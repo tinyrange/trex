@@ -3,6 +3,7 @@ package ese
 import (
 	"bytes"
 	"encoding/binary"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -47,6 +48,81 @@ func TestNewChecksumDetectsCorruption(t *testing.T) {
 	}
 }
 
+func TestEncodeRecordRoundTrip(t *testing.T) {
+	columns := []ColumnDefinition{
+		{Name: "Key", Identifier: 1, Type: ColumnSignedLong},
+		{Name: "Missing", Identifier: 2, Type: ColumnSignedLong},
+		{Name: "Enabled", Identifier: 3, Type: ColumnBoolean},
+		{Name: "Name", Identifier: 128, Type: ColumnText, CodePage: 1200},
+		{Name: "Payload", Identifier: 256, Type: ColumnLongBinary},
+	}
+	logical := Row{
+		"Key": int32(-7), "Enabled": true, "Name": "TinyRange",
+		"Payload": []byte{0x00, 0xff, 0x42},
+	}
+	record, err := encodeRecord(columns, logical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := &Table{Columns: []Column{
+		{Name: "Key", Identifier: 1, SpaceUsage: 4, Type: "long", typeCode: ColumnSignedLong},
+		{Name: "Missing", Identifier: 2, SpaceUsage: 4, Type: "long", typeCode: ColumnSignedLong},
+		{Name: "Enabled", Identifier: 3, SpaceUsage: 1, Type: "boolean", typeCode: ColumnBoolean},
+		{Name: "Name", Identifier: 128, Type: "text", CodePage: 1200, typeCode: ColumnText},
+		{Name: "Payload", Identifier: 256, Type: "long-binary", typeCode: ColumnLongBinary},
+	}}
+	database := &Database{info: Info{PageSize: 32768, Revision: 0x14}}
+	decoded, err := database.decodeRecord(table, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Record{
+		{Name: "Key", Value: int32(-7)},
+		{Name: "Enabled", Value: true},
+		{Name: "Name", Value: "TinyRange"},
+		{Name: "Payload", Value: []byte{0x00, 0xff, 0x42}},
+	}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded = %#v, want %#v", decoded, want)
+	}
+}
+
+func TestEncodedPageRoundTrip(t *testing.T) {
+	record, err := recordLeafEntry([]byte{0x7f, 0x80, 0, 0, 1}, []byte("record"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := (encodedPage{
+		dbtime: 17, flags: pageFlagRoot | pageFlagLeaf,
+		number: 4, objid: 2, values: [][]byte{make([]byte, 16), record},
+	}).encode(32768)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyPageChecksum(data, 4); err != nil {
+		t.Fatal(err)
+	}
+	database := &Database{
+		source: testReader{bytes.NewReader(append(make([]byte, 5*32768), data...))},
+		info:   Info{PageSize: 32768, Revision: 0x14},
+	}
+	page, err := database.readPage(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := database.pageValue(page, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := entryData(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != "record" {
+		t.Fatalf("record = %q", decoded)
+	}
+}
+
 func TestOpenWalksNativeCatalogAndTablePages(t *testing.T) {
 	const pageSize = 4096
 	image := make([]byte, 7*pageSize)
@@ -61,9 +137,9 @@ func TestOpenWalksNativeCatalogAndTablePages(t *testing.T) {
 	writeTestESEPage(image[5*pageSize:6*pageSize], pageFlagRoot|pageFlagLeaf,
 		[]byte{3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 		append([]byte{0, 0}, tableCatalog...), append([]byte{0, 0}, columnCatalog...))
-	row := make([]byte, 8)
+	row := make([]byte, 9)
 	row[0], row[1] = 1, 127
-	binary.LittleEndian.PutUint16(row[2:4], 8)
+	binary.LittleEndian.PutUint16(row[2:4], 9)
 	binary.LittleEndian.PutUint32(row[4:8], 0x78563412)
 	writeTestESEPage(image[2*pageSize:3*pageSize], pageFlagRoot|pageFlagLeaf,
 		[]byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, append([]byte{0, 0}, row...))
@@ -86,7 +162,7 @@ func TestOpenWalksNativeCatalogAndTablePages(t *testing.T) {
 }
 
 func testCatalogRecord(object uint32, kind uint16, identifier, definition uint32, name string) []byte {
-	const fixedEnd = 33
+	const fixedEnd = 35
 	record := make([]byte, fixedEnd+2+len(name))
 	record[0], record[1] = 9, 128
 	binary.LittleEndian.PutUint16(record[2:4], fixedEnd)
@@ -101,6 +177,8 @@ func testCatalogRecord(object uint32, kind uint16, identifier, definition uint32
 	binary.LittleEndian.PutUint32(record[18:22], spaceUsage)
 	binary.LittleEndian.PutUint32(record[22:26], 1)
 	binary.LittleEndian.PutUint32(record[26:30], 1252)
+	// The nine fixed columns are followed by two fixed-column null bytes.
+	record[33], record[34] = 0, 0
 	binary.LittleEndian.PutUint16(record[fixedEnd:fixedEnd+2], uint16(len(name)))
 	copy(record[fixedEnd+2:], name)
 	return record

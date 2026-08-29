@@ -494,6 +494,11 @@ func (d *Database) decodeRecord(table *Table, data []byte) (Record, error) {
 		return nil, err
 	}
 	fixedOffset := 4
+	fixedNullBytes := (int(lastFixed) + 7) / 8
+	if variableOffset < fixedOffset+fixedNullBytes {
+		return nil, fmt.Errorf("fixed null bitmap exceeds record")
+	}
+	fixedNulls := data[variableOffset-fixedNullBytes : variableOffset]
 	record := make(Record, 0, len(table.Columns))
 	for _, column := range table.Columns {
 		var raw []byte
@@ -501,10 +506,12 @@ func (d *Database) decodeRecord(table *Table, data []byte) (Record, error) {
 		switch {
 		case column.Identifier <= lastFixed:
 			end := fixedOffset + int(column.SpaceUsage)
-			if end > variableOffset || end > len(data) {
+			if end > variableOffset-len(fixedNulls) || end > len(data) {
 				return nil, fmt.Errorf("column %q fixed data exceeds record", column.Name)
 			}
-			raw, present = data[fixedOffset:end], true
+			raw = data[fixedOffset:end]
+			index := column.Identifier - 1
+			present = fixedNulls[index/8]&(1<<(index%8)) == 0
 			fixedOffset = end
 		case column.Identifier >= 128 && column.Identifier <= lastVariable:
 			index := int(column.Identifier - 128)
