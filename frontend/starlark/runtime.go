@@ -24,6 +24,7 @@ import (
 	ziparchive "github.com/tinyrange/trex/archive/zip"
 	binaryapi "github.com/tinyrange/trex/binary"
 	binarystar "github.com/tinyrange/trex/binary/star"
+	databaseese "github.com/tinyrange/trex/database/ese"
 	debugapi "github.com/tinyrange/trex/debug"
 	x86api "github.com/tinyrange/trex/emulator/x86"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
@@ -97,7 +98,11 @@ func predeclared() starlark.StringDict {
 	return starlark.StringDict{
 		"archive": archiveModule,
 		"binary":  namespace{name: "binary", attrs: binarystar.Builtins()},
-		"block":   blockNamespace(),
+		"database": namespace{name: "database", attrs: starlark.StringDict{
+			"ese":       starlark.NewBuiltin("ese", databaseese.Builtin),
+			"ese_build": starlark.NewBuiltin("ese_build", databaseese.BuildBuiltin),
+		}},
+		"block": blockNamespace(),
 		"clock": namespace{
 			name: "clock",
 			attrs: starlark.StringDict{

@@ -124,7 +124,10 @@ def wait_for_material_change(
 def _activate_command_surface(vm, launcher):
     """Activates a guest shell's command surface without entering text."""
     if launcher == "run_dialog":
-        paced_chord(vm, ["meta_l", "r"])
+        # Modern Windows handles QEMU's atomic chord reliably even when the
+        # shell has just completed first-logon setup. Separate key events can
+        # be consumed by that transition without ever dispatching Win+R.
+        vm.chord(["meta_l", "r"])
         wait_duration(vm, 0.5)
     elif launcher == "start_menu":
         paced_chord(vm, ["control", "escape"])
@@ -355,14 +358,34 @@ def wait_for_command_surface(
         timeout = max(1, deadline - clock.monotonic()),
         stable_samples = stable_samples,
     )
-    result = launch_and_capture(
+    surface_timeout = min(5, attempt_timeout)
+    remaining = max(0, deadline - clock.monotonic())
+    # Opening an empty launcher is safe to retry for the complete readiness
+    # deadline. Command submission remains exactly once, after a launcher has
+    # produced an observable framebuffer response.
+    surface_attempts = max(1, int(remaining // (surface_timeout + 1)))
+    surface = _open_command_surface(
         vm,
-        command,
-        launcher = launcher,
-        timeout = attempt_timeout,
-        settle = 2,
+        launcher,
+        timeout = surface_timeout,
         minimum_changed_pixels = minimum_changed_pixels,
+        attempts = surface_attempts,
     )
+    if surface["passed"]:
+        result = _capture_command_result(
+            vm,
+            command,
+            surface["before"],
+            surface["command_surface"],
+            attempt_timeout,
+            2,
+            minimum_changed_pixels,
+        )
+        result["attempts"] = surface["attempts"]
+    else:
+        result = surface
+        result["command"] = command
+        result["detail"] = "command surface did not open: " + result["detail"]
     result["attempts"] = result.get("attempts", 1)
     result["boot_image"] = before
     if result["passed"] and verify_close:
