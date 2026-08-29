@@ -4,14 +4,17 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tinyrange/trex/storage"
+	"github.com/tinyrange/trex/windows/nls"
 	"go.starlark.net/starlark"
 )
 
 // BuildBuiltin exposes the portable ESE writer to Starlark.
 func BuildBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var tablesValue starlark.Value
+	var sortDataValue starlark.Value = starlark.None
 	databasePages := 0
-	if err := starlark.UnpackArgs("ese_build", args, kwargs, "tables", &tablesValue, "database_pages?", &databasePages); err != nil {
+	if err := starlark.UnpackArgs("ese_build", args, kwargs, "tables", &tablesValue, "database_pages?", &databasePages, "sort_data?", &sortDataValue); err != nil {
 		return nil, err
 	}
 	if databasePages < 0 {
@@ -33,7 +36,19 @@ func BuildBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 		}
 		tables = append(tables, table)
 	}
-	return Build(tables, BuildOptions{DatabasePages: uint32(databasePages)})
+	options := BuildOptions{DatabasePages: uint32(databasePages)}
+	if sortDataValue != starlark.None {
+		source, ok := sortDataValue.(storage.Reader)
+		if !ok {
+			return nil, fmt.Errorf("ese_build: sort_data is %s, want file", sortDataValue.Type())
+		}
+		collation, err := nls.OpenSortDefault(source)
+		if err != nil {
+			return nil, fmt.Errorf("ese_build: sort_data: %w", err)
+		}
+		options.UnicodeCollation = collation
+	}
+	return Build(tables, options)
 }
 
 func starlarkTableDefinition(value *starlark.Dict) (TableDefinition, error) {

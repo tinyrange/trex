@@ -415,7 +415,8 @@ func normalizeFixed(column ColumnDefinition, raw []byte, descending bool) ([]byt
 	return segment, nil
 }
 
-func encodeIndexKey(columns []ColumnDefinition, row Row, identifiers []int32) ([]byte, error) {
+func encodeIndexKey(columns []ColumnDefinition, row Row, definition IndexDefinition, collation UnicodeCollation) ([]byte, error) {
+	identifiers := definition.Columns
 	key := make([]byte, 0, len(identifiers)*9)
 	for _, signedIdentifier := range identifiers {
 		descending := signedIdentifier < 0
@@ -441,7 +442,7 @@ func encodeIndexKey(columns []ColumnDefinition, row Row, identifiers []int32) ([
 			return nil, err
 		}
 		if fixedColumnSize(column.Type) == 0 {
-			segment, err := normalizeVariable(column, raw, descending)
+			segment, err := normalizeVariable(column, raw, descending, definition, collation)
 			if err != nil {
 				return nil, err
 			}
@@ -457,7 +458,11 @@ func encodeIndexKey(columns []ColumnDefinition, row Row, identifiers []int32) ([
 	return key, nil
 }
 
-func normalizeVariable(column ColumnDefinition, raw []byte, descending bool) ([]byte, error) {
+func encodeIndexColumns(columns []ColumnDefinition, row Row, identifiers []int32) ([]byte, error) {
+	return encodeIndexKey(columns, row, IndexDefinition{Columns: identifiers}, nil)
+}
+
+func normalizeVariable(column ColumnDefinition, raw []byte, descending bool, definition IndexDefinition, collation UnicodeCollation) ([]byte, error) {
 	var segment []byte
 	switch column.Type {
 	case ColumnText, ColumnLongText:
@@ -466,7 +471,16 @@ func normalizeVariable(column ColumnDefinition, raw []byte, descending bool) ([]
 			break
 		}
 		if column.CodePage == 1200 {
-			return nil, fmt.Errorf("ese: Unicode index normalization requires an explicit persisted key for %q", column.Name)
+			if collation == nil {
+				return nil, fmt.Errorf("ese: Unicode index normalization requires target collation data for %q", column.Name)
+			}
+			text := string(utf16.Decode(bytesToUTF16(raw)))
+			sortKey, err := collation.SortKey(text, definition.LCMapFlags, definition.SortID)
+			if err != nil {
+				return nil, fmt.Errorf("ese: Unicode index normalization for %q: %w", column.Name, err)
+			}
+			segment = append([]byte{0x7f}, sortKey...)
+			break
 		}
 		segment = make([]byte, 1, len(raw)+2)
 		segment[0] = 0x7f
@@ -504,6 +518,14 @@ func normalizeVariable(column ColumnDefinition, raw []byte, descending bool) ([]
 		}
 	}
 	return segment, nil
+}
+
+func bytesToUTF16(raw []byte) []uint16 {
+	words := make([]uint16, len(raw)/2)
+	for index := range words {
+		words[index] = binary.LittleEndian.Uint16(raw[index*2 : index*2+2])
+	}
+	return words
 }
 
 func recordLeafEntry(key, record []byte) ([]byte, error) {

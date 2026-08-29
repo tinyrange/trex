@@ -54,6 +54,15 @@ type BuildOptions struct {
 	PageSize      int
 	Revision      uint32
 	Version       uint32
+	// UnicodeCollation supplies persisted Windows sort keys for Unicode
+	// indexes. It is deliberately independent of host locale services.
+	UnicodeCollation UnicodeCollation
+}
+
+// UnicodeCollation produces a persisted Windows sort key for one string.
+// Implementations normally decode the target's SortDefault.nls file.
+type UnicodeCollation interface {
+	SortKey(text string, flags uint32, sortID []byte) ([]byte, error)
 }
 
 type buildIndex struct {
@@ -159,7 +168,7 @@ func Build(tables []TableDefinition, options BuildOptions) (*starfile.Bytes, err
 	for _, table := range physical {
 		primaryKeys := make([][]byte, len(table.definition.Rows))
 		for index, row := range table.definition.Rows {
-			key, err := encodeIndexKey(table.definition.Columns, row, table.definition.Indexes[0].Columns)
+			key, err := encodeIndexKey(table.definition.Columns, row, table.definition.Indexes[0], b.options.UnicodeCollation)
 			if err != nil {
 				return nil, fmt.Errorf("ese: table %q row %d primary key: %w", table.definition.Name, index, err)
 			}
@@ -178,7 +187,7 @@ func Build(tables []TableDefinition, options BuildOptions) (*starfile.Bytes, err
 			}
 			entries := make([]treeEntry, 0, len(table.definition.Rows))
 			for rowIndex, row := range table.definition.Rows {
-				key, err := encodeIndexKey(table.definition.Columns, row, tree.definition.Columns)
+				key, err := encodeIndexKey(table.definition.Columns, row, tree.definition, b.options.UnicodeCollation)
 				if err != nil {
 					return nil, fmt.Errorf("ese: table %q index %q row %d: %w", table.definition.Name, tree.definition.Name, rowIndex, err)
 				}

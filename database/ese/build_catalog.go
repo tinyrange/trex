@@ -188,8 +188,8 @@ func (b *builder) catalogRows(tables []*buildTable) ([]Row, error) {
 		rows = append(rows, catalogIndexRows(object)...)
 	}
 	sort.SliceStable(rows, func(left, right int) bool {
-		leftKey, _ := encodeIndexKey(catalogColumns, rows[left], []int32{1, 2, 3})
-		rightKey, _ := encodeIndexKey(catalogColumns, rows[right], []int32{1, 2, 3})
+		leftKey, _ := encodeIndexColumns(catalogColumns, rows[left], []int32{1, 2, 3})
+		rightKey, _ := encodeIndexColumns(catalogColumns, rows[right], []int32{1, 2, 3})
 		return string(leftKey) < string(rightKey)
 	})
 	return rows, nil
@@ -205,7 +205,7 @@ func (b *builder) buildSystemPages(rows []Row, tables []*buildTable) error {
 	entries := make([]treeEntry, 0, len(rows))
 	primaryKeys := make([][]byte, 0, len(rows))
 	for index, row := range rows {
-		key, err := encodeIndexKey(catalogColumns, row, []int32{1, 2, 3})
+		key, err := encodeIndexColumns(catalogColumns, row, []int32{1, 2, 3})
 		if err != nil {
 			return fmt.Errorf("ese: catalog row %d key: %w", index, err)
 		}
@@ -237,13 +237,13 @@ func (b *builder) buildSystemPages(rows []Row, tables []*buildTable) error {
 	nameEntries := make([]treeEntry, 0, len(rows))
 	rootEntries := make([]treeEntry, 0, len(rows))
 	for index, row := range rows {
-		nameKey, err := encodeIndexKey(catalogColumns, row, []int32{1, 2, 128})
+		nameKey, err := encodeIndexColumns(catalogColumns, row, []int32{1, 2, 128})
 		if err != nil {
 			return err
 		}
 		nameEntries = append(nameEntries, treeEntry{key: nameKey, data: primaryKeys[index]})
 		if _, present := row["RootFlag"]; present {
-			rootKey, err := encodeIndexKey(catalogColumns, row, []int32{8, 128})
+			rootKey, err := encodeIndexColumns(catalogColumns, row, []int32{8, 128})
 			if err != nil {
 				return err
 			}
@@ -296,7 +296,7 @@ func (b *builder) buildSystemObjids(tables []*buildTable) error {
 	values := [][]byte{spaceHeader(1, 1, 0, 0)}
 	for _, object := range objects {
 		row := Row{"objid": int32(object.id), "objidTable": int32(object.table), "type": object.kind}
-		key, err := encodeIndexKey(systemObjidColumns, row, []int32{256})
+		key, err := encodeIndexColumns(systemObjidColumns, row, []int32{256})
 		if err != nil {
 			return err
 		}
@@ -376,7 +376,7 @@ func (b *builder) buildSystemLocales(tables []*buildTable) error {
 	type keyed struct{ key, record []byte }
 	encoded := make([]keyed, 0, len(rows))
 	for _, row := range rows {
-		key, err := encodeIndexKey(systemLocaleColumns, row, []int32{128})
+		key, err := encodeIndexColumns(systemLocaleColumns, row, []int32{128})
 		if err != nil {
 			return err
 		}
