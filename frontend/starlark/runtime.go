@@ -99,7 +99,8 @@ func predeclared() starlark.StringDict {
 		"archive": archiveModule,
 		"binary":  namespace{name: "binary", attrs: binarystar.Builtins()},
 		"database": namespace{name: "database", attrs: starlark.StringDict{
-			"ese": starlark.NewBuiltin("ese", databaseese.Builtin),
+			"ese":       starlark.NewBuiltin("ese", databaseese.Builtin),
+			"ese_build": starlark.NewBuiltin("ese_build", databaseese.BuildBuiltin),
 		}},
 		"block": blockNamespace(),
 		"clock": namespace{

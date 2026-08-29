@@ -441,7 +441,12 @@ func encodeIndexKey(columns []ColumnDefinition, row Row, identifiers []int32) ([
 			return nil, err
 		}
 		if fixedColumnSize(column.Type) == 0 {
-			return nil, fmt.Errorf("ese: text and binary index normalization is not implemented for %q", column.Name)
+			segment, err := normalizeVariable(column, raw, descending)
+			if err != nil {
+				return nil, err
+			}
+			key = append(key, segment...)
+			continue
 		}
 		segment, err := normalizeFixed(column, raw, descending)
 		if err != nil {
@@ -450,6 +455,55 @@ func encodeIndexKey(columns []ColumnDefinition, row Row, identifiers []int32) ([
 		key = append(key, segment...)
 	}
 	return key, nil
+}
+
+func normalizeVariable(column ColumnDefinition, raw []byte, descending bool) ([]byte, error) {
+	var segment []byte
+	switch column.Type {
+	case ColumnText, ColumnLongText:
+		if len(raw) == 0 {
+			segment = []byte{0x40}
+			break
+		}
+		if column.CodePage == 1200 {
+			return nil, fmt.Errorf("ese: Unicode index normalization requires an explicit persisted key for %q", column.Name)
+		}
+		segment = make([]byte, 1, len(raw)+2)
+		segment[0] = 0x7f
+		for _, value := range raw {
+			if value == 0 {
+				break
+			}
+			if value >= 'a' && value <= 'z' {
+				value -= 'a' - 'A'
+			}
+			segment = append(segment, value)
+		}
+		segment = append(segment, 0)
+	case ColumnBinary, ColumnLongBinary:
+		if len(raw) == 0 {
+			segment = []byte{0x40}
+			break
+		}
+		if column.Identifier < 128 {
+			segment = []byte{0x7f}
+		}
+		for len(raw) > 8 {
+			segment = append(segment, raw[:8]...)
+			segment = append(segment, 9)
+			raw = raw[8:]
+		}
+		segment = append(segment, raw...)
+		segment = append(segment, byte(len(raw)))
+	default:
+		return nil, fmt.Errorf("ese: unsupported variable key type %d for %q", column.Type, column.Name)
+	}
+	if descending {
+		for index := range segment {
+			segment[index] = ^segment[index]
+		}
+	}
+	return segment, nil
 }
 
 func recordLeafEntry(key, record []byte) ([]byte, error) {

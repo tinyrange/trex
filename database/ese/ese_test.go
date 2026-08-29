@@ -123,6 +123,77 @@ func TestEncodedPageRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBuildRoundTrip(t *testing.T) {
+	file, err := Build([]TableDefinition{{
+		Name: "Example",
+		Columns: []ColumnDefinition{
+			{Name: "Key", Identifier: 1, Type: ColumnSignedLong, Flags: 5, Maximum: 4},
+			{Name: "Value", Identifier: 128, Type: ColumnText, CodePage: 1200, Maximum: 256},
+		},
+		Indexes: []IndexDefinition{{
+			Name: "primary", Columns: []int32{1}, Flags: 0x10031, KeyMost: 255,
+		}},
+		Rows: []Row{
+			{"Key": int32(2), "Value": "second"},
+			{"Key": int32(1), "Value": "first"},
+		},
+	}}, BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Verify(256); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := database.Rows("Example", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Record{
+		{{Name: "Key", Value: int32(1)}, {Name: "Value", Value: "first"}},
+		{{Name: "Key", Value: int32(2)}, {Name: "Value", Value: "second"}},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("rows = %#v, want %#v", rows, want)
+	}
+}
+
+func TestBuildMultiPageTreeRoundTrip(t *testing.T) {
+	logical := make([]Row, 5000)
+	for index := range logical {
+		logical[index] = Row{"Key": int32(5000 - index), "Value": strings.Repeat("x", 80)}
+	}
+	file, err := Build([]TableDefinition{{
+		Name: "ManyRows",
+		Columns: []ColumnDefinition{
+			{Name: "Key", Identifier: 1, Type: ColumnSignedLong, Flags: 5, Maximum: 4},
+			{Name: "Value", Identifier: 128, Type: ColumnText, CodePage: 1252, Maximum: 255},
+		},
+		Indexes: []IndexDefinition{{Name: "primary", Columns: []int32{1}, Flags: 0x10031}},
+		Rows:    logical,
+	}}, BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Verify(512); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := database.Rows("ManyRows", 6000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 5000 || rows[0][0].Value != int32(1) || rows[4999][0].Value != int32(5000) {
+		t.Fatalf("unexpected rows: count=%d first=%#v last=%#v", len(rows), rows[0], rows[len(rows)-1])
+	}
+}
+
 func TestOpenWalksNativeCatalogAndTablePages(t *testing.T) {
 	const pageSize = 4096
 	image := make([]byte, 7*pageSize)
