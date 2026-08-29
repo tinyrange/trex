@@ -2,6 +2,7 @@ package ntfs
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -131,12 +132,60 @@ func TestNTFSHardLinksShareAFileRecord(t *testing.T) {
 			continue
 		}
 		fileNames++
-		if got := attribute.value[65]; got != 0 {
-			t.Errorf("hard-link name namespace = %d, want POSIX namespace 0", got)
+		if got := attribute.value[65]; got != 3 {
+			t.Errorf("hard-link name namespace = %d, want combined Win32/DOS namespace 3", got)
 		}
 	}
 	if fileNames != 2 {
 		t.Fatalf("hard-linked file has %d file-name attributes, want one per link", fileNames)
+	}
+}
+
+func TestNTFSNormalizesWIMStyleExtensionlessDOSName(t *testing.T) {
+	root := filesystemapi.New()
+	root.Mkdir("/example")
+	root.PutFile("/example/aspnet_perf.h", filesystemapi.FileRecord{Data: []byte("x"), Size: 1})
+	root.SetMetadata("/example/aspnet_perf.h", filesystemapi.Metadata{ShortName: "ASPNET~1."})
+	image, err := buildNTFSImageWithOptions(root, 64<<20, nil, 0, "DOSNAME", 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume, err := newNTFSVolume(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := volume.paths["/example/aspnet_perf.h"]
+	if node == nil {
+		t.Fatal("file is missing from generated volume")
+	}
+	boot := make([]byte, ntfsSectorSize)
+	if _, err := image.ReadAt(boot, 0); err != nil {
+		t.Fatal(err)
+	}
+	mftOffset := int64(binary.LittleEndian.Uint64(boot[48:56])) * ntfsCluster
+	record := make([]byte, ntfsRecordSize)
+	if _, err := image.ReadAt(record, mftOffset+int64(node.id)*ntfsRecordSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyNTFSReadFixup(record, ntfsSectorSize, "DOS-name file"); err != nil {
+		t.Fatal(err)
+	}
+	attributes, err := parseNTFSReadAttributes(record, ntfsCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dosName string
+	for _, attribute := range attributes {
+		if attribute.typ != ntfsAttrFileName || len(attribute.value) < 66 || attribute.value[65] != 2 {
+			continue
+		}
+		dosName, err = decodeNTFSReadName(attribute.value, 66, int(attribute.value[64]))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if dosName != "ASPNET~1" {
+		t.Fatalf("DOS name = %q, want extensionless canonical name", dosName)
 	}
 }
 
@@ -242,6 +291,22 @@ func TestNTFS31UpCasePreservesHistoricalIdentityMappings(t *testing.T) {
 				t.Fatalf("uppercase(%#x) = %#x, want identity mapping", value, got)
 			}
 		}
+	}
+}
+
+func TestNTFSWindows81UpCaseProfile(t *testing.T) {
+	data, err := ntfsUpCaseDataForProfile(true, "windows-8.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [32]byte{
+		0x41, 0xc2, 0x6b, 0xc7, 0xa1, 0x2b, 0xda, 0xeb,
+		0x26, 0x02, 0x5c, 0x93, 0x11, 0x86, 0x97, 0xc7,
+		0xe3, 0xef, 0x81, 0xee, 0x04, 0x8b, 0x00, 0xfe,
+		0x5c, 0xce, 0x2a, 0x47, 0x2e, 0x0e, 0x07, 0x42,
+	}
+	if got := sha256.Sum256(data); got != want {
+		t.Fatalf("Windows 8.1 $UpCase SHA-256 = %x, want %x", got, want)
 	}
 }
 
@@ -526,6 +591,27 @@ func TestNTFS31PreservesImportedSecurityDescriptors(t *testing.T) {
 	}
 	if !allocations["$SDH"] || !allocations["$SII"] {
 		t.Fatalf("large security indexes have allocations %v", allocations)
+	}
+}
+
+func TestNTFS31DoesNotIndexLegacyRootDescriptorInSecure(t *testing.T) {
+	root := filesystemapi.New()
+	root.SetMetadata("/", filesystemapi.Metadata{SecurityDescriptor: ntfsSecurityDescriptor(
+		ntfsSID(5, 18),
+		ntfsSID(5, 18),
+		0x001f01ff,
+		ntfsSID(5, 18),
+	)})
+	b := &ntfsBuild{nextID: 16, versionMajor: 3, versionMinor: 1}
+	if err := b.importDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.prepareSecurity(); err != nil {
+		t.Fatal(err)
+	}
+	want := ntfsSecureMirrorBase + align8(20+len(ntfsDefaultSecurityDescriptor()))
+	if len(b.secureData) != want {
+		t.Fatalf("$SDS size = %d, want one reachable descriptor (%d bytes)", len(b.secureData), want)
 	}
 }
 

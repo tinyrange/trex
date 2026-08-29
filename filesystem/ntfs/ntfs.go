@@ -67,14 +67,15 @@ func NTFSBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, k
 	var bootCodeValue starlark.Value = starlark.None
 	var logFileValue starlark.Value = starlark.None
 	var upCaseValue starlark.Value = starlark.None
+	upCaseProfile := "default"
 	hiddenSectors := 0
 	label := "NO NAME"
 	version := "1.1"
-	if err := starlark.UnpackArgs("ntfs", args, kwargs, "source", &value, "size?", &sizeValue, "boot_code?", &bootCodeValue, "hidden_sectors?", &hiddenSectors, "label?", &label, "version?", &version, "log_file?", &logFileValue, "upcase?", &upCaseValue); err != nil {
+	if err := starlark.UnpackArgs("ntfs", args, kwargs, "source", &value, "size?", &sizeValue, "boot_code?", &bootCodeValue, "hidden_sectors?", &hiddenSectors, "label?", &label, "version?", &version, "log_file?", &logFileValue, "upcase?", &upCaseValue, "upcase_profile?", &upCaseProfile); err != nil {
 		return nil, err
 	}
 	if file, ok := value.(starfile.File); ok {
-		if sizeValue != starlark.None || bootCodeValue != starlark.None || hiddenSectors != 0 || label != "NO NAME" || version != "1.1" || logFileValue != starlark.None || upCaseValue != starlark.None {
+		if sizeValue != starlark.None || bootCodeValue != starlark.None || hiddenSectors != 0 || label != "NO NAME" || version != "1.1" || logFileValue != starlark.None || upCaseValue != starlark.None || upCaseProfile != "default" {
 			return nil, fmt.Errorf("ntfs: mount does not accept builder options")
 		}
 		return newNTFSVolume(file)
@@ -118,6 +119,9 @@ func NTFSBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, k
 	}
 	var upCase []byte
 	if upCaseValue != starlark.None {
+		if upCaseProfile != "default" {
+			return nil, fmt.Errorf("ntfs: upcase and upcase_profile are mutually exclusive")
+		}
 		file, ok := upCaseValue.(starfile.File)
 		if !ok {
 			return nil, fmt.Errorf("ntfs: upcase is %s, want file", upCaseValue.Type())
@@ -128,6 +132,11 @@ func NTFSBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, k
 		upCase, err = fsinternal.ReadBytesAt(file, 0, file.Size())
 		if err != nil {
 			return nil, fmt.Errorf("ntfs: read upcase: %w", err)
+		}
+	} else {
+		upCase, err = ntfsUpCaseDataForProfile(versionMajor >= 3, upCaseProfile)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return buildNTFSImageWithMetadata(dir, size, bootCode, int64(hiddenSectors), label, versionMajor, versionMinor, logFile, upCase)
@@ -271,6 +280,9 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 	if err := validateNTFSVolumeName(volumeName); err != nil {
 		return nil, err
 	}
+	if upCase == nil {
+		upCase = ntfsUpCaseData(versionMajor >= 3)
+	}
 	b := &ntfsBuild{
 		size:         size,
 		mftLCN:       16 * 1024 / ntfsCluster,
@@ -280,6 +292,7 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 		volumeName:   volumeName,
 		versionMajor: versionMajor,
 		versionMinor: versionMinor,
+		upCase:       upCase,
 	}
 	if err := b.importDirectory(dir); err != nil {
 		return nil, err
@@ -297,18 +310,18 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 		if !node.dir {
 			continue
 		}
-		idx, err := buildNTFSDirectoryIndex(node, b.modern())
+		idx, err := buildNTFSDirectoryIndexWithUpCase(node, b.modern(), b.upCase)
 		if errors.Is(err, errNTFSIndexRootCapacity) && node.id >= 16 && len(node.names) > 0 {
 			if err := b.createDirectoryAttributeExtensions(node); err != nil {
 				return nil, err
 			}
-			idx, err = buildNTFSDirectoryIndex(node, b.modern())
+			idx, err = buildNTFSDirectoryIndexWithUpCase(node, b.modern(), b.upCase)
 		}
 		if errors.Is(err, errNTFSIndexRootCapacity) && node.id >= 16 {
 			if err := b.createDirectoryIndexRootExtension(node); err != nil {
 				return nil, err
 			}
-			idx, err = buildNTFSDirectoryIndex(node, b.modern())
+			idx, err = buildNTFSDirectoryIndexWithUpCase(node, b.modern(), b.upCase)
 		}
 		if err != nil {
 			return nil, err
@@ -341,10 +354,6 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 	b.logFileLCN = b.allocate(fsinternal.CeilDiv(b.logFile.Size(), ntfsCluster))
 	b.attrDef = ntfsAttrDefData(b.modern())
 	b.attrDefLCN = b.allocate(fsinternal.CeilDiv(int64(len(b.attrDef)), ntfsCluster))
-	if upCase == nil {
-		upCase = ntfsUpCaseData(b.modern())
-	}
-	b.upCase = upCase
 	b.upCaseLCN = b.allocate(fsinternal.CeilDiv(int64(len(b.upCase)), ntfsCluster))
 	if b.modern() {
 		b.rootSecurity = ntfsRootSecurityDescriptor()
@@ -646,11 +655,19 @@ func (b *ntfsBuild) importDirectory(dir *filesystemapi.Directory) error {
 		name = storage.CleanPath(name)
 		if node := byPath[strings.ToLower(name)]; node != nil {
 			node.metadata = metadata
+			if node.parent != nil {
+				for _, link := range node.parent.children {
+					if link.node == node {
+						link.shortName = metadata.ShortName
+						break
+					}
+				}
+			}
 		}
 	}
 	for _, node := range b.nodes {
 		sort.Slice(node.children, func(i, j int) bool {
-			return ntfsCompareName(node.children[i].name, node.children[j].name) < 0
+			return ntfsCompareNameWithUpCase(node.children[i].name, node.children[j].name, b.upCase) < 0
 		})
 	}
 	return b.assignFileNames()
@@ -685,12 +702,6 @@ func ntfsChildByName(parent *ntfsNode, name string) *ntfsNode {
 }
 
 func (b *ntfsBuild) assignFileNames() error {
-	linkCounts := make(map[*ntfsNode]int, len(b.nodes))
-	for _, parent := range b.nodes {
-		for _, link := range parent.children {
-			linkCounts[link.node]++
-		}
-	}
 	for _, parent := range b.nodes {
 		if !parent.dir {
 			continue
@@ -705,19 +716,14 @@ func (b *ntfsBuild) assignFileNames() error {
 		}
 		for _, link := range parent.children {
 			child := link.node
-			if linkCounts[child] > 1 {
-				link.names = []ntfsName{{value: link.name, namespace: 0, parent: parent}}
-				child.names = append(child.names, link.names...)
-				continue
-			}
 			if child.id < 16 {
 				link.names = []ntfsName{{value: link.name, namespace: 3, parent: parent}}
 				child.names = append(child.names, link.names...)
 				continue
 			}
 			upper, exact := ntfsDOSName(link.name)
-			if link.shortName != "" && !strings.EqualFold(link.shortName, link.name) {
-				upper, exact = link.shortName, false
+			if imported, valid := ntfsImportedDOSName(link.shortName); valid && !strings.EqualFold(imported, link.name) {
+				upper, exact = imported, false
 			}
 			if exact {
 				link.names = []ntfsName{{value: link.name, namespace: 3, parent: parent}}
@@ -893,6 +899,10 @@ func ntfsNamedAttributeListEntry(typ uint32, name string, attributeID uint16, re
 }
 
 func buildNTFSDirectoryIndex(node *ntfsNode, modern bool) (ntfsDirectoryIndex, error) {
+	return buildNTFSDirectoryIndexWithUpCase(node, modern, ntfsUpCaseData(modern))
+}
+
+func buildNTFSDirectoryIndexWithUpCase(node *ntfsNode, modern bool, upCase []byte) (ntfsDirectoryIndex, error) {
 	var items []*ntfsIndexKey
 	for _, link := range node.children {
 		for _, name := range link.names {
@@ -900,7 +910,7 @@ func buildNTFSDirectoryIndex(node *ntfsNode, modern bool) (ntfsDirectoryIndex, e
 		}
 	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return ntfsCompareName(items[i].name.value, items[j].name.value) < 0
+		return ntfsCompareNameWithUpCase(items[i].name.value, items[j].name.value, upCase) < 0
 	})
 	if ntfsIndexEntriesSize(items, false)+32 <= ntfsIndexRootLimit(node, false, 0, modern) {
 		entries := make([][]byte, 0, len(items)+1)
@@ -1794,6 +1804,39 @@ var ntfs31UpCaseIdentity = []ntfsUpCaseIdentityRange{
 	{0xa7d9, 0xa7d9, 1}, {0xa7f6, 0xa7f6, 1}, {0xab53, 0xab53, 1}, {0xab70, 0xabbf, 1},
 }
 
+type ntfsUpCaseMappingRange struct {
+	first, last, step int
+	target, increment int
+}
+
+// Windows 8.1 updates the original NTFS 3.1 uppercase table through Unicode
+// 6.2. These compact arithmetic runs are the mappings that differ from the
+// historical table above. Keeping the profile explicit prevents an older
+// Windows target from silently receiving a table from a newer Unicode era.
+var ntfsWindows81UpCaseMappings = []ntfsUpCaseMappingRange{
+	{384, 405, 21, 579, -77}, {410, 411, 1, 573, -162}, {414, 447, 33, 544, -41},
+	{505, 537, 32, 504, 32}, {539, 543, 2, 538, 2}, {547, 563, 2, 546, 2},
+	{572, 578, 6, 571, 6}, {583, 591, 2, 582, 2}, {592, 593, 1, 11375, -2},
+	{612, 619, 7, 612, 10750}, {625, 637, 12, 11374, -10}, {640, 649, 9, 422, 158},
+	{652, 881, 229, 581, 299}, {883, 887, 4, 882, 4}, {891, 893, 1, 1021, 1},
+	{962, 983, 21, 962, 13}, {985, 993, 2, 984, 2}, {1010, 1016, 6, 1017, -2},
+	{1019, 1104, 85, 1018, 6}, {1117, 1163, 46, 1037, 125}, {1165, 1167, 2, 1164, 2},
+	{1222, 1230, 4, 1221, 4}, {1231, 1261, 30, 1216, 44}, {1271, 1275, 4, 1270, 4},
+	{1277, 1315, 2, 1276, 2}, {7306, 7545, 239, 7306, 35571},
+	{7549, 7931, 382, 11363, -3433}, {7933, 7935, 2, 7932, 2},
+	{8064, 8071, 1, 8072, 1}, {8080, 8087, 1, 8088, 1}, {8096, 8103, 1, 8104, 1},
+	{8115, 8131, 16, 8124, 16}, {8179, 8526, 347, 8188, 310},
+	{8580, 11312, 2732, 8579, 2685}, {11313, 11358, 1, 11265, 1},
+	{11361, 11365, 4, 11360, -10790}, {11366, 11368, 2, 574, 10793},
+	{11370, 11372, 2, 11369, 2}, {11379, 11382, 3, 11378, 3},
+	{11393, 11491, 2, 11392, 2}, {11520, 11557, 1, 4256, 1},
+	{42561, 42591, 2, 42560, 2}, {42595, 42605, 2, 42594, 2},
+	{42625, 42647, 2, 42624, 2}, {42787, 42799, 2, 42786, 2},
+	{42803, 42863, 2, 42802, 2}, {42874, 42876, 2, 42873, 2},
+	{42879, 42887, 2, 42878, 2}, {42892, 42957, 65, 42891, 66},
+	{42959, 42963, 4, 42959, 4}, {42965, 42971, 6, 42965, 6},
+}
+
 func ntfsUpCaseData(modern bool) []byte {
 	data := make([]byte, 65536*2)
 	for value := 0; value < 65536; value++ {
@@ -1811,6 +1854,27 @@ func ntfsUpCaseData(modern bool) []byte {
 		}
 	}
 	return data
+}
+
+func ntfsUpCaseDataForProfile(modern bool, profile string) ([]byte, error) {
+	data := ntfsUpCaseData(modern)
+	switch profile {
+	case "", "default":
+		return data, nil
+	case "windows-8.1":
+		if !modern {
+			return nil, fmt.Errorf("ntfs: upcase_profile %q requires NTFS 3.1", profile)
+		}
+		for _, mapping := range ntfsWindows81UpCaseMappings {
+			target := mapping.target
+			for value := mapping.first; value <= mapping.last; value, target = value+mapping.step, target+mapping.increment {
+				binary.LittleEndian.PutUint16(data[value*2:value*2+2], uint16(target))
+			}
+		}
+		return data, nil
+	default:
+		return nil, fmt.Errorf("ntfs: unsupported upcase_profile %q (want \"default\" or \"windows-8.1\")", profile)
+	}
 }
 
 func ntfsDefaultSecurityDescriptor() []byte {
@@ -1943,7 +2007,12 @@ func (b *ntfsBuild) prepareSecurity() error {
 	}
 	for _, node := range b.nodes {
 		record := defaultRecord
-		if len(node.metadata.SecurityDescriptor) > 0 {
+		// Records with a compatibility $SECURITY_DESCRIPTOR attribute have
+		// no security ID field in $STANDARD_INFORMATION. Importing their
+		// descriptor into $Secure would create an unreachable SDS entry that
+		// Windows removes during its first consistency check (the WIM root is
+		// the usual source of that otherwise-unused record).
+		if !b.legacySecurityRecord(node) && len(node.metadata.SecurityDescriptor) > 0 {
 			record, err = add(node.metadata.SecurityDescriptor)
 			if err != nil {
 				return fmt.Errorf("ntfs: security descriptor for %q: %w", node.fullPath, err)
@@ -2409,11 +2478,15 @@ func utf16Bytes(s string) []byte {
 }
 
 func ntfsCompareName(a, b string) int {
+	return ntfsCompareNameWithUpCase(a, b, nil)
+}
+
+func ntfsCompareNameWithUpCase(a, b string, upCase []byte) int {
 	left := utf16.Encode([]rune(a))
 	right := utf16.Encode([]rune(b))
 	for index := 0; index < min(len(left), len(right)); index++ {
-		l := uint16(unicode.ToUpper(rune(left[index])))
-		r := uint16(unicode.ToUpper(rune(right[index])))
+		l := ntfsUpperCase(left[index], upCase)
+		r := ntfsUpperCase(right[index], upCase)
 		if l < r {
 			return -1
 		}
@@ -2428,6 +2501,28 @@ func ntfsCompareName(a, b string) int {
 		return 1
 	}
 	return 0
+}
+
+func ntfsUpperCase(value uint16, upCase []byte) uint16 {
+	offset := int(value) * 2
+	if offset+2 <= len(upCase) {
+		return binary.LittleEndian.Uint16(upCase[offset : offset+2])
+	}
+	return uint16(unicode.ToUpper(rune(value)))
+}
+
+// ntfsImportedDOSName accepts the extensionless form found in normal NTFS
+// records and the same name with the trailing separator used by some WIM
+// metadata producers. A trailing dot is not itself a valid NTFS DOS name.
+func ntfsImportedDOSName(name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	name = strings.TrimRight(name, ". ")
+	if name == "" {
+		return "", false
+	}
+	return ntfsDOSName(name)
 }
 
 func ntfsDOSName(name string) (string, bool) {
