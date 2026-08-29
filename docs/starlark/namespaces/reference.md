@@ -1852,13 +1852,13 @@ Native `crypto` operation. Limits and timeout arguments are validated before wor
 
 ### `database.ese`
 
-`database.ese(...)`
+`database.ese(file) -> ESE database`
 
 Native `database` operation. Limits and timeout arguments are validated before work begins.
 
 ### `database.ese_build`
 
-`database.ese_build(...)`
+`database.ese_build(tables, database_pages=0, sort_data=None) -> file`
 
 Native `database` operation. Limits and timeout arguments are validated before work begins.
 
@@ -1942,7 +1942,7 @@ Native `filesystem` operation. Limits and timeout arguments are validated before
 
 ### `filesystem.ntfs`
 
-`filesystem.ntfs(...)`
+`filesystem.ntfs(source, size=None, boot_code=None, hidden_sectors=0, label='NO NAME', version='1.1', log_file=None, upcase=None, upcase_profile='default')`
 
 Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
 

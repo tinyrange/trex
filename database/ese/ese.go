@@ -1,5 +1,5 @@
-// Package ese reads Extensible Storage Engine (ESE/Jet Blue) databases from
-// portable TinyRange storage readers.
+// Package ese reads and builds Extensible Storage Engine (ESE/Jet Blue)
+// databases through portable TinyRange storage abstractions.
 package ese
 
 import (
