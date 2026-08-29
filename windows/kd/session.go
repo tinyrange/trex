@@ -1,0 +1,653 @@
+package kd
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"time"
+
+	channelstar "github.com/tinyrange/trex/channel/star"
+	"github.com/tinyrange/trex/lifecycle"
+	starvalue "github.com/tinyrange/trex/script/value"
+	vmmapi "github.com/tinyrange/trex/vmm"
+	"go.starlark.net/starlark"
+)
+
+const (
+	kdDefaultEventQueue  = 512
+	kdDefaultMemoryLimit = 64 << 20
+)
+
+type kdPendingRequest struct {
+	api   uint32
+	reply chan kdPacket
+}
+
+type kdEvent struct {
+	kind  string
+	value starlark.Value
+	file  *kdPacket
+}
+
+type kdOutboundRequest struct {
+	ctx     context.Context
+	kind    uint16
+	payload []byte
+	result  chan kdOutboundResult
+}
+
+type kdOutboundResult struct {
+	id           uint32
+	acknowledged <-chan error
+	err          error
+}
+
+type kdSessionValue struct {
+	channel      *channelstar.Value
+	wire         *kdWire
+	memoryLimit  int
+	architecture string
+
+	events         chan kdEvent
+	ready          chan struct{}
+	outbound       chan kdOutboundRequest
+	writerDone     chan struct{}
+	done           chan struct{}
+	shutdown       chan struct{}
+	readerErr      error
+	readerMu       sync.Mutex
+	requestMu      sync.Mutex
+	pendingMu      sync.Mutex
+	pending        *kdPendingRequest
+	stateMu        sync.Mutex
+	processor      uint16
+	processorLevel uint16
+	stopped        bool
+	stopGeneration uint64
+	protocolKnown  bool
+	target64       bool
+	handlerMu      sync.RWMutex
+	fileHandler    starlark.Callable
+	close          sync.Once
+	unregister     func()
+}
+
+func Builtin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var channelValue starlark.Value
+	packetLimit := kdDefaultPacketLimit
+	memoryLimit := kdDefaultMemoryLimit
+	eventQueue := kdDefaultEventQueue
+	architecture := "i386"
+	if err := starlark.UnpackArgs("kd", args, kwargs,
+		"channel", &channelValue, "architecture?", &architecture, "packet_limit?", &packetLimit, "memory_limit?", &memoryLimit, "event_queue?", &eventQueue,
+	); err != nil {
+		return nil, err
+	}
+	channel, ok := channelValue.(*channelstar.Value)
+	if !ok {
+		return nil, fmt.Errorf("kd: channel is %s, want byte_channel", channelValue.Type())
+	}
+	if architecture != "i386" && architecture != "amd64" {
+		return nil, fmt.Errorf("kd: unsupported architecture %q", architecture)
+	}
+	if packetLimit < kdManipulateSize || packetLimit > int(^uint16(0)) || memoryLimit <= 0 || memoryLimit > 1<<30 || eventQueue <= 0 || eventQueue > 65536 {
+		return nil, fmt.Errorf("kd: invalid resource limit")
+	}
+	session := &kdSessionValue{
+		channel: channel, wire: newKDWire(channel, packetLimit), memoryLimit: memoryLimit, architecture: architecture,
+		events: make(chan kdEvent, eventQueue), ready: make(chan struct{}, 1),
+		outbound: make(chan kdOutboundRequest, 64), writerDone: make(chan struct{}),
+		done: make(chan struct{}), shutdown: make(chan struct{}),
+	}
+	resources, err := lifecycle.ForThread(thread)
+	if err != nil {
+		return nil, err
+	}
+	unregister, err := resources.Add(session)
+	if err != nil {
+		return nil, err
+	}
+	session.unregister = unregister
+	go session.writeLoop()
+	go session.readLoop()
+	return session, nil
+}
+
+// writeLoop serializes KD data packets. The protocol does not advance its
+// outbound packet ID until the target acknowledges the previous packet, while
+// the independent reader must remain live to receive that acknowledgement.
+func (s *kdSessionValue) writeLoop() {
+	defer close(s.writerDone)
+	for {
+		var request kdOutboundRequest
+		select {
+		case request = <-s.outbound:
+		case <-s.shutdown:
+			return
+		}
+		select {
+		case <-request.ctx.Done():
+			request.result <- kdOutboundResult{err: request.ctx.Err()}
+			continue
+		default:
+		}
+		id, ack, err := s.wire.sendData(request.kind, request.payload)
+		if err != nil {
+			request.result <- kdOutboundResult{err: err}
+			s.fail(err)
+			_ = s.channel.Close()
+			return
+		}
+		acknowledged := make(chan error, 1)
+		request.result <- kdOutboundResult{id: id, acknowledged: acknowledged}
+		select {
+		case err := <-ack:
+			acknowledged <- err
+		case <-s.shutdown:
+			acknowledged <- io.ErrClosedPipe
+			return
+		case <-s.done:
+			acknowledged <- s.readerError()
+			return
+		}
+	}
+}
+
+func (s *kdSessionValue) sendData(ctx context.Context, kind uint16, payload []byte) (uint32, <-chan error, error) {
+	request := kdOutboundRequest{
+		ctx: ctx, kind: kind, payload: append([]byte(nil), payload...),
+		result: make(chan kdOutboundResult, 1),
+	}
+	select {
+	case s.outbound <- request:
+	case <-ctx.Done():
+		return 0, nil, ctx.Err()
+	case <-s.done:
+		return 0, nil, s.readerError()
+	}
+	select {
+	case result := <-request.result:
+		return result.id, result.acknowledged, result.err
+	case <-ctx.Done():
+		return 0, nil, ctx.Err()
+	case <-s.done:
+		return 0, nil, s.readerError()
+	}
+}
+
+// queueData is reserved for responses generated by the reader itself. Waiting
+// here would prevent the reader from consuming the ACK that makes the send
+// possible when another data packet is already in flight.
+func (s *kdSessionValue) queueData(kind uint16, payload []byte) error {
+	request := kdOutboundRequest{
+		ctx: context.Background(), kind: kind, payload: append([]byte(nil), payload...),
+		result: make(chan kdOutboundResult, 1),
+	}
+	select {
+	case s.outbound <- request:
+		return nil
+	default:
+		return fmt.Errorf("KD outbound queue overflow")
+	}
+}
+
+func (s *kdSessionValue) readLoop() {
+	defer close(s.done)
+	for {
+		packet, err := s.wire.readPacket()
+		if err != nil {
+			select {
+			case <-s.shutdown:
+				return
+			default:
+			}
+			s.fail(err)
+			return
+		}
+		switch packet.Leader {
+		case kdBreakinPacket:
+			s.publish(kdEvent{kind: "breakin", value: starvalue.NewRecord(starlark.StringDict{"kind": starlark.String("breakin")})})
+		case kdControlPacketLeader:
+			if err := s.wire.handleControl(packet); err != nil {
+				s.fail(err)
+				return
+			}
+			kind := "control"
+			if packet.Type == kdPacketReset {
+				kind = "reset"
+			}
+			s.publish(kdEvent{kind: kind, value: kdPacketValue(packet, kind)})
+		case kdPacketLeader:
+			valid, err := s.wire.validateAndAcknowledge(packet)
+			if err != nil {
+				s.fail(err)
+				return
+			}
+			if !valid {
+				continue
+			}
+			if err := s.handleData(packet); err != nil {
+				s.fail(err)
+				return
+			}
+		}
+	}
+}
+
+func (s *kdSessionValue) handleData(packet kdPacket) error {
+	switch packet.Type {
+	case kdPacketStateChange32:
+		event, err := s.stateChange32Event(packet)
+		if err != nil {
+			return err
+		}
+		s.publish(event)
+	case kdPacketStateChange64:
+		event, err := s.stateChangeEvent(packet)
+		if err != nil {
+			return err
+		}
+		s.publish(event)
+	case kdPacketStateManipulate:
+		api := kdU32(packet.Payload, 0)
+		s.pendingMu.Lock()
+		pending := s.pending
+		if pending != nil && pending.api == api {
+			s.pending = nil
+		}
+		s.pendingMu.Unlock()
+		if pending != nil && pending.api == api {
+			pending.reply <- packet
+		} else {
+			s.publish(kdEvent{kind: "manipulate", value: kdManipulateValue(packet)})
+		}
+	case kdPacketDebugIO:
+		s.publish(kdEvent{kind: "debug_io", value: kdDebugIOValue(packet)})
+	case kdPacketFileIO:
+		copyPacket := packet
+		s.handlerMu.RLock()
+		hasHandler := s.fileHandler != nil
+		s.handlerMu.RUnlock()
+		if !hasHandler {
+			if err := s.rejectFileIO(packet); err != nil {
+				return err
+			}
+			copyPacket.Payload = nil
+		}
+		s.publish(kdEvent{kind: "file_io", value: kdFileIOValue(packet), file: map[bool]*kdPacket{true: &copyPacket, false: nil}[hasHandler]})
+	default:
+		s.publish(kdEvent{kind: "packet", value: kdPacketValue(packet, "packet")})
+	}
+	return nil
+}
+
+func (s *kdSessionValue) stateChangeEvent(packet kdPacket) (kdEvent, error) {
+	if len(packet.Payload) < kdStateChangeSize {
+		return kdEvent{}, fmt.Errorf("KD state change has %d bytes, want %d", len(packet.Payload), kdStateChangeSize)
+	}
+	state := kdU32(packet.Payload, 0)
+	s.stateMu.Lock()
+	s.processorLevel, s.processor, s.stopped, s.protocolKnown, s.target64 = kdU16(packet.Payload, 4), kdU16(packet.Payload, 6), true, true, true
+	s.stopGeneration++
+	s.stateMu.Unlock()
+	fields := starlark.StringDict{
+		"kind": starlark.String("state"), "state": starlark.MakeUint64(uint64(state)),
+		"processor": starlark.MakeInt(int(kdU16(packet.Payload, 6))), "processor_level": starlark.MakeInt(int(kdU16(packet.Payload, 4))),
+		"program_counter": starlark.MakeUint64(kdU64(packet.Payload, 24)), "packet_id": starlark.MakeUint64(uint64(packet.ID)),
+		"packet_size": starlark.MakeInt(len(packet.Payload)), "raw": starlark.Bytes(packet.Payload),
+	}
+	kind := "state"
+	switch state {
+	case kdStateException:
+		kind = "exception"
+		fields["kind"] = starlark.String(kind)
+		fields["code"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 32)))
+		fields["address"] = starlark.MakeUint64(kdU64(packet.Payload, 48))
+		fields["first_chance"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 184)))
+		count := min(int(kdU32(packet.Payload, 56)), 15)
+		parameters := make([]starlark.Value, count)
+		for index := range parameters {
+			parameters[index] = starlark.MakeUint64(kdU64(packet.Payload, 64+index*8))
+		}
+		fields["parameters"] = starlark.NewList(parameters)
+	case kdStateLoadSymbols:
+		kind = "load_symbols"
+		fields["kind"] = starlark.String(kind)
+		length := min(int(kdU32(packet.Payload, 32)), len(packet.Payload)-kdStateChangeSize)
+		// The control report and processor context make the fixed state-change
+		// prefix target-dependent. KD appends the counted image path at the end.
+		pathOffset := len(packet.Payload) - length
+		path := strings.TrimRight(string(packet.Payload[pathOffset:]), "\x00")
+		fields["path"] = starlark.String(path)
+		fields["base"] = starlark.MakeUint64(kdU64(packet.Payload, 40))
+		fields["size"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 60)))
+		fields["unload"] = starlark.Bool(packet.Payload[64] != 0)
+	case kdStateCommand:
+		kind = "command_string"
+		fields["kind"] = starlark.String(kind)
+		fields["data"] = starlark.Bytes(packet.Payload[kdStateChangeSize:])
+	}
+	return kdEvent{kind: kind, value: starvalue.NewRecord(fields)}, nil
+}
+
+func (s *kdSessionValue) stateChange32Event(packet kdPacket) (kdEvent, error) {
+	const headerSize = 20
+	if len(packet.Payload) < headerSize {
+		return kdEvent{}, fmt.Errorf("KD32 state change has %d bytes, want at least %d", len(packet.Payload), headerSize)
+	}
+	state := kdU32(packet.Payload, 0)
+	s.stateMu.Lock()
+	s.processorLevel, s.processor, s.stopped, s.protocolKnown, s.target64 = kdU16(packet.Payload, 4), kdU16(packet.Payload, 6), true, true, false
+	s.stopGeneration++
+	s.stateMu.Unlock()
+	fields := starlark.StringDict{
+		"kind": starlark.String("state"), "state": starlark.MakeUint64(uint64(state)),
+		"processor": starlark.MakeInt(int(kdU16(packet.Payload, 6))), "processor_level": starlark.MakeInt(int(kdU16(packet.Payload, 4))),
+		"program_counter": starlark.MakeUint64(uint64(kdU32(packet.Payload, 16))), "packet_id": starlark.MakeUint64(uint64(packet.ID)),
+		"packet_size": starlark.MakeInt(len(packet.Payload)), "raw": starlark.Bytes(packet.Payload),
+	}
+	kind := "state"
+	switch state {
+	case kdStateException:
+		if len(packet.Payload) < 104 {
+			return kdEvent{}, fmt.Errorf("KD32 exception state has %d bytes, want at least 104", len(packet.Payload))
+		}
+		kind = "exception"
+		fields["kind"] = starlark.String(kind)
+		fields["code"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 20)))
+		fields["address"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 32)))
+		fields["first_chance"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 100)))
+		count := min(int(kdU32(packet.Payload, 36)), 15)
+		parameters := make([]starlark.Value, count)
+		for index := range parameters {
+			parameters[index] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 40+index*4)))
+		}
+		fields["parameters"] = starlark.NewList(parameters)
+	case kdStateLoadSymbols:
+		if len(packet.Payload) < 44 {
+			return kdEvent{}, fmt.Errorf("KD32 load-symbols state has %d bytes, want at least 44", len(packet.Payload))
+		}
+		length := int(kdU32(packet.Payload, 20))
+		if length < 0 || length > len(packet.Payload)-44 {
+			return kdEvent{}, fmt.Errorf("KD32 image path length %d exceeds packet", length)
+		}
+		kind = "load_symbols"
+		fields["kind"] = starlark.String(kind)
+		fields["path"] = starlark.String(strings.TrimRight(string(packet.Payload[len(packet.Payload)-length:]), "\x00"))
+		fields["base"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 24)))
+		fields["size"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 36)))
+		fields["unload"] = starlark.Bool(packet.Payload[40] != 0)
+	case kdStateCommand:
+		kind = "command_string"
+		fields["kind"] = starlark.String(kind)
+		fields["data"] = starlark.Bytes(packet.Payload[headerSize:])
+	}
+	return kdEvent{kind: kind, value: starvalue.NewRecord(fields)}, nil
+}
+
+func (s *kdSessionValue) publish(event kdEvent) {
+	select {
+	case s.events <- event:
+		select {
+		case s.ready <- struct{}{}:
+		default:
+		}
+	default:
+		s.fail(fmt.Errorf("KD event queue overflow"))
+	}
+}
+
+func (s *kdSessionValue) fail(err error) {
+	s.readerMu.Lock()
+	if s.readerErr == nil {
+		s.readerErr = err
+	}
+	s.readerMu.Unlock()
+}
+
+func (s *kdSessionValue) readerError() error {
+	s.readerMu.Lock()
+	defer s.readerMu.Unlock()
+	if s.readerErr != nil {
+		return s.readerErr
+	}
+	return io.EOF
+}
+
+func (s *kdSessionValue) DebugReady() <-chan struct{} { return s.ready }
+func (s *kdSessionValue) String() string              { return "<windows.kd>" }
+func (s *kdSessionValue) Type() string                { return "windows.kd" }
+func (s *kdSessionValue) Freeze()                     {}
+func (s *kdSessionValue) Truth() starlark.Bool        { return starlark.True }
+func (s *kdSessionValue) Hash() (uint32, error)       { return 0, fmt.Errorf("unhashable: %s", s.Type()) }
+func (s *kdSessionValue) Attr(name string) (starlark.Value, error) {
+	methods := map[string]func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error){
+		"breakin": s.breakinBuiltin, "breakpoint": s.breakpointBuiltin, "close": s.closeBuiltin,
+		"context": s.contextBuiltin, "continue": s.continueBuiltin, "file_io": s.fileIOBuiltin,
+		"next_event": s.nextEventBuiltin, "packet": s.packetBuiltin, "read_physical": s.readPhysicalBuiltin, "read_virtual": s.readVirtualBuiltin,
+		"request": s.requestBuiltin, "set_context": s.setContextBuiltin, "write_physical": s.writePhysicalBuiltin, "write_virtual": s.writeVirtualBuiltin,
+	}
+	if method := methods[name]; method != nil {
+		return starlark.NewBuiltin(name, method), nil
+	}
+	return nil, nil
+}
+func (s *kdSessionValue) AttrNames() []string {
+	return []string{"breakin", "breakpoint", "close", "context", "continue", "file_io", "next_event", "packet", "read_physical", "read_virtual", "request", "set_context", "write_physical", "write_virtual"}
+}
+
+func (s *kdSessionValue) Close() error {
+	s.close.Do(func() {
+		if s.unregister != nil {
+			s.unregister()
+		}
+		close(s.shutdown)
+		_ = s.channel.Close()
+		<-s.writerDone
+	})
+	return nil
+}
+
+func (s *kdSessionValue) request(ctx context.Context, api uint32, processor uint16, union []byte, data []byte) (kdPacket, error) {
+	s.requestMu.Lock()
+	defer s.requestMu.Unlock()
+	unionOffset, manipulateSize := s.manipulateLayout()
+	if len(union) > manipulateSize-unionOffset {
+		return kdPacket{}, fmt.Errorf("KD manipulate arguments exceed %d bytes", manipulateSize-unionOffset)
+	}
+	payload := make([]byte, manipulateSize+len(data))
+	binary.LittleEndian.PutUint32(payload[0:4], api)
+	binary.LittleEndian.PutUint16(payload[6:8], processor)
+	copy(payload[unionOffset:manipulateSize], union)
+	copy(payload[manipulateSize:], data)
+	pending := &kdPendingRequest{api: api, reply: make(chan kdPacket, 1)}
+	s.pendingMu.Lock()
+	if s.pending != nil {
+		s.pendingMu.Unlock()
+		return kdPacket{}, fmt.Errorf("KD manipulate request already pending")
+	}
+	s.pending = pending
+	s.pendingMu.Unlock()
+	_, _, err := s.sendData(ctx, kdPacketStateManipulate, payload)
+	if err != nil {
+		s.clearPending(pending)
+		return kdPacket{}, err
+	}
+	for {
+		select {
+		case packet := <-pending.reply:
+			return packet, nil
+		case <-ctx.Done():
+			s.clearPending(pending)
+			return kdPacket{}, ctx.Err()
+		case <-s.done:
+			s.clearPending(pending)
+			return kdPacket{}, s.readerError()
+		}
+	}
+}
+
+func (s *kdSessionValue) manipulateLayout() (unionOffset, size int) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.protocolKnown && !s.target64 {
+		return 12, kdManipulate32Size
+	}
+	return 16, kdManipulate64Size
+}
+
+func (s *kdSessionValue) targetIs64() bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return !s.protocolKnown || s.target64
+}
+
+func (s *kdSessionValue) clearPending(pending *kdPendingRequest) {
+	s.pendingMu.Lock()
+	if s.pending == pending {
+		s.pending = nil
+	}
+	s.pendingMu.Unlock()
+}
+
+func kdOperationContext(timeout float64) (context.Context, context.CancelFunc, error) {
+	if timeout < 0 || timeout > 86400 {
+		return nil, nil, fmt.Errorf("invalid KD timeout")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout*float64(time.Second)))
+	return ctx, cancel, nil
+}
+
+func (s *kdSessionValue) nextEventBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	timeout := starvalue.Number(30)
+	if err := starlark.UnpackArgs("next_event", args, kwargs, "timeout?", &timeout); err != nil {
+		return nil, err
+	}
+	ctx, cancel, err := kdOperationContext(float64(timeout))
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	select {
+	case event := <-s.events:
+		return s.consumeEvent(thread, event)
+	default:
+	}
+	select {
+	case event := <-s.events:
+		return s.consumeEvent(thread, event)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.done:
+		return nil, s.readerError()
+	}
+}
+
+func (s *kdSessionValue) consumeEvent(thread *starlark.Thread, event kdEvent) (starlark.Value, error) {
+	select {
+	case <-s.ready:
+	default:
+	}
+	if len(s.events) != 0 {
+		select {
+		case s.ready <- struct{}{}:
+		default:
+		}
+	}
+	if event.file != nil {
+		if err := s.handleFileCallback(thread, *event.file, event.value); err != nil {
+			return nil, err
+		}
+	}
+	return event.value, nil
+}
+
+func (s *kdSessionValue) breakinBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackArgs("breakin", args, kwargs); err != nil {
+		return nil, err
+	}
+	return starlark.None, s.wire.breakin()
+}
+
+func (s *kdSessionValue) continueBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	status := uint64(kdContinueStatus)
+	timeout := starvalue.Number(30)
+	if err := starlark.UnpackArgs("continue", args, kwargs, "status?", &status, "timeout?", &timeout); err != nil {
+		return nil, err
+	}
+	if status > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("continue: status exceeds 32 bits")
+	}
+	s.stateMu.Lock()
+	processor, level, stopped, generation := s.processor, s.processorLevel, s.stopped, s.stopGeneration
+	s.stateMu.Unlock()
+	if !stopped {
+		return nil, &vmmapi.Error{Code: vmmapi.ErrorState, Message: "KD target is not stopped"}
+	}
+	unionOffset, manipulateSize := s.manipulateLayout()
+	payload := make([]byte, manipulateSize)
+	binary.LittleEndian.PutUint32(payload[0:4], kdAPIContinue)
+	binary.LittleEndian.PutUint16(payload[4:6], level)
+	binary.LittleEndian.PutUint16(payload[6:8], processor)
+	binary.LittleEndian.PutUint32(payload[8:12], uint32(status))
+	binary.LittleEndian.PutUint32(payload[unionOffset:unionOffset+4], uint32(status))
+	ctx, cancel, err := kdOperationContext(float64(timeout))
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	_, acknowledged, err := s.sendData(ctx, kdPacketStateManipulate, payload)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case err := <-acknowledged:
+		if err != nil {
+			return nil, err
+		}
+		s.markContinued(generation)
+		return starlark.None, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.done:
+		return nil, s.readerError()
+	}
+}
+
+func (s *kdSessionValue) markContinued(generation uint64) {
+	s.stateMu.Lock()
+	if s.stopGeneration == generation {
+		s.stopped = false
+	}
+	s.stateMu.Unlock()
+}
+
+func kdPacketValue(packet kdPacket, kind string) starlark.Value {
+	return starvalue.NewRecord(starlark.StringDict{"kind": starlark.String(kind), "packet_type": starlark.MakeInt(int(packet.Type)), "packet_id": starlark.MakeUint64(uint64(packet.ID)), "payload": starlark.Bytes(packet.Payload)})
+}
+func kdManipulateValue(packet kdPacket) starlark.Value {
+	data := []byte(nil)
+	if len(packet.Payload) > kdManipulateSize {
+		data = packet.Payload[kdManipulateSize:]
+	}
+	return starvalue.NewRecord(starlark.StringDict{"kind": starlark.String("manipulate"), "api": starlark.MakeUint64(uint64(kdU32(packet.Payload, 0))), "status": starlark.MakeUint64(uint64(kdU32(packet.Payload, 8))), "processor": starlark.MakeInt(int(kdU16(packet.Payload, 6))), "arguments": starlark.Bytes(packet.Payload[16:min(len(packet.Payload), kdManipulateSize)]), "data": starlark.Bytes(data), "packet_id": starlark.MakeUint64(uint64(packet.ID))})
+}
+func kdDebugIOValue(packet kdPacket) starlark.Value {
+	data := []byte(nil)
+	if len(packet.Payload) > 16 {
+		data = packet.Payload[16:]
+	}
+	length := min(int(kdU32(packet.Payload, 8)), len(data))
+	data = data[:length]
+	return starvalue.NewRecord(starlark.StringDict{"kind": starlark.String("debug_io"), "api": starlark.MakeUint64(uint64(kdU32(packet.Payload, 0))), "data": starlark.Bytes(data), "packet_id": starlark.MakeUint64(uint64(packet.ID))})
+}
+func kdFileIOValue(packet kdPacket) starlark.Value {
+	data := []byte(nil)
+	if len(packet.Payload) > kdFileIOSize {
+		data = packet.Payload[kdFileIOSize:]
+	}
+	return starvalue.NewRecord(starlark.StringDict{"kind": starlark.String("file_io"), "api": starlark.MakeUint64(uint64(kdU32(packet.Payload, 0))), "status": starlark.MakeUint64(uint64(kdU32(packet.Payload, 4))), "data": starlark.Bytes(data), "packet_id": starlark.MakeUint64(uint64(packet.ID))})
+}
