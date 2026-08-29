@@ -1850,6 +1850,12 @@ Native `crypto` operation. Limits and timeout arguments are validated before wor
 
 Native `crypto` operation. Limits and timeout arguments are validated before work begins.
 
+### `database.ese`
+
+`database.ese(...)`
+
+Native `database` operation. Limits and timeout arguments are validated before work begins.
+
 ### `debug.disassemble`
 
 `debug.disassemble(data, address=0, architecture='i386', maximum=64MiB, count=-1); architectures: i8086/x86-16, i386/x86, amd64/x86_64`
