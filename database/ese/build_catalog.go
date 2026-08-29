@@ -16,19 +16,18 @@ const (
 )
 
 var catalogColumns = []ColumnDefinition{
-	{Name: "ObjidTable", Identifier: 1, Type: ColumnSignedLong, Maximum: 4, Flags: 4, CodePage: 1252},
-	{Name: "Type", Identifier: 2, Type: ColumnSignedShort, Maximum: 2, Flags: 4, CodePage: 1252},
-	{Name: "Id", Identifier: 3, Type: ColumnSignedLong, Maximum: 4, Flags: 4, CodePage: 1252},
-	{Name: "ColtypOrPgnoFDP", Identifier: 4, Type: ColumnSignedLong, Maximum: 4, Flags: 4, CodePage: 1252},
-	{Name: "SpaceUsage", Identifier: 5, Type: ColumnSignedLong, Maximum: 4, Flags: 4, CodePage: 1252},
-	{Name: "Flags", Identifier: 6, Type: ColumnSignedLong, Maximum: 4, Flags: 4, CodePage: 1252},
-	{Name: "PagesOrLocale", Identifier: 7, Type: ColumnSignedLong, Maximum: 4, Flags: 4, CodePage: 1252},
+	{Name: "ObjidTable", Identifier: 1, Type: ColumnSignedLong, Maximum: 4, Flags: 1, CodePage: 1252},
+	{Name: "Type", Identifier: 2, Type: ColumnSignedShort, Maximum: 2, Flags: 1, CodePage: 1252},
+	{Name: "Id", Identifier: 3, Type: ColumnSignedLong, Maximum: 4, Flags: 1, CodePage: 1252},
+	{Name: "ColtypOrPgnoFDP", Identifier: 4, Type: ColumnSignedLong, Maximum: 4, Flags: 1, CodePage: 1252},
+	{Name: "SpaceUsage", Identifier: 5, Type: ColumnSignedLong, Maximum: 4, Flags: 1, CodePage: 1252},
+	{Name: "Flags", Identifier: 6, Type: ColumnSignedLong, Maximum: 4, Flags: 1, CodePage: 1252},
+	{Name: "PagesOrLocale", Identifier: 7, Type: ColumnSignedLong, Maximum: 4, Flags: 1, CodePage: 1252},
 	{Name: "RootFlag", Identifier: 8, Type: ColumnBoolean, Maximum: 1, CodePage: 1252},
 	{Name: "RecordOffset", Identifier: 9, Type: ColumnSignedShort, Maximum: 2, CodePage: 1252},
 	{Name: "LCMapFlags", Identifier: 10, Type: ColumnSignedLong, Maximum: 4, CodePage: 1252},
 	{Name: "KeyMost", Identifier: 11, Type: ColumnUnsignedShort, Maximum: 2, CodePage: 1252},
-	{Name: "LVChunkMax", Identifier: 12, Type: ColumnSignedLong, Maximum: 4, CodePage: 1252},
-	{Name: "Name", Identifier: 128, Type: ColumnText, Maximum: 255, Flags: 4, CodePage: 1252},
+	{Name: "Name", Identifier: 128, Type: ColumnText, Maximum: 255, Flags: 1, CodePage: 1252},
 	{Name: "Stats", Identifier: 129, Type: ColumnBinary, Maximum: 255, CodePage: 1252},
 	{Name: "TemplateTable", Identifier: 130, Type: ColumnText, Maximum: 255, CodePage: 1252},
 	{Name: "DefaultValue", Identifier: 131, Type: ColumnBinary, Maximum: 255, CodePage: 1252},
@@ -38,26 +37,24 @@ var catalogColumns = []ColumnDefinition{
 	{Name: "TupleLimits", Identifier: 135, Type: ColumnBinary, Maximum: 255, CodePage: 1252},
 	{Name: "Version", Identifier: 136, Type: ColumnBinary, Maximum: 255, CodePage: 1252},
 	{Name: "SortID", Identifier: 137, Type: ColumnBinary, Maximum: 255, CodePage: 1252},
-	{Name: "CallbackData", Identifier: 256, Type: ColumnLongBinary, Maximum: 0x7fffffff, Flags: 2, CodePage: 1252},
-	{Name: "CallbackDependencies", Identifier: 257, Type: ColumnLongBinary, Maximum: 0x7fffffff, Flags: 2, CodePage: 1252},
-	{Name: "SeparateLV", Identifier: 258, Type: ColumnLongBinary, Maximum: 0x7fffffff, Flags: 2, CodePage: 1252},
-	{Name: "SpaceHints", Identifier: 259, Type: ColumnLongBinary, Maximum: 0x7fffffff, Flags: 2, CodePage: 1252},
-	{Name: "SpaceDeferredLVHints", Identifier: 260, Type: ColumnLongBinary, Maximum: 0x7fffffff, Flags: 2, CodePage: 1252},
-	{Name: "LocaleName", Identifier: 261, Type: ColumnLongBinary, Maximum: 0x7fffffff, Flags: 2, CodePage: 1252},
+	{Name: "CallbackData", Identifier: 256, Type: ColumnLongBinary, CodePage: 1252},
+	{Name: "CallbackDependencies", Identifier: 257, Type: ColumnLongBinary, CodePage: 1252},
+	{Name: "SeparateLV", Identifier: 258, Type: ColumnLongBinary, CodePage: 1252},
+	{Name: "SpaceHints", Identifier: 259, Type: ColumnLongBinary, CodePage: 1252},
+	{Name: "SpaceDeferredLVHints", Identifier: 260, Type: ColumnLongBinary, CodePage: 1252},
+	{Name: "LocaleName", Identifier: 261, Type: ColumnLongBinary, CodePage: 1252},
 }
 
 var systemObjidColumns = []ColumnDefinition{
-	{Name: "objid", Identifier: 256, Type: ColumnSignedLong, Maximum: 4, Flags: 2},
-	{Name: "objidTable", Identifier: 257, Type: ColumnSignedLong, Maximum: 4, Flags: 2},
-	{Name: "type", Identifier: 258, Type: ColumnSignedShort, Maximum: 2, Flags: 2},
+	{Name: "objid", Identifier: 256, Type: ColumnSignedLong, Maximum: 4},
+	{Name: "objidTable", Identifier: 257, Type: ColumnSignedLong, Maximum: 4},
+	{Name: "type", Identifier: 258, Type: ColumnSignedShort, Maximum: 2},
 }
 
 var systemLocaleColumns = []ColumnDefinition{
-	{Name: "Type", Identifier: 1, Type: ColumnUnsignedByte, Maximum: 1, Flags: 5},
-	{Name: "iValue", Identifier: 2, Type: ColumnSignedLong, Maximum: 4, Flags: 0x801},
-	{Name: "Key", Identifier: 128, Type: ColumnBinary, Maximum: 224, Flags: 0x40000},
-	{Name: "i64Value", Identifier: 129, Type: ColumnCurrency, Maximum: 8, Flags: 0x40000},
-	{Name: "rgbValue", Identifier: 256, Type: ColumnLongBinary, Flags: 2},
+	{Name: "Type", Identifier: 1, Type: ColumnUnsignedByte, Maximum: 1, Flags: 1},
+	{Name: "iValue", Identifier: 2, Type: ColumnSignedLong, Maximum: 4, Flags: 0x30},
+	{Name: "Key", Identifier: 128, Type: ColumnBinary, Maximum: 255},
 }
 
 type catalogObject struct {
@@ -136,8 +133,7 @@ func catalogIndexRows(object catalogObject) []Row {
 			row["SortID"] = index.definition.SortID
 		}
 		if index.definition.LocaleName != "" {
-			encoded, _ := encodeColumn(ColumnDefinition{Type: ColumnLongBinary}, []byte(index.definition.LocaleName))
-			row["LocaleName"] = encoded
+			row["LocaleName"] = utf16Key(index.definition.LocaleName)
 		}
 		rows = append(rows, row)
 	}
@@ -151,8 +147,8 @@ func (b *builder) catalogRows(tables []*buildTable) ([]Row, error) {
 			columns: catalogColumns,
 			indexes: []*buildIndex{
 				{objid: 2, fdp: catalogPage, primary: true, definition: IndexDefinition{Name: "Id", Columns: []int32{1, 2, 3}, Flags: 0x10031, KeyMost: 255, Locale: 1033}},
-				{objid: 4, fdp: catalogNamePage, definition: IndexDefinition{Name: "Name", Columns: []int32{1, 2, 128}, Flags: 0x1040f, KeyMost: 255, Locale: 1033}},
-				{objid: 5, fdp: catalogRootPageIndex, definition: IndexDefinition{Name: "RootObjects", Columns: []int32{8, 128}, Flags: 0x1044f, KeyMost: 255, Locale: 1033}},
+				{objid: 4, fdp: catalogNamePage, definition: IndexDefinition{Name: "Name", Columns: []int32{1, 2, 128}, Flags: 0x10011, KeyMost: 255, Locale: 1033}},
+				{objid: 5, fdp: catalogRootPageIndex, definition: IndexDefinition{Name: "RootObjects", Columns: []int32{8, 128}, Flags: 0x10009, KeyMost: 255, Locale: 1033}},
 			},
 		},
 		{
@@ -163,12 +159,12 @@ func (b *builder) catalogRows(tables []*buildTable) ([]Row, error) {
 		{
 			name: "MSysObjids", objid: 6, fdp: 33, flags: 0x80000002,
 			columns: systemObjidColumns,
-			indexes: []*buildIndex{{objid: 6, fdp: 33, primary: true, definition: IndexDefinition{Name: "primary", Columns: []int32{256}, Flags: 0x10031, KeyMost: 255}}},
+			indexes: []*buildIndex{{objid: 6, fdp: 33, primary: true, definition: IndexDefinition{Name: "primary", Columns: []int32{256}, Flags: 0x1002f, KeyMost: 255}}},
 		},
 		{
 			name: "MSysLocales", objid: 7, fdp: 34, flags: 0x80000000,
 			columns: systemLocaleColumns,
-			indexes: []*buildIndex{{objid: 7, fdp: 34, primary: true, definition: IndexDefinition{Name: "KeyPrimary", Columns: []int32{128}, Flags: 0x10031, KeyMost: 255}}},
+			indexes: []*buildIndex{{objid: 7, fdp: 34, primary: true, definition: IndexDefinition{Name: "KeyPrimary", Columns: []int32{128}, Flags: 0x1402f, KeyMost: 255}}},
 		},
 	}
 	for _, table := range tables {
@@ -203,7 +199,7 @@ func (b *builder) buildSystemPages(rows []Row, tables []*buildTable) error {
 	if err := b.buildSystemObjids(tables); err != nil {
 		return err
 	}
-	if err := b.buildSystemLocales(); err != nil {
+	if err := b.buildSystemLocales(tables); err != nil {
 		return err
 	}
 	entries := make([]treeEntry, 0, len(rows))
@@ -261,14 +257,14 @@ func (b *builder) buildSystemPages(rows []Row, tables []*buildTable) error {
 		return string(rootEntries[left].key) < string(rootEntries[right].key)
 	})
 	nameIndex := &buildIndex{
-		definition: IndexDefinition{Name: "Name", Flags: 0x1040f}, fdp: 7, oe: 8, ae: 9,
+		definition: IndexDefinition{Name: "Name", Flags: 0x10011}, fdp: 7, oe: 8, ae: 9,
 		objid: 4, owner: owner, extents: []pageExtent{{first: 7, count: 3}},
 	}
 	if err := b.buildTree(nameIndex, nameEntries); err != nil {
 		return err
 	}
 	rootIndex := &buildIndex{
-		definition: IndexDefinition{Name: "RootObjects", Flags: 0x1044f}, fdp: 10, oe: 11, ae: 12,
+		definition: IndexDefinition{Name: "RootObjects", Flags: 0x10009}, fdp: 10, oe: 11, ae: 12,
 		objid: 5, owner: owner, extents: []pageExtent{{first: 10, count: 3}},
 	}
 	if err := b.buildTree(rootIndex, rootEntries); err != nil {
@@ -320,16 +316,63 @@ func utf16Key(value string) []byte {
 	return data
 }
 
-func (b *builder) buildSystemLocales() error {
+func persistedSortID(value []byte) (string, error) {
+	if len(value) != 16 {
+		return "", fmt.Errorf("ese: persisted locale sort ID has %d bytes, want 16", len(value))
+	}
+	return fmt.Sprintf("%08x-%04x-%04x-%02x%02x-%012x",
+		binary.LittleEndian.Uint32(value[0:4]),
+		binary.LittleEndian.Uint16(value[4:6]),
+		binary.LittleEndian.Uint16(value[6:8]),
+		value[8], value[9], value[10:16]), nil
+}
+
+func persistedLocaleKey(index IndexDefinition) (string, error) {
+	if index.LocaleName == "" {
+		return "", fmt.Errorf("ese: persisted locale has no name")
+	}
+	if len(index.Version) != 8 {
+		return "", fmt.Errorf("ese: persisted locale %q version has %d bytes, want 8", index.LocaleName, len(index.Version))
+	}
+	sortID, err := persistedSortID(index.SortID)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("LocaleName=%s,SortID=%s,Ver=%x",
+		index.LocaleName, sortID, binary.LittleEndian.Uint64(index.Version)), nil
+}
+
+func (b *builder) buildSystemLocales(tables []*buildTable) error {
 	rows := []Row{
 		{"Key": utf16Key(".Schema\\Internal\\Major"), "Type": uint8(1), "iValue": int32(1)},
 		{"Key": utf16Key(".Schema\\Internal\\Minor"), "Type": uint8(1), "iValue": int32(0)},
-		{"Key": utf16Key(".Schema\\Internal\\Update"), "Type": uint8(1), "iValue": int32(2)},
+		{"Key": utf16Key(".Schema\\Internal\\Update"), "Type": uint8(1), "iValue": int32(0)},
 		{"Key": utf16Key(".Schema\\External\\Major"), "Type": uint8(1), "iValue": int32(1)},
 		{"Key": utf16Key(".Schema\\External\\Minor"), "Type": uint8(1), "iValue": int32(0)},
 		{"Key": utf16Key(".Schema\\External\\Update"), "Type": uint8(1), "iValue": int32(0)},
-		{"Key": utf16Key("MSysLocalesConsistent"), "Type": uint8(2), "iValue": int32(1)},
 	}
+	localeCounts := make(map[string]int32)
+	for _, table := range tables {
+		for _, index := range table.indexes {
+			if index.definition.LocaleName == "" {
+				continue
+			}
+			key, err := persistedLocaleKey(index.definition)
+			if err != nil {
+				return fmt.Errorf("ese: table %q index %q: %w", table.definition.Name, index.definition.Name, err)
+			}
+			localeCounts[key]++
+		}
+	}
+	localeKeys := make([]string, 0, len(localeCounts))
+	for key := range localeCounts {
+		localeKeys = append(localeKeys, key)
+	}
+	sort.Strings(localeKeys)
+	for _, key := range localeKeys {
+		rows = append(rows, Row{"Key": utf16Key(key), "Type": uint8(2), "iValue": localeCounts[key]})
+	}
+	rows = append(rows, Row{"Key": utf16Key("MSysLocalesConsistent"), "Type": uint8(2), "iValue": int32(1)})
 	type keyed struct{ key, record []byte }
 	encoded := make([]keyed, 0, len(rows))
 	for _, row := range rows {
