@@ -239,6 +239,144 @@ def _advanced_inf_expand(value, directories, strings):
             break
     return result
 
+def _advanced_inf_unquote(value):
+    """Removes balanced INF field quotes retained by the generic parser."""
+    if type(value) != "string" or len(value) < 2:
+        return value
+    if value[0] == value[-1] and value[0] in ["'", '"']:
+        return value[1:-1]
+    return value
+
+def _advanced_inf_csv(value):
+    """Splits the comma-separated value nested inside an INF string field."""
+    output = []
+    field = ""
+    quoted = False
+    skip = False
+    for index in range(len(value)):
+        if skip:
+            skip = False
+            continue
+        character = value[index]
+        if character == '"':
+            if quoted and index + 1 < len(value) and value[index + 1] == '"':
+                field += '"'
+                skip = True
+            else:
+                quoted = not quoted
+        elif character == "," and not quoted:
+            output.append(field.strip())
+            field = ""
+        else:
+            field += character
+    output.append(field.strip())
+    return output
+
+def _advanced_inf_section_line(section, name, default = ""):
+    rows = _inf_rows(_inf_value(section, name, []))
+    if not rows:
+        return default
+    return ",".join([str(field) for field in rows[0]])
+
+def _advanced_inf_per_user_modifications(section, directories, strings):
+    """Returns the Active Setup values written by PerUserInstall."""
+    guid = _advanced_inf_expand(_advanced_inf_section_line(section, "GUID"), directories, strings)
+    if not guid:
+        return []
+    key = r"SOFTWARE\Microsoft\Active Setup\Installed Components" + "\\" + guid
+    values = [
+        ("StubPath", "StubPath"),
+        ("Version", "Version"),
+        ("Locale", "Locale"),
+        ("ComponentID", "ComponentID"),
+        ("DisplayName", "(default)"),
+    ]
+    output = []
+    for source_name, registry_name in values:
+        value = _advanced_inf_expand(_advanced_inf_section_line(section, source_name), directories, strings)
+        if value:
+            output.append({
+                "operation": "registry_set_value",
+                "root": "HKEY_LOCAL_MACHINE",
+                "key": key,
+                "name": registry_name,
+                "type": "REG_SZ",
+                "value": value,
+            })
+    installed = _advanced_inf_section_line(section, "IsInstalled", "0")
+    output.append({
+        "operation": "registry_set_value",
+        "root": "HKEY_LOCAL_MACHINE",
+        "key": key,
+        "name": "IsInstalled",
+        "type": "REG_DWORD",
+        "value": int(installed),
+    })
+    return output
+
+def _parent_path(value):
+    fields = value.replace("/", "\\").split("\\")
+    return "\\".join(fields[:-1])
+
+def _advanced_inf_update_inis(inf, section_names, directories, strings, installed_files, system_root):
+    """Models Setup.ini Program Manager groups as native shell links."""
+    groups = {}
+    modifications = []
+    programs = system_root + r"\Start Menu\Programs"
+    for section_name in section_names:
+        section = inf.section(section_name)
+        if section == None:
+            continue
+        for value in section.values():
+            for raw_row in _inf_rows(value):
+                row = _advanced_inf_expand(raw_row, directories, strings)
+                if len(row) < 4 or row[0].lower() != "setup.ini":
+                    continue
+                ini_section = row[1]
+                new_entry = row[3]
+                if ini_section.lower() == "progman.groups":
+                    assignment = _advanced_inf_csv(new_entry)
+                    if not assignment:
+                        continue
+                    fields = assignment[0].split("=")
+                    group = fields[0].strip()
+                    if group:
+                        groups[group.lower()] = "=".join(fields[1:]).strip()
+                    continue
+                group_name = groups.get(ini_section.lower())
+                if group_name == None:
+                    continue
+                fields = _advanced_inf_csv(new_entry)
+                if not fields or not fields[0]:
+                    continue
+                link_name = fields[0]
+                directory = programs + ("\\" + group_name if group_name else "")
+                link_path = directory + "\\" + _safe_filename(link_name) + ".lnk"
+                target = fields[1] if len(fields) > 1 else ""
+                if not target or target.lower() == "null":
+                    modifications.append({"operation": "delete_file", "path": link_path})
+                    continue
+                target_file = _casefold_get(installed_files, target)
+                working_directory = fields[5] if len(fields) > 5 and fields[5] else _parent_path(target)
+                icon = fields[2] if len(fields) > 2 and fields[2] else target
+                icon_index = int(fields[3]) if len(fields) > 3 and fields[3] else 0
+                description = fields[6] if len(fields) > 6 and fields[6] else link_name
+                modifications.append({
+                    "operation": "write_file",
+                    "path": link_path,
+                    "source": windows.shortcut(
+                        target = target,
+                        description = description,
+                        working_dir = working_directory,
+                        icon_location = icon,
+                        icon_index = icon_index,
+                        target_size = target_file.size if target_file != None else 0,
+                        system_root = system_root,
+                    ),
+                    "replace": "always",
+                })
+    return modifications
+
 def _advanced_inf_directories(inf, system_root):
     directories = {
         "10": system_root,
@@ -292,7 +430,11 @@ def _advanced_inf_directories(inf, system_root):
                 if fallback == None:
                     remaining.append((identifiers, resolver_name))
                     continue
-                resolved = _advanced_inf_expand(fallback, directories, strings)
+                # Advanced INF custom-destination records commonly use single
+                # quotes around their prompt and fallback fields. SetupAPI
+                # treats those as field delimiters even though ordinary INF
+                # string values preserve apostrophes.
+                resolved = _advanced_inf_expand(_advanced_inf_unquote(fallback), directories, strings)
                 if "%" in resolved:
                     remaining.append((identifiers, resolver_name))
                     continue
@@ -322,6 +464,10 @@ def _advanced_inf_destination(inf, section_name, directories, strings):
     if len(fields) > 1 and fields[1]:
         root += "\\" + _advanced_inf_expand(fields[1], directories, strings).strip("\\")
     return root.rstrip("\\")
+
+def _advanced_inf_file_rows(inf, section_name):
+    section = inf.section(section_name)
+    return [] if section == None else [row for value in section.values() for row in _inf_rows(value)]
 
 def _advanced_inf_registry_modification(patch, directories, strings, delete = False):
     hive = patch["hive"]
@@ -488,6 +634,40 @@ def _advanced_inf_installer(package, system_root, version):
             for directive, output in [("RunPreSetupCommands", pre_commands), ("RunPostSetupCommands", post_commands)]:
                 for command_section in _inf_directives(section, directive):
                     output.extend(_advanced_inf_command(inf.section(command_section), directories, strings))
+            # SetupAPI applies the file queue in delete, rename, copy order.
+            # Preserve those operations so native image construction also
+            # upgrades an existing installation rather than only fresh disks.
+            for delete_name in _inf_directives(section, "DelFiles"):
+                destination = _advanced_inf_destination(inf, delete_name, directories, strings)
+                for row in _advanced_inf_file_rows(inf, delete_name):
+                    if row:
+                        modifications.append({
+                            "operation": "delete_file",
+                            "path": destination + "\\" + row[0],
+                        })
+            for rename_name in _inf_directives(section, "RenFiles"):
+                destination = _advanced_inf_destination(inf, rename_name, directories, strings)
+                rename_section = inf.section(rename_name)
+                if rename_section == None:
+                    continue
+                for output_name, value in rename_section.items():
+                    rows = _inf_rows(value)
+                    if output_name.startswith("@"):
+                        for row in rows:
+                            if len(row) >= 2:
+                                modifications.append({
+                                    "operation": "rename_file",
+                                    "source": destination + "\\" + row[1],
+                                    "path": destination + "\\" + row[0],
+                                })
+                    else:
+                        for row in rows:
+                            if row:
+                                modifications.append({
+                                    "operation": "rename_file",
+                                    "source": destination + "\\" + row[0],
+                                    "path": destination + "\\" + output_name,
+                                })
             for copy_name in _inf_directives(section, "CopyFiles"):
                 destination = _advanced_inf_destination(inf, "DefaultDestDir" if copy_name.startswith("@") else copy_name, directories, strings)
                 if copy_name.startswith("@"):
@@ -522,6 +702,20 @@ def _advanced_inf_installer(package, system_root, version):
                         modification = _advanced_inf_registry_modification(patch, directories, strings, delete = delete)
                         if modification != None:
                             modifications.append(modification)
+            modifications.extend(_advanced_inf_update_inis(
+                inf,
+                _inf_directives(section, "UpdateInis"),
+                directories,
+                strings,
+                installed_files,
+                system_root,
+            ))
+            for per_user_section in _inf_directives(section, "PerUserInstall"):
+                modifications.extend(_advanced_inf_per_user_modifications(
+                    inf.section(per_user_section),
+                    directories,
+                    strings,
+                ))
             for registration_section in _inf_directives(section, "RegisterOCXs"):
                 registration = inf.section(registration_section)
                 if registration == None:
@@ -566,6 +760,11 @@ def _advanced_inf_installer(package, system_root, version):
             if modification != None:
                 modifications.append(modification)
     _advanced_inf_run_commands(post_commands, modifications, installed_files, version)
+    if target == None:
+        for path in installed_files:
+            if path.lower().endswith(".exe") and not path.lower().startswith(system_root.lower() + "\\"):
+                target = _parent_path(path)
+                break
     if target == None:
         target = r"C:\Program Files"
     requirements = {}

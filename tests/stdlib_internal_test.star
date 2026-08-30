@@ -349,6 +349,46 @@ def test_automation_type_library_resource_paths():
 
 def test_advanced_inf_command_and_registry_adapters():
     module = testing.module("@stdlib//windows:installer.star")
+    equal(module["_advanced_inf_unquote"]("'%24%\\Program Files'"), r"%24%\Program Files")
+    equal(module["_advanced_inf_unquote"]('"quoted"'), "quoted")
+    equal(module["_advanced_inf_unquote"]("developer's tools"), "developer's tools")
+    equal(module["_advanced_inf_unquote"]("'unbalanced"), "'unbalanced")
+    equal(module["_advanced_inf_csv"]('"Microsoft Chat", "C:\\Program Files\\Microsoft Chat\\CChat.exe"'), [
+        "Microsoft Chat",
+        r"C:\Program Files\Microsoft Chat\CChat.exe",
+    ])
+    per_user = module["_advanced_inf_per_user_modifications"]({
+        "DisplayName": ["Microsoft Chat 2.5"],
+        "ComponentID": ["comicchat"],
+        "GUID": ["{44BBA844-CC51-11CF-AAFA-00AA00B6015C}"],
+        "Version": ["4", "71", "2302", "0"],
+        "Locale": ["EN"],
+        "IsInstalled": ["1"],
+        "StubPath": ["rundll32.exe advpack.dll", "LaunchINFSection %17%\\CChat25.inf", "PerUserAdd"],
+    }, {"17": r"C:\WINDOWS\INF"}, {})
+    equal(len(per_user), 6)
+    per_user_values = {item["name"]: item["value"] for item in per_user}
+    equal(per_user_values["(default)"], "Microsoft Chat 2.5")
+    equal(per_user_values["Version"], "4,71,2302,0")
+    equal(per_user_values["StubPath"], r"rundll32.exe advpack.dll,LaunchINFSection C:\WINDOWS\INF\CChat25.inf,PerUserAdd")
+    equal(per_user_values["IsInstalled"], 1)
+    links = windows.inf(r'''[Links]
+setup.ini,progman.groups,,"group=Accessories"
+setup.ini,group,,"""Old Link"""
+setup.ini,group,,"""New Link"", ""C:\Program Files\Thing\thing.exe""
+''')
+    link_modifications = module["_advanced_inf_update_inis"](
+        links,
+        ["Links"],
+        {},
+        {},
+        {},
+        r"C:\WINDOWS",
+    )
+    equal([(item["operation"], item["path"]) for item in link_modifications], [
+        ("delete_file", r"C:\WINDOWS\Start Menu\Programs\Accessories\Old Link.lnk"),
+        ("write_file", r"C:\WINDOWS\Start Menu\Programs\Accessories\New Link.lnk"),
+    ])
     section = windows.inf(r'''[Commands]
 one="%17%\helper.exe",/RegServer
 ''').section("Commands")

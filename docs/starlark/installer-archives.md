@@ -215,6 +215,15 @@ Ambiguous packages fail closed and can be given an explicit `target=` override.
 The returned package contains trex file values rather than host staging paths
 and can be consumed by a caller-provided filesystem or analysis pipeline.
 
+Embedded-cab Advanced INF packages derive their destination directories and
+effects directly from INF metadata. The modification set preserves CopyFiles,
+DelFiles, RenFiles, AddReg, DelReg, Active Setup PerUserInstall values, native
+Program Manager links expressed through Setup.ini UpdateInis records,
+RegisterOCXs registration, and bounded package-owned pre/post setup commands.
+File removal and in-place rename are returned as `delete_file` and
+`rename_file` operations so an image adapter can apply upgrades as well as
+fresh installations.
+
 Payload writes carry replacement intent. Files with fixed PE version metadata
 use `if_newer`: the image adapter compares the packaged version with the file
 already installed by Windows and retains equal or newer system files. Other
