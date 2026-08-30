@@ -31,6 +31,7 @@ _KERNEL_SIGNATURES = {
     "createdirectorya": 2,
     "createdirectoryw": 2,
     "disablethreadlibrarycalls": 1,
+    "dosdatetimetofiletime": 3,
     "duplicatehandle": 7,
     "decodepointer": 1,
     "dbgprint": 1,
@@ -49,6 +50,7 @@ _KERNEL_SIGNATURES = {
     "formatmessagew": 7,
     "flushfilebuffers": 1,
     "flushviewoffile": 2,
+    "filetimetolocalfiletime": 2,
     "filetimetosystemtime": 2,
     "findclose": 1,
     "findclosechangenotification": 1,
@@ -175,6 +177,7 @@ _KERNEL_SIGNATURES = {
     "localalloc": 2,
     "localrealloc": 3,
     "localfree": 1,
+    "localfiletimetofiletime": 2,
     "localsize": 1,
     "loadlibrarya": 1,
     "loadlibraryw": 1,
@@ -2106,6 +2109,27 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write_u16le(args[2], (hour << 11) | (minute << 5) | (second // 2))
             state["last_error"] = 0
             return 1
+        if name == "dosdatetimetofiletime":
+            if not args[2]:
+                state["last_error"] = 87
+                return 0
+            date = args[0]
+            time = args[1]
+            ticks = _filetime_ticks(
+                ((date >> 9) & 0x7f) + 1980,
+                (date >> 5) & 0x0f,
+                date & 0x1f,
+                (time >> 11) & 0x1f,
+                (time >> 5) & 0x3f,
+                (time & 0x1f) * 2,
+                0,
+            )
+            if ticks == None:
+                state["last_error"] = 87
+                return 0
+            machine.write_u64le(args[2], ticks)
+            state["last_error"] = 0
+            return 1
         if name in ["comparestringa", "comparestringw"]:
             wide = name.endswith("w")
             encoding = "utf16le" if wide else "ascii"
@@ -3281,6 +3305,15 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             output = binary.builder(capacity = 8)
             output.u64le(ticks)
             machine.write(args[1], output.bytes())
+            return 1
+        if name in ["filetimetolocalfiletime", "localfiletimetofiletime"]:
+            if not args[0] or not args[1]:
+                state["last_error"] = 87
+                return 0
+            # The deterministic process environment reports
+            # TIME_ZONE_ID_UNKNOWN with a zero bias, so UTC and local
+            # FILETIME values have the same representation.
+            machine.write(args[1], machine.read(args[0], 8))
             return 1
         if name == "filetimetosystemtime":
             if not args[0] or not args[1]:
@@ -6003,6 +6036,28 @@ def msvcrt_plugin(kernel = None):
         "wcsncmp": 3,
         "strcmp": 2,
         "strncmp": 3,
+        "strlen": 1,
+        "strcpy": 2,
+        "strcat": 2,
+        "strncat": 3,
+        "strstr": 2,
+        "_strlwr": 1,
+        "_mbslen": 1,
+        "_mbschr": 2,
+        "_mbsrchr": 2,
+        "_mbsstr": 2,
+        "_mbsinc": 1,
+        "_mbsninc": 2,
+        "_mbscmp": 2,
+        "_mbsicmp": 2,
+        "_mbsncmp": 3,
+        "_mbsnicmp": 3,
+        "_mbsnbcmp": 3,
+        "_mbsnbicmp": 3,
+        "_mbsnbcpy": 3,
+        "_mbsnbcnt": 2,
+        "_mbsnccnt": 2,
+        "_ismbslead": 2,
         "wcsncpy": 3,
         "wcsstr": 2,
         "_wcsicmp": 2,
@@ -6012,6 +6067,7 @@ def msvcrt_plugin(kernel = None):
         "_strdup": 1,
         "_stricmp": 2,
         "_strnicmp": 3,
+        "_splitpath": 5,
         "_memicmp": 3,
         "strchr": 2,
         "strrchr": 2,
@@ -6273,6 +6329,25 @@ def msvcrt_plugin(kernel = None):
             if len(state["actions"]) < 256:
                 state["actions"].append({"api": name, "path": path, "mode": args[1], "allowed": allowed})
             return 0 if allowed else 0xffffffff
+        if name == "_splitpath":
+            path = event.machine.read_cstring(args[0], encoding = "ascii").replace("/", "\\")
+            drive = path[:2] if len(path) >= 2 and path[1:2] == ":" else ""
+            remainder = path[len(drive):]
+            parts = remainder.split("\\")
+            leaf = parts[-1]
+            directory = remainder[:-len(leaf)] if leaf else remainder
+            dot = leaf.rfind(".")
+            filename = leaf[:dot] if dot > 0 else leaf
+            extension = leaf[dot:] if dot > 0 else ""
+            for address, value in [
+                (args[1], drive),
+                (args[2], directory),
+                (args[3], filename),
+                (args[4], extension),
+            ]:
+                if address:
+                    event.machine.write(address, binary.encode(value, encoding = "ascii", nul = True))
+            return None
         if name in ["_read", "_write"]:
             pointer = state["descriptors"].get(args[0])
             if pointer == None:
@@ -6544,6 +6619,37 @@ def msvcrt_plugin(kernel = None):
             return min(len(value), args[2])
         if name == "wcslen":
             return len(event.machine.read_cstring(args[0], encoding = "utf16le"))
+        if name in ["strlen", "_mbslen"]:
+            return len(event.machine.read_cstring(args[0], encoding = "ascii"))
+        if name in ["strcpy", "strcat", "strncat", "_mbsnbcpy"]:
+            value = event.machine.read_cstring(args[1], encoding = "ascii")
+            if name in ["strncat", "_mbsnbcpy"]:
+                value = value[:args[2]]
+            if name in ["strcat", "strncat"]:
+                value = event.machine.read_cstring(args[0], encoding = "ascii") + value
+            encoded = binary.encode(value, encoding = "ascii", nul = name != "_mbsnbcpy" or len(value) < args[2])
+            if name == "_mbsnbcpy":
+                encoded = encoded[:args[2]]
+                if len(encoded) < args[2]:
+                    padding = binary.builder(capacity = args[2] - len(encoded))
+                    padding.reserve(args[2] - len(encoded))
+                    encoded += padding.bytes()
+            event.machine.write(args[0], encoded)
+            return args[0]
+        if name == "_strlwr":
+            value = event.machine.read_cstring(args[0], encoding = "ascii").lower()
+            event.machine.write(args[0], binary.encode(value, encoding = "ascii", nul = True))
+            return args[0]
+        if name in ["_mbsinc", "_mbsninc"]:
+            count = 1 if name == "_mbsinc" else args[1]
+            value = event.machine.read_cstring(args[0], encoding = "ascii")
+            return args[0] + min(count, len(value))
+        if name in ["_mbsnbcnt", "_mbsnccnt"]:
+            value = event.machine.read_cstring(args[0], encoding = "ascii")
+            return min(len(value), args[1])
+        if name == "_ismbslead":
+            # The modeled C locale is single-byte ASCII, so there are no lead bytes.
+            return 0
         if name in ["_wcsdup", "_strdup"]:
             wide = name == "_wcsdup"
             value = event.machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
@@ -6562,16 +6668,16 @@ def msvcrt_plugin(kernel = None):
             output.reserve(args[2] * 2 - len(encoded))
             event.machine.write(args[0], output.bytes())
             return args[0]
-        if name in ["wcscmp", "wcsncmp", "strcmp", "strncmp", "_wcsicmp", "_wcsnicmp", "_stricmp", "_strnicmp"]:
+        if name in ["wcscmp", "wcsncmp", "strcmp", "strncmp", "_wcsicmp", "_wcsnicmp", "_stricmp", "_strnicmp", "_mbscmp", "_mbsicmp", "_mbsncmp", "_mbsnicmp", "_mbsnbcmp", "_mbsnbicmp"]:
             wide = "wcs" in name
-            bounded = name in ["wcsncmp", "strncmp", "_wcsnicmp", "_strnicmp"]
+            bounded = name in ["wcsncmp", "strncmp", "_wcsnicmp", "_strnicmp", "_mbsncmp", "_mbsnicmp", "_mbsnbcmp", "_mbsnbicmp"]
             return _crt_compare_strings(
                 event.machine,
                 args[0],
                 args[1],
                 wide,
                 count = args[2] if bounded else None,
-                ignore_case = name.startswith("_"),
+                ignore_case = name in ["_wcsicmp", "_wcsnicmp", "_stricmp", "_strnicmp", "_mbsicmp", "_mbsnicmp", "_mbsnbicmp"],
             )
         if name == "wcsstr":
             value = event.machine.read_cstring(args[0], encoding = "utf16le")
@@ -6584,7 +6690,7 @@ def msvcrt_plugin(kernel = None):
             return args[0]
         if name == "_memicmp":
             return _crt_compare_memory(event.machine, args[0], args[1], args[2], ignore_case = True)
-        if name in ["strchr", "strrchr", "wcschr", "wcsrchr"]:
+        if name in ["strchr", "strrchr", "wcschr", "wcsrchr", "_mbschr", "_mbsrchr"]:
             wide = name.startswith("wcs")
             width = 2 if wide else 1
             value = event.machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
@@ -6597,8 +6703,13 @@ def msvcrt_plugin(kernel = None):
             else:
                 character_data.u8(codepoint)
             character = binary.text(character_data.bytes(), encoding = "utf16le" if wide else "ascii")
-            index = value.rfind(character) if name in ["strrchr", "wcsrchr"] else value.find(character)
+            index = value.rfind(character) if name in ["strrchr", "wcsrchr", "_mbsrchr"] else value.find(character)
             return 0 if index < 0 else args[0] + index * width
+        if name in ["strstr", "_mbsstr"]:
+            value = event.machine.read_cstring(args[0], encoding = "ascii")
+            needle = event.machine.read_cstring(args[1], encoding = "ascii")
+            index = value.find(needle)
+            return 0 if index < 0 else args[0] + index
         if name in ["wcstok", "strtok"]:
             wide = name == "wcstok"
             width = 2 if wide else 1
@@ -7065,11 +7176,43 @@ _WINSOCK_ORDINAL_SIGNATURES = {
     9: 1,   # htons
     14: 1,  # ntohl
     15: 1,  # ntohs
+    111: 0, # WSAGetLastError
+    112: 1, # WSASetLastError
+    114: 0, # WSAIsBlocking
+    115: 2, # WSAStartup
+    116: 0, # WSACleanup
 }
 
 def winsock_plugin():
-    """Models stable Winsock byte-order conversion entry points."""
+    """Models stable Winsock 1.1 ordinals shared by wsock32 and ws2_32."""
+    state = {"last_error": 0, "started": False}
+
     def callback(event):
+        if event.name == "#111":
+            return state["last_error"]
+        if event.name == "#112":
+            state["last_error"] = event.args[0]
+            return 0
+        if event.name == "#114":
+            return 0
+        if event.name == "#115":
+            requested = event.args[0]
+            if not event.args[1]:
+                state["last_error"] = 10014  # WSAEFAULT
+                return 10014
+            # WSADATA begins with negotiated/requested WORD versions followed
+            # by the implementation description fields. The legacy clients in
+            # scope inspect this fixed WinSock 1.1 prefix only.
+            event.machine.write_u16le(event.args[1], requested)
+            event.machine.write_u16le(event.args[1] + 2, 0x0101)
+            event.machine.write(event.args[1] + 4, b"TinyRangeX WinSock 1.1\x00")
+            state["started"] = True
+            state["last_error"] = 0
+            return 0
+        if event.name == "#116":
+            state["started"] = False
+            state["last_error"] = 0
+            return 0
         value = event.args[0]
         if event.name in ["#8", "#14"]:
             return (
@@ -7082,8 +7225,9 @@ def winsock_plugin():
 
     def install(machine):
         for ordinal, argc in _WINSOCK_ORDINAL_SIGNATURES.items():
-            machine.provide_export(callback, module = "ws2_32.dll", ordinal = ordinal, argc = argc)
-    return emulator.plugin(install, name = "windows.winsock")
+            for module in ["wsock32.dll", "ws2_32.dll"]:
+                machine.provide_export(callback, module = module, ordinal = ordinal, argc = argc)
+    return emulator.plugin(install, name = "windows.winsock", state = state)
 
 def _map_generic_access(mask, mapping):
     """Expands Win32 generic access bits through a GENERIC_MAPPING."""
@@ -9616,12 +9760,40 @@ def shell_plugin(module_path, kernel = None):
 
 def gdi32_plugin():
     """Models registration-visible GDI stock objects without a host display."""
+    state = {"next_palette": 0xda000001, "palettes": {}, "next_bitmap": 0xda100001, "bitmaps": {}}
     def callback(event):
         name = event.name.lower()
         if name == "getstockobject":
             # Stock-object identities are process-stable and owned by GDI.
             # A private pseudo-handle preserves those observable facts.
             return 0xd900 + (event.args[0] & 0xff)
+        if name == "createsolidbrush":
+            # A solid brush is completely described by its COLORREF. Keep a
+            # stable nonzero pseudo-handle; callers only select or delete it.
+            return 0xdb000000 | (event.args[0] & 0xffffff)
+        if name == "createpalette":
+            logical = event.args[0]
+            if not logical:
+                return 0
+            version = event.machine.read_u16le(logical)
+            count = event.machine.read_u16le(logical + 2)
+            if version != 0x300 or count == 0:
+                return 0
+            handle = state["next_palette"]
+            state["next_palette"] = handle + 1
+            state["palettes"][handle] = event.machine.read(logical + 4, count * 4)
+            return handle
+        if name == "createdibitmap":
+            handle = state["next_bitmap"]
+            state["next_bitmap"] = handle + 1
+            state["bitmaps"][handle] = {
+                "header": event.args[1],
+                "initialization": event.args[2],
+                "bits": event.args[3],
+                "information": event.args[4],
+                "usage": event.args[5],
+            }
+            return handle
         if name == "getpaletteentries":
             count = event.args[2]
             if event.args[3]:
@@ -9641,19 +9813,72 @@ def gdi32_plugin():
                 38: 0,   # RASTERCAPS: no palette-managed display
             }
             return capabilities.get(event.args[1], 0)
+        if name in ["enumfontfamiliesa", "enumfontfamiliesw", "enumfontfamiliesexa", "enumfontfamiliesexw"]:
+            # Registration/setup helpers use enumeration to choose UI fonts.
+            # A headless semantic process has no installed display fonts; zero
+            # is the native completed-enumeration result when none match.
+            return 0
         if name == "deleteobject":
+            state["palettes"].pop(event.args[0], None)
+            state["bitmaps"].pop(event.args[0], None)
             return 1 if event.args[0] else 0
         return 0
 
     def install(machine):
-        signatures = {"getstockobject": 1, "getpaletteentries": 4, "getdevicecaps": 2, "deleteobject": 1}
+        signatures = {"getstockobject": 1, "createsolidbrush": 1, "createpalette": 1, "createdibitmap": 6, "getpaletteentries": 4, "getdevicecaps": 2, "enumfontfamiliesa": 4, "enumfontfamiliesw": 4, "enumfontfamiliesexa": 5, "enumfontfamiliesexw": 5, "deleteobject": 1}
         for name, argc in signatures.items():
             machine.provide_export(callback, module = "gdi32.dll", name = name, argc = argc)
         for imported in machine.imports:
             name = imported.name.lower()
             if imported.module.lower() == "gdi32.dll" and name in signatures:
                 machine.hook(callback, address = imported.address, argc = signatures[name])
-    return emulator.plugin(install, name = "windows.gdi32")
+    return emulator.plugin(install, name = "windows.gdi32", state = state)
+
+def lz32_plugin(kernel):
+    """Models the memory-backed LZ file-handle APIs used by setup helpers."""
+    state = {"calls": []}
+    def callback(event):
+        name = event.name.lower()
+        state["calls"].append({"api": name, "arguments": list(event.args)})
+        if name == "lzopenfilea":
+            style = event.args[2]
+            create = style & 0x1000 != 0  # OF_CREATE
+            opened = event.machine.invoke(
+                event.machine.resolve_export("kernel32.dll", name = "CreateFileA"),
+                args = [event.args[0], 0x40000000 if create else 0x80000000, 0, 0, 2 if create else 3, 0, 0],
+            )
+            return opened.value if opened.reason == "return" and opened.value != 0xffffffff else 0xffffffff
+        if name == "lzcopy":
+            source = kernel.state["handles"].get(event.args[0])
+            target = kernel.state["handles"].get(event.args[1])
+            if source == None or target == None or source.get("kind") != "file" or target.get("kind") != "file":
+                return 0xffffffff
+            source_state = source["value"]
+            target_state = target["value"]
+            data = kernel.state["file_data"](source_state["path"])[source_state["offset"]:]
+            if data[:8] == b"SZDD\x88\xf0\x27\x33":
+                encoded = binary.builder(capacity = len(data))
+                encoded.append(data)
+                data = archive.szdd(encoded.file()).bytes()
+            if not kernel.state["write_file_data"](target_state["path"], target_state["offset"], data, machine = event.machine):
+                return 0xffffffff
+            source_state["offset"] += len(data)
+            target_state["offset"] += len(data)
+            return len(data)
+        if name == "lzclose":
+            return 0 if kernel.state["handles"].pop(event.args[0], None) != None else 0xffffffff
+        return 0xffffffff
+
+    def install(machine):
+        signatures = {"LZOpenFileA": 3, "LZCopy": 2, "LZClose": 1}
+        for name, argc in signatures.items():
+            machine.provide_export(callback, module = "lz32.dll", name = name, argc = argc)
+        folded = {name.lower(): argc for name, argc in signatures.items()}
+        for imported in machine.imports:
+            name = imported.name.lower()
+            if imported.module.lower() == "lz32.dll" and name in folded:
+                machine.hook(callback, address = imported.address, argc = folded[name])
+    return emulator.plugin(install, name = "windows.lz32", state = state)
 
 def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment = {}):
     """Models the process-local shell change-notification registrations."""
@@ -9888,6 +10113,58 @@ def _padded(text, width, left, zero):
     padding = ("0" if zero else " ") * (width - len(text))
     return text + padding if left else padding + text
 
+def _format_argument_word_count(format):
+    """Returns the number of 32-bit variadic words consumed by a format."""
+    count = 0
+    offset = 0
+    digits = "0123456789"
+    while offset < len(format):
+        if format[offset] != "%":
+            offset += 1
+            continue
+        offset += 1
+        if offset < len(format) and format[offset] == "%":
+            offset += 1
+            continue
+        while offset < len(format) and format[offset] in "-+ 0#":
+            offset += 1
+        if offset < len(format) and format[offset] == "*":
+            count += 1
+            offset += 1
+        else:
+            while offset < len(format) and format[offset] in digits:
+                offset += 1
+        if offset < len(format) and format[offset] == ".":
+            offset += 1
+            if offset < len(format) and format[offset] == "*":
+                count += 1
+                offset += 1
+            else:
+                while offset < len(format) and format[offset] in digits:
+                    offset += 1
+        length = ""
+        for candidate in ["I64", "I32", "ll"]:
+            if format[offset:].startswith(candidate):
+                length = candidate
+                offset += len(candidate)
+                break
+        if length == "" and offset < len(format) and format[offset] in "hlwL":
+            length = format[offset]
+            offset += 1
+        if offset >= len(format):
+            break
+        kind = format[offset]
+        offset += 1
+        if kind in "sSdiuxXcC":
+            count += 2 if length in ["I64", "ll"] else 1
+    return count
+
+def _stack_format_arguments(event, fixed, format):
+    return [
+        event.machine.read_u32le(event.argument_address + (fixed + index) * 4)
+        for index in range(_format_argument_word_count(format))
+    ]
+
 def _format_win32(machine, format, args, wide):
     output = ""
     offset = 0
@@ -10017,7 +10294,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
     tables_by_name = {"": resource_tables(file)}
     for name, module_file in module_files.items():
         tables_by_name[_module_basename(name)] = resource_tables(module_file)
-    state = {"formats": {}, "next_format": 0xc000, "images": {}, "messages": [], "dialogs": [], "next_image": 0xd000, "classes": {}, "next_atom": 1, "windows": {}, "next_window": 0xe000, "hooks": {}, "next_hook": 0xe800, "tables": {}, "cursor_position": [0, 0]}
+    state = {"formats": {}, "next_format": 0xc000, "images": {}, "messages": [], "dialogs": [], "next_image": 0xd000, "menus": {}, "next_menu": 0xd800, "accelerators": {}, "next_accelerator": 0xdc00, "classes": {}, "next_atom": 1, "windows": {}, "next_window": 0xe000, "hooks": {}, "next_hook": 0xe800, "tables": {}, "cursor_position": [0, 0]}
 
     def ensure_module_tables(name):
         name = _module_basename(name)
@@ -10083,20 +10360,62 @@ def user32_plugin(file, module_files = {}, kernel = None):
     def rect_empty(rectangle):
         return rectangle[0] >= rectangle[2] or rectangle[1] >= rectangle[3]
 
+    def new_window(class_name = 0, name = 0, style = 0, parent = 0, identifier = 0):
+        handle = state["next_window"]
+        state["next_window"] = handle + 1
+        state["windows"][handle] = {
+            "class": class_name,
+            "name": name,
+            "style": style,
+            "parent": parent,
+            "id": identifier,
+            "text": "",
+            "controls": {},
+            "longs": {},
+        }
+        return handle
+
+    def dialog_control(parent, identifier):
+        window = state["windows"].get(parent)
+        if window == None:
+            return 0
+        handle = window["controls"].get(identifier)
+        if handle == None:
+            handle = new_window(parent = parent, identifier = identifier)
+            window["controls"][identifier] = handle
+        return handle
+
+    def new_menu(instance, template):
+        handle = state["next_menu"]
+        state["next_menu"] = handle + 1
+        state["menus"][handle] = {"instance": instance, "template": template}
+        return handle
+
+    def registered_class(machine, value, wide):
+        if value <= 0xffff:
+            for record in state["classes"].values():
+                if record["atom"] == value:
+                    return record
+            return None
+        name = machine.read_cstring(value, encoding = "utf16le" if wide else "ascii")
+        return state["classes"].get(name.lower())
+
     def callback(event):
         name = event.name.lower()
         wide = name.endswith("w")
         if name in ["registerclassa", "registerclassw", "registerclassexa", "registerclassexw"]:
             structure = event.args[0]
             name_offset = 44 if name.startswith("registerclassex") else 36
+            procedure_offset = 8 if name.startswith("registerclassex") else 4
             class_address = event.machine.read_u32le(structure + name_offset) if structure else 0
             class_name = event.machine.read_cstring(class_address, encoding = "utf16le" if wide else "ascii") if class_address else ""
-            atom = state["classes"].get(class_name.lower())
-            if atom == None:
+            record = state["classes"].get(class_name.lower())
+            if record == None:
                 atom = state["next_atom"]
                 state["next_atom"] = atom + 1
-                state["classes"][class_name.lower()] = atom
-            return atom
+                record = {"atom": atom, "procedure": event.machine.read_u32le(structure + procedure_offset) if structure else 0}
+                state["classes"][class_name.lower()] = record
+            return record["atom"]
         if name in ["unregisterclassa", "unregisterclassw"]:
             if event.args[0] > 0xffff:
                 class_name = event.machine.read_cstring(event.args[0], encoding = "utf16le" if wide else "ascii")
@@ -10108,6 +10427,10 @@ def user32_plugin(file, module_files = {}, kernel = None):
             if not class_address or not output:
                 return 0
             class_name = event.machine.read_cstring(class_address, encoding = "utf16le" if wide else "ascii")
+            record = state["classes"].get(class_name.lower())
+            built_in = class_name.lower() in ["button", "combobox", "edit", "listbox", "mdiclient", "scrollbar", "static", "#32770"]
+            if record == None and not built_in:
+                return 0
             # USER owns both registered application classes and the built-in
             # control classes. DllInstall only inspects/copies their metadata;
             # it does not dispatch through the returned window procedure.
@@ -10117,19 +10440,83 @@ def user32_plugin(file, module_files = {}, kernel = None):
             if size == 48:
                 event.machine.write_u32le(output, cb_size if cb_size else 48)
                 event.machine.write_u32le(output + 44, class_address)
+                event.machine.write_u32le(output + 8, record.get("procedure", 0) if record != None else 0)
             else:
                 event.machine.write_u32le(output + 36, class_address)
+                event.machine.write_u32le(output + 4, record.get("procedure", 0) if record != None else 0)
             event.machine.write_u32le(output + (32 if size == 48 else 28), 0xd80f)
-            return 1 if class_name else 0
+            return 1
         if name in ["createwindowexa", "createwindowexw"]:
-            handle = state["next_window"]
-            state["next_window"] = handle + 1
-            state["windows"][handle] = {
-                "class": event.args[1],
-                "name": event.args[2],
-                "style": event.args[3],
-            }
+            handle = new_window(
+                class_name = event.args[1],
+                name = event.args[2],
+                style = event.args[3],
+                parent = event.args[8],
+                identifier = event.args[9],
+            )
+            window = state["windows"][handle]
+            if event.args[9] in state["menus"]:
+                window["menu"] = event.args[9]
+            record = registered_class(event.machine, event.args[1], wide)
+            procedure = record.get("procedure", 0) if record != None else 0
+            creation = binary.builder(capacity = 48)
+            for value in [event.args[11], event.args[10], event.args[9], event.args[8], event.args[7], event.args[6], event.args[5], event.args[4], event.args[3], event.args[2], event.args[1], event.args[0]]:
+                creation.u32le(value)
+            creation_address = event.machine.allocate(value = creation.bytes(), name = "CREATESTRUCT")
+            # MFC's AfxHookWindowCreate uses a thread-local WH_CBT hook to bind
+            # the HWND to its CWnd before USER sends WM_NCCREATE. Merely
+            # retaining SetWindowsHookEx registrations leaves the window proc
+            # without that association and it dereferences an invalid object.
+            cbt_create_record = binary.builder(capacity = 8)
+            cbt_create_record.u32le(creation_address)
+            cbt_create_record.u32le(0)
+            cbt_create = event.machine.allocate(value = cbt_create_record.bytes(), name = "CBT_CREATEWND")
+            for hook in list(state["hooks"].values()):
+                if hook["kind"] == 5 and hook["procedure"]:
+                    hooked = _invoke_target(event.machine, hook["procedure"], [3, handle, cbt_create])
+                    window["cbt_reason"] = hooked.reason
+                    window["cbt_detail"] = hooked.detail
+                    if hooked.reason == "return" and hooked.value:
+                        state["windows"].pop(handle, None)
+                        return 0
+            if procedure:
+                created = _invoke_target(event.machine, procedure, [handle, 0x81, 0, creation_address])
+                window["nccreate_reason"] = created.reason
+                window["nccreate_detail"] = created.detail
+                if created.reason == "return" and created.value:
+                    initialized = _invoke_target(event.machine, procedure, [handle, 0x01, 0, creation_address])
+                    window["create_reason"] = initialized.reason
+                    window["create_detail"] = initialized.detail
             return handle
+        if name in ["loadmenua", "loadmenuw"]:
+            return new_menu(event.args[0], event.args[1])
+        if name in ["loadmenuindirecta", "loadmenuindirectw"]:
+            return new_menu(0, event.args[0])
+        if name in ["loadacceleratorsa", "loadacceleratorsw"]:
+            handle = state["next_accelerator"]
+            state["next_accelerator"] = handle + 1
+            state["accelerators"][handle] = {"instance": event.args[0], "table": event.args[1]}
+            return handle
+        if name in ["translateacceleratora", "translateacceleratorw"]:
+            return 0
+        if name == "destroymenu":
+            return 1 if state["menus"].pop(event.args[0], None) != None else 0
+        if name == "setmenu":
+            window = state["windows"].get(event.args[0])
+            if window == None or (event.args[1] and event.args[1] not in state["menus"]):
+                return 0
+            window["menu"] = event.args[1]
+            return 1
+        if name == "getmenu":
+            window = state["windows"].get(event.args[0])
+            return 0 if window == None else window.get("menu", 0)
+        if name == "drawmenubar":
+            return 1 if event.args[0] in state["windows"] else 0
+        if name == "getactivewindow":
+            # Registration-time execution has no host window manager. Return
+            # the last process-created window when one exists.
+            handles = state["windows"].keys()
+            return handles[-1] if handles else 0
         if name == "destroywindow":
             state["windows"].pop(event.args[0], None)
             return 1
@@ -10145,6 +10532,162 @@ def user32_plugin(file, module_files = {}, kernel = None):
                 "flags": event.args[3],
             })
             return 1  # IDOK
+        if name in ["dialogboxparama", "dialogboxparamw", "dialogboxindirectparama", "dialogboxindirectparamw"]:
+            handle = new_window(parent = event.args[2])
+            dialog = {
+                "instance": event.args[0],
+                "template": event.args[1],
+                "parent": event.args[2],
+                "procedure": event.args[3],
+                "parameter": event.args[4],
+                "window": handle,
+                "controls": {},
+                "result": 1,
+            }
+            state["dialogs"].append(dialog)
+            state["windows"][handle]["dialog"] = dialog
+            if event.args[3]:
+                initialized = _invoke_target(event.machine, event.args[3], [handle, 0x110, 0, event.args[4]])
+                dialog["initialization_reason"] = initialized.reason
+                dialog["initialization_detail"] = initialized.detail
+            return dialog["result"]
+        if name in ["createdialogparama", "createdialogparamw", "createdialogindirectparama", "createdialogindirectparamw"]:
+            handle = new_window(parent = event.args[2])
+            dialog = {
+                "instance": event.args[0],
+                "template": event.args[1],
+                "parent": event.args[2],
+                "procedure": event.args[3],
+                "parameter": event.args[4],
+                "window": handle,
+                "controls": {},
+                "modeless": True,
+                "result": 0,
+            }
+            state["dialogs"].append(dialog)
+            state["windows"][handle]["dialog"] = dialog
+            if event.args[3]:
+                initialized = _invoke_target(event.machine, event.args[3], [handle, 0x110, 0, event.args[4]])
+                dialog["initialization_reason"] = initialized.reason
+                dialog["initialization_detail"] = initialized.detail
+            return handle
+        if name == "enddialog":
+            window = state["windows"].get(event.args[0])
+            if window != None and window.get("dialog") != None:
+                window["dialog"]["result"] = event.args[1]
+            return 1
+        if name in ["getdlgitem", "getdlgitemint", "getdlgitemtexta", "getdlgitemtextw", "setdlgitemint", "setdlgitemtexta", "setdlgitemtextw"]:
+            control = dialog_control(event.args[0], event.args[1])
+            if name == "getdlgitem":
+                return control
+            window = state["windows"].get(control)
+            if name.startswith("setdlgitemtext"):
+                encoding = "utf16le" if wide else "ascii"
+                window["text"] = event.machine.read_cstring(event.args[2], encoding = encoding) if event.args[2] else ""
+                parent = state["windows"].get(event.args[0])
+                if parent != None and parent.get("dialog") != None:
+                    parent["dialog"]["controls"][event.args[1]] = window["text"]
+                return 1
+            if name == "setdlgitemint":
+                window["text"] = str(event.args[2])
+                parent = state["windows"].get(event.args[0])
+                if parent != None and parent.get("dialog") != None:
+                    parent["dialog"]["controls"][event.args[1]] = window["text"]
+                return 1
+            if name.startswith("getdlgitemtext"):
+                capacity = event.args[3]
+                value = window["text"][:max(0, capacity - 1)]
+                _write_string(event.machine, event.args[2], value, wide)
+                return len(value)
+            value = window["text"]
+            valid = bool(value)
+            for index in range(len(value)):
+                if value[index] not in "0123456789":
+                    valid = False
+            return int(value) if valid else 0
+        if name in ["setwindowtexta", "setwindowtextw", "getwindowtexta", "getwindowtextw", "getwindowtextlengtha", "getwindowtextlengthw"]:
+            window = state["windows"].get(event.args[0])
+            if window == None:
+                return 0
+            if name.startswith("setwindowtext"):
+                window["text"] = event.machine.read_cstring(event.args[1], encoding = "utf16le" if wide else "ascii") if event.args[1] else ""
+                return 1
+            if name.startswith("getwindowtextlength"):
+                return len(window["text"])
+            capacity = event.args[2]
+            value = window["text"][:max(0, capacity - 1)]
+            _write_string(event.machine, event.args[1], value, wide)
+            return len(value)
+        if name in ["getwindowlonga", "getwindowlongw", "setwindowlonga", "setwindowlongw"]:
+            window = state["windows"].get(event.args[0])
+            if window == None:
+                return 0
+            index = event.args[1]
+            previous = window["longs"].get(index, 0)
+            if name.startswith("setwindowlong"):
+                window["longs"][index] = event.args[2]
+            return previous
+        if name in ["sendmessagea", "sendmessagew", "senddlgitemmessagea", "senddlgitemmessagew"]:
+            if name.startswith("senddlgitemmessage"):
+                window_handle = dialog_control(event.args[0], event.args[1])
+                message = event.args[2]
+                wparam = event.args[3]
+                lparam = event.args[4]
+            else:
+                window_handle = event.args[0]
+                message = event.args[1]
+                wparam = event.args[2]
+                lparam = event.args[3]
+            window = state["windows"].get(window_handle)
+            if window == None:
+                return 0
+            if message == 0x0c:  # WM_SETTEXT
+                window["text"] = event.machine.read_cstring(lparam, encoding = "utf16le" if wide else "ascii") if lparam else ""
+                return 1
+            if message == 0x0d:  # WM_GETTEXT
+                value = window["text"][:max(0, wparam - 1)]
+                _write_string(event.machine, lparam, value, wide)
+                return len(value)
+            if message == 0x0e:  # WM_GETTEXTLENGTH
+                return len(window["text"])
+            return 0
+        if name == "getdlgctrlid":
+            window = state["windows"].get(event.args[0])
+            return window["id"] if window != None else 0
+        if name in ["getparent", "iswindowvisible", "bringwindowtotop", "setforegroundwindow", "setwindowpos"]:
+            window = state["windows"].get(event.args[0])
+            if name == "getparent":
+                return window["parent"] if window != None else 0
+            return 1 if window != None else 0
+        if name in ["getclassnamea", "getclassnamew"]:
+            window = state["windows"].get(event.args[0])
+            if window == None or event.args[2] <= 0:
+                return 0
+            value = "#32770" if window.get("dialog") != None else "Control"
+            value = value[:event.args[2] - 1]
+            _write_string(event.machine, event.args[1], value, wide)
+            return len(value)
+        if name == "getdesktopwindow":
+            desktop = state.get("desktop")
+            if desktop == None:
+                desktop = new_window(class_name = 0, name = 0)
+                state["desktop"] = desktop
+            return desktop
+        if name in ["getwindowrect", "getclientrect"]:
+            if event.args[0] not in state["windows"] or not event.args[1]:
+                return 0
+            write_rect(event.machine, event.args[1], [0, 0, 640, 480])
+            return 1
+        if name in ["enumchildwindows", "enumwindows"]:
+            parent = event.args[0] if name == "enumchildwindows" else 0
+            callback_address = event.args[1] if name == "enumchildwindows" else event.args[0]
+            parameter = event.args[2] if name == "enumchildwindows" else event.args[1]
+            for handle, window in state["windows"].items():
+                if callback_address and (not parent or window["parent"] == parent):
+                    result = _invoke_target(event.machine, callback_address, [handle, parameter])
+                    if result.reason == "return" and result.value == 0:
+                        break
+            return 1
         if name in ["defwindowproca", "defwindowprocw"]:
             return 0
         if name == "showwindow":
@@ -10439,8 +10982,14 @@ def user32_plugin(file, module_files = {}, kernel = None):
                 state["next_format"] = identifier + 1
                 state["formats"][value] = identifier
             return identifier
+        if name in ["wvsprintfa", "wvsprintfw"]:
+            format = event.machine.read_cstring(event.args[1], encoding = "utf16le" if wide else "ascii")
+            values = [event.machine.read_u32le(event.args[2] + index * 4) for index in range(_format_argument_word_count(format))] if event.args[2] else []
+            value = _format_win32(event.machine, format, values, wide)
+            _write_string(event.machine, event.args[0], value, wide)
+            return len(value)
         format = event.machine.read_cstring(event.args[1], encoding = "utf16le" if wide else "ascii")
-        value = _format_win32(event.machine, format, event.args[2:], wide)
+        value = _format_win32(event.machine, format, _stack_format_arguments(event, 2, format), wide)
         _write_string(event.machine, event.args[0], value, wide)
         return len(value)
 
@@ -10475,10 +11024,38 @@ def user32_plugin(file, module_files = {}, kernel = None):
             "CreateWindowExA": 12, "CreateWindowExW": 12,
             "DestroyWindow": 1,
             "IsWindow": 1,
+            "GetActiveWindow": 0,
             "DefWindowProcA": 4, "DefWindowProcW": 4,
             "ShowWindow": 2, "UpdateWindow": 1,
             "MessageBeep": 1,
             "MessageBoxA": 4, "MessageBoxW": 4,
+            "DialogBoxParamA": 5, "DialogBoxParamW": 5,
+            "DialogBoxIndirectParamA": 5, "DialogBoxIndirectParamW": 5,
+            "CreateDialogParamA": 5, "CreateDialogParamW": 5,
+            "CreateDialogIndirectParamA": 5, "CreateDialogIndirectParamW": 5,
+            "LoadMenuA": 2, "LoadMenuW": 2,
+            "LoadMenuIndirectA": 1, "LoadMenuIndirectW": 1,
+            "LoadAcceleratorsA": 2, "LoadAcceleratorsW": 2,
+            "TranslateAcceleratorA": 3, "TranslateAcceleratorW": 3,
+            "DestroyMenu": 1, "SetMenu": 2, "GetMenu": 1, "DrawMenuBar": 1,
+            "EndDialog": 2,
+            "GetDlgItem": 2, "GetDlgItemInt": 4,
+            "GetDlgItemTextA": 4, "GetDlgItemTextW": 4,
+            "SetDlgItemInt": 4, "SetDlgItemTextA": 3, "SetDlgItemTextW": 3,
+            "SetWindowTextA": 2, "SetWindowTextW": 2,
+            "GetWindowTextA": 3, "GetWindowTextW": 3,
+            "GetWindowTextLengthA": 1, "GetWindowTextLengthW": 1,
+            "GetWindowLongA": 2, "GetWindowLongW": 2,
+            "SetWindowLongA": 3, "SetWindowLongW": 3,
+            "SendMessageA": 4, "SendMessageW": 4,
+            "SendDlgItemMessageA": 5, "SendDlgItemMessageW": 5,
+            "GetDlgCtrlID": 1, "GetParent": 1,
+            "IsWindowVisible": 1, "BringWindowToTop": 1,
+            "SetForegroundWindow": 1, "SetWindowPos": 7,
+            "GetClassNameA": 3, "GetClassNameW": 3,
+            "GetDesktopWindow": 0,
+            "GetWindowRect": 2, "GetClientRect": 2,
+            "EnumChildWindows": 3, "EnumWindows": 2,
             "GetSystemMenu": 2, "DeleteMenu": 3,
             "CharLowerA": 1, "CharLowerW": 1,
             "CharUpperA": 1, "CharUpperW": 1,
@@ -10501,8 +11078,10 @@ def user32_plugin(file, module_files = {}, kernel = None):
         }
         for exported_name, argc in exported.items():
             machine.provide_export(callback, module = "user32.dll", name = exported_name, argc = argc)
-        machine.provide_export(callback, module = "user32.dll", name = "wsprintfA", argc = 16, convention = "cdecl")
-        machine.provide_export(callback, module = "user32.dll", name = "wsprintfW", argc = 16, convention = "cdecl")
+        machine.provide_export(callback, module = "user32.dll", name = "wsprintfA", argc = 2, convention = "cdecl")
+        machine.provide_export(callback, module = "user32.dll", name = "wsprintfW", argc = 2, convention = "cdecl")
+        machine.provide_export(callback, module = "user32.dll", name = "wvsprintfA", argc = 3)
+        machine.provide_export(callback, module = "user32.dll", name = "wvsprintfW", argc = 3)
         signatures = {name.lower(): argc for name, argc in exported.items()}
         for imported in machine.imports:
             name = imported.name.lower()
@@ -10511,5 +11090,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
             if name in signatures:
                 machine.hook(callback, address = imported.address, argc = signatures[name])
             elif name in ["wsprintfa", "wsprintfw"]:
-                machine.hook(callback, address = imported.address, argc = 16, convention = "cdecl")
+                machine.hook(callback, address = imported.address, argc = 2, convention = "cdecl")
+            elif name in ["wvsprintfa", "wvsprintfw"]:
+                machine.hook(callback, address = imported.address, argc = 3)
     return emulator.plugin(install, name = "windows.user32", state = state)

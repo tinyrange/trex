@@ -747,6 +747,15 @@ def test_windows_wall_clock_is_coherent_across_apis_and_shared_data():
     equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetSystemTime"), args = [output]).reason, "return")
     equal([machine.read_u16le(output + index * 2) for index in range(8)], [1970, 1, 4, 1, 0, 0, 0, 0])
 
+    file_time = machine.allocate(size = 8)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetSystemTimeAsFileTime"), args = [file_time]).reason, "return")
+    local = machine.allocate(size = 8)
+    round_trip = machine.allocate(size = 8)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "FileTimeToLocalFileTime"), args = [file_time, local]).value, 1)
+    equal(machine.read_u64le(local), expected)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "LocalFileTimeToFileTime"), args = [local, round_trip]).value, 1)
+    equal(machine.read_u64le(round_trip), expected)
+
     shared_machine = emulator.x86(code = b"\xc3")
     shared_machine.use([module["environment_plugin"](system_time = 0)])
     equal(shared_machine.read_u32le(0x7ffe0014), expected & 0xffffffff)
@@ -856,7 +865,16 @@ def test_winsock_helper_signatures():
     equal(signatures["wahcloseapchelper"], 1)
     equal(signatures["wahopencurrentthread"], 2)
     equal(signatures["wahclosethread"], 1)
-    equal(module["_WINSOCK_ORDINAL_SIGNATURES"], {8: 1, 9: 1, 14: 1, 15: 1})
+    equal(module["_WINSOCK_ORDINAL_SIGNATURES"], {8: 1, 9: 1, 14: 1, 15: 1, 111: 0, 112: 1, 114: 0, 115: 2, 116: 0})
+    machine = emulator.x86(code = b"\xc3")
+    winsock = module["winsock_plugin"]()
+    machine.use([winsock])
+    data = machine.allocate(size = 400)
+    startup = machine.call(machine.resolve_export("wsock32.dll", ordinal = 115), args = [0x0101, data])
+    equal((startup.reason, startup.value, machine.read_u16le(data), machine.read_u16le(data + 2)), ("return", 0, 0x0101, 0x0101))
+    equal(machine.call(machine.resolve_export("wsock32.dll", ordinal = 112), args = [10061]).value, 0)
+    equal(machine.call(machine.resolve_export("wsock32.dll", ordinal = 111)).value, 10061)
+    equal(machine.call(machine.resolve_export("wsock32.dll", ordinal = 116)).value, 0)
 
 def test_rpc_runtime_signatures():
     module = testing.module("@stdlib//windows/emulation:rpc.star")
@@ -1439,6 +1457,20 @@ def test_win32_dynamic_format_width():
     equal(module["_format_win32"](machine, "%-*ls:%.*s", [8, wide, 3, narrow], False), "wide    :abc")
     equal(module["_format_win32"](machine, "%*s", [0xfffffffa, narrow], False), "abcdef")
 
+def test_user32_wsprintf_reads_all_variadic_arguments():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    image_data = windows.pe32_executable(section = b"\xc3", labels = {"entry": 0}, fixups = [])
+    image_builder = binary.builder(capacity = len(image_data))
+    image_builder.append(image_data)
+    machine.use(module["user32_plugin"](image_builder.file()))
+    output = machine.allocate(size = 64)
+    format = machine.allocate(value = b"{%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X}\x00")
+    result = machine.call(machine.resolve_export("user32.dll", name = "wsprintfA"), args = [output, format] + list(range(16)))
+    equal(result.reason, "return", result.detail)
+    equal(result.value, 38)
+    equal(machine.read_cstring(output), "{00010203-0405-0607-0809-0A0B0C0D0E0F}")
+
 def test_binary_floating_point_codecs():
     encoded = binary.builder(capacity = 24)
     encoded.f32be(1.5)
@@ -1491,6 +1523,8 @@ def test_installshield5_conventional_component_locations():
         {"name": "Windows System"},
         {"name": "ShellExtDlls"},
         {"name": "Application Data"},
+        {"name": "English/Eval"},
+        {"name": "English/Eval/Core"},
     ], r"C:\Program Files\FTP Voyager", r"C:\WINDOWS\SYSTEM")
     equal(locations, {
         "Program Files": r"C:\Program Files\FTP Voyager",
@@ -1500,7 +1534,164 @@ def test_installshield5_conventional_component_locations():
         "OCX Files": r"C:\WINDOWS\SYSTEM",
         "Windows System": r"C:\WINDOWS\SYSTEM",
         "ShellExtDlls": r"C:\WINDOWS\SYSTEM",
+        "Application Data": r"C:\Program Files\FTP Voyager",
+        "English/Eval": r"C:\Program Files\FTP Voyager",
+        "English/Eval/Core": r"C:\Program Files\FTP Voyager",
     })
+
+    action = module["_expanded_custom_action"]({
+        "dll": "example.dll",
+        "arguments": [0, None, r"Name|2001.01.01|<TARGETDIR>"],
+    }, {"<TARGETDIR>": r"C:\Program Files\Example"})
+    equal(action["arguments"], [0, None, r"Name|2001.01.01|C:\Program Files\Example"])
+    equal(module["_calendar_timestamp"]("1970.01.01"), 12 * 3600)
+    equal(module["_calendar_timestamp"]("2000.03.01"), 951912000)
+    equal(module["_calendar_timestamp"]("2001.07.05"), 994334400)
+    raises(module["_calendar_timestamp"], args = ["2001.02.29"], message = "invalid day")
+
+    registry = module["_additional_registry_modification"]({
+        "root": "HKEY_CURRENT_USER",
+        "key": r"Software\Example\<TARGETDIR>",
+        "name": "DataDir",
+        "value": r"<APPDATA>\Example",
+    }, {
+        "<TARGETDIR>": "Product",
+        "<APPDATA>": r"C:\WINDOWS\Application Data",
+    })
+    equal(registry, {
+        "operation": "registry_set_value",
+        "root": "HKEY_CURRENT_USER",
+        "key": r"Software\Example\Product",
+        "name": "DataDir",
+        "type": "REG_SZ",
+        "value": r"C:\WINDOWS\Application Data\Example",
+    })
+    raises(module["_additional_registry_modification"], args = [{
+        "root": "HKEY_CLASSES_ROOT",
+        "key": "Example",
+    }, {}], message = "unsupported additional registry root")
+
+    files = module["_additional_file_entries"]([
+        "/Group/b.txt",
+        "/Other/c.txt",
+        "/Group/a.txt",
+    ], {
+        "source_prefix": "/Group/",
+        "destination_prefix": "<TARGETDIR>\\Data\\",
+    }, {"<TARGETDIR>": r"C:\Program Files\Example"})
+    equal(files, [
+        {"source": "/Group/a.txt", "destination": r"C:\Program Files\Example\Data\a.txt", "resolved": True, "container": False},
+        {"source": "/Group/b.txt", "destination": r"C:\Program Files\Example\Data\b.txt", "resolved": True, "container": False},
+    ])
+    raises(module["_additional_file_entries"], args = [[], {
+        "source_prefix": "/Missing/",
+        "destination_prefix": "C:\\Missing\\",
+    }, {}], message = "matched no package files")
+
+def test_registration_ui_object_handles():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    image_data = windows.pe32_executable(section = b"\xc3", labels = {"entry": 0}, fixups = [])
+    image_builder = binary.builder(capacity = len(image_data))
+    image_builder.append(image_data)
+    image = image_builder.file()
+    machine.use([module["gdi32_plugin"](), module["user32_plugin"](image)])
+    brush = machine.call(machine.resolve_export("gdi32.dll", name = "CreateSolidBrush"), args = [0x123456])
+    equal(brush.value, 0xdb123456)
+    logical_palette = machine.allocate(value = b"\x00\x03\x02\x00\x01\x02\x03\x00\x04\x05\x06\x00")
+    palette = machine.call(machine.resolve_export("gdi32.dll", name = "CreatePalette"), args = [logical_palette])
+    equal(palette.value, 0xda000001)
+    equal(machine.call(machine.resolve_export("gdi32.dll", name = "DeleteObject"), args = [palette.value]).value, 1)
+    bitmap = machine.call(machine.resolve_export("gdi32.dll", name = "CreateDIBitmap"), args = [0, 0, 0, 0, 0, 0])
+    equal(bitmap.value, 0xda100001)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "GetActiveWindow")).value, 0)
+    modeless = machine.call(machine.resolve_export("user32.dll", name = "CreateDialogParamA"), args = [0, 1, 0, 0, 0])
+    true(modeless.value != 0)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "IsWindow"), args = [modeless.value]).value, 1)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "GetActiveWindow")).value, modeless.value)
+    indirect = machine.call(machine.resolve_export("user32.dll", name = "CreateDialogIndirectParamA"), args = [0, 0x1234, modeless.value, 0, 0])
+    true(indirect.value != 0)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "GetParent"), args = [indirect.value]).value, modeless.value)
+    menu = machine.call(machine.resolve_export("user32.dll", name = "LoadMenuA"), args = [0x400000, 101]).value
+    true(menu != 0)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "SetMenu"), args = [modeless.value, menu]).value, 1)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "GetMenu"), args = [modeless.value]).value, menu)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "DrawMenuBar"), args = [modeless.value]).value, 1)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "DestroyMenu"), args = [menu]).value, 1)
+    accelerators = machine.call(machine.resolve_export("user32.dll", name = "LoadAcceleratorsA"), args = [0x400000, 102]).value
+    true(accelerators != 0)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "TranslateAcceleratorA"), args = [modeless.value, accelerators, 0]).value, 0)
+
+    delivered = []
+    hook_handle = [0]
+    def cbt_hook(event):
+        equal(event.args[0], 3)
+        true(event.args[1] != 0, "CBT hook did not receive the prospective HWND")
+        true(event.machine.read_u32le(event.args[2]) != 0, "CBT_CREATEWND did not reference CREATESTRUCT")
+        delivered.append("cbt")
+        return 0
+    hook_procedure = machine.provide_export(cbt_hook, module = "test.window", name = "CbtHook", argc = 3)
+    hook_handle[0] = machine.call(machine.resolve_export("user32.dll", name = "SetWindowsHookExA"), args = [5, hook_procedure, 0, 1]).value
+    true(hook_handle[0] != 0, "SetWindowsHookEx did not return a hook")
+    def window_procedure(event):
+        delivered.append(event.args[1])
+        return 1
+    procedure = machine.provide_export(window_procedure, module = "test.window", name = "WindowProcedure", argc = 4)
+    class_name = machine.allocate(value = b"TinyRangeWindow\x00")
+    window_class = machine.allocate(size = 40)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "GetClassInfoA"), args = [0, class_name, window_class]).value, 0)
+    machine.write_u32le(window_class + 4, procedure)
+    machine.write_u32le(window_class + 36, class_name)
+    atom = machine.call(machine.resolve_export("user32.dll", name = "RegisterClassA"), args = [window_class]).value
+    class_info = machine.allocate(size = 40)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "GetClassInfoA"), args = [0, class_name, class_info]).value, 1)
+    equal(machine.read_u32le(class_info + 4), procedure)
+    created_result = machine.call(machine.resolve_export("user32.dll", name = "CreateWindowExA"), args = [0, atom, 0, 0, 0, 0, 100, 100, 0, 0, 0x400000, 0])
+    equal(created_result.reason, "return", created_result.detail)
+    created = created_result.value
+    equal(delivered, ["cbt", 0x81, 0x01])
+    true(created != 0, "CreateWindowEx rejected a zero-returning CBT hook")
+    equal(machine.call(machine.resolve_export("user32.dll", name = "UnhookWindowsHookEx"), args = [hook_handle[0]]).value, 1)
+
+def test_lz32_copies_memory_backed_files():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    kernel = module["kernel32_plugin"](files = {r"C:\source.bin": b"TinyRangeX"})
+    lz = module["lz32_plugin"](kernel)
+    machine.use([kernel, lz])
+    source_name = machine.allocate(value = b"C:\\source.bin\x00")
+    target_name = machine.allocate(value = b"C:\\target.bin\x00")
+    source = machine.call(machine.resolve_export("lz32.dll", name = "LZOpenFileA"), args = [source_name, 0, 0]).value
+    target = machine.call(machine.resolve_export("lz32.dll", name = "LZOpenFileA"), args = [target_name, 0, 0x1000]).value
+    true(source != 0xffffffff)
+    true(target != 0xffffffff)
+    true(source != target)
+    equal(kernel.state["handles"][source]["value"]["offset"], 0)
+    equal(kernel.state["handles"][source]["value"]["path"], r"c:\source.bin")
+    equal(kernel.state["handles"][target]["value"]["path"], r"c:\target.bin")
+    equal(kernel.state["file_data"](kernel.state["handles"][source]["value"]["path"]), b"TinyRangeX")
+    copied = machine.call(machine.resolve_export("lz32.dll", name = "LZCopy"), args = [source, target]).value
+    equal(lz.state["calls"][-1]["api"], "lzcopy")
+    equal(lz.state["calls"][-1]["arguments"], [source, target])
+    equal(kernel.state["file_data"](r"c:\target.bin"), b"TinyRangeX")
+    equal(copied, 10)
+    equal(kernel.state["file_data"](r"c:\source.bin"), kernel.state["file_data"](r"c:\target.bin"))
+    equal(machine.call(machine.resolve_export("lz32.dll", name = "LZClose"), args = [source]).value, 0)
+
+def test_kernel_dos_file_time_round_trip():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"]()])
+    file_time = machine.allocate(size = 8)
+    date_output = machine.allocate(size = 2)
+    time_output = machine.allocate(size = 2)
+    date = ((2001 - 1980) << 9) | (7 << 5) | 5
+    time = (13 << 11) | (4 << 5) | (6 // 2)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "DosDateTimeToFileTime"), args = [date, time, file_time]).value, 1)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "FileTimeToDosDateTime"), args = [file_time, date_output, time_output]).value, 1)
+    equal(machine.read_u16le(date_output), date)
+    equal(machine.read_u16le(time_output), time)
+
 TEST_SUITE = suite("stdlib/internal", [
     case("gdb_integer_codecs", test_gdb_integer_codecs),
     case("resource_patch_normalization", test_resource_patch_normalization),
@@ -1557,9 +1748,13 @@ TEST_SUITE = suite("stdlib/internal", [
     case("security_access_mapping", test_security_access_mapping),
     case("sddl_security_descriptor", test_sddl_security_descriptor),
     case("win32_dynamic_format_width", test_win32_dynamic_format_width),
+    case("user32_wsprintf_reads_all_variadic_arguments", test_user32_wsprintf_reads_all_variadic_arguments),
     case("binary_floating_point_codecs", test_binary_floating_point_codecs),
     case("binary_xml_round_trip", test_binary_xml_round_trip),
     case("win32_tracked_reallocate", test_win32_tracked_reallocate),
     case("binary_hex", test_binary_hex),
     case("installshield5_conventional_component_locations", test_installshield5_conventional_component_locations),
+    case("registration_ui_object_handles", test_registration_ui_object_handles),
+    case("lz32_copies_memory_backed_files", test_lz32_copies_memory_backed_files),
+    case("kernel_dos_file_time_round_trip", test_kernel_dos_file_time_round_trip),
 ])

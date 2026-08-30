@@ -97,6 +97,92 @@ func installScriptFixture() []byte {
 	return data
 }
 
+func legacyInstallScriptFixtureWithPadding(padding int) []byte {
+	data := make([]byte, 96+padding)
+	copy(data[12:], "InstallSHIELD Software Corporation  (c) 1990-1997")
+	data = appendISU16(data, 1) // predefined variables
+	data = appendISU16(data, 0)
+	data = appendISString(data, "SRCDIR")
+	data = appendISU16(data, 0) // highest global slot
+	data = appendISU16(data, 0) // named globals
+	data = appendISU16(data, 0) // structured types
+	data = appendISU16(data, 2) // first dynamic function ID
+	for range 5 {
+		data = appendISU16(data, 0)
+	}
+	data = appendISU16(data, 1) // external prototype marker
+	data = appendISU16(data, 4) // calling convention
+	data = appendISString(data, "example")
+	data = appendISString(data, "Apply")
+	data = appendISU16(data, 2) // arguments
+	data = appendISU16(data, 7) // return type
+	data = appendISU16(data, 5)
+	data = appendISU16(data, 1)
+	data = appendISU16(data, 5)
+	data = appendISU16(data, 2)
+
+	// The invalid prototype prefix is the start of bytecode and is followed by
+	// the first legacy function prologue and one call expression.
+	data = appendISU16(data, 0x002c)
+	data = appendISU16(data, 0x3d70)
+	data = append(data, 0xb6, 0x00, 0x10, 0x00)
+	data = append(data, 0x41)
+	data = appendISU32(data, 7)
+	data = append(data, 0x61)
+	data = appendISString(data, "payload")
+	data = appendISU16(data, 0x0022)
+	data = append(data, 0x70)
+	data = appendISU16(data, 2)
+	data = append(data, 0x95)
+	return data
+}
+
+func legacyInstallScriptFixture() []byte { return legacyInstallScriptFixtureWithPadding(57) }
+
+func TestLegacyInstallScriptDecodesPrototypeAndCall(t *testing.T) {
+	script, err := Open(&starfile.Bytes{Name: "setup.ins", Data: legacyInstallScriptFixture()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if script.format != "legacy-ins" || script.legacy == nil {
+		t.Fatalf("legacy format = %q, state=%v", script.format, script.legacy)
+	}
+	if got, want := len(script.prototypes), 3; got != want {
+		t.Fatalf("functions = %d, want %d", got, want)
+	}
+	prototype := script.prototypes[2]
+	if prototype.name != "Apply" || prototype.dll != "example" || len(prototype.arguments) != 2 {
+		t.Fatalf("external prototype = %+v", prototype)
+	}
+	if got, want := len(script.legacy.instructions), 1; got != want {
+		t.Fatalf("instructions = %d, want %d", got, want)
+	}
+	call := script.legacy.instructions[0]
+	if call.functionID != 2 || len(call.operands) != 2 || call.operands[0].number != 7 || call.operands[1].text != "payload" {
+		t.Fatalf("decoded call = %+v", call)
+	}
+	evaluated, err := script.Evaluate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callsValue, found, err := evaluated.(*starlark.Dict).Get(starlark.String("calls"))
+	if err != nil || !found || callsValue.(*starlark.List).Len() != 1 {
+		t.Fatalf("evaluated calls = %v, found=%v err=%v", callsValue, found, err)
+	}
+}
+
+func TestLegacyInstallScriptDiscoversVariableHeader(t *testing.T) {
+	for _, padding := range []int{31, 57, 83} {
+		script, err := Open(&starfile.Bytes{Name: "setup.ins", Data: legacyInstallScriptFixtureWithPadding(padding)})
+		if err != nil {
+			t.Fatalf("padding %d: %v", padding, err)
+		}
+		if script.legacy == nil || len(script.legacy.instructions) != 1 {
+			t.Fatalf("padding %d: decoded state = %+v", padding, script.legacy)
+		}
+	}
+}
+
 func TestInstallScriptParsesFunctionsAndCalls(t *testing.T) {
 	script, err := Open(&starfile.Bytes{Name: "setup.inx", Data: installScriptFixture()})
 	if err != nil {
@@ -118,6 +204,9 @@ func TestInstallScriptParsesFunctionsAndCalls(t *testing.T) {
 	}
 	if value, err := script.Attr("functions"); err != nil || value.Type() != "list" {
 		t.Fatalf("functions attribute = %v, %v", value, err)
+	}
+	if value, err := script.Attr("source"); err != nil || value != script.file {
+		t.Fatalf("source attribute = %v, %v", value, err)
 	}
 	if _, err := script.Hash(); err == nil {
 		t.Fatal("installscript unexpectedly hashable")

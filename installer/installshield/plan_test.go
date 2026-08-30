@@ -123,6 +123,18 @@ func TestInstallerPlanInspectsActiveXControlsForRegistration(t *testing.T) {
 	}
 }
 
+func TestInstallPlanCustomActionsRejectsUnprovedLegacyCalls(t *testing.T) {
+	unsafe := starlark.NewDict(2)
+	_ = unsafe.SetKey(starlark.String("dll"), starlark.String("example.dll"))
+	_ = unsafe.SetKey(starlark.String("construction_safe"), starlark.False)
+	safe := starlark.NewDict(1)
+	_ = safe.SetKey(starlark.String("dll"), starlark.String("example.dll"))
+	actions := installPlanCustomActions(starlark.NewList([]starlark.Value{unsafe, safe}))
+	if got, want := actions.Len(), 1; got != want || actions.Index(0) != safe {
+		t.Fatalf("custom actions = %v, want only proved call", actions)
+	}
+}
+
 func TestJoinInstallWindowsPathPreservesUNC(t *testing.T) {
 	if got, want := joinInstallWindowsPath(`\\server\share`, "bin", "app.exe"), `\\server\share\bin\app.exe`; got != want {
 		t.Fatalf("join = %q, want %q", got, want)

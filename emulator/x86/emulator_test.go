@@ -267,6 +267,44 @@ func TestEmulatorX86DoublePrecisionShifts(t *testing.T) {
 	}
 }
 
+func TestEmulatorX86RotateThroughCarry(t *testing.T) {
+	tests := []struct {
+		name string
+		code starlark.Bytes
+		want uint32
+	}{
+		{
+			name: "right uses and updates carry",
+			// MOV EAX, 2; RCR EAX, 1; ADC EAX, 0; RET.
+			code: starlark.Bytes("\xb8\x02\x00\x00\x00\xd1\xd8\x83\xd0\x00\xc3"),
+			want: 0x80000001,
+		},
+		{
+			name: "left uses and updates carry",
+			// MOV EAX, 0x80000000; RCL EAX, 1; ADC EAX, 0; RET.
+			code: starlark.Bytes("\xb8\x00\x00\x00\x80\xd1\xd0\x83\xd0\x00\xc3"),
+			want: 2,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := newRawX86TestMachine(t, test.code, nil)
+			machine.carry = true
+			resultValue, err := machine.run(&starlark.Thread{Name: "emulator-rotate-through-carry-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := resultValue.(*starlarkRecord)
+			if got := recordString(t, result, "reason"); got != "return" {
+				t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+			}
+			if got := recordUint32(t, result, "value"); got != test.want {
+				t.Fatalf("eax = %#x, want %#x", got, test.want)
+			}
+		})
+	}
+}
+
 func TestEmulatorX86SetOverflowConditions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2105,7 +2143,7 @@ func TestEmulatorX86PluggableHook(t *testing.T) {
 	code := starlark.Bytes("\x6a\x2a\xe8\xf9\x0f\x00\x00\xc3")
 	machine := newRawX86TestMachine(t, code, nil)
 	thread := &starlark.Thread{Name: "emulator-hook-test"}
-	globals, err := starlark.ExecFileOptions(starlarkFileOptions(), thread, "hook.star", []byte("def callback(event):\n    if event.return_address != 0x1007: fail(\"bad return address\")\n    return event.args[0] + 1\n"), nil)
+	globals, err := starlark.ExecFileOptions(starlarkFileOptions(), thread, "hook.star", []byte("def callback(event):\n    if event.return_address != 0x1007: fail(\"bad return address\")\n    if event.machine.read_u32le(event.argument_address) != event.args[0]: fail(\"bad argument address\")\n    return event.args[0] + 1\n"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

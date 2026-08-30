@@ -10,7 +10,7 @@ load("@stdlib//windows/selfreg:setupapi.star", "setupapi_plugin")
 load("@stdlib//windows/selfreg:advpack.star", "advpack_plugin")
 load("@stdlib//windows/selfreg:loadperf.star", "loadperf_plugin")
 load("@stdlib//windows/selfreg:facts.star", "class_ids")
-load("@stdlib//windows/selfreg:win32.star", "com_plugin", "common_controls_plugin", "environment_plugin", "event_log_plugin", "gdi32_plugin", "kernel32_plugin", "msvcrt_plugin", "netapi_plugin", "ole32_plugin", "oleaut_plugin", "resource_plugin", "security_plugin", "shell32_plugin", "shell_plugin", "user32_plugin", "version_plugin", "winsock_helper_plugin", "winsock_plugin")
+load("@stdlib//windows/selfreg:win32.star", "com_plugin", "common_controls_plugin", "environment_plugin", "event_log_plugin", "gdi32_plugin", "kernel32_plugin", "lz32_plugin", "msvcrt_plugin", "netapi_plugin", "ole32_plugin", "oleaut_plugin", "resource_plugin", "security_plugin", "shell32_plugin", "shell_plugin", "user32_plugin", "version_plugin", "winsock_helper_plugin", "winsock_plugin")
 load("@stdlib//windows/selfreg:msxml.star", "msxml_dom_provider")
 load("@stdlib//windows/selfreg:comcat.star", "component_categories_provider")
 
@@ -67,7 +67,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     deferred = {canonical_module_name(name): True for name in deferred_modules}
     virtual_system_modules = [
         "advapi32.dll", "api-ms-win-core-com-l1-1-1.dll", "cabinet.dll", "comctl32.dll", "crypt32.dll", "gdi32.dll",
-        "kernel32.dll", "loadperf.dll", "msvcrt.dll", "netapi32.dll", "ntdll.dll",
+        "kernel32.dll", "loadperf.dll", "lz32.dll", "msvcrt.dll", "netapi32.dll", "ntdll.dll",
         "ole32.dll", "oleaut32.dll", "rpcrt4.dll", "setupapi.dll",
         "shell32.dll", "shlwapi.dll", "user32.dll", "version.dll",
         "wintrust.dll", "ws2_32.dll",
@@ -283,6 +283,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         advpack,
         exceptions,
         kernel,
+        lz32_plugin(kernel),
         cabinet,
         environment_plugin(process_environment, system_time = system_time),
         event_log_plugin(),
@@ -369,6 +370,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                     "xml_actions": xml_dom["state"]["actions"],
                     "component_category_actions": component_categories["state"]["actions"],
                     "user_dialogs": user_interface.state["dialogs"],
+                    "user_windows": dict(user_interface.state["windows"]),
                     "crt_actions": crt.state["actions"],
                     "crt_calls": crt.state["calls"],
                 }
@@ -417,6 +419,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 "xml_actions": xml_dom["state"]["actions"],
                 "component_category_actions": component_categories["state"]["actions"],
                 "user_dialogs": user_interface.state["dialogs"],
+                "user_windows": dict(user_interface.state["windows"]),
                 "crt_actions": crt.state["actions"],
                 "crt_calls": crt.state["calls"],
             }
@@ -471,6 +474,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "xml_actions": xml_dom["state"]["actions"],
         "component_category_actions": component_categories["state"]["actions"],
         "user_dialogs": user_interface.state["dialogs"],
+        "user_windows": dict(user_interface.state["windows"]),
         "crt_actions": crt.state["actions"],
         "crt_calls": crt.state["calls"],
     }

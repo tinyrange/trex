@@ -4569,7 +4569,7 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		if err := m.setOperand(instruction.Args[0], instruction.MemBytes, result); err != nil {
 			return "", "", err
 		}
-	case x86asm.SHL, x86asm.SHR, x86asm.SAR, x86asm.ROL, x86asm.ROR:
+	case x86asm.SHL, x86asm.SHR, x86asm.SAR, x86asm.ROL, x86asm.ROR, x86asm.RCL, x86asm.RCR:
 		width := m.operandWidth(instruction.Args[0], instruction.MemBytes)
 		left, err := m.operandValueWidth(instruction.Args[0], next, instruction.MemBytes)
 		if err != nil {
@@ -4598,6 +4598,35 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 					m.carry = result&(1<<(bits-1)) != 0
 					if effective == 1 {
 						m.overflow = (result&(1<<(bits-1)) != 0) != (result&(1<<(bits-2)) != 0)
+					}
+				}
+			}
+		} else if instruction.Op == x86asm.RCL || instruction.Op == x86asm.RCR {
+			effective := count % (bits + 1)
+			if effective != 0 {
+				for range effective {
+					previousCarry := m.carry
+					if instruction.Op == x86asm.RCL {
+						m.carry = result&(1<<(bits-1)) != 0
+						result = result << 1 & mask
+						if previousCarry {
+							result |= 1
+						}
+					} else {
+						m.carry = result&1 != 0
+						result >>= 1
+						if previousCarry {
+							result |= 1 << (bits - 1)
+						}
+					}
+				}
+				if effective == 1 {
+					mostSignificant := result&(1<<(bits-1)) != 0
+					if instruction.Op == x86asm.RCL {
+						m.overflow = mostSignificant != m.carry
+					} else {
+						nextMostSignificant := result&(1<<(bits-2)) != 0
+						m.overflow = mostSignificant != nextMostSignificant
 					}
 				}
 			}
@@ -5652,12 +5681,13 @@ func (m *emulatorX86) invokeHook(thread *starlark.Thread, hook emulatorHook) (st
 		arguments[index] = starlark.MakeUint64(uint64(value))
 	}
 	event := newStarlarkRecord(map[string]starlark.Value{
-		"machine":        m,
-		"module":         starlark.String(hook.module),
-		"name":           starlark.String(hook.name),
-		"address":        starlark.MakeUint64(uint64(hook.address)),
-		"return_address": starlark.MakeUint64(uint64(m.eip)),
-		"args":           starlark.NewList(arguments),
+		"machine":          m,
+		"module":           starlark.String(hook.module),
+		"name":             starlark.String(hook.name),
+		"address":          starlark.MakeUint64(uint64(hook.address)),
+		"return_address":   starlark.MakeUint64(uint64(m.eip)),
+		"argument_address": starlark.MakeUint64(uint64(esp)),
+		"args":             starlark.NewList(arguments),
 	})
 	m.hookDepth++
 	result, err := starlark.Call(thread, hook.callback, starlark.Tuple{event}, nil)
@@ -5700,12 +5730,13 @@ func (m *emulatorX86) invokeTailHook(thread *starlark.Thread, hook emulatorHook)
 		arguments[index] = starlark.MakeUint64(uint64(value))
 	}
 	event := newStarlarkRecord(map[string]starlark.Value{
-		"machine":        m,
-		"module":         starlark.String(hook.module),
-		"name":           starlark.String(hook.name),
-		"address":        starlark.MakeUint64(uint64(hook.address)),
-		"return_address": starlark.MakeUint64(uint64(returnAddress)),
-		"args":           starlark.NewList(arguments),
+		"machine":          m,
+		"module":           starlark.String(hook.module),
+		"name":             starlark.String(hook.name),
+		"address":          starlark.MakeUint64(uint64(hook.address)),
+		"return_address":   starlark.MakeUint64(uint64(returnAddress)),
+		"argument_address": starlark.MakeUint64(uint64(esp + 4)),
+		"args":             starlark.NewList(arguments),
 	})
 	m.hookDepth++
 	result, err := starlark.Call(thread, hook.callback, starlark.Tuple{event}, nil)

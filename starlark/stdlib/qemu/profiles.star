@@ -12,7 +12,8 @@ def dos(
         overlay_limit = 256 << 20,
         debug_events = [],
         icount = "",
-        no_acpi = False):
+        no_acpi = False,
+        rtc = ""):
     """Returns a minimal legacy PC profile for an installed DOS system."""
     if boot_order not in ["a", "c", "d"]:
         fail("DOS boot_order must be a, c, or d")
@@ -31,6 +32,8 @@ def dos(
         options.append(qemu.option("-icount", icount))
     if no_acpi:
         options.append(qemu.option("-no-acpi"))
+    if rtc:
+        options.append(qemu.option("-rtc", "base=" + rtc))
     return qemu.backend(
         machine = machine,
         accelerator = accelerator,
