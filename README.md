@@ -104,7 +104,7 @@ encrypted variant is supported.
 | Registration analysis | Static resource facts first, then bounded PE32/x86 calls such as `DllRegisterServer` with composable semantic models for COM, registry, services, SetupAPI, WMI, type libraries, shell/ADVPack, crypto, RPC, event log, performance counters, and related Win32 APIs. Effects are returned as data. | Not a Windows VM and not proof that every DLL path is modeled. Unsupported imports/calls and incomplete registration are reported; no target executable is launched on the host. |
 | VM contract | Backend-neutral machine, disk, network, display, channel, lifecycle, input, event, screenshot, debugger-channel, and capability-validation APIs. | Recipes must test capabilities instead of assuming backend behavior. |
 | QEMU backend | Starts QEMU with opaque disks exported directly over in-process NBD; supports structured disks/media/CHS, snapshots, display input and screenshots, QMP events, debugger/serial channels, concurrent sessions, and deterministic cleanup. | QEMU is the only production external process. Image parsing, construction, conversion, and debugging protocols remain in trex. |
-| Starlark frontend | CLI execution, module loader, scoped resources, REPL, tests, runtime statistics, stage cache, clocks/profiler, URL/HTML/JSON/crypto helpers, and embeddable program execution. | Host files, listeners, sockets, and processes are native frontend/backends rather than stable core APIs. |
+| Starlark frontend | CLI execution, module loader, scoped resources, REPL, tests, runtime statistics, stage cache, clocks/profiler, URL/HTML/JSON/crypto helpers, resumable verified mirror files backed by a configured local cache, and embeddable program execution. | Host files, HTTP clients, listeners, sockets, and processes are native frontend/backends rather than stable core APIs. |
 | Web frontends | Generic Starlark HTTP request/response, file, redirect, and streaming directory-ZIP responses; archive browser with lazy mounting of supported archives, filesystems, hives, and WIM images. The archive browser confines host reads to a pinned root, omits symbolic links and special files, limits mounts and nodes, authenticates remote sessions with an ephemeral access token, and protects mutating requests with a per-process token. | ZIP streaming does not materialize an extracted host tree. The archive browser is an inspection frontend, not a filesystem editor. `-web` binds to loopback unless non-loopback access is explicitly enabled with `-web-public`; remote mode prints an ephemeral session URL but does not provide TLS, so it belongs only on a trusted network or behind a TLS reverse proxy. |
 | Inspection scripts | Reusable Starlark scripts and a scoped REPL for archive, installer, disk, debugger, and VM inspection. | Scripts compose the capabilities above and do not add hidden host-tool fallbacks. |
 
@@ -151,7 +151,8 @@ load("@stdlib//debug:gdb.star", "read_u32")
 
 See the [Starlark quickstart](docs/starlark/quickstart.md), the generated
 [namespace reference](docs/starlark/namespaces/reference.md), and the
-[debugging guide](docs/starlark/debugging.md).
+[debugging guide](docs/starlark/debugging.md). Cached immutable downloads are
+covered by the [mirror-backed file guide](docs/starlark/mirror-cache.md).
 
 ## Go packages
 

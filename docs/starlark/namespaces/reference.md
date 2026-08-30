@@ -1278,6 +1278,12 @@ Native top-level operation.
 
 Native top-level operation.
 
+### `mirror_file`
+
+`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600) -> file`
+
+Native top-level operation.
+
 ### `open`
 
 `open(name) -> file`

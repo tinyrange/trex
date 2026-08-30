@@ -168,6 +168,7 @@ func predeclared() starlark.StringDict {
 		"digest":       starlark.NewBuiltin("digest", digestBuiltin),
 		"hex":          starlark.NewBuiltin("hex", hexBuiltin),
 		"help":         starlark.NewBuiltin("help", helpBuiltin),
+		"mirror_file":  nativeIO["mirror_file"],
 		"open":         nativeIO["open"],
 		"repl":         starlark.NewBuiltin("repl", replBuiltin),
 		"stdout":       nativeIO["stdout"],
