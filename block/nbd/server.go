@@ -706,8 +706,7 @@ func (s *NBDServer) transmit(ctx context.Context, channel channelpkg.ByteChannel
 			readErr = err
 			break
 		}
-		setByteChannelDeadline(channel, s.requestTimeout)
-		request, err := wire.readRequest()
+		request, err := wire.readRequest(channel, s.requestTimeout)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
 				readErr = err
@@ -1069,10 +1068,24 @@ func (w *nbdWire) optionReply(option, reply uint32, data []byte) error {
 	return w.writer.Flush()
 }
 
-func (w *nbdWire) readRequest() (nbdRequest, error) {
+func (w *nbdWire) readRequest(channel channelpkg.ByteChannel, timeout time.Duration) (nbdRequest, error) {
 	var magic uint32
 	var request nbdRequest
-	if err := w.read(&magic, &request.flags, &request.kind, &request.cookie, &request.offset, &request.length); err != nil {
+	// An established NBD transmission is allowed to remain idle indefinitely.
+	// Arm the request deadline only after the peer starts a new frame; applying
+	// it while waiting for the first byte disconnects healthy, idle VM disks and
+	// turns the guest's next cache miss into an I/O error.
+	setByteChannelReadDeadline(channel, 0)
+	var magicBytes [4]byte
+	if _, err := io.ReadFull(w.reader, magicBytes[:1]); err != nil {
+		return request, err
+	}
+	setByteChannelReadDeadline(channel, timeout)
+	if _, err := io.ReadFull(w.reader, magicBytes[1:]); err != nil {
+		return request, err
+	}
+	magic = binary.BigEndian.Uint32(magicBytes[:])
+	if err := w.read(&request.flags, &request.kind, &request.cookie, &request.offset, &request.length); err != nil {
 		return request, err
 	}
 	if magic != nbdRequestMagic {
@@ -1217,4 +1230,18 @@ func setByteChannelDeadline(channel channelpkg.ByteChannel, timeout time.Duratio
 		deadline = time.Now().Add(timeout)
 	}
 	_ = setter.SetDeadline(deadline)
+}
+
+func setByteChannelReadDeadline(channel channelpkg.ByteChannel, timeout time.Duration) {
+	deadline := time.Time{}
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	if setter, ok := channel.(channelpkg.ReadDeadlineSetter); ok {
+		_ = setter.SetReadDeadline(deadline)
+		return
+	}
+	if setter, ok := channel.(channelpkg.DeadlineSetter); ok {
+		_ = setter.SetDeadline(deadline)
+	}
 }

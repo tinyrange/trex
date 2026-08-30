@@ -22,6 +22,12 @@ type DeadlineSetter interface {
 	SetDeadline(time.Time) error
 }
 
+// ReadDeadlineSetter is implemented by channels that can bound reads without
+// changing the deadline for concurrent writes on the same duplex stream.
+type ReadDeadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
 // ReadNotifier is implemented by channels that expose read readiness without
 // consuming bytes.
 type ReadNotifier interface {
