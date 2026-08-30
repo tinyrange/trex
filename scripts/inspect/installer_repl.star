@@ -3,6 +3,7 @@
 load("@stdlib//windows:installer.star", "analyze", installation = "installer")
 load("@stdlib//windows/emulation:runner.star", emulate = "run")
 load("@stdlib//windows/selfreg:facts.star", windows_class_ids = "class_ids")
+load("@stdlib//windows/selfreg:policy.star", inspect_registration = "registration_patches")
 
 def main(args):
     if len(args) != 2:
@@ -20,7 +21,8 @@ def main(args):
     installer_modifications = installation
     run_executable = emulate
     class_ids = windows_class_ids
+    registration_patches = inspect_registration
 
-    print("disc, source, installer, payload, script, analyze_installer, installer_modifications, run_executable, and class_ids are available")
+    print("disc, source, installer, payload, script, analyze_installer, installer_modifications, run_executable, class_ids, and registration_patches are available")
     print("format=%s files=%d" % (installer.format, len(installer.files)))
     repl()

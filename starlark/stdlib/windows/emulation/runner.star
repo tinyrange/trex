@@ -265,6 +265,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         manager_call_trace_size = rpc_manager_call_trace_size,
     )
     crypto = crypto_registration_plugin(registry, module, file = file)
+    common_controls = common_controls_plugin()
     def service_execution_statistics():
         return {
             "slices": services.state["execution_slices"],
@@ -302,8 +303,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         resources,
         versions,
         gdi32_plugin(),
-        shell32_plugin(module_path = module, environment = environment),
-        common_controls_plugin(),
+        shell32_plugin(module_path = module, environment = process_environment, malloc = ole.state),
+        common_controls,
         shell_plugin(module, kernel = kernel),
         user_interface,
     ] + extension_plugins + plugins)
@@ -394,6 +395,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 "setup_directories": setup.state["directories"],
                 "version_queries": versions.state["queries"],
                 "file_queries": kernel.state["file_queries"],
+                "volume_queries": kernel.state["volume_queries"],
                 "module_queries": kernel.state["module_queries"],
                 "procedure_queries": kernel.state["procedure_queries"],
                 "process_queries": kernel.state["process_queries"],
@@ -420,6 +422,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 "component_category_actions": component_categories["state"]["actions"],
                 "user_dialogs": user_interface.state["dialogs"],
                 "user_windows": dict(user_interface.state["windows"]),
+                "user_messages": user_interface.state["sent_messages"],
+                "property_sheets": common_controls.state["property_sheets"],
                 "crt_actions": crt.state["actions"],
                 "crt_calls": crt.state["calls"],
             }
@@ -449,6 +453,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "setup_directories": setup.state["directories"],
         "version_queries": versions.state["queries"],
         "file_queries": kernel.state["file_queries"],
+        "volume_queries": kernel.state["volume_queries"],
         "module_queries": kernel.state["module_queries"],
         "procedure_queries": kernel.state["procedure_queries"],
         "process_queries": kernel.state["process_queries"],
@@ -475,6 +480,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "component_category_actions": component_categories["state"]["actions"],
         "user_dialogs": user_interface.state["dialogs"],
         "user_windows": dict(user_interface.state["windows"]),
+        "user_messages": user_interface.state["sent_messages"],
+        "property_sheets": common_controls.state["property_sheets"],
         "crt_actions": crt.state["actions"],
         "crt_calls": crt.state["calls"],
     }

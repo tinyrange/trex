@@ -194,6 +194,44 @@ func TestEmulatorX86BSWAPReversesRegisterBytes(t *testing.T) {
 	}
 }
 
+func TestEmulatorX86SAHFLoadsStatusFlagsFromAH(t *testing.T) {
+	tests := []struct {
+		name string
+		ah   byte
+		want bool
+	}{
+		{name: "set", ah: 0xc5, want: true},
+		{name: "clear", ah: 0x00, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			code := starlark.Bytes([]byte{0xb8, 0x00, test.ah, 0x00, 0x00, 0x9e, 0xc3})
+			machine := newRawX86TestMachine(t, code, nil)
+			machine.carry = !test.want
+			machine.parity = !test.want
+			machine.zero = !test.want
+			machine.sign = !test.want
+			machine.direction = true
+			machine.overflow = true
+
+			resultValue, err := machine.run(&starlark.Thread{Name: "emulator-sahf-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := resultValue.(*starlarkRecord)
+			if got, want := recordString(t, result, "reason"), "return"; got != want {
+				t.Fatalf("reason = %q, want %q (detail %s)", got, want, recordString(t, result, "detail"))
+			}
+			if machine.carry != test.want || machine.parity != test.want || machine.zero != test.want || machine.sign != test.want {
+				t.Fatalf("status flags = CF:%t PF:%t ZF:%t SF:%t, want all %t", machine.carry, machine.parity, machine.zero, machine.sign, test.want)
+			}
+			if !machine.direction || !machine.overflow {
+				t.Fatalf("SAHF changed unrelated flags: DF:%t OF:%t", machine.direction, machine.overflow)
+			}
+		})
+	}
+}
+
 func TestEmulatorX86CWDESignExtendsAX(t *testing.T) {
 	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\x01\x80\x34\x12\x98\xc3"), nil)
 	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-cwde-test"})

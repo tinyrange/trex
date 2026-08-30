@@ -11,9 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode/utf16"
-	"unicode/utf8"
 
+	binaryapi "github.com/tinyrange/trex/binary"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	starfile "github.com/tinyrange/trex/storage/star"
 	windowsapi "github.com/tinyrange/trex/windows"
@@ -276,49 +275,11 @@ func binaryTextBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if maximum < 0 || len(data) > maximum {
 		return nil, fmt.Errorf("text: input size %d exceeds limit %d", len(data), maximum)
 	}
-	switch strings.ToLower(strings.ReplaceAll(encoding, "-", "")) {
-	case "ascii":
-		if nul {
-			if end := bytes.IndexByte(data, 0); end >= 0 {
-				data = data[:end]
-			}
-		}
-		for _, value := range data {
-			if value > 0x7f {
-				return nil, fmt.Errorf("text: input is not ASCII")
-			}
-		}
-		return starlark.String(string(data)), nil
-	case "utf8":
-		if nul {
-			if end := bytes.IndexByte(data, 0); end >= 0 {
-				data = data[:end]
-			}
-		}
-		if !utf8.Valid(data) {
-			return nil, fmt.Errorf("text: input is not valid UTF-8")
-		}
-		return starlark.String(string(data)), nil
-	case "utf16le", "utf16be":
-		if len(data)%2 != 0 {
-			return nil, fmt.Errorf("text: UTF-16 input has odd size")
-		}
-		var order binary.ByteOrder = binary.LittleEndian
-		if strings.Contains(strings.ToLower(encoding), "be") {
-			order = binary.BigEndian
-		}
-		units := make([]uint16, 0, len(data)/2)
-		for offset := 0; offset < len(data); offset += 2 {
-			unit := order.Uint16(data[offset : offset+2])
-			if nul && unit == 0 {
-				break
-			}
-			units = append(units, unit)
-		}
-		return starlark.String(string(utf16.Decode(units))), nil
-	default:
-		return nil, fmt.Errorf("text: unsupported encoding %q", encoding)
+	text, err := binaryapi.DecodeText(data, encoding, nul)
+	if err != nil {
+		return nil, fmt.Errorf("text: %w", err)
 	}
+	return starlark.String(text), nil
 }
 
 func binaryDecodeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -387,39 +348,9 @@ func binaryEncodeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.
 	if err := starlark.UnpackArgs("encode", args, kwargs, "value", &value, "encoding?", &encoding, "nul?", &nul); err != nil {
 		return nil, err
 	}
-	var data []byte
-	switch strings.ToLower(strings.ReplaceAll(encoding, "-", "")) {
-	case "utf8":
-		data = []byte(value)
-		if nul {
-			data = append(data, 0)
-		}
-	case "ascii":
-		data = make([]byte, len(value))
-		for index, character := range []byte(value) {
-			if character > 0x7f {
-				return nil, fmt.Errorf("encode: value is not ASCII")
-			}
-			data[index] = character
-		}
-		if nul {
-			data = append(data, 0)
-		}
-	case "utf16le", "utf16be":
-		units := utf16.Encode([]rune(value))
-		if nul {
-			units = append(units, 0)
-		}
-		data = make([]byte, len(units)*2)
-		var order binary.ByteOrder = binary.LittleEndian
-		if strings.Contains(strings.ToLower(encoding), "be") {
-			order = binary.BigEndian
-		}
-		for index, unit := range units {
-			order.PutUint16(data[index*2:], unit)
-		}
-	default:
-		return nil, fmt.Errorf("encode: unsupported encoding %q", encoding)
+	data, err := binaryapi.EncodeText(value, encoding, nul)
+	if err != nil {
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 	return starlark.Bytes(data), nil
 }

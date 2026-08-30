@@ -183,12 +183,406 @@ def _versioned_image_name(name):
     folded = name.lower()
     return any([folded.endswith(extension) for extension in [".cpl", ".dll", ".drv", ".exe", ".ocx", ".scr"]])
 
+def _portable_pe_image(file):
+    view = binary.view(file)
+    if view.size < 0x40 or view.slice(0, 2).bytes() != b"MZ":
+        return False
+    offset = binary.read_u32le(view, 0x3c)
+    return offset <= view.size - 4 and view.slice(offset, 4).bytes() == b"PE\x00\x00"
+
 def _casefold_get(mapping, name):
     folded = name.lower()
     for key, value in mapping.items():
         if key.lower() == folded:
             return value
     return None
+
+def _inf_rows(value):
+    if type(value) != "list":
+        return []
+    return value if value and type(value[0]) == "list" else [value]
+
+def _inf_value(section, name, default = None):
+    if section == None:
+        return default
+    folded = name.lower()
+    for key, value in section.items():
+        if key.lower() == folded:
+            return value
+    return default
+
+def _inf_directives(section, name):
+    value = _inf_value(section, name, [])
+    if type(value) != "list":
+        return []
+    if value and type(value[0]) == "list":
+        output = []
+        for row in value:
+            output.extend(row)
+        return output
+    return value
+
+def _advanced_inf_expand(value, directories, strings):
+    if type(value) == "list":
+        return [_advanced_inf_expand(item, directories, strings) for item in value]
+    if type(value) != "string":
+        return value
+    result = value
+    for unused in range(8):
+        previous = result
+        for name, replacement in strings.items():
+            for token in ["%" + name + "%", "%" + name.lower() + "%", "%" + name.upper() + "%"]:
+                result = result.replace(token, replacement)
+        for identifier, replacement in directories.items():
+            result = result.replace("%" + identifier + "%", replacement)
+        if result == previous:
+            break
+    return result
+
+def _advanced_inf_directories(inf, system_root):
+    directories = {
+        "10": system_root,
+        "11": system_root + r"\SYSTEM",
+        "12": system_root + r"\SYSTEM\IOSUBSYS",
+        "13": system_root + r"\COMMAND",
+        "17": system_root + r"\INF",
+        "18": system_root + r"\HELP",
+        "20": system_root + r"\FONTS",
+        "21": system_root + r"\SYSTEM\VIEWERS",
+        "22": system_root + r"\SYSTEM\VMM32",
+        "23": system_root + r"\SYSTEM\COLOR",
+        # Advanced INF uses DIRID 24 for the drive root.  In particular,
+        # Microsoft's media installers express Program Files as
+        # %24%\Program Files and use DIRID 25 for the Windows directory.
+        "24": "C:",
+        "25": system_root,
+        "26": system_root + r"\COMMAND",
+        "27": system_root + r"\TEMP",
+        "28": system_root,
+        "30": "C:\\",
+        "36": system_root + r"\CURSORS",
+        "28700": r"C:\Program Files",
+        "28701": r"C:\Program Files",
+        "28702": r"C:\Program Files",
+        "28730": r"C:\Program Files\Common Files",
+        "28732": r"C:\Program Files\Common Files",
+        "28740": r"C:\Program Files\Common Files\Microsoft Shared",
+        "28742": r"C:\Program Files\Common Files\Microsoft Shared",
+    }
+    strings = {}
+    for name, value in (inf.section("Strings") or {}).items():
+        rows = _inf_rows(value)
+        if rows and rows[0]:
+            strings[name] = str(rows[0][0])
+    default = inf.section("DefaultInstall")
+    for destination_section in _inf_directives(default, "CustomDestination"):
+        custom = inf.section(destination_section)
+        if custom == None:
+            continue
+        pending = []
+        for identifiers, resolver in custom.items():
+            pending.append((identifiers.split(","), resolver[0] if resolver else ""))
+        for unused in range(len(pending) + 2):
+            progressed = False
+            remaining = []
+            for identifiers, resolver_name in pending:
+                resolver = inf.section(resolver_name)
+                rows = [] if resolver == None else [row for value in resolver.values() for row in _inf_rows(value)]
+                fallback = rows[0][4] if rows and len(rows[0]) > 4 else None
+                if fallback == None:
+                    remaining.append((identifiers, resolver_name))
+                    continue
+                resolved = _advanced_inf_expand(fallback, directories, strings)
+                if "%" in resolved:
+                    remaining.append((identifiers, resolver_name))
+                    continue
+                for identifier in identifiers:
+                    directories[identifier.strip()] = resolved.rstrip("\\")
+                progressed = True
+            pending = remaining
+            if not pending or not progressed:
+                break
+    return directories, strings
+
+def _advanced_inf_member(package, name):
+    normalized = name.replace("\\", "/").split("/")[-1].lower()
+    for path in package.files:
+        if path.replace("\\", "/").split("/")[-1].lower() == normalized:
+            return package.find(path)
+    return None
+
+def _advanced_inf_destination(inf, section_name, directories, strings):
+    destinations = inf.section("DestinationDirs")
+    row = _inf_value(destinations, section_name)
+    if row == None:
+        row = _inf_value(destinations, "DefaultDestDir", ["11"])
+    rows = _inf_rows(row)
+    fields = rows[0] if rows else ["11"]
+    root = directories.get(str(fields[0]), directories["11"])
+    if len(fields) > 1 and fields[1]:
+        root += "\\" + _advanced_inf_expand(fields[1], directories, strings).strip("\\")
+    return root.rstrip("\\")
+
+def _advanced_inf_registry_modification(patch, directories, strings, delete = False):
+    hive = patch["hive"]
+    key = patch["key"].replace("\\", "/").strip("/")
+    if hive == "SOFTWARE":
+        root = "HKEY_LOCAL_MACHINE"
+        key = "SOFTWARE" + ("\\" + key.replace("/", "\\") if key else "")
+    elif hive == "SYSTEM":
+        root = "HKEY_LOCAL_MACHINE"
+        key = "SYSTEM" + ("\\" + key.replace("/", "\\") if key else "")
+    elif hive == "DEFAULT":
+        root = "HKEY_CURRENT_USER"
+        key = key.replace("/", "\\")
+    else:
+        return None
+    modification = {
+        "operation": "registry_delete_value" if delete else "registry_set_value",
+        "root": root,
+        "key": key,
+        "name": patch["name"],
+    }
+    if not delete:
+        modification["type"] = patch["type"]
+        modification["value"] = _advanced_inf_expand(patch["value"], directories, strings)
+    return modification
+
+def _advanced_inf_registry_patch(modification):
+    """Converts one public image modification into self-registration state."""
+    operation = modification.get("operation", "")
+    if operation not in ["registry_set_value", "registry_delete_value"]:
+        return None
+    root = modification.get("root", "").upper()
+    key = modification.get("key", "").replace("/", "\\").strip("\\")
+    if root == "HKEY_LOCAL_MACHINE" and key.upper().startswith("SOFTWARE"):
+        hive = "SOFTWARE"
+        key = key[8:].strip("\\")
+    elif root == "HKEY_LOCAL_MACHINE" and key.upper().startswith("SYSTEM"):
+        hive = "SYSTEM"
+        key = key[6:].strip("\\")
+    elif root == "HKEY_CURRENT_USER":
+        hive = "DEFAULT"
+    else:
+        return None
+    patch = {
+        "hive": hive,
+        "key": "/" + key.replace("\\", "/") if key else "/",
+        "name": modification.get("name", "(default)"),
+        "type": modification.get("type", "REG_SZ"),
+        "value": modification.get("value", ""),
+    }
+    if operation == "registry_delete_value":
+        patch["delete"] = True
+    return patch
+
+def _advanced_inf_registry_state(modifications):
+    return [
+        patch
+        for patch in [_advanced_inf_registry_patch(item) for item in modifications]
+        if patch != None
+    ]
+
+def _advanced_inf_command(section, directories, strings):
+    """Returns command lines from one Advanced INF command section."""
+    if section == None:
+        return []
+    commands = []
+    for value in section.values():
+        for row in _inf_rows(value):
+            if row:
+                commands.append(_advanced_inf_expand(",".join([str(field) for field in row]), directories, strings))
+    return commands
+
+def _advanced_inf_command_target(command, installed_files):
+    """Resolves a command's executable against the package-installed files."""
+    value = command.strip()
+    if not value:
+        return None
+    if value.startswith('"'):
+        end = value.find('"', 1)
+        if end < 0:
+            return None
+        requested = value[1:end]
+    else:
+        requested = value.split(" ", 1)[0]
+    requested = requested.replace("/", "\\")
+    requested_name = _base(requested).lower()
+    requested_path = requested.lower()
+    candidates = []
+    for path, source in installed_files.items():
+        if _base(path).lower() != requested_name:
+            continue
+        if "\\" in requested and path.lower() != requested_path:
+            continue
+        if _portable_pe_image(source):
+            candidates.append((path, source))
+    if len(candidates) > 1:
+        fail("Advanced INF command target is ambiguous: " + command)
+    return candidates[0] if candidates else None
+
+def _advanced_inf_run_commands(commands, modifications, installed_files, version):
+    """Derives durable effects from package-owned Advanced INF helpers."""
+    for command in commands:
+        target = _advanced_inf_command_target(command, installed_files)
+        # System-owned launchers (for example rundll32.exe) are outside this
+        # package's construction graph. Their declarative INF targets are
+        # already traversed directly by the planner.
+        if target == None:
+            continue
+        path, source = target
+        effects = registration_patches(
+            source,
+            path,
+            execute = True,
+            executable = True,
+            command_line = command,
+            files = installed_files,
+            registry_values = _advanced_inf_registry_state(modifications),
+            version = version,
+            instruction_limit = 3000000,
+        )
+        executions = effects["executions"]
+        if not executions:
+            fail("Advanced INF command did not execute: " + command)
+        result = executions[-1]["result"]
+        if result.reason not in ["return", "process-exit"] or result.value != 0:
+            fail("Advanced INF command failed (%s, %s): %s" % (result.reason, result.detail, command))
+        for patch in effects["patches"]:
+            modification = _advanced_inf_registry_modification(
+                patch,
+                {},
+                {},
+                delete = patch.get("delete", False),
+            )
+            if modification != None:
+                modifications.append(modification)
+        for generated_path, generated_source in effects["generated_files"].items():
+            installed_files[generated_path] = generated_source
+            modifications.append({
+                "operation": "write_file",
+                "path": generated_path,
+                "source": generated_source,
+                "replace": "always",
+            })
+
+def _advanced_inf_installer(package, system_root, version):
+    modifications = []
+    installed = {}
+    installed_names = {}
+    installed_files = {}
+    registrations = {}
+    pre_commands = []
+    post_commands = []
+    target = None
+    for inf_path in sorted([path for path in package.files if path.lower().endswith(".inf")]):
+        member = package.find(inf_path)
+        inf = windows.inf(member)
+        if inf.section("DefaultInstall") == None:
+            continue
+        directories, strings = _advanced_inf_directories(inf, system_root)
+        if target == None and "49300" in directories:
+            target = directories["49300"]
+        for install in inf.install_sections("DefaultInstall"):
+            section = install.section
+            for directive, output in [("RunPreSetupCommands", pre_commands), ("RunPostSetupCommands", post_commands)]:
+                for command_section in _inf_directives(section, directive):
+                    output.extend(_advanced_inf_command(inf.section(command_section), directories, strings))
+            for copy_name in _inf_directives(section, "CopyFiles"):
+                destination = _advanced_inf_destination(inf, "DefaultDestDir" if copy_name.startswith("@") else copy_name, directories, strings)
+                if copy_name.startswith("@"):
+                    rows = [[copy_name[1:]]]
+                else:
+                    copy_section = inf.section(copy_name)
+                    rows = [] if copy_section == None else [row for value in copy_section.values() for row in _inf_rows(value)]
+                for row in rows:
+                    if not row:
+                        continue
+                    output_name = row[0]
+                    source_name = row[1] if len(row) > 1 and row[1] else output_name
+                    source = _advanced_inf_member(package, source_name)
+                    if source == None:
+                        continue
+                    path = destination + "\\" + output_name
+                    identity = path.lower()
+                    if identity in installed:
+                        continue
+                    installed[identity] = True
+                    installed_files[path] = source
+                    installed_names[_base(path).lower()] = True
+                    modifications.append({
+                        "operation": "write_file",
+                        "path": path,
+                        "source": source,
+                        "replace": "if_newer" if _versioned_image_name(path) and _portable_pe_image(source) else "always",
+                    })
+            for directive, delete in [("AddReg", False), ("DelReg", True)]:
+                for registry_section in _inf_directives(section, directive):
+                    for patch in inf.section_patches(registry_section):
+                        modification = _advanced_inf_registry_modification(patch, directories, strings, delete = delete)
+                        if modification != None:
+                            modifications.append(modification)
+            for registration_section in _inf_directives(section, "RegisterOCXs"):
+                registration = inf.section(registration_section)
+                if registration == None:
+                    continue
+                for value in registration.values():
+                    for row in _inf_rows(value):
+                        if not row:
+                            continue
+                        path = _advanced_inf_expand(row[0], directories, strings)
+                        registrations[path.lower()] = path
+    _advanced_inf_run_commands(pre_commands, modifications, installed_files, version)
+    # RegisterOCXs is declarative installer metadata, not a request to run a
+    # guest helper.  Derive each module's registry effects directly from its
+    # resources and, where necessary, the bounded in-memory x86 emulator.
+    for identity, path in sorted(registrations.items()):
+        source = None
+        for installed_path, installed_source in installed_files.items():
+            if installed_path.lower() == identity:
+                source = installed_source
+                break
+        if source == None:
+            fail("Advanced INF registration target was not installed: " + path)
+        if not _portable_pe_image(source):
+            fail("Advanced INF registration target is not a PE image: " + path)
+        effects = registration_patches(
+            source,
+            path,
+            execute = True,
+            execute_with_static = True,
+            files = installed_files,
+            registry_values = _advanced_inf_registry_state(modifications),
+            version = version,
+            instruction_limit = 500000,
+        )
+        for patch in effects["patches"]:
+            modification = _advanced_inf_registry_modification(
+                patch,
+                {},
+                {},
+                delete = patch.get("delete", False),
+            )
+            if modification != None:
+                modifications.append(modification)
+    _advanced_inf_run_commands(post_commands, modifications, installed_files, version)
+    if target == None:
+        target = r"C:\Program Files"
+    requirements = {}
+    for modification in modifications:
+        if modification["operation"] != "write_file" or not _versioned_image_name(modification["path"]) or not _portable_pe_image(modification["source"]):
+            continue
+        for imported in windows.pe(modification["source"]).imports:
+            name = imported["dll"].lower()
+            if name not in installed_names:
+                requirements[name] = True
+    return {
+        "format": package.format,
+        "target": target,
+        "modifications": modifications,
+        "requirements": sorted(requirements.keys()),
+        "clock": None,
+    }
 
 def _profile_value(profiles, filename, section, key):
     profile = _casefold_get(profiles, filename)
@@ -559,7 +953,7 @@ def _nested_installer_locations(nested, inherited, target):
                 locations[name] = data_dir + "\\" + leaf
     return locations
 
-def _nested_installers(package, plan, resolved_locations, target, system_root, system_time):
+def _nested_installers(package, plan, resolved_locations, target, system_root, system_time, version):
     script = package.installscript
     references = {_base(value).lower(): True for value in script.strings} if script != None else {}
     output = []
@@ -581,16 +975,21 @@ def _nested_installers(package, plan, resolved_locations, target, system_root, s
             system_root = system_root,
             system_time = system_time,
             nested_installers = False,
+            version = version,
         ))
     return output
 
-def installer(source, target = None, components = None, locations = {}, variables = {}, system_root = r"C:\WINDOWS", additional_files = [], directories = [], registry_values = [], custom_actions = [], system_time = None, nested_installers = True):
+def installer(source, target = None, components = None, locations = {}, variables = {}, system_root = r"C:\WINDOWS", additional_files = [], directories = [], registry_values = [], custom_actions = [], system_time = None, nested_installers = True, version = {}):
     """Returns declarative modifications and requirements for one installer.
 
     The result contains no host paths or staged files. Package members remain
     trex files and can be applied directly while an image is assembled.
     """
     package = source if type(source) == "installer" else archive.installer(source)
+    if package.format == "embedded_cab":
+        if target != None or components != None or locations or variables or additional_files or directories or registry_values or custom_actions:
+            fail("Advanced INF bundles derive their installation plan from package metadata")
+        return _advanced_inf_installer(package, system_root, version)
     selected = _default_components(package) if components == None else components
     resolved_variables = _shortcut_variables(package, variables)
     resolved_locations = {
@@ -649,7 +1048,7 @@ def installer(source, target = None, components = None, locations = {}, variable
             _expanded_custom_action(action, resolved_locations)
             for action in custom_actions
         ] + ieval_actions
-    effects = analyze(package, plan)
+    effects = analyze(package, plan, version = version)
     if effects["drivers"]:
         fail("installer modification plan contains unsupported drivers: " + repr(effects["drivers"]))
     if len(effects["custom_executions"]) != len(effects["custom_actions"]):
@@ -722,7 +1121,7 @@ def installer(source, target = None, components = None, locations = {}, variable
             "source": shortcut_file,
         })
 
-    nested_results = _nested_installers(package, plan, resolved_locations, target, system_root, system_time) if nested_installers else []
+    nested_results = _nested_installers(package, plan, resolved_locations, target, system_root, system_time, version) if nested_installers else []
     for result in nested_results:
         modifications.extend(result["modifications"])
 
