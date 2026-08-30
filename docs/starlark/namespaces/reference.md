@@ -1128,6 +1128,10 @@ Models deterministic allocation, strings, paths, files, and OS facts.
     `system_time` is a portable Unix timestamp used by the Windows wall-clock
     APIs. Its default preserves the historic deterministic 2000-01-01 value.
 
+### `lz32_plugin`
+
+Models the memory-backed LZ file-handle APIs used by setup helpers.
+
 ### `msvcrt_plugin`
 
 Models CRT memory, strings, locale data, and guest-backed streams.
@@ -1198,7 +1202,7 @@ Models opaque Winsock handle-context tables used by ws2_32.
 
 ### `winsock_plugin`
 
-Models stable Winsock byte-order conversion entry points.
+Models stable Winsock 1.1 ordinals shared by wsock32 and ws2_32.
 
 ## `windows/symbols.star`
 

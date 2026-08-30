@@ -87,6 +87,8 @@ type Script struct {
 	prototypes []installScriptPrototype
 	blocks     []installScriptBlock
 	globalDecl installScriptDeclarations
+	format     string
+	legacy     *legacyInstallScript
 }
 
 type installScriptReader struct {
@@ -161,7 +163,7 @@ func Open(file File) (*Script, error) {
 		return nil, fmt.Errorf("installscript: read: %w", err)
 	}
 	if binary.LittleEndian.Uint32(data[:4]) != installScriptSignature {
-		return nil, fmt.Errorf("installscript: unsupported signature")
+		return openLegacyInstallScript(file, data)
 	}
 	variablesOffset := binary.LittleEndian.Uint32(data[104:108])
 	prototypesOffset := binary.LittleEndian.Uint32(data[108:112])
@@ -187,7 +189,7 @@ func Open(file File) (*Script, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Script{file: file, data: data, prototypes: prototypes, blocks: blocks, globalDecl: globalDecl}, nil
+	return &Script{file: file, data: data, prototypes: prototypes, blocks: blocks, globalDecl: globalDecl, format: "aluz"}, nil
 }
 
 func skipInstallScriptTypes(data []byte, offset uint64) error {
@@ -487,8 +489,9 @@ func (s *Script) Type() string          { return "installscript" }
 func (s *Script) Freeze()               {}
 func (s *Script) Truth() starlark.Bool  { return starlark.True }
 func (s *Script) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: %s", s.Type()) }
+func (s *Script) Format() string        { return s.format }
 func (s *Script) AttrNames() []string {
-	return []string{"blocks", "callbacks", "calls", "effects", "evaluate", "find_function", "functions", "strings"}
+	return []string{"blocks", "callbacks", "calls", "effects", "evaluate", "find_function", "format", "functions", "instructions", "predefined_variables", "source", "strings"}
 }
 func (s *Script) Attr(name string) (starlark.Value, error) {
 	switch name {
@@ -506,6 +509,23 @@ func (s *Script) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("installscript.evaluate", s.evaluateBuiltin), nil
 	case "find_function":
 		return starlark.NewBuiltin("installscript.find_function", s.findFunctionBuiltin), nil
+	case "format":
+		return starlark.String(s.format), nil
+	case "instructions":
+		if s.legacy != nil {
+			return s.legacy.instructionsValue(), nil
+		}
+		return starlark.NewList(nil), nil
+	case "predefined_variables":
+		values := starlark.NewDict(len(s.PredefinedVariables()))
+		for name, address := range s.PredefinedVariables() {
+			if err := values.SetKey(starlark.String(name), starlark.MakeInt(address)); err != nil {
+				return nil, err
+			}
+		}
+		return values, nil
+	case "source":
+		return s.file, nil
 	case "strings":
 		return s.stringsValue(), nil
 	}
@@ -702,6 +722,13 @@ func installScriptArgumentValue(argument installScriptArgument) *starlark.Dict {
 }
 
 func (s *Script) stringsValue() *starlark.List {
+	if s.legacy != nil {
+		result := make([]starlark.Value, len(s.legacy.strings))
+		for index, value := range s.legacy.strings {
+			result[index] = starlark.String(value)
+		}
+		return starlark.NewList(result)
+	}
 	seen := make(map[string]bool)
 	values := make([]string, 0)
 	for _, block := range s.blocks {

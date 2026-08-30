@@ -64,6 +64,9 @@ type installScriptFunctionResult struct {
 }
 
 func (s *Script) evaluateBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if s.legacy != nil {
+		return s.evaluateLegacyInstallScript(args, kwargs)
+	}
 	entry := "application"
 	maximumSteps, maximumDepth := 200000, 64
 	stringsValue, numbersValue, profilesValue := starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None)

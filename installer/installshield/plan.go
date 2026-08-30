@@ -114,8 +114,19 @@ func (i *Installer) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 	}
 	if script != nil {
 		scriptValue = script
-		seedStrings := starlark.NewDict(3)
-		for address, token := range map[int]string{8: "<TARGETDIR>", 9: "<SUPPORTDIR>", 30: "<PROGRAMFILES>"} {
+		seedAddresses := map[int]string{8: "<TARGETDIR>", 9: "<SUPPORTDIR>", 30: "<PROGRAMFILES>"}
+		for name, address := range script.PredefinedVariables() {
+			if token, found := map[string]string{"TARGETDIR": "<TARGETDIR>", "SUPPORTDIR": "<SUPPORTDIR>", "PROGRAMFILES": "<PROGRAMFILES>"}[name]; found {
+				seedAddresses[address] = token
+			}
+		}
+		// InstallShield 5's AppData folder resolver stores its result in this
+		// standard shared string slot before composing per-user paths.
+		if script.Format() == "legacy-ins" {
+			seedAddresses[34] = "<APPDATA>"
+		}
+		seedStrings := starlark.NewDict(len(seedAddresses))
+		for address, token := range seedAddresses {
 			value := token
 			if resolved, found := locations[strings.ToLower(token)]; found {
 				value = resolved
@@ -340,11 +351,14 @@ func installPlanCustomActions(value starlark.Value) *starlark.List {
 	if !ok {
 		return starlark.NewList(nil)
 	}
-	standard := map[string]bool{"isrt": true, "kernel": true, "kernel32": true, "user": true, "user32": true, "gdi32": true, "advapi32": true, "shell32": true, "ole32": true, "oleaut32": true, "sfc": true, "ismif32": true}
+	standard := map[string]bool{"isrt": true, "kernel": true, "kernel32": true, "user": true, "user32": true, "gdi": true, "gdi32": true, "advapi32": true, "shell32": true, "ole32": true, "oleaut32": true, "sfc": true, "ismif32": true}
 	output := make([]starlark.Value, 0)
 	for index := 0; index < list.Len(); index++ {
 		entry, ok := list.Index(index).(*starlark.Dict)
 		if !ok {
+			continue
+		}
+		if safe, found, _ := entry.Get(starlark.String("construction_safe")); found && safe == starlark.False {
 			continue
 		}
 		dllValue, found, _ := entry.Get(starlark.String("dll"))

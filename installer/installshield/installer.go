@@ -411,18 +411,20 @@ func (i *Installer) Attr(name string) (starlark.Value, error) {
 
 func (i *Installer) installScript() (*installscript.Script, error) {
 	if len(i.packages) != 0 && i.packages[0].script != nil {
-		if strings.HasSuffix(strings.ToLower(i.packages[0].scriptPath), ".inx") {
+		extension := strings.ToLower(path.Ext(i.packages[0].scriptPath))
+		if extension == ".inx" || extension == ".ins" {
 			return installscript.Open(i.packages[0].script)
 		}
 		return nil, nil
 	}
 	for _, member := range i.container.Files() {
-		if !strings.EqualFold(path.Base(member.Name), "setup.inx") {
+		base := path.Base(member.Name)
+		if !strings.EqualFold(base, "setup.inx") && !strings.EqualFold(base, "setup.ins") {
 			continue
 		}
 		value, err := i.container.Lookup(member.Name)
 		if err != nil {
-			return nil, fmt.Errorf("installer: setup.inx: %w", err)
+			return nil, fmt.Errorf("installer: %s: %w", base, err)
 		}
 		return installscript.Open(value)
 	}

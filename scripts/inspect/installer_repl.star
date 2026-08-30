@@ -1,6 +1,8 @@
 """Opens an installer from an ISO 9660 image in the scoped REPL."""
 
 load("@stdlib//windows:installer.star", "analyze", installation = "installer")
+load("@stdlib//windows/emulation:runner.star", emulate = "run")
+load("@stdlib//windows/selfreg:facts.star", windows_class_ids = "class_ids")
 
 def main(args):
     if len(args) != 2:
@@ -16,7 +18,9 @@ def main(args):
     # Bind the imported helper in main's scope so the scoped REPL can use it.
     analyze_installer = analyze
     installer_modifications = installation
+    run_executable = emulate
+    class_ids = windows_class_ids
 
-    print("disc, source, installer, payload, script, analyze_installer, and installer_modifications are available")
+    print("disc, source, installer, payload, script, analyze_installer, installer_modifications, run_executable, and class_ids are available")
     print("format=%s files=%d" % (installer.format, len(installer.files)))
     repl()
