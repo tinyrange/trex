@@ -1094,7 +1094,7 @@ Models COM registration APIs as explicit registry writes.
 
 ### `common_controls_plugin`
 
-Models registration-time COMCTL32 strings and abstract image lists.
+Models registration-time COMCTL32 controls and headless property sheets.
 
 ### `environment_plugin`
 

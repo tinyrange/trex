@@ -16,6 +16,11 @@ import (
 
 const DefaultValueLimit = int64(512 << 20)
 
+var windows1252Extension = [...]rune{
+	'€', '\u0081', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u008d', 'Ž', '\u008f',
+	'\u0090', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u009d', 'ž', 'Ÿ',
+}
+
 func BytesForValue(value starlark.Value) ([]byte, error) {
 	return starfile.BytesForValue(value, DefaultValueLimit)
 }
@@ -141,6 +146,21 @@ func DecodeText(data []byte, encoding string, nul bool) (string, error) {
 			}
 		}
 		return string(data), nil
+	case "windows1252", "cp1252":
+		if nul {
+			if end := bytespkg.IndexByte(data, 0); end >= 0 {
+				data = data[:end]
+			}
+		}
+		decoded := make([]rune, len(data))
+		for index, value := range data {
+			if value >= 0x80 && value <= 0x9f {
+				decoded[index] = windows1252Extension[value-0x80]
+			} else {
+				decoded[index] = rune(value)
+			}
+		}
+		return string(decoded), nil
 	case "utf8":
 		if nul {
 			if end := bytespkg.IndexByte(data, 0); end >= 0 {
@@ -171,4 +191,59 @@ func DecodeText(data []byte, encoding string, nul bool) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported encoding %q", encoding)
 	}
+}
+
+func EncodeText(value, encoding string, nul bool) ([]byte, error) {
+	var data []byte
+	switch strings.ToLower(strings.ReplaceAll(encoding, "-", "")) {
+	case "utf8":
+		data = []byte(value)
+	case "ascii":
+		data = make([]byte, 0, len(value))
+		for _, character := range value {
+			if character > 0x7f {
+				return nil, fmt.Errorf("value is not ASCII")
+			}
+			data = append(data, byte(character))
+		}
+	case "windows1252", "cp1252":
+		data = make([]byte, 0, len(value))
+		for _, character := range value {
+			if character <= 0x7f || character >= 0xa0 && character <= 0xff {
+				data = append(data, byte(character))
+				continue
+			}
+			encoded := -1
+			for index, candidate := range windows1252Extension {
+				if candidate == character {
+					encoded = 0x80 + index
+					break
+				}
+			}
+			if encoded < 0 {
+				return nil, fmt.Errorf("character %U is not representable in Windows-1252", character)
+			}
+			data = append(data, byte(encoded))
+		}
+	case "utf16le", "utf16be":
+		units := utf16.Encode([]rune(value))
+		if nul {
+			units = append(units, 0)
+		}
+		data = make([]byte, len(units)*2)
+		var order encodingbinary.ByteOrder = encodingbinary.LittleEndian
+		if strings.Contains(strings.ToLower(encoding), "be") {
+			order = encodingbinary.BigEndian
+		}
+		for index, unit := range units {
+			order.PutUint16(data[index*2:], unit)
+		}
+		return data, nil
+	default:
+		return nil, fmt.Errorf("unsupported encoding %q", encoding)
+	}
+	if nul {
+		data = append(data, 0)
+	}
+	return data, nil
 }

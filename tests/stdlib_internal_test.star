@@ -347,6 +347,75 @@ def test_automation_type_library_resource_paths():
     equal(resolve("C:\\WINDOWS\\system32\\vbscript.dll\\TYPELIB", libraries), None)
     equal(resolve("C:\\WINDOWS\\system32\\missing.dll\\2", libraries), None)
 
+def test_advanced_inf_command_and_registry_adapters():
+    module = testing.module("@stdlib//windows:installer.star")
+    equal(module["_advanced_inf_unquote"]("'%24%\\Program Files'"), r"%24%\Program Files")
+    equal(module["_advanced_inf_unquote"]('"quoted"'), "quoted")
+    equal(module["_advanced_inf_unquote"]("developer's tools"), "developer's tools")
+    equal(module["_advanced_inf_unquote"]("'unbalanced"), "'unbalanced")
+    equal(module["_advanced_inf_csv"]('"Microsoft Chat", "C:\\Program Files\\Microsoft Chat\\CChat.exe"'), [
+        "Microsoft Chat",
+        r"C:\Program Files\Microsoft Chat\CChat.exe",
+    ])
+    per_user = module["_advanced_inf_per_user_modifications"]({
+        "DisplayName": ["Microsoft Chat 2.5"],
+        "ComponentID": ["comicchat"],
+        "GUID": ["{44BBA844-CC51-11CF-AAFA-00AA00B6015C}"],
+        "Version": ["4", "71", "2302", "0"],
+        "Locale": ["EN"],
+        "IsInstalled": ["1"],
+        "StubPath": ["rundll32.exe advpack.dll", "LaunchINFSection %17%\\CChat25.inf", "PerUserAdd"],
+    }, {"17": r"C:\WINDOWS\INF"}, {})
+    equal(len(per_user), 6)
+    per_user_values = {item["name"]: item["value"] for item in per_user}
+    equal(per_user_values["(default)"], "Microsoft Chat 2.5")
+    equal(per_user_values["Version"], "4,71,2302,0")
+    equal(per_user_values["StubPath"], r"rundll32.exe advpack.dll,LaunchINFSection C:\WINDOWS\INF\CChat25.inf,PerUserAdd")
+    equal(per_user_values["IsInstalled"], 1)
+    links = windows.inf(r'''[Links]
+setup.ini,progman.groups,,"group=Accessories"
+setup.ini,group,,"""Old Link"""
+setup.ini,group,,"""New Link"", ""C:\Program Files\Thing\thing.exe""
+''')
+    link_modifications = module["_advanced_inf_update_inis"](
+        links,
+        ["Links"],
+        {},
+        {},
+        {},
+        r"C:\WINDOWS",
+    )
+    equal([(item["operation"], item["path"]) for item in link_modifications], [
+        ("delete_file", r"C:\WINDOWS\Start Menu\Programs\Accessories\Old Link.lnk"),
+        ("write_file", r"C:\WINDOWS\Start Menu\Programs\Accessories\New Link.lnk"),
+    ])
+    section = windows.inf(r'''[Commands]
+one="%17%\helper.exe",/RegServer
+''').section("Commands")
+    equal(module["_advanced_inf_command"](section, {"17": r"C:\WINDOWS\INF"}, {}), [r"C:\WINDOWS\INF\helper.exe,/RegServer"])
+    image_builder = binary.builder(capacity = 68)
+    image_builder.append(b"MZ")
+    image_builder.reserve(58)
+    image_builder.u32le(64)
+    image_builder.append(b"PE\x00\x00")
+    image = image_builder.bytes()
+    files = {r"C:\WINDOWS\INF\helper.exe": image}
+    target = module["_advanced_inf_command_target"](r'"C:\WINDOWS\INF\helper.exe" /RegServer', files)
+    equal(target[0], r"C:\WINDOWS\INF\helper.exe")
+    equal(target[1], image)
+    equal(module["_advanced_inf_command_target"]("rundll32.exe setup.dll,Install", files), None)
+    modification = {
+        "operation": "registry_set_value",
+        "root": "HKEY_LOCAL_MACHINE",
+        "key": r"SOFTWARE\Example",
+        "name": "Value",
+        "type": "REG_SZ",
+        "value": "data",
+    }
+    patch = module["_advanced_inf_registry_patch"](modification)
+    equal(patch, {"hive": "SOFTWARE", "key": "/Example", "name": "Value", "type": "REG_SZ", "value": "data"})
+    equal(module["_advanced_inf_registry_modification"](patch, {}, {}), modification)
+
 def test_registered_type_library_resolution():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     resolve = module["_registered_type_library"]
@@ -516,6 +585,25 @@ def test_kernel_synchronization_signatures():
     equal(module["_module_windows_directory"]("C:\\WINDOWS\\system\\ie4uinit.exe"), "C:\\WINDOWS")
     equal(module["_OLE_SIGNATURES"]["stringfromclsid"], 2)
     equal(module["_system_power_status"](), b"\x01\x80\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff")
+    equal(module["_dos_short_path"](r"C:\WINDOWS\SYSTEM\logagent.exe"), r"C:\WINDOWS\SYSTEM\logagent.exe")
+    equal(module["_dos_short_path"](r"C:\Program Files\Long Name.dll"), r"C:\PROGRA~1\LONGNA~1.DLL")
+
+def test_crt_eh_prolog_frame():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3", fs_base = 0x7ffde000)
+    machine.use([module["msvcrt_plugin"]()])
+    top = machine.stack.high
+    result = machine.call(
+        machine.resolve_export("msvcrt.dll", name = "_EH_prolog"),
+        registers = {"eax": 0x12345678, "ebp": 0x87654321},
+    )
+    equal(result.reason, "return", result.detail)
+    equal(machine.get_register("ebp"), top - 4)
+    equal(machine.get_register("esp"), top - 16)
+    equal(machine.read_u32le(machine.segment_base("fs")), top - 16)
+    equal(machine.read_u32le(top - 12), 0x12345678)
+    equal(machine.read_u32le(top - 8), 0xffffffff)
+    equal(machine.read_u32le(top - 4), 0x87654321)
 
 def test_kernel_overlapped_file_io_uses_explicit_offsets():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -608,6 +696,35 @@ def test_kernel_file_mappings_observe_file_writes():
     ).value, 1)
     equal(machine.read(view, 10), b"012XY56789")
 
+def test_kernel_legacy_profile_and_file_metadata():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"](r"C:\WINDOWS\SYSTEM\tool.exe", files = {
+        r"C:\sample.bin": b"x",
+        r"C:\WINDOWS\WIN.INI": b"[windows]\r\nrun=wmplayer.exe\r\n",
+    })])
+    section = machine.allocate(value = b"windows\x00")
+    key = machine.allocate(value = b"run\x00")
+    output = machine.allocate(size = 32)
+    read = machine.call(machine.resolve_export("kernel32.dll", name = "GetProfileStringA"), args = [section, key, 0, output, 32])
+    equal((read.value, machine.read_cstring(output)), (12, "wmplayer.exe"))
+    path = machine.allocate(value = b"C:\\sample.bin\x00")
+    handle = machine.call(machine.resolve_export("kernel32.dll", name = "CreateFileA"), args = [path, 0, 0, 0, 3, 0, 0]).value
+    creation = machine.allocate(size = 8)
+    access = machine.allocate(size = 8)
+    written = machine.allocate(size = 8)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetFileTime"), args = [handle, creation, access, written]).value, 1)
+    expected = module["_filetime_ticks"](2000, 1, 1, 0, 0, 0, 0)
+    equal((machine.read_u64le(creation), machine.read_u64le(access), machine.read_u64le(written)), (expected, expected, expected))
+    short = machine.allocate(size = 260)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetShortPathNameA"), args = [path, short, 260]).value, len(r"C:\sample.bin"))
+    equal(machine.read_cstring(short), r"C:\sample.bin")
+    atom_name = machine.allocate(value = b"TinyRangeX\x00")
+    equal(
+        machine.call(machine.resolve_export("kernel32.dll", name = "AddAtomA"), args = [atom_name]).value,
+        machine.call(machine.resolve_export("kernel32.dll", name = "GlobalAddAtomA"), args = [atom_name]).value,
+    )
+
 def test_crt_bounded_string_comparison():
     compare = testing.module("@stdlib//windows/selfreg:win32.star")["_crt_compare_strings"]
     machine = emulator.x86(code = b"\xc3")
@@ -634,6 +751,18 @@ def test_crt_bounded_memory_comparison():
     memchr = machine.resolve_export("msvcrt.dll", name = "memchr")
     equal(machine.call(memchr, args = [left, ord("B"), 4]).value, left + 1)
     equal(machine.call(memchr, args = [left, ord("Q"), 4]).value, 0)
+
+def test_crt_wide_case_conversion():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["msvcrt_plugin"]()])
+    value = machine.allocate(value = binary.encode("MiXeD", encoding = "utf16le", nul = True))
+    lower = machine.resolve_export("msvcrt.dll", name = "_wcslwr")
+    upper = machine.resolve_export("msvcrt.dll", name = "_wcsupr")
+    equal(machine.call(lower, args = [value]).value, value)
+    equal(machine.read_cstring(value, encoding = "utf16le"), "mixed")
+    equal(machine.call(upper, args = [value]).value, value)
+    equal(machine.read_cstring(value, encoding = "utf16le"), "MIXED")
 
 def test_crt_ui64_wide_formatting():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -855,6 +984,24 @@ def test_shell32_special_folder_location_round_trip():
     resolved = machine.call(machine.resolve_export("shell32.dll", name = "SHGetPathFromIDListA"), args = [pidl, path])
     equal((resolved.reason, resolved.value), ("return", 1))
     equal(machine.read_cstring(path), "C:\\WINDOWS\\Application Data")
+    notified = machine.call(machine.resolve_export("shell32.dll", name = "SHChangeNotify"), args = [0x08000000, 0, path, 0])
+    equal(notified.reason, "return")
+
+def test_oleaut_variant_time_by_value_abi():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["oleaut_plugin"]()])
+    encoded = binary.builder(capacity = 8)
+    encoded.f64le(36526.5)  # 2000-01-01 12:00:00
+    words = binary.cursor(encoded.bytes())
+    output = machine.allocate(size = 16)
+    converted = machine.call(
+        machine.resolve_export("oleaut32.dll", name = "VariantTimeToSystemTime"),
+        args = [words.u32le(), words.u32le(), output],
+    )
+    equal((converted.reason, converted.value), ("return", 1))
+    fields = binary.cursor(machine.read(output, 16))
+    equal([fields.u16le() for unused in range(8)], [2000, 1, 6, 1, 12, 0, 0, 0])
 
 def test_winsock_helper_signatures():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -1752,13 +1899,17 @@ TEST_SUITE = suite("stdlib/internal", [
     case("registry_can_emit_folded_key_spelling", test_registry_can_emit_folded_key_spelling),
     case("registry_system_root_routing", test_registry_system_root_routing),
     case("automation_type_library_resource_paths", test_automation_type_library_resource_paths),
+    case("advanced_inf_command_and_registry_adapters", test_advanced_inf_command_and_registry_adapters),
     case("registered_type_library_resolution", test_registered_type_library_resolution),
     case("setupapi_inf_lines", test_setupapi_inf_lines),
     case("kernel_synchronization_signatures", test_kernel_synchronization_signatures),
+    case("crt_eh_prolog_frame", test_crt_eh_prolog_frame),
     case("kernel_overlapped_file_io_uses_explicit_offsets", test_kernel_overlapped_file_io_uses_explicit_offsets),
+    case("kernel_legacy_profile_and_file_metadata", test_kernel_legacy_profile_and_file_metadata),
     case("kernel_file_mappings_observe_file_writes", test_kernel_file_mappings_observe_file_writes),
     case("crt_bounded_string_comparison", test_crt_bounded_string_comparison),
     case("crt_bounded_memory_comparison", test_crt_bounded_memory_comparison),
+    case("crt_wide_case_conversion", test_crt_wide_case_conversion),
     case("crt_ui64_wide_formatting", test_crt_ui64_wide_formatting),
     case("crt_wide_floating_conversion", test_crt_wide_floating_conversion),
     case("crt_scanf_floating_point", test_crt_scanf_floating_point),
@@ -1771,6 +1922,7 @@ TEST_SUITE = suite("stdlib/internal", [
     case("kernel_resolves_rva_delay_imports", test_kernel_resolves_rva_delay_imports),
     case("shlwapi_ansi_to_unicode_ordinal", test_shlwapi_ansi_to_unicode_ordinal),
     case("shell32_special_folder_location_round_trip", test_shell32_special_folder_location_round_trip),
+    case("oleaut_variant_time_by_value_abi", test_oleaut_variant_time_by_value_abi),
     case("winsock_helper_signatures", test_winsock_helper_signatures),
     case("rpc_runtime_signatures", test_rpc_runtime_signatures),
     case("kernel_virtual_file_entries", test_kernel_virtual_file_entries),

@@ -293,6 +293,20 @@ func TestBinaryTextDecoding(t *testing.T) {
 	if _, err := binaryTextBuiltin(nil, nil, starlark.Tuple{starlark.Bytes("\xff"), starlark.String("utf8")}, nil); err == nil {
 		t.Fatal("invalid UTF-8 was accepted")
 	}
+	windowsText, err := binaryTextBuiltin(nil, nil, starlark.Tuple{starlark.Bytes("license \x93terms\x94\x00ignored")}, []starlark.Tuple{
+		{starlark.String("encoding"), starlark.String("windows-1252")},
+		{starlark.String("nul"), starlark.True},
+	})
+	if err != nil || windowsText != starlark.String("license “terms”") {
+		t.Fatalf("Windows-1252 text = %v, %v", windowsText, err)
+	}
+	encoded, err := binaryEncodeBuiltin(nil, nil, starlark.Tuple{starlark.String("license “terms”")}, []starlark.Tuple{
+		{starlark.String("encoding"), starlark.String("windows-1252")},
+		{starlark.String("nul"), starlark.True},
+	})
+	if err != nil || encoded != starlark.Bytes("license \x93terms\x94\x00") {
+		t.Fatalf("Windows-1252 encoding = %v, %v", encoded, err)
+	}
 }
 
 func TestBinaryViewFindIndices(t *testing.T) {

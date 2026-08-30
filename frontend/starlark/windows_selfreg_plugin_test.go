@@ -6,6 +6,7 @@ import (
 	"unicode/utf16"
 
 	binaryapi "github.com/tinyrange/trex/binary"
+	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
 
@@ -311,6 +312,284 @@ func TestKernelLoadLibraryActivatesPreMappedModule(t *testing.T) {
 	}
 	if len(requested) != 1 || requested[0] != "deferred.dll" {
 		t.Fatalf("module-load callbacks = %v, want [deferred.dll]", requested)
+	}
+}
+
+func TestKernelCurrentDirectoryTracksGuestDirectories(t *testing.T) {
+	thread, _, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := thread.Load(thread, "@stdlib//windows/selfreg:win32.star")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin, err := starlark.Call(thread, module["kernel32_plugin"], nil, []starlark.Tuple{
+		{starlark.String("module_path"), starlark.String(`C:\WINDOWS\TEMP\SETUP.EXE`)},
+		{starlark.String("directories"), starlark.NewList([]starlark.Value{starlark.String(`C:\WINDOWS\TEMP`), starlark.String(`C:\PROGRAM FILES`)})},
+		{starlark.String("files"), testStarlarkStringDict(map[string]starlark.Value{`C:\WINDOWS\TEMP\sample.bin`: starlark.Bytes("sample")})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xc3"), nil)
+	if _, err := machine.UseBuiltin(thread, nil, starlark.Tuple{plugin}, nil); err != nil {
+		t.Fatal(err)
+	}
+	allocate := func(data []byte) uint32 {
+		value, err := machine.AllocateBuiltin(nil, nil, nil, []starlark.Tuple{{starlark.String("value"), starlark.Bytes(data)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		address, _ := value.(starlark.Int).Uint64()
+		return uint32(address)
+	}
+	call := func(name string, args ...uint32) uint32 {
+		address := machine.ResolveExport("kernel32.dll", name, 0, 0)
+		value, err := machine.CallAddress(thread, address, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := value.(*starlarkRecord)
+		if got := recordString(t, result, "reason"); got != "return" {
+			t.Fatalf("%s stopped with %s: %s", name, got, recordString(t, result, "detail"))
+		}
+		return recordUint32(t, result, "value")
+	}
+
+	buffer := allocate(make([]byte, 260))
+	if got, want := call("GetCurrentDirectoryA", 260, buffer), uint32(len(`C:\WINDOWS\TEMP`)); got != want {
+		t.Fatalf("GetCurrentDirectoryA = %d, want %d", got, want)
+	}
+	stored, err := machine.ReadMemory(buffer, len(`C:\WINDOWS\TEMP`)+1, 'r')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(stored), "C:\\WINDOWS\\TEMP\x00"; got != want {
+		t.Fatalf("current directory = %q, want %q", got, want)
+	}
+	next := allocate([]byte("C:\\PROGRAM FILES\x00"))
+	if got := call("SetCurrentDirectoryA", next); got != 1 {
+		t.Fatalf("SetCurrentDirectoryA = %d, want TRUE", got)
+	}
+	if got, want := call("GetCurrentDirectoryA", 260, buffer), uint32(len(`C:\PROGRAM FILES`)); got != want {
+		t.Fatalf("GetCurrentDirectoryA after set = %d, want %d", got, want)
+	}
+	label := allocate(make([]byte, 32))
+	serial := allocate(make([]byte, 4))
+	maximumComponent := allocate(make([]byte, 4))
+	flags := allocate(make([]byte, 4))
+	filesystem := allocate(make([]byte, 32))
+	if got := call("GetVolumeInformationA", 0, label, 32, serial, maximumComponent, flags, filesystem, 32); got != 1 {
+		t.Fatalf("GetVolumeInformationA(NULL) = %d, want TRUE", got)
+	}
+	path := allocate([]byte("C:\\WINDOWS\\TEMP\\sample.bin\x00"))
+	file := call("_lopen", path, 0)
+	if file == 0xffffffff {
+		t.Fatal("_lopen returned HFILE_ERROR")
+	}
+	if got := call("_llseek", file, 2, 0); got != 2 {
+		t.Fatalf("_llseek = %d, want 2", got)
+	}
+	if got := call("_lclose", file); got != 0 {
+		t.Fatalf("_lclose = %#x, want 0", got)
+	}
+}
+
+func TestShellSHGetMallocReturnsOLEAllocator(t *testing.T) {
+	thread, _, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := thread.Load(thread, "@stdlib//windows/selfreg:win32.star")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ole, err := starlark.Call(thread, module["ole32_plugin"], nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	malloc, err := ole.(starlark.HasAttrs).Attr("state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell, err := starlark.Call(thread, module["shell32_plugin"], nil, []starlark.Tuple{{starlark.String("malloc"), malloc}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xc3"), nil)
+	if _, err := machine.UseBuiltin(thread, nil, starlark.Tuple{starlark.NewList([]starlark.Value{ole, shell})}, nil); err != nil {
+		t.Fatal(err)
+	}
+	outputValue, err := machine.AllocateBuiltin(nil, nil, nil, []starlark.Tuple{{starlark.String("size"), starlark.MakeInt(4)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output64, _ := outputValue.(starlark.Int).Uint64()
+	address := machine.ResolveExport("shell32.dll", "SHGetMalloc", 0, 0)
+	value, err := machine.CallAddress(thread, address, []uint32{uint32(output64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := value.(*starlarkRecord)
+	if got := recordUint32(t, result, "value"); got != 0 {
+		t.Fatalf("SHGetMalloc returned %#x, want S_OK", got)
+	}
+	stored, err := machine.ReadMemory(uint32(output64), 4, 'r')
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocator := uint32(stored[0]) | uint32(stored[1])<<8 | uint32(stored[2])<<16 | uint32(stored[3])<<24
+	if allocator == 0 {
+		t.Fatal("SHGetMalloc returned a null allocator")
+	}
+}
+
+func TestCommonControlsPropertySheetDispatchesWizardPages(t *testing.T) {
+	thread, _, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := thread.Load(thread, "@stdlib//windows/selfreg:win32.star")
+	if err != nil {
+		t.Fatal(err)
+	}
+	common, err := starlark.Call(thread, module["common_controls_plugin"], nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := relocatablePE32TestImage(t, 0x200000)
+	user, err := starlark.Call(thread, module["user32_plugin"], starlark.Tuple{&starfile.Bytes{Name: "user32-test", Data: []byte(image)}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The page procedure returns TRUE for WM_INITDIALOG and each notification.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\x01\x00\x00\x00\xc2\x10\x00"), nil)
+	if _, err := machine.UseBuiltin(thread, nil, starlark.Tuple{starlark.NewList([]starlark.Value{common, user})}, nil); err != nil {
+		t.Fatal(err)
+	}
+	allocateWords := func(words ...uint32) uint32 {
+		data := make([]byte, len(words)*4)
+		for index, word := range words {
+			data[index*4] = byte(word)
+			data[index*4+1] = byte(word >> 8)
+			data[index*4+2] = byte(word >> 16)
+			data[index*4+3] = byte(word >> 24)
+		}
+		value, err := machine.AllocateBuiltin(nil, nil, nil, []starlark.Tuple{{starlark.String("value"), starlark.Bytes(data)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		address, _ := value.(starlark.Int).Uint64()
+		return uint32(address)
+	}
+	entryValue, err := machine.Attr("entry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry64, _ := entryValue.(starlark.Int).Uint64()
+	page := allocateWords(48, 0, 0x1234, 101, 0, 0, uint32(entry64), 0, 0, 0, 0, 0)
+	header := allocateWords(52, 0, 0, 0x1234, 0, 0, 1, 0, page, 0, 0, 0, 0)
+	address := machine.ResolveExport("comctl32.dll", "PropertySheetA", 0, 0)
+	value, err := machine.CallAddress(thread, address, []uint32{header})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := value.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("PropertySheetA stopped with %s: %s", got, recordString(t, result, "detail"))
+	}
+	if got := recordUint32(t, result, "value"); got != 1 {
+		t.Fatalf("PropertySheetA = %#x, want 1", got)
+	}
+}
+
+func TestUserClassModuleAndCRTWCSNCat(t *testing.T) {
+	thread, _, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := thread.Load(thread, "@stdlib//windows/selfreg:win32.star")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := relocatablePE32TestImage(t, 0x200000)
+	user, err := starlark.Call(thread, module["user32_plugin"], starlark.Tuple{&starfile.Bytes{Name: "user32-test", Data: []byte(image)}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crt, err := starlark.Call(thread, module["msvcrt_plugin"], nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\x01\x00\x00\x00\xc2\x10\x00"), nil)
+	if _, err := machine.UseBuiltin(thread, nil, starlark.Tuple{starlark.NewList([]starlark.Value{user, crt})}, nil); err != nil {
+		t.Fatal(err)
+	}
+	allocate := func(data []byte) uint32 {
+		value, err := machine.AllocateBuiltin(nil, nil, nil, []starlark.Tuple{{starlark.String("value"), starlark.Bytes(data)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		address, _ := value.(starlark.Int).Uint64()
+		return uint32(address)
+	}
+	call := func(module, name string, args ...uint32) uint32 {
+		address := machine.ResolveExport(module, name, 0, 0)
+		if address == 0 {
+			t.Fatalf("missing semantic export %s!%s", module, name)
+		}
+		value, err := machine.CallAddress(thread, address, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := value.(*starlarkRecord)
+		if got := recordString(t, result, "reason"); got != "return" {
+			t.Fatalf("%s!%s stopped with %s: %s", module, name, got, recordString(t, result, "detail"))
+		}
+		return recordUint32(t, result, "value")
+	}
+
+	entryValue, err := machine.Attr("entry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry64, _ := entryValue.(starlark.Int).Uint64()
+	className := allocate(append([]byte("WMP Test Window"), 0))
+	windowClass := make([]byte, 48)
+	windowClass[0] = 48
+	windowClass[40] = byte(className)
+	windowClass[41] = byte(className >> 8)
+	windowClass[42] = byte(className >> 16)
+	windowClass[43] = byte(className >> 24)
+	// A non-pointer small icon handle proves RegisterClassExA reads the class
+	// name from offset 40 rather than the trailing hIconSm field at offset 44.
+	windowClass[44] = 2
+	windowClass[45] = 0xd0
+	if got := call("user32.dll", "RegisterClassExA", allocate(windowClass)); got == 0 {
+		t.Fatal("RegisterClassExA returned no class atom")
+	}
+	dialog := call("user32.dll", "CreateDialogParamA", 0x1234, 101, 0, uint32(entry64), 0)
+	child := call("user32.dll", "GetDlgItem", dialog, 1001)
+	if got := call("user32.dll", "GetClassLongA", child, 0xfffffff0); got != 0x1234 {
+		t.Fatalf("GetClassLongA(GCL_HMODULE) = %#x, want %#x", got, uint32(0x1234))
+	}
+	if got := call("user32.dll", "MessageBoxA", 0, 0, 0, 4); got != 6 {
+		t.Fatalf("MessageBoxA(MB_YESNO) = %d, want IDYES", got)
+	}
+	destinationData := make([]byte, 128)
+	copy(destinationData, selfregUTF16Bytes("Media "))
+	destination := allocate(destinationData)
+	source := allocate(append(selfregUTF16Bytes("Player"), 0, 0))
+	if got := call("msvcrt.dll", "wcsncat", destination, source, 3); got != destination {
+		t.Fatalf("wcsncat returned %#x, want destination %#x", got, destination)
+	}
+	stored, err := machine.ReadMemory(destination, len(selfregUTF16Bytes("Media Pla"))+2, 'r')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := append(selfregUTF16Bytes("Media Pla"), 0, 0); !bytes.Equal(stored, want) {
+		t.Fatalf("wcsncat output = %x, want %x", stored, want)
 	}
 }
 

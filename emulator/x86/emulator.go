@@ -4364,6 +4364,12 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		if err := m.setOperand(instruction.Args[0], 4, bits.ReverseBytes32(v)); err != nil {
 			return "", "", err
 		}
+	case x86asm.SAHF:
+		value := m.registerValue(x86asm.AH)
+		m.carry = value&(1<<0) != 0
+		m.parity = value&(1<<2) != 0
+		m.zero = value&(1<<6) != 0
+		m.sign = value&(1<<7) != 0
 	case x86asm.BSF, x86asm.BSR:
 		width := m.operandWidth(instruction.Args[1], instruction.MemBytes)
 		if width != 2 && width != 4 {
@@ -6280,7 +6286,7 @@ func (m *emulatorX86) readCStringBuiltin(_ *starlark.Thread, _ *starlark.Builtin
 	normalized := strings.ToLower(strings.ReplaceAll(encoding, "-", ""))
 	if normalized == "utf16le" || normalized == "utf16be" {
 		width = 2
-	} else if normalized != "ascii" && normalized != "utf8" {
+	} else if normalized != "ascii" && normalized != "utf8" && normalized != "windows1252" && normalized != "cp1252" {
 		return nil, fmt.Errorf("read_cstring: unsupported encoding %q", encoding)
 	}
 	data := make([]byte, 0, min(maximum, 256))
