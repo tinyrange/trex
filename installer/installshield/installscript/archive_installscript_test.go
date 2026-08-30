@@ -183,6 +183,91 @@ func TestLegacyInstallScriptDiscoversVariableHeader(t *testing.T) {
 	}
 }
 
+func TestLegacyInstallScriptCarriesGlobalStateIntoInternalCalls(t *testing.T) {
+	data := make([]byte, 0)
+	data = appendISU16(data, 0x0013)
+	data = append(data, 0x52)
+	data = appendISU16(data, 10)
+	data = append(data, 0x61)
+	data = appendISString(data, `Software\Example`)
+	callOffset := uint32(len(data))
+	data = append(data, 0x22, 0x00, 0x70, 0x02, 0x00, 0x95)
+	calleeOffset := uint32(len(data))
+	data = appendISU16(data, 0x0110)
+	data = append(data, 0x41)
+	data = appendISU32(data, 0x80000002)
+	data = appendISU16(data, 0x0151)
+	data = append(data, 0x62)
+	data = appendISU16(data, 10)
+	data = append(data, 0x61)
+	data = appendISString(data, "Installed")
+	data = append(data, 0x41)
+	data = appendISU32(data, 1)
+	data = append(data, 0x61)
+	data = appendISString(data, "yes")
+	data = append(data, 0x41)
+	data = appendISU32(data, 4)
+
+	blocks := []installScriptBlock{
+		{index: 0, offset: 0, functionID: 1, actions: []installScriptAction{{offset: callOffset, opcode: 33, functionID: 2}}},
+		{index: 1, offset: calleeOffset, functionID: 2},
+	}
+	script := &Script{
+		data: data,
+		prototypes: []installScriptPrototype{
+			{name: "predefined", flags: 4, blockIndex: 0xffff},
+			{name: "application", flags: 2, blockIndex: 0},
+			{name: "helper", flags: 2, blockIndex: 1},
+		},
+		blocks: blocks,
+		legacy: &legacyInstallScript{blocks: blocks},
+	}
+	value, err := script.Evaluate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writesValue, found, err := value.(*starlark.Dict).Get(starlark.String("registry_writes"))
+	if err != nil || !found {
+		t.Fatalf("registry writes: found=%v err=%v", found, err)
+	}
+	writes := writesValue.(*starlark.List)
+	if got, want := writes.Len(), 1; got != want {
+		t.Fatalf("registry writes = %d, want %d", got, want)
+	}
+	write := writes.Index(0).(*starlark.Dict)
+	key, _, _ := write.Get(starlark.String("key"))
+	entryID, _, _ := write.Get(starlark.String("entry_id"))
+	caller, _, _ := write.Get(starlark.String("caller"))
+	if key != starlark.String(`Software\Example`) || entryID != starlark.MakeInt(1) || caller != starlark.String("helper") {
+		t.Fatalf("interprocedural write = %v", write)
+	}
+	definitiveValue, _, _ := value.(*starlark.Dict).Get(starlark.String("definitive_registry_writes"))
+	if definitiveValue.(*starlark.List).Len() != 0 {
+		t.Fatalf("legacy write was applied without decoded control flow: %v", definitiveValue)
+	}
+}
+
+func TestLegacyInstallScriptConflictingWritesAreNotDefinitive(t *testing.T) {
+	write := func(data string) starlark.Value {
+		return starlarkStringDict(map[string]starlark.Value{
+			"operation": starlark.String("set_value"), "root": starlark.String("HKEY_CURRENT_USER"),
+			"key": starlark.String(`Software\Example`), "name": starlark.String("Mode"), "data": starlark.String(data),
+		})
+	}
+	all, definitive := legacyInstallScriptClassifyRegistryWrites([]starlark.Value{write("0"), write("1")})
+	if len(all) != 2 || len(definitive) != 0 {
+		t.Fatalf("classified writes: all=%d definitive=%d", len(all), len(definitive))
+	}
+	for _, value := range all {
+		entry := value.(*starlark.Dict)
+		conditional, _, _ := entry.Get(starlark.String("conditional"))
+		proved, _, _ := entry.Get(starlark.String("definitive"))
+		if conditional != starlark.True || proved != starlark.False {
+			t.Fatalf("conflicting write = %v", entry)
+		}
+	}
+}
+
 func TestInstallScriptParsesFunctionsAndCalls(t *testing.T) {
 	script, err := Open(&starfile.Bytes{Name: "setup.inx", Data: installScriptFixture()})
 	if err != nil {

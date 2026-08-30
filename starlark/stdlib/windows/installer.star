@@ -65,6 +65,15 @@ def _custom_preparable(action):
             return False
     return True
 
+def _installed_artifact_module(plan_files, source, fallback):
+    matches = {}
+    for entry in plan_files:
+        if entry.get("resolved", False) and entry.get("source", "").lower() == source.lower():
+            matches[entry["destination"].lower()] = entry["destination"]
+    if len(matches) == 1:
+        return matches.values()[0]
+    return fallback
+
 def analyze(installer, plan = None, execute_registration = True, environment = {}, version = {}, instruction_limit = 250000, memory_limit = 32 << 20):
     """Analyzes script, driver, custom-DLL, and self-registration effects.
 
@@ -94,7 +103,7 @@ def analyze(installer, plan = None, execute_registration = True, environment = {
         source = installer.find(artifact["source"])
         if source == None or source.size == 0:
             continue
-        module = artifact["name"]
+        module = _installed_artifact_module(plan["files"], artifact["source"], artifact["name"])
         result = registration_patches(
             source,
             module,
@@ -218,6 +227,24 @@ def _shortcut_variables(package, variables):
         resolved[symbol] = fallback
     return resolved
 
+def _installshield5_uninstall_locations(entries, locations, system_root):
+    candidates = {}
+    for entry in entries:
+        if entry.get("name", "").lower() != "uninst.dll":
+            continue
+        for component in entry.get("components", []):
+            destination = _casefold_get(locations, component)
+            if destination != None:
+                candidates[destination.lower()] = destination
+    if len(candidates) > 1:
+        fail("installer has ambiguous InstallShield 5 uninstall locations: " + repr(sorted(candidates.values())))
+    for destination in candidates.values():
+        return {
+            "<UNINST>": system_root + r"\IsUninst.exe",
+            "<UninstPath>": destination,
+        }
+    return {}
+
 def _expand_location(value, locations):
     result = value
     for token, replacement in locations.items():
@@ -254,7 +281,39 @@ def _default_target(package, selected, locations, variables):
         return locations["<PROGRAMFILES>"] + "\\" + _safe_filename(app_name)
     fail("installer does not declare a default install location; pass target= explicitly")
 
-def _installshield5_component_locations(components, target, system_directory):
+def _installshield5_media_component_locations(entries, media_files, target):
+    media_by_identity = {}
+    for item in media_files:
+        identity = _base(item["path"]).lower() + "\x00" + str(item["size"])
+        media_by_identity.setdefault(identity, []).append(item["path"])
+
+    candidates = {}
+    names = {}
+    for entry in entries:
+        identity = entry.get("name", "").lower() + "\x00" + str(entry.get("size", -1))
+        paths = media_by_identity.get(identity, [])
+        if len(paths) != 1:
+            continue
+        media_directory = paths[0].replace("\\", "/").rsplit("/", 1)[0]
+        entry_directory = entry.get("directory", "").replace("\\", "/").strip("/")
+        if entry_directory:
+            suffix = "/" + entry_directory
+            if not media_directory.lower().endswith(suffix.lower()):
+                continue
+            media_directory = media_directory[:-len(suffix)]
+        destination = target + media_directory.replace("/", "\\")
+        for component in entry.get("components", []):
+            folded = component.lower()
+            names[folded] = component
+            candidates.setdefault(folded, {})[destination.lower()] = destination
+
+    output = {}
+    for folded, destinations in candidates.items():
+        if len(destinations) == 1:
+            output[names[folded]] = destinations.values()[0]
+    return output
+
+def _installshield5_component_locations(components, target, system_directory, entries = [], media_files = []):
     """Infers conventional InstallShield 5 component destinations."""
     application_components = {
         "program files": True,
@@ -264,6 +323,7 @@ def _installshield5_component_locations(components, target, system_directory):
     system_components = {
         "mfc dlls": True,
         "ocx files": True,
+        "system files": True,
         "windows system": True,
         "shellextdlls": True,
     }
@@ -279,6 +339,12 @@ def _installshield5_component_locations(components, target, system_directory):
             # InstallShield 5 leaves ordinary application-component targets
             # blank for the compiled script to inherit from TARGETDIR.
             output[name] = target
+    output.update(_installshield5_media_component_locations(entries, media_files, target))
+    # Runtime libraries carried under an application's media directory still
+    # follow InstallShield's conventional system-component destination.
+    for component in components:
+        if component["name"].lower() in system_components:
+            output[component["name"]] = system_directory
     return output
 
 def _expanded_custom_action(action, locations):
@@ -547,10 +613,22 @@ def installer(source, target = None, components = None, locations = {}, variable
     for name, destination in list(resolved_locations.items()):
         resolved_locations[name] = destination.replace("<TARGETDIR>", target).replace("<targetdir>", target)
     if package.format == "installshield5" and package.payload != None and hasattr(package.payload, "components"):
-        inferred_locations = _installshield5_component_locations(package.payload.components, target, resolved_locations["<WINSYSDIR>"])
+        media_files = [{"path": path, "size": package.container.find(path).size} for path in package.container.files]
+        inferred_locations = _installshield5_component_locations(
+            package.payload.components,
+            target,
+            resolved_locations["<WINSYSDIR>"],
+            entries = package.payload.entries if hasattr(package.payload, "entries") else [],
+            media_files = media_files,
+        )
         for name, destination in inferred_locations.items():
             if _casefold_get(resolved_locations, name) == None:
                 resolved_locations[name] = destination
+        if package.container.find("/_INST32I.EX_") != None and hasattr(package.payload, "entries"):
+            inferred_uninstall = _installshield5_uninstall_locations(package.payload.entries, resolved_locations, system_root)
+            for name, destination in inferred_uninstall.items():
+                if _casefold_get(resolved_locations, name) == None:
+                    resolved_locations[name] = destination
     plan = package.plan(locations = resolved_locations, variables = resolved_variables, components = selected)
     if plan["unresolved"]:
         fail("installer modification plan is incomplete: " + repr(plan["unresolved"]))

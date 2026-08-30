@@ -141,6 +141,20 @@ func TestJoinInstallWindowsPathPreservesUNC(t *testing.T) {
 	}
 }
 
+func TestExpandInstallPlanValueResolvesEmbeddedTokens(t *testing.T) {
+	locations := map[string]string{"<uninstpath>": `C:\Program Files\Example`}
+	got, resolved := expandInstallPlanValue(`-f"<UninstPath>\Uninst.isu" -c"<UNINSTPATH>\Uninst.dll"`, locations, nil)
+	want := `-f"C:\Program Files\Example\Uninst.isu" -c"C:\Program Files\Example\Uninst.dll"`
+	if !resolved || got != want {
+		t.Fatalf("expanded value = %q, resolved=%v, want %q, true", got, resolved, want)
+	}
+
+	got, resolved = expandInstallPlanValue(`-f"<Missing>\Uninst.isu"`, locations, nil)
+	if resolved || got != `-f"<Missing>\Uninst.isu"` {
+		t.Fatalf("unresolved value = %q, resolved=%v", got, resolved)
+	}
+}
+
 func TestParseInstallPlanINI(t *testing.T) {
 	profiles := parseInstallPlanINI([]byte("; comment\r\n[Setup]\r\n AppType = 100 \r\nPath=C:\\Program Files\r\n"))
 	if got, want := profiles["Setup"]["AppType"], "100"; got != want {
