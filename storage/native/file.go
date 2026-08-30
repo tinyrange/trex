@@ -35,9 +35,10 @@ type blockDeviceExtenter = blockpkg.Extenter
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
-		"open":   starlark.NewBuiltin("open", openBuiltin),
-		"stdout": starlark.NewBuiltin("stdout", stdoutBuiltin),
-		"write":  starlark.NewBuiltin("write", writeBuiltin),
+		"mirror_file": starlark.NewBuiltin("mirror_file", mirrorFileBuiltin),
+		"open":        starlark.NewBuiltin("open", openBuiltin),
+		"stdout":      starlark.NewBuiltin("stdout", stdoutBuiltin),
+		"write":       starlark.NewBuiltin("write", writeBuiltin),
 	}
 }
 

@@ -133,6 +133,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"help":                              "help(value=None) -> None",
 	"json.decode":                       "json.decode(value, maximum=64MiB) -> value",
 	"hex":                               "hex(value, width=0) -> string",
+	"mirror_file":                       "mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600) -> file",
 	"open":                              "open(name) -> file",
 	"repl":                              "repl() -> None",
 	"stdout":                            "stdout(value) -> None",
