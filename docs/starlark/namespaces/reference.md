@@ -1866,6 +1866,18 @@ Native `database` operation. Limits and timeout arguments are validated before w
 
 Native `database` operation. Limits and timeout arguments are validated before work begins.
 
+### `database.sqlite`
+
+`database.sqlite(...)`
+
+Native `database` operation. Limits and timeout arguments are validated before work begins.
+
+### `database.sqlite_build`
+
+`database.sqlite_build(...)`
+
+Native `database` operation. Limits and timeout arguments are validated before work begins.
+
 ### `debug.disassemble`
 
 `debug.disassemble(data, address=0, architecture='i386', maximum=64MiB, count=-1); architectures: i8086/x86-16, i386/x86, amd64/x86_64`

@@ -25,6 +25,7 @@ import (
 	binaryapi "github.com/tinyrange/trex/binary"
 	binarystar "github.com/tinyrange/trex/binary/star"
 	databaseese "github.com/tinyrange/trex/database/ese"
+	databasesqlite "github.com/tinyrange/trex/database/sqlite"
 	debugapi "github.com/tinyrange/trex/debug"
 	x86api "github.com/tinyrange/trex/emulator/x86"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
@@ -99,8 +100,10 @@ func predeclared() starlark.StringDict {
 		"archive": archiveModule,
 		"binary":  namespace{name: "binary", attrs: binarystar.Builtins()},
 		"database": namespace{name: "database", attrs: starlark.StringDict{
-			"ese":       starlark.NewBuiltin("ese", databaseese.Builtin),
-			"ese_build": starlark.NewBuiltin("ese_build", databaseese.BuildBuiltin),
+			"ese":          starlark.NewBuiltin("ese", databaseese.Builtin),
+			"ese_build":    starlark.NewBuiltin("ese_build", databaseese.BuildBuiltin),
+			"sqlite":       starlark.NewBuiltin("sqlite", databasesqlite.Builtin),
+			"sqlite_build": starlark.NewBuiltin("sqlite_build", databasesqlite.BuildBuiltin),
 		}},
 		"block": blockNamespace(),
 		"clock": namespace{
