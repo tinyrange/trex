@@ -540,12 +540,52 @@ func expandInstallPlanValue(value string, locations, variables map[string]string
 		if end < 0 {
 			return value, false
 		}
-		if replacement, ok := locations[strings.ToLower(value[:end+1])]; ok {
-			return joinInstallWindowsPath(replacement, value[end+1:]), true
+		token := strings.ToLower(value[:end+1])
+		replacement, ok := locations[token]
+		if !ok {
+			replacement, ok = variables[token]
+		}
+		if ok {
+			suffix, resolved := expandInstallPlanEmbeddedTokens(value[end+1:], locations, variables)
+			return joinInstallWindowsPath(replacement, suffix), resolved
 		}
 		return value, false
 	}
-	return value, true
+	return expandInstallPlanEmbeddedTokens(value, locations, variables)
+}
+
+func expandInstallPlanEmbeddedTokens(value string, locations, variables map[string]string) (string, bool) {
+	var output strings.Builder
+	resolved := true
+	for cursor := 0; cursor < len(value); {
+		start := strings.IndexByte(value[cursor:], '<')
+		if start < 0 {
+			output.WriteString(value[cursor:])
+			break
+		}
+		start += cursor
+		output.WriteString(value[cursor:start])
+		end := strings.IndexByte(value[start:], '>')
+		if end < 0 {
+			output.WriteString(value[start:])
+			resolved = false
+			break
+		}
+		end += start
+		token := value[start : end+1]
+		replacement, found := locations[strings.ToLower(token)]
+		if !found {
+			replacement, found = variables[strings.ToLower(token)]
+		}
+		if found {
+			output.WriteString(replacement)
+		} else {
+			output.WriteString(token)
+			resolved = false
+		}
+		cursor = end + 1
+	}
+	return output.String(), resolved
 }
 
 func installPlanFileValue(packageRoot string, file fileRecord, component, destination string, resolved bool) *starlark.Dict {

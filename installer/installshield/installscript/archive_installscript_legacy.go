@@ -52,6 +52,17 @@ type legacyInstallScriptLayout struct {
 	path          legacyInstallScriptPrototypePath
 }
 
+type legacyInstallScriptEvaluation struct {
+	maximumSteps int
+	maximumDepth int
+	steps        int
+	reached      map[int]bool
+	writes       []starlark.Value
+	writeSeen    map[string]bool
+	calls        []starlark.Value
+	callSeen     map[string]bool
+}
+
 func openLegacyInstallScript(file File, data []byte) (*Script, error) {
 	if len(data) < 64 ||
 		(!bytes.Contains(data[12:min(len(data), 512)], []byte("InstallSHIELD Software Coporation")) &&
@@ -552,122 +563,134 @@ func (s *Script) evaluateLegacyInstallScript(args starlark.Tuple, kwargs []starl
 	if _, err := installScriptProfileValues(profilesValue); err != nil {
 		return nil, err
 	}
-	registryWrites := s.evaluateLegacyRegistryWrites(seed)
-	reached := map[int]bool{1: true}
-	for changed := true; changed; {
-		changed = false
-		for _, block := range s.legacy.blocks {
-			if !reached[block.functionID] {
-				continue
-			}
-			for _, action := range block.actions {
-				callee := int(action.functionID)
-				if action.opcode == 33 && !reached[callee] {
-					reached[callee], changed = true, true
-				}
-			}
-		}
+	evaluation := &legacyInstallScriptEvaluation{
+		maximumSteps: maximumSteps, maximumDepth: maximumDepth,
+		reached: make(map[int]bool), writeSeen: make(map[string]bool), callSeen: make(map[string]bool),
 	}
-	calls := make([]starlark.Value, 0, len(s.legacy.instructions))
-	steps := 0
-	for _, block := range s.legacy.blocks {
-		if !reached[block.functionID] {
-			continue
-		}
+	entryIDs := s.installScriptCallbackEntries()
+	entries := make([]starlark.Value, 0, len(entryIDs))
+	for _, entryID := range entryIDs {
 		state := cloneInstallScriptState(seed)
 		root := installScriptValue{}
-		cursor := uint64(block.offset)
-		end := uint64(len(s.data))
-		if block.index+1 < len(s.legacy.blocks) {
-			end = uint64(s.legacy.blocks[block.index+1].offset)
-		}
-		discardedWrites := make([]starlark.Value, 0)
-		discardedSeen := make(map[string]bool)
-		for _, action := range block.actions {
-			for cursor < uint64(action.offset) {
-				next, handled := s.evaluateLegacyStatement(cursor, uint64(action.offset), &state, &root, block.functionID, &discardedWrites, discardedSeen)
-				if handled {
-					cursor = next
-				} else {
-					cursor++
-				}
-			}
-			if cursor < end {
-				cursor = min(uint64(action.offset)+6, end)
-			}
-			if action.opcode != 32 {
-				continue
-			}
-			instruction := legacyInstallScriptInstruction{offset: action.offset, opcode: action.opcode, functionID: action.functionID, operands: action.operands}
-			if steps >= maximumSteps {
-				break
-			}
-			steps++
-			prototype := s.prototypes[instruction.functionID]
-			arguments := make([]starlark.Value, len(instruction.operands))
-			resolved := len(instruction.operands) == len(prototype.arguments)
-			for index, operand := range instruction.operands {
-				value := installScriptRead(operand, state)
-				arguments[index] = installScriptEvaluatedValue(value)
-				resolved = resolved && value.known
-			}
-			types := make([]starlark.Value, len(prototype.arguments))
-			for index, typ := range prototype.arguments {
-				types[index] = starlarkStringDict(map[string]starlark.Value{
-					"script_type": starlark.MakeInt(int(typ.scriptType)), "concrete_type": starlark.MakeInt(int(typ.concreteType)),
-				})
-			}
-			calls = append(calls, starlarkStringDict(map[string]starlark.Value{
-				"entry_id": starlark.MakeInt(-1), "entry_function": starlark.String("application"),
-				"caller": starlark.String(s.prototypes[block.functionID].name), "callee": starlark.String(prototype.name),
-				"dll": starlark.String(prototype.dll), "offset": starlark.MakeUint64(uint64(instruction.offset)),
-				"arguments": starlark.NewList(arguments), "argument_types": starlark.NewList(types),
-				"resolved": starlark.Bool(resolved), "conditional": starlark.True, "modeled": starlark.False,
-				// Calls are decoded without yet proving a legacy callback path. Keep
-				// them visible to analysis while preventing an image plan from
-				// executing dead-code imports as installer actions.
-				"construction_safe": starlark.False,
-			}))
+		entryReached := make(map[int]bool)
+		s.evaluateLegacyFunction(entryID, entryID, &state, &root, evaluation, entryReached, make(map[int]bool), 0)
+		entries = append(entries, starlarkStringDict(map[string]starlark.Value{
+			"id": starlark.MakeInt(entryID), "function": starlark.String(s.prototypes[entryID].name),
+			"reached_functions": legacyInstallScriptReachedFunctions(s, entryReached),
+		}))
+		if evaluation.steps >= maximumSteps {
+			break
 		}
 	}
-	// Prototype and call decoding is complete, but the legacy callback graph is
-	// not yet reconstructed. Reporting this explicitly keeps reachability from
-	// being mistaken for a proved construction action.
+	registryWrites, _ := legacyInstallScriptClassifyRegistryWrites(evaluation.writes)
+	definitiveRegistryWrites := []starlark.Value(nil)
 	incomplete := true
-	reasons := []starlark.Value{starlark.String("legacy callback reachability is not decoded")}
+	reasons := make([]starlark.Value, 0, 1)
+	if evaluation.steps >= maximumSteps {
+		reasons = append(reasons, starlark.String("legacy evaluation step limit reached"))
+	} else {
+		// The callback call graph is now reconstructed, but legacy conditional
+		// branches are not. Keep the resolved mutations visible to analysis
+		// without applying one side of an unproved branch during construction.
+		reasons = append(reasons, starlark.String("legacy callback control flow is not decoded"))
+	}
 	return starlarkStringDict(map[string]starlark.Value{
 		"entry": starlark.String("application"), "registry": starlark.NewList(registryWrites),
-		"registry_writes": starlark.NewList(registryWrites), "definitive_registry_writes": starlark.NewList(registryWrites),
-		"calls": starlark.NewList(calls), "reached_functions": legacyInstallScriptReachedFunctions(s, reached),
-		"entries": starlark.NewList(nil), "final_globals": starlark.NewList(nil), "steps": starlark.MakeInt(steps),
+		"registry_writes": starlark.NewList(registryWrites), "definitive_registry_writes": starlark.NewList(definitiveRegistryWrites),
+		"calls": starlark.NewList(evaluation.calls), "reached_functions": legacyInstallScriptReachedFunctions(s, evaluation.reached),
+		"entries": starlark.NewList(entries), "final_globals": starlark.NewList(nil), "steps": starlark.MakeInt(evaluation.steps),
 		"incomplete": starlark.Bool(incomplete), "incomplete_reasons": starlark.NewList(reasons),
 	}), nil
 }
 
-func (s *Script) evaluateLegacyRegistryWrites(seed installScriptEvalState) []starlark.Value {
-	writes := make([]starlark.Value, 0)
-	seen := make(map[string]bool)
-	for _, block := range s.legacy.blocks {
-		state := cloneInstallScriptState(seed)
-		root := installScriptValue{}
-		start := uint64(block.offset)
-		end := uint64(len(s.data))
-		if block.index+1 < len(s.legacy.blocks) {
-			end = uint64(s.legacy.blocks[block.index+1].offset)
-		}
-		for offset := start; offset+2 <= end; {
-			next, handled := s.evaluateLegacyStatement(offset, end, &state, &root, block.functionID, &writes, seen)
+func (s *Script) evaluateLegacyFunction(entryID, functionID int, state *installScriptEvalState, root *installScriptValue, evaluation *legacyInstallScriptEvaluation, entryReached, active map[int]bool, depth int) {
+	if functionID <= 0 || functionID >= len(s.prototypes) || depth >= evaluation.maximumDepth || active[functionID] || evaluation.steps >= evaluation.maximumSteps {
+		return
+	}
+	blockIndex := int(s.prototypes[functionID].blockIndex)
+	if blockIndex < 0 || blockIndex >= len(s.legacy.blocks) {
+		return
+	}
+	block := s.legacy.blocks[blockIndex]
+	evaluation.reached[functionID], entryReached[functionID] = true, true
+	active[functionID] = true
+	defer delete(active, functionID)
+
+	cursor := uint64(block.offset)
+	end := uint64(len(s.data))
+	if block.index+1 < len(s.legacy.blocks) {
+		end = uint64(s.legacy.blocks[block.index+1].offset)
+	}
+	advanceStatements := func(limit uint64) {
+		for cursor < limit && evaluation.steps < evaluation.maximumSteps {
+			next, handled := s.evaluateLegacyStatement(cursor, limit, state, root, entryID, functionID, &evaluation.writes, evaluation.writeSeen)
+			evaluation.steps++
 			if handled {
-				offset = next
+				cursor = next
 			} else {
-				offset++
+				cursor++
 			}
 		}
 	}
-	return writes
+	for _, action := range block.actions {
+		advanceStatements(uint64(action.offset))
+		if evaluation.steps >= evaluation.maximumSteps {
+			return
+		}
+		evaluation.steps++
+		switch action.opcode {
+		case 32:
+			s.evaluateLegacyExternal(entryID, functionID, action, *state, evaluation)
+		case 33:
+			calleeState := cloneInstallScriptState(*state)
+			calleeRoot := *root
+			s.evaluateLegacyFunction(entryID, int(action.functionID), &calleeState, &calleeRoot, evaluation, entryReached, active, depth+1)
+			for variable, value := range calleeState.vars {
+				if variable.address >= 0 {
+					state.vars[variable] = value
+				}
+			}
+			*root = calleeRoot
+		}
+		cursor = min(uint64(action.offset)+6, end)
+	}
+	advanceStatements(end)
 }
 
-func (s *Script) evaluateLegacyStatement(offset, end uint64, state *installScriptEvalState, root *installScriptValue, functionID int, writes *[]starlark.Value, seen map[string]bool) (uint64, bool) {
+func (s *Script) evaluateLegacyExternal(entryID, callerID int, action installScriptAction, state installScriptEvalState, evaluation *legacyInstallScriptEvaluation) {
+	if int(action.functionID) >= len(s.prototypes) {
+		return
+	}
+	prototype := s.prototypes[action.functionID]
+	arguments := make([]starlark.Value, len(action.operands))
+	resolved := len(action.operands) == len(prototype.arguments)
+	for index, operand := range action.operands {
+		value := installScriptRead(operand, state)
+		arguments[index] = installScriptEvaluatedValue(value)
+		resolved = resolved && value.known
+	}
+	types := make([]starlark.Value, len(prototype.arguments))
+	for index, typ := range prototype.arguments {
+		types[index] = starlarkStringDict(map[string]starlark.Value{
+			"script_type": starlark.MakeInt(int(typ.scriptType)), "concrete_type": starlark.MakeInt(int(typ.concreteType)),
+		})
+	}
+	key := fmt.Sprintf("%d:%d:%d:%v", entryID, callerID, action.offset, arguments)
+	if evaluation.callSeen[key] {
+		return
+	}
+	evaluation.callSeen[key] = true
+	evaluation.calls = append(evaluation.calls, starlarkStringDict(map[string]starlark.Value{
+		"entry_id": starlark.MakeInt(entryID), "entry_function": starlark.String(s.prototypes[entryID].name),
+		"caller": starlark.String(s.prototypes[callerID].name), "callee": starlark.String(prototype.name),
+		"dll": starlark.String(prototype.dll), "offset": starlark.MakeUint64(uint64(action.offset)),
+		"arguments": starlark.NewList(arguments), "argument_types": starlark.NewList(types),
+		"resolved": starlark.Bool(resolved), "conditional": starlark.True, "modeled": starlark.False,
+		"construction_safe": starlark.False,
+	}))
+}
+
+func (s *Script) evaluateLegacyStatement(offset, end uint64, state *installScriptEvalState, root *installScriptValue, entryID, functionID int, writes *[]starlark.Value, seen map[string]bool) (uint64, bool) {
 	if offset+2 > end {
 		return offset, false
 	}
@@ -731,11 +754,11 @@ func (s *Script) evaluateLegacyStatement(offset, end uint64, state *installScrip
 		if root.known {
 			entryRoot = installScriptRegistryRoot(root.num)
 		}
-		key := fmt.Sprintf("%s:%s:%s:%s", entryRoot, arguments[0].text, arguments[1].text, arguments[3].text)
+		key := fmt.Sprintf("%d:%d:%d:%s:%s:%s:%s", entryID, functionID, offset, entryRoot, arguments[0].text, arguments[1].text, arguments[3].text)
 		if resolved && strings.HasPrefix(entryRoot, "HKEY_") && !seen[key] {
 			seen[key] = true
 			entry := map[string]starlark.Value{
-				"entry_id": starlark.MakeInt(functionID), "entry_function": starlark.String(s.prototypes[functionID].name),
+				"entry_id": starlark.MakeInt(entryID), "entry_function": starlark.String(s.prototypes[entryID].name),
 				"operation": starlark.String("set_value"), "caller": starlark.String(s.prototypes[functionID].name),
 				"callee": starlark.String("RegDBSetKeyValueEx"), "offset": starlark.MakeUint64(offset),
 				"conditional": starlark.False, "resolved": starlark.True, "root": starlark.String(entryRoot),
@@ -748,6 +771,40 @@ func (s *Script) evaluateLegacyStatement(offset, end uint64, state *installScrip
 		return r.off, true
 	}
 	return offset, false
+}
+
+func legacyInstallScriptClassifyRegistryWrites(input []starlark.Value) ([]starlark.Value, []starlark.Value) {
+	values := make(map[string]map[string]bool)
+	identities := make([]string, len(input))
+	for index, value := range input {
+		entry := value.(*starlark.Dict)
+		operation, _, _ := entry.Get(starlark.String("operation"))
+		root, _, _ := entry.Get(starlark.String("root"))
+		key, _, _ := entry.Get(starlark.String("key"))
+		name, _, _ := entry.Get(starlark.String("name"))
+		data, _, _ := entry.Get(starlark.String("data"))
+		identity := fmt.Sprintf("%s:%s:%s:%s", operation, root, key, name)
+		identities[index] = strings.ToLower(identity)
+		if values[identities[index]] == nil {
+			values[identities[index]] = make(map[string]bool)
+		}
+		values[identities[index]][fmt.Sprint(data)] = true
+	}
+	all := make([]starlark.Value, 0, len(input))
+	definitive := make([]starlark.Value, 0, len(input))
+	definitiveSeen := make(map[string]bool)
+	for index, value := range input {
+		entry := value.(*starlark.Dict)
+		proved := len(values[identities[index]]) == 1
+		_ = entry.SetKey(starlark.String("conditional"), starlark.Bool(!proved))
+		_ = entry.SetKey(starlark.String("definitive"), starlark.Bool(proved))
+		all = append(all, entry)
+		if proved && !definitiveSeen[identities[index]] {
+			definitiveSeen[identities[index]] = true
+			definitive = append(definitive, entry)
+		}
+	}
+	return all, definitive
 }
 
 func parseLegacyInstallScriptLValue(r *installScriptReader) (installScriptArgument, bool) {

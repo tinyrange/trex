@@ -323,6 +323,64 @@ func TestNBDServerRoutesAdvertisedCacheHints(t *testing.T) {
 	}
 }
 
+func TestNBDServerKeepsIdleTransmissionConnected(t *testing.T) {
+	base := testBlockDevice(t, 4096)
+	overlay, err := blockstar.NewOverlayDevice(base, 4096, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewNBDServer(overlay, "disk", 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.requestTimeout = 20 * time.Millisecond
+	serverConn, clientConn := net.Pipe()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- server.Serve(context.Background(), serverConn) }()
+	defer clientConn.Close()
+
+	var magic, options uint64
+	var flags uint16
+	readNBDValues(t, clientConn, &magic, &options, &flags)
+	writeNBDValues(t, clientConn, nbdClientFixedNewstyle|nbdClientNoZeroes)
+	sendNBDOption(t, clientConn, nbdOptStructuredReply, nil)
+	if reply := readNBDOptionReply(t, clientConn); reply.kind != nbdRepACK {
+		t.Fatalf("structured reply = %#v", reply)
+	}
+	sendNBDOption(t, clientConn, nbdOptGo, nbdInfoPayload("disk"))
+	for {
+		if reply := readNBDOptionReply(t, clientConn); reply.kind == nbdRepACK {
+			break
+		}
+	}
+
+	// The request timeout bounds a frame after its first byte, not the quiet
+	// period between requests. A retained VM can legitimately leave its disk
+	// completely idle for much longer than this interval.
+	time.Sleep(3 * server.requestTimeout)
+	if got := overlay.LeaseCount(); got != 1 {
+		t.Fatalf("idle NBD transmission released overlay lease: %d", got)
+	}
+	if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	sendNBDRequest(t, clientConn, nbdRequest{kind: nbdCommandRead, cookie: 10, offset: 0, length: 512}, nil)
+	if reply := readNBDStructuredReply(t, clientConn); reply.cookie != 10 || reply.kind != nbdStructuredOffsetData {
+		t.Fatalf("read after idle = %#v", reply)
+	}
+	if _, err := clientConn.Write([]byte{byte(nbdRequestMagic >> 24)}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-serverErr:
+		if err == nil {
+			t.Fatal("partial request did not time out")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("partial request remained connected past request timeout")
+	}
+}
+
 func TestNBDRequestParsersRejectMalformedLengths(t *testing.T) {
 	if _, _, err := parseNBDInfoRequest([]byte{0, 0, 0, 8, 0, 0}); err == nil {
 		t.Fatal("malformed info request accepted")

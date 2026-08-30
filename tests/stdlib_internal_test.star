@@ -1514,6 +1514,12 @@ def test_binary_hex():
 
 def test_installshield5_conventional_component_locations():
     module = testing.module("@stdlib//windows:installer.star")
+
+    equal(module["_installed_artifact_module"]([
+        {"source": "/ActiveX/pdf.ocx", "destination": r"C:\Program Files\Reader\ActiveX\pdf.ocx", "resolved": True},
+    ], "/activex/PDF.OCX", "pdf.ocx"), r"C:\Program Files\Reader\ActiveX\pdf.ocx")
+    equal(module["_installed_artifact_module"]([], "/ActiveX/pdf.ocx", "pdf.ocx"), "pdf.ocx")
+
     locations = module["_installshield5_component_locations"]([
         {"name": "Program Files"},
         {"name": "Help Files"},
@@ -1539,6 +1545,29 @@ def test_installshield5_conventional_component_locations():
         "English/Eval/Core": r"C:\Program Files\FTP Voyager",
     })
 
+    locations = module["_installshield5_component_locations"]([
+        {"name": "Program Files"},
+        {"name": "Program Files/Plug-ins"},
+        {"name": "Help Files"},
+        {"name": "System Files"},
+    ], r"C:\Program Files\Example", r"C:\WINDOWS\SYSTEM", entries = [
+        {"name": "app.exe", "size": 10, "directory": "", "components": ["Program Files"]},
+        {"name": "form.api", "size": 11, "directory": r"Forms\Scripts", "components": ["Program Files/Plug-ins"]},
+        {"name": "manual.pdf", "size": 12, "directory": "ENU", "components": ["Help Files"]},
+        {"name": "runtime.dll", "size": 13, "directory": "", "components": ["System Files"]},
+    ], media_files = [
+        {"path": "/Reader/app.exe", "size": 10},
+        {"path": "/Reader/plug_ins/Forms/Scripts/form.api", "size": 11},
+        {"path": "/Help/ENU/manual.pdf", "size": 12},
+        {"path": "/Reader/runtime.dll", "size": 13},
+    ])
+    equal(locations, {
+        "Program Files": r"C:\Program Files\Example\Reader",
+        "Program Files/Plug-ins": r"C:\Program Files\Example\Reader\plug_ins",
+        "Help Files": r"C:\Program Files\Example\Help",
+        "System Files": r"C:\WINDOWS\SYSTEM",
+    })
+
     action = module["_expanded_custom_action"]({
         "dll": "example.dll",
         "arguments": [0, None, r"Name|2001.01.01|<TARGETDIR>"],
@@ -1548,6 +1577,17 @@ def test_installshield5_conventional_component_locations():
     equal(module["_calendar_timestamp"]("2000.03.01"), 951912000)
     equal(module["_calendar_timestamp"]("2001.07.05"), 994334400)
     raises(module["_calendar_timestamp"], args = ["2001.02.29"], message = "invalid day")
+
+    equal(module["_installshield5_uninstall_locations"]([
+        {"name": "AcroRd32.exe", "components": ["Program Files"]},
+        {"name": "Uninst.dll", "components": ["Uninstall DLL"]},
+    ], {
+        "Program Files": r"C:\Program Files\Example\Reader",
+        "Uninstall DLL": r"C:\Program Files\Example",
+    }, r"C:\WINDOWS"), {
+        "<UNINST>": r"C:\WINDOWS\IsUninst.exe",
+        "<UninstPath>": r"C:\Program Files\Example",
+    })
 
     registry = module["_additional_registry_modification"]({
         "root": "HKEY_CURRENT_USER",
