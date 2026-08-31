@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -206,6 +207,92 @@ func TestBuildRoundTripWithoutSQLiteDependency(t *testing.T) {
 	}
 	if got := []any{indexRows[0].Values[0], indexRows[1].Values[0], indexRows[2].Values[0]}; !reflect.DeepEqual(got, []any{"alpha", string(longText), "zulu"}) {
 		t.Fatalf("built index rows = %#v", got)
+	}
+}
+
+func TestBuildTableFanoutDoesNotCreateUnaryInteriorPage(t *testing.T) {
+	for _, count := range []int{21, 41, 401} {
+		rows := make([]Row, count)
+		for index := range rows {
+			rowID := int64(index + 1)
+			rows[index] = Row{RowID: &rowID, Values: []any{nil, int64(index)}}
+		}
+		file, err := Build([]Object{{
+			Type: "table", Name: "items", TableName: "items",
+			SQL:  "CREATE TABLE items(id INTEGER PRIMARY KEY NOT NULL,value INTEGER)",
+			Rows: rows,
+		}}, BuildOptions{PageSize: 1024, Encoding: 1})
+		if err != nil {
+			t.Fatalf("Build(%d rows): %v", count, err)
+		}
+		database, err := Open(file, nil)
+		if err != nil {
+			t.Fatalf("Open(%d rows): %v", count, err)
+		}
+		got, err := database.Rows("items", count+1)
+		if err != nil {
+			t.Fatalf("Rows(%d rows): %v", count, err)
+		}
+		if len(got) != count || got[count-1].Values[1] != int64(count-1) {
+			t.Fatalf("round trip count %d returned %#v", count, got)
+		}
+	}
+}
+
+func TestBuildIndexDoesNotCreateEmptyChildPages(t *testing.T) {
+	rows := make([]Row, 300)
+	for index := range rows {
+		rows[index] = Row{Values: []any{int64(index), strings.Repeat("x", 80), int64(index + 1)}}
+	}
+	file, err := Build([]Object{
+		{Type: "table", Name: "items", TableName: "items", SQL: "CREATE TABLE items(id INTEGER PRIMARY KEY,value INTEGER)"},
+		{Type: "index", Name: "items_value", TableName: "items", SQL: "CREATE INDEX items_value ON items(value)", Rows: rows},
+	}, BuildOptions{PageSize: 1024, Encoding: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Objects are allocated in schema order, so the index root is page 3.
+	visited := map[uint32]bool{}
+	var visit func(uint32, bool)
+	visit = func(number uint32, root bool) {
+		if number == 0 || int(number)*1024 > len(file.Data) {
+			t.Fatalf("invalid child page %d", number)
+		}
+		if visited[number] {
+			t.Fatalf("index page %d is referenced more than once", number)
+		}
+		visited[number] = true
+		page := file.Data[(number-1)*1024 : number*1024]
+		count := int(binary.BigEndian.Uint16(page[3:5]))
+		switch page[0] {
+		case 0x0a:
+			if !root && count == 0 {
+				t.Fatalf("non-root index leaf page %d is empty", number)
+			}
+		case 0x02:
+			if !root && count < 2 {
+				t.Fatalf("non-root index interior page %d has only %d cell(s)", number, count)
+			}
+			if root && count == 0 {
+				t.Fatalf("root index interior page %d has no cells", number)
+			}
+			for index := 0; index < count; index++ {
+				offset := int(binary.BigEndian.Uint16(page[12+index*2 : 14+index*2]))
+				visit(binary.BigEndian.Uint32(page[offset:offset+4]), false)
+			}
+			visit(binary.BigEndian.Uint32(page[8:12]), false)
+		default:
+			t.Fatalf("index page %d has type %#x", number, page[0])
+		}
+	}
+	visit(3, true)
+	database, err := Open(file, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := database.Rows("items_value", len(rows)+1)
+	if err != nil || len(got) != len(rows) {
+		t.Fatalf("index round trip returned %d rows: %v", len(got), err)
 	}
 }
 
