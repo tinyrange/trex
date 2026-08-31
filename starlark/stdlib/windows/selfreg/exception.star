@@ -6,6 +6,14 @@ def _signed(value):
 def _record(machine, address, size):
     return binary.cursor(machine.read(address, size))
 
+def _mapped(machine, address, size):
+    if not address or size < 0:
+        return False
+    for mapping in machine.mappings:
+        if address >= mapping.start and address + size <= mapping.start + mapping.size:
+            return True
+    return False
+
 def exception_plugin(kernel = None):
     """Dispatches RaiseException through active compiler SEH3 scope tables.
 
@@ -84,6 +92,8 @@ def exception_plugin(kernel = None):
             if current in seen:
                 return False
             seen[current] = True
+            if not _mapped(machine, table + current * 12, 12):
+                return False
             outer = scope_entry(machine, table, current)["outer"]
             if outer < -1 or outer >= current:
                 return False
@@ -122,9 +132,19 @@ def exception_plugin(kernel = None):
         pointers_address = machine.allocate(value = pointers.bytes(), name = "EXCEPTION_POINTERS")
 
         fs = machine.segment_base("fs")
+        mapped_fs = not fs or _mapped(machine, fs, 4)
+        if not mapped_fs:
+            fail("invalid FS base {} while dispatching {} parameters {}".format(
+                hex(fs), hex(code), [hex(value) for value in values[:count]],
+            ))
         frame = _record(machine, fs, 4).u32le() if fs else 0xffffffff
         traversed = []
         while frame != 0xffffffff:
+            mapped_frame = _mapped(machine, frame, 16)
+            if not mapped_frame:
+                fail("invalid SEH frame {} from FS {} while dispatching {} parameters {}".format(
+                    hex(frame), hex(fs), hex(code), [hex(value) for value in values[:count]],
+                ))
             registration = _record(machine, frame, 16)
             next_frame = registration.u32le()
             handler = registration.u32le()
@@ -211,6 +231,12 @@ def exception_plugin(kernel = None):
 
     def raise_exception(event):
         code, flags, count, values_address = event.args
+        if count > 15:
+            fail("RaiseException has invalid argument count {} for code {} at {}".format(count, hex(code), hex(values_address)))
+        if count:
+            mapped = _mapped(event.machine, values_address, count * 4)
+            if not mapped:
+                fail("RaiseException arguments for code {} are unmapped: count {} at {}".format(hex(code), count, hex(values_address)))
         values = []
         for index in range(min(count, 15)):
             values.append(_record(event.machine, values_address + index * 4, 4).u32le() if values_address else 0)

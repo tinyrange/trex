@@ -39,6 +39,9 @@ func Exports(data []byte) ([]Export, error) {
 	functionsRVA := binary.LittleEndian.Uint32(data[exportOffset+28 : exportOffset+32])
 	namesRVA := binary.LittleEndian.Uint32(data[exportOffset+32 : exportOffset+36])
 	ordinalsRVA := binary.LittleEndian.Uint32(data[exportOffset+36 : exportOffset+40])
+	if functionCount == 0 {
+		return nil, nil
+	}
 	functionsOffset, err := rvaOffset(file, functionsRVA)
 	if err != nil || uint64(functionsOffset)+uint64(functionCount)*4 > uint64(len(data)) {
 		return nil, fmt.Errorf("pe exports: export address table outside file")

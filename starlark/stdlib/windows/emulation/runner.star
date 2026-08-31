@@ -13,6 +13,8 @@ load("@stdlib//windows/selfreg:facts.star", "class_ids")
 load("@stdlib//windows/selfreg:win32.star", "com_plugin", "common_controls_plugin", "environment_plugin", "event_log_plugin", "gdi32_plugin", "kernel32_plugin", "lz32_plugin", "msvcrt_plugin", "netapi_plugin", "ole32_plugin", "oleaut_plugin", "resource_plugin", "security_plugin", "shell32_plugin", "shell_plugin", "user32_plugin", "version_plugin", "winsock_helper_plugin", "winsock_plugin")
 load("@stdlib//windows/selfreg:msxml.star", "msxml_dom_provider")
 load("@stdlib//windows/selfreg:comcat.star", "component_categories_provider")
+load("@stdlib//windows/selfreg:wer.star", "wer_plugin")
+load("@stdlib//windows/selfreg:appmodel.star", "appmodel_plugin")
 
 def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800):
     """Runs one target export or executable using semantic system-DLL plugins.
@@ -78,7 +80,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "kernel32.dll", "loadperf.dll", "lz32.dll", "msvcrt.dll", "netapi32.dll", "ntdll.dll",
         "ole32.dll", "oleaut32.dll", "rpcrt4.dll", "setupapi.dll",
         "shell32.dll", "shlwapi.dll", "user32.dll", "version.dll",
-        "wintrust.dll", "ws2_32.dll",
+        "winmm.dll", "wintrust.dll", "ws2_32.dll",
     ]
     virtual_system_module_names = {name: True for name in virtual_system_modules}
     module_images = dict(modules)
@@ -109,6 +111,31 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         module_dependencies[owner] = target_module_dependencies(image, owner)
     module_initializations = []
     module_initialization_state = {}
+    static_tls_state = {}
+
+    def initialize_static_tls(loaded):
+        """Installs one PE32 static-TLS template and runs process-attach callbacks."""
+        if loaded.tls_index == 0 or static_tls_state.get(loaded.name, False):
+            return None
+        allocate = machine.resolve_export("kernel32.dll", name = "TlsAlloc")
+        set_value = machine.resolve_export("kernel32.dll", name = "TlsSetValue")
+        allocated = machine.invoke(allocate)
+        if allocated.reason != "return" or allocated.value == 0xffffffff:
+            return allocated
+        template = binary.builder(capacity = len(loaded.tls_template) + loaded.tls_zero_fill)
+        template.append(loaded.tls_template)
+        template.append(b"\x00" * loaded.tls_zero_fill)
+        thread_data = machine.allocate(value = template.bytes(), name = loaded.name + ".static-tls")
+        installed = machine.invoke(set_value, args = [allocated.value, thread_data])
+        if installed.reason != "return" or installed.value == 0:
+            return installed
+        machine.write_u32le(loaded.tls_index, allocated.value)
+        static_tls_state[loaded.name] = True
+        for callback in loaded.tls_callbacks:
+            result = machine.invoke(callback, args = [loaded.base, 1, 0])
+            if result.reason != "return":
+                return result
+        return None
 
     def initialize_target_module(name):
         """Runs one mapped module's process attach after its private imports."""
@@ -134,7 +161,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
             module_records[name] = loaded
             module_images[name] = source
             module_dependencies[name] = target_module_dependencies(source, name)
-        if loaded == None or loaded.primary or loaded.entry == 0 or loaded.entry == loaded.base:
+        if loaded == None:
             module_initialization_state[name] = 2
             return None
         module_initialization_state[name] = 1
@@ -143,6 +170,13 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
             if current != None and (current.reason != "return" or current.value == 0):
                 module_initialization_state[name] = 3
                 return current
+        current = initialize_static_tls(loaded)
+        if current != None:
+            module_initialization_state[name] = 3
+            return current
+        if loaded.primary or loaded.entry == 0 or loaded.entry == loaded.base:
+            module_initialization_state[name] = 2
+            return None
         current = machine.invoke(loaded.entry, args = [loaded.base, 1, 0])
         module_initializations.append({"module": loaded.name, "result": current})
         module_initialization_state[name] = 2 if current.reason == "return" and current.value != 0 else 3
@@ -310,6 +344,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         winsock_helper_plugin(),
         resources,
         versions,
+        appmodel_plugin(),
+        wer_plugin(),
         gdi32_plugin(),
         shell32_plugin(module_path = module, environment = process_environment, malloc = ole.state),
         common_controls,
@@ -383,7 +419,9 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                     "crt_actions": crt.state["actions"],
                     "crt_calls": crt.state["calls"],
                 }
-        initialization = None if executable else machine.call(machine.entry, args = [primary.base, 1, 0])
+        initialization = initialize_static_tls(primary)
+        if initialization == None and not executable:
+            initialization = machine.call(machine.entry, args = [primary.base, 1, 0])
         if initialization != None and (initialization.reason != "return" or initialization.value == 0):
             return {
                 "patches": registry.patches(),

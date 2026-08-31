@@ -40,6 +40,7 @@ _CRYPTOAPI_SIGNATURES = {
     "cryptreleasecontext": 2,
     "cryptverifysignaturea": 6,
     "cryptverifysignaturew": 6,
+    "systemfunction036": 2,
 }
 
 _CRYPT_VERIFYCONTEXT = 0xf0000000
@@ -84,7 +85,7 @@ def cryptoapi_plugin(kernel = None):
     emulation remains reproducible; it is not exposed as a cryptographic host
     randomness service.
     """
-    state = {"providers": {}, "hashes": {}, "keys": {}, "next_handle": 0x70000, "actions": []}
+    state = {"providers": {}, "hashes": {}, "keys": {}, "next_handle": 0x70000, "random_counter": 0, "actions": []}
 
     def fail(code):
         if kernel != None:
@@ -98,6 +99,21 @@ def cryptoapi_plugin(kernel = None):
         name = event.name.lower()
         args = event.args
         machine = event.machine
+        if name == "systemfunction036":
+            address, size = args
+            if size > (1 << 20) or (size and not address):
+                return 0
+            output = binary.builder(capacity = size)
+            while output.size < size:
+                seed = binary.builder()
+                seed.append(b"TinyRangeX RtlGenRandom\x00")
+                seed.u32le(state["random_counter"])
+                output.append(crypto.hash("sha256", seed.bytes()))
+                state["random_counter"] += 1
+            if size:
+                machine.write(address, output.bytes()[:size])
+            state["actions"].append({"operation": "random", "function": "SystemFunction036", "size": size})
+            return 1
         if name in ["cryptacquirecontexta", "cryptacquirecontextw"]:
             output, container_address, provider_address, provider_type, flags = args
             if not output:

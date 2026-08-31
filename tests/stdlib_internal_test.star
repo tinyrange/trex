@@ -260,6 +260,31 @@ def test_registry_initial_keys_are_baseline_state():
     }])
     equal(registry.keys(), [])
     equal(registry.state["flushes"], [])
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([registry])
+    appid = machine.allocate(value = binary.encode("AppID", encoding = "utf16le", nul = True))
+    output = machine.allocate(size = 4)
+    opened = machine.call(machine.resolve_export("advapi32.dll", name = "RegOpenKeyExW"), args = [0x80000000, appid, 0, 0x20019, output])
+    equal(opened.value, 0)
+    true(machine.read_u32le(output) != 0)
+    equal(registry.keys(), [])
+
+def test_registry_predefined_root_override_redirects_operations():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    registry = module["registry_plugin"]()
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([registry])
+    redirected = machine.allocate(value = binary.encode("Redirected", encoding = "utf16le", nul = True))
+    redirected_handle = machine.allocate(size = 4)
+    create = machine.resolve_export("advapi32.dll", name = "RegCreateKeyW")
+    equal(machine.call(create, args = [0x80000002, redirected, redirected_handle]).value, 0)
+    override = machine.resolve_export("advapi32.dll", name = "RegOverridePredefKey")
+    equal(machine.call(override, args = [0x80000000, machine.read_u32le(redirected_handle)]).value, 0)
+    child = machine.allocate(value = binary.encode("Sample", encoding = "utf16le", nul = True))
+    child_handle = machine.allocate(size = 4)
+    equal(machine.call(create, args = [0x80000000, child, child_handle]).value, 0)
+    true({"hive": "SOFTWARE", "key": "/Redirected/Sample"} in registry.keys())
+    equal(machine.call(override, args = [0x80000000, 0]).value, 0)
 
 def test_registry_can_emit_folded_key_spelling():
     module = testing.module("@stdlib//windows/selfreg:registry.star")
@@ -550,6 +575,13 @@ def test_kernel_synchronization_signatures():
     equal(signatures["globalmemorystatus"], 1)
     equal(signatures["globalmemorystatusex"], 1)
     equal(signatures["getsystempowerstatus"], 1)
+    equal(signatures["getproductinfo"], 5)
+    equal(signatures["getnativesysteminfo"], 1)
+    equal(module["_MULTIMEDIA_SIGNATURES"]["timegettime"], 0)
+    equal(module["_MULTIMEDIA_SIGNATURES"]["timebeginperiod"], 1)
+    equal(signatures["rtlcapturestackbacktrace"], 4)
+    equal(signatures["getthreadpreferreduilanguages"], 4)
+    equal(signatures["createprocessw"], 10)
     equal(signatures["isdebuggerpresent"], 0)
     equal(signatures["isprocessorfeaturepresent"], 1)
     equal(signatures["ntqueryinformationprocess"], 5)
@@ -568,6 +600,10 @@ def test_kernel_synchronization_signatures():
     equal(signatures["virtualfree"], 3)
     equal(signatures["virtualprotect"], 4)
     equal(signatures["virtualquery"], 3)
+    equal(signatures["initializeconditionvariable"], 1)
+    equal(signatures["initializecriticalsectionex"], 3)
+    equal(signatures["wakeconditionvariable"], 1)
+    equal(signatures["wakeallconditionvariable"], 1)
     equal(signatures["versetconditionmask"], 4)
     equal(signatures["verifyversioninfow"], 4)
     condition_mask = module["_version_condition_mask"](0, 0x22, 3)
@@ -904,6 +940,22 @@ def test_event_log_exports_support_late_loaded_modules():
     equal(machine.call(unregister, args = [handle & 0xffffffff, handle >> 32]).value, 0)
     equal(provider.state["trace_providers"], {})
 
+def test_security_reports_required_sid_length():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["security_plugin"]()])
+    target = machine.resolve_export("advapi32.dll", name = "GetSidLengthRequired")
+    equal(machine.call(target, args = [0]).value, 8)
+    equal(machine.call(target, args = [5]).value, 28)
+    authority = machine.allocate(value = b"\x00\x00\x00\x00\x00\x05")
+    output = machine.allocate(size = 12)
+    initialize = machine.resolve_export("advapi32.dll", name = "InitializeSid")
+    equal(machine.call(initialize, args = [output, authority, 1]).value, 1)
+    equal(machine.read(output, 8), b"\x01\x01\x00\x00\x00\x00\x00\x05")
+    service = machine.allocate(value = binary.encode("SampleService", encoding = "utf16le", nul = True))
+    set_named = machine.resolve_export("advapi32.dll", name = "SetNamedSecurityInfoW")
+    equal(machine.call(set_named, args = [service, 5, 4, 0, 0, 0, 0]).value, 0)
+
 def test_kernel_budget_threads_remain_runnable():
     state_for = testing.module("@stdlib//windows/selfreg:win32.star")["_execution_thread_state"]
     equal(state_for("return"), "terminated")
@@ -973,9 +1025,111 @@ def test_kernel_reports_consistent_default_language():
         "GetUserDefaultLangID",
         "GetSystemDefaultUILanguage",
         "GetUserDefaultUILanguage",
+        "GetThreadLocale",
     ]:
         target = machine.resolve_export("kernel32.dll", name = name)
         equal(machine.call(target).value, 0x0409)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "SetThreadLocale"), args = [0x0809]).value, 1)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetThreadLocale")).value, 0x0809)
+
+def test_kernel_validates_supported_code_pages():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"]()])
+    target = machine.resolve_export("kernel32.dll", name = "IsValidCodePage")
+    equal(machine.call(target, args = [1252]).value, 1)
+    equal(machine.call(target, args = [65001]).value, 1)
+    equal(machine.call(target, args = [0]).value, 0)
+
+def test_kernel_initializes_x86_slist_header():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"]()])
+    header = machine.allocate(value = b"\xff" * 8)
+    target = machine.resolve_export("kernel32.dll", name = "InitializeSListHead")
+    equal(machine.call(target, args = [header]).value, 0)
+    equal(machine.read(header, 8), b"\x00" * 8)
+
+def test_kernel_reports_deterministic_current_thread_times():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"](system_time = 0)])
+    times = machine.allocate(size = 32)
+    target = machine.resolve_export("kernel32.dll", name = "GetThreadTimes")
+    result = machine.call(target, args = [0xfffffffe, times, times + 8, times + 16, times + 24])
+    equal((result.reason, result.value), ("return", 1))
+    equal(machine.read_u64le(times), 116444736000000000)
+    equal([machine.read_u64le(times + offset) for offset in [8, 16, 24]], [0, 0, 0])
+    shutdown = machine.allocate(size = 8)
+    get_shutdown = machine.resolve_export("kernel32.dll", name = "GetProcessShutdownParameters")
+    equal(machine.call(get_shutdown, args = [shutdown, shutdown + 4]).value, 1)
+    equal((machine.read_u32le(shutdown), machine.read_u32le(shutdown + 4)), (0x280, 0))
+
+def test_kernel_tls_apis_share_the_x86_teb_array():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3", fs_base = 0x7000)
+    machine.use([module["kernel32_plugin"]()])
+    allocate = machine.resolve_export("kernel32.dll", name = "TlsAlloc")
+    get_value = machine.resolve_export("kernel32.dll", name = "TlsGetValue")
+    set_value = machine.resolve_export("kernel32.dll", name = "TlsSetValue")
+    index = machine.call(allocate).value
+    tls_array = machine.read_u32le(0x7000 + 0x2c)
+    true(tls_array != 0)
+    equal(machine.call(set_value, args = [index, 0x12345678]).value, 1)
+    equal(machine.read_u32le(tls_array + index * 4), 0x12345678)
+    machine.write_u32le(tls_array + index * 4, 0x87654321)
+    equal(machine.call(get_value, args = [index]).value, 0x87654321)
+
+def test_kernel_short_path_preserves_components_without_aliases():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"]()])
+    source = machine.allocate(value = binary.encode("C:\\Program Files\\Sample", encoding = "utf16le", nul = True))
+    output = machine.allocate(size = 128)
+    target = machine.resolve_export("kernel32.dll", name = "GetShortPathNameW")
+    equal(machine.call(target, args = [source, 0, 0]).value, 24)
+    equal(machine.call(target, args = [source, output, 64]).value, 23)
+    equal(machine.read_cstring(output, encoding = "utf16le"), "C:\\Program Files\\Sample")
+
+def test_kernel_current_directory_resolves_relative_file_paths():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    kernel = module["kernel32_plugin"](
+        environment = {"CurrentDirectory": "C:\\Initial"},
+        files = {"C:\\Target\\sample.bin": b"sample"},
+        directories = ["C:\\Initial", "C:\\Target"],
+    )
+    machine.use([kernel])
+    target = machine.allocate(value = binary.encode("C:\\Target", encoding = "utf16le", nul = True))
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "SetCurrentDirectoryW"), args = [target]).value, 1)
+    output = machine.allocate(size = 64)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetCurrentDirectoryW"), args = [32, output]).value, 9)
+    equal(machine.read_cstring(output, encoding = "utf16le"), "C:\\Target")
+    relative = machine.allocate(value = binary.encode("sample.bin", encoding = "utf16le", nul = True))
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetFileAttributesW"), args = [relative]).value, 0x80)
+
+def test_kernel_init_once_executes_callback_once_and_preserves_context():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"]()])
+    calls = []
+    def initialize(event):
+        calls.append(event.args[1])
+        event.machine.write_u32le(event.args[2], 0x12345678)
+        return 1
+    callback = machine.provide_export(initialize, module = "sample.dll", name = "Initialize", argc = 3)
+    once = machine.allocate(size = 4)
+    context = machine.allocate(size = 4)
+    target = machine.resolve_export("kernel32.dll", name = "InitOnceExecuteOnce")
+    equal(machine.call(target, args = [once, callback, 7, context]).value, 1)
+    machine.write_u32le(context, 0)
+    equal(machine.call(target, args = [once, callback, 9, context]).value, 1)
+    equal((calls, machine.read_u32le(context), machine.read_u32le(once)), ([7], 0x12345678, 2))
+    event_name = machine.allocate(value = binary.encode("Sample", encoding = "utf16le", nul = True))
+    create_event = machine.resolve_export("kernel32.dll", name = "CreateEventExW")
+    event = machine.call(create_event, args = [0, event_name, 3, 0x1f0003]).value
+    true(event != 0)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "WaitForSingleObject"), args = [event, 0]).value, 0)
 
 def test_kernel_resolves_rva_delay_imports():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -1043,6 +1197,12 @@ def test_shlwapi_ansi_to_unicode_ordinal():
     true(roundtrip_address != 0)
     roundtrip = machine.call(roundtrip_address, args = [roundtrip_source, roundtrip_destination, 32])
     equal((roundtrip.reason, roundtrip.value, machine.read_cstring(roundtrip_destination)), ("return", 1, "My Documents"))
+    left = machine.allocate(value = binary.encode("C:\\Program Files\\Microsoft", encoding = "utf16le", nul = True))
+    right = machine.allocate(value = binary.encode("c:\\Program Files\\Mozilla", encoding = "utf16le", nul = True))
+    common = machine.allocate(size = 260 * 2)
+    common_prefix = machine.resolve_export("shlwapi.dll", name = "PathCommonPrefixW")
+    equal(machine.call(common_prefix, args = [left, right, common]).value, 17)
+    equal(machine.read_cstring(common, encoding = "utf16le"), "C:\\Program Files\\")
 
 def test_shell32_special_folder_location_round_trip():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -1076,6 +1236,45 @@ def test_oleaut_variant_time_by_value_abi():
     fields = binary.cursor(machine.read(output, 16))
     equal([fields.u16le() for unused in range(8)], [2000, 1, 6, 1, 12, 0, 0, 0])
 
+def test_shell32_known_folder_path_uses_process_environment():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["shell32_plugin"](
+        "C:\\Windows\\System32\\shell32.dll",
+        environment = {
+            "ProgramData": "D:\\SharedData",
+            "USERPROFILE": "C:\\Users\\Test",
+            "windir": "C:\\Windows",
+        },
+    )])
+    # FOLDERID_ProgramData, encoded using the in-memory GUID byte order.
+    identifier = machine.allocate(value = b"\x82\x5d\xab\x62\xc1\xfd\xc3\x4d\xa9\xdd\x07\x0d\x1d\x49\x5d\x97")
+    output = machine.allocate(size = 4)
+    result = machine.call(machine.resolve_export("shell32.dll", name = "SHGetKnownFolderPath"), args = [identifier, 0, 0, output])
+    equal((result.reason, result.value), ("return", 0))
+    equal(machine.read_cstring(machine.read_u32le(output), encoding = "utf16le"), "D:\\SharedData")
+    legacy_output = machine.allocate(size = 260 * 2)
+    legacy_result = machine.call(machine.resolve_export("shell32.dll", name = "SHGetFolderPathW"), args = [0, 0x23, 0, 0, legacy_output])
+    equal((legacy_result.reason, legacy_result.value), ("return", 0))
+    equal(machine.read_cstring(legacy_output, encoding = "utf16le"), "D:\\SharedData")
+
+def test_shell32_command_line_to_argv_uses_local_allocation():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"](), module["shell32_plugin"]("C:\\Program Files\\Sample\\sample.exe")])
+    command_line = machine.allocate(value = binary.encode('sample.exe /regsvc "two words"', encoding = "utf16le", nul = True))
+    count = machine.allocate(size = 4)
+    result = machine.call(machine.resolve_export("shell32.dll", name = "CommandLineToArgvW"), args = [command_line, count])
+    equal(result.reason, "return")
+    argv = result.value
+    equal(machine.read_u32le(count), 3)
+    equal([
+        machine.read_cstring(machine.read_u32le(argv + index * 4), encoding = "utf16le")
+        for index in range(3)
+    ], ["sample.exe", "/regsvc", "two words"])
+    equal(machine.read_u32le(argv + 12), 0)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "LocalFree"), args = [argv]).value, 0)
+
 def test_winsock_helper_signatures():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     signatures = module["_WS2HELP_SIGNATURES"]
@@ -1095,6 +1294,53 @@ def test_winsock_helper_signatures():
     equal(machine.call(machine.resolve_export("wsock32.dll", ordinal = 112), args = [10061]).value, 0)
     equal(machine.call(machine.resolve_export("wsock32.dll", ordinal = 111)).value, 10061)
     equal(machine.call(machine.resolve_export("wsock32.dll", ordinal = 116)).value, 0)
+
+def test_wer_process_registrations_are_reversible():
+    module = testing.module("@stdlib//windows/selfreg:wer.star")
+    machine = emulator.x86(code = b"\xc3")
+    plugin = module["wer_plugin"]()
+    machine.use([plugin])
+    path = machine.allocate(value = binary.encode("C:\\Program Files\\Sample\\sample.dll", encoding = "utf16le", nul = True))
+    register = machine.resolve_export("wer.dll", name = "WerRegisterRuntimeExceptionModule")
+    unregister = machine.resolve_export("wer.dll", name = "WerUnregisterRuntimeExceptionModule")
+    equal(machine.call(register, args = [path, 0x1234]).value, 0)
+    equal(plugin.state["runtime_modules"]["c:\\program files\\sample\\sample.dll"]["context"], 0x1234)
+    equal(machine.call(unregister, args = [path, 0x1234]).value, 0)
+    equal(plugin.state["runtime_modules"], {})
+    equal(machine.call(machine.resolve_export("wer.dll", name = "WerSetFlags"), args = [4]).value, 0)
+    flags = machine.allocate(size = 4)
+    equal(machine.call(machine.resolve_export("wer.dll", name = "WerGetFlags"), args = [0, flags]).value, 0)
+    equal(machine.read_u32le(flags), 4)
+    event_type = machine.allocate(value = binary.encode("SampleEvent", encoding = "utf16le", nul = True))
+    report_output = machine.allocate(size = 4)
+    equal(machine.call(machine.resolve_export("wer.dll", name = "WerReportCreate"), args = [event_type, 2, 0, report_output]).value, 0)
+    report = machine.read_u32le(report_output)
+    parameter_name = machine.allocate(value = binary.encode("Version", encoding = "utf16le", nul = True))
+    parameter_value = machine.allocate(value = binary.encode("1.0", encoding = "utf16le", nul = True))
+    equal(machine.call(machine.resolve_export("wer.dll", name = "WerReportSetParameter"), args = [report, 0, parameter_name, parameter_value]).value, 0)
+    submit_result = machine.allocate(size = 4)
+    equal(machine.call(machine.resolve_export("wer.dll", name = "WerReportSubmit"), args = [report, 2, 0, submit_result]).value, 0)
+    equal(machine.read_u32le(submit_result), 1)
+    equal(plugin.state["reports"][report]["parameters"][0]["value"], "1.0")
+    equal(machine.call(machine.resolve_export("wer.dll", name = "WerReportCloseHandle"), args = [report]).value, 0)
+    equal(plugin.state["reports"], {})
+
+def test_appmodel_reports_unpacked_desktop_process():
+    module = testing.module("@stdlib//windows/selfreg:appmodel.star")
+    machine = emulator.x86(code = b"\xc3")
+    plugin = module["appmodel_plugin"]()
+    machine.use([plugin])
+    length = machine.allocate(size = 4)
+    machine.write_u32le(length, 260)
+    target = machine.resolve_export("api-ms-win-appmodel-runtime-l1-1-2.dll", name = "GetCurrentPackageFullName")
+    true(target != 0)
+    equal(machine.call(target, args = [length, 0]).value, 15700)
+    equal(machine.read_u32le(length), 0)
+    equal(plugin.state["queries"][-1]["api"], "getcurrentpackagefullname")
+    policy = machine.allocate(size = 4)
+    query_policy = machine.resolve_export("api-ms-win-appmodel-runtime-l1-1-2.dll", name = "AppPolicyGetProcessTerminationMethod")
+    equal(machine.call(query_policy, args = [0, policy]).value, 0)
+    equal(machine.read_u32le(policy), 0)
 
 def test_rpc_runtime_signatures():
     module = testing.module("@stdlib//windows/emulation:rpc.star")
@@ -1190,6 +1436,17 @@ def test_event_log_provider_recognizes_api_set_contracts():
     true(module["_event_log_provider_module"]("api-ms-win-eventlog-legacy-l1-1-0.dll"))
     true(module["_event_log_provider_module"]("api-ms-win-eventing-classicprovider-l1-1-0.dll"))
     true(not module["_event_log_provider_module"]("api-ms-win-core-file-l1-1-0.dll"))
+    machine = emulator.x86(code = b"\xc3")
+    plugin = module["event_log_plugin"]()
+    machine.use([plugin])
+    provider = machine.allocate(value = b"\x00" * 16)
+    output = machine.allocate(size = 8)
+    register = machine.resolve_export("advapi32.dll", name = "EventRegister")
+    unregister = machine.resolve_export("advapi32.dll", name = "EventUnregister")
+    equal(machine.call(register, args = [provider, 0, 0, output]).value, 0)
+    handle = machine.read_u64le(output)
+    true(handle in plugin.state["trace_providers"])
+    equal(machine.call(unregister, args = [handle & 0xffffffff, handle >> 32]).value, 0)
 
 def test_create_service_default_account():
     module = testing.module("@stdlib//windows/selfreg:service.star")
@@ -1218,6 +1475,20 @@ def test_create_service_default_account():
     service = module["service_manager_plugin"](registry)
     machine.use([service])
     true(machine.resolve_export("advapi32.dll", name = "OpenSCManagerW") != 0)
+    manager = machine.call(machine.resolve_export("advapi32.dll", name = "OpenSCManagerW"), args = [0, 0, 0]).value
+    service_name = machine.allocate(value = binary.encode("QuerySvc", encoding = "utf16le", nul = True))
+    image_path = machine.allocate(value = binary.encode("C:\\query.exe", encoding = "utf16le", nul = True))
+    query_service = machine.call(machine.resolve_export("advapi32.dll", name = "CreateServiceW"), args = [manager, service_name, 0, 0, 0x10, 2, 1, image_path, 0, 0, 0, 0, 0]).value
+    description_text = machine.allocate(value = binary.encode("Query service", encoding = "utf16le", nul = True))
+    description_info = machine.allocate(size = 4)
+    machine.write_u32le(description_info, description_text)
+    equal(machine.call(machine.resolve_export("advapi32.dll", name = "ChangeServiceConfig2W"), args = [query_service, 1, description_info]).value, 1)
+    required = machine.allocate(size = 4)
+    query_config = machine.resolve_export("advapi32.dll", name = "QueryServiceConfig2W")
+    equal(machine.call(query_config, args = [query_service, 1, 0, 0, required]).value, 0)
+    output = machine.allocate(size = machine.read_u32le(required))
+    equal(machine.call(query_config, args = [query_service, 1, output, machine.read_u32le(required), required]).value, 1)
+    equal(machine.read_cstring(machine.read_u32le(output), encoding = "utf16le"), "Query service")
     equal(service.resolve_class("{11111111-2222-3333-4444-555555555555}", 4), {
         "class": "{11111111-2222-3333-4444-555555555555}",
         "service": "ExampleSvc",
@@ -1383,6 +1654,14 @@ def test_kernel_critical_section_blocks_other_execution_and_is_recursive():
     equal(machine.call(leave, args = [critical_section]).reason, "return")
     equal(contender.run().reason, "return")
 
+    srw = machine.allocate(size = 4)
+    acquire_srw = machine.resolve_export("kernel32.dll", name = "TryAcquireSRWLockExclusive")
+    release_srw = machine.resolve_export("kernel32.dll", name = "ReleaseSRWLockExclusive")
+    equal(machine.call(acquire_srw, args = [srw]).value, 1)
+    machine.call(release_srw, args = [srw])
+    equal(machine.call(acquire_srw, args = [srw]).value, 1)
+    machine.call(release_srw, args = [srw])
+
 def test_virtual_protect_restores_image_execution():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     machine = emulator.x86(code = b"\xb8\x34\x12\x00\x00\xc3")
@@ -1422,6 +1701,26 @@ def test_kernel_tls_api_shares_teb_slots():
     equal(machine.read_u32le(machine.read_u32le(machine.segment_base("fs") + 0x2c) + index * 4), 0x12345678)
     machine.write_u32le(slots + index * 4, 0x87654321)
     equal(machine.call(tls_get, args = [index]).value, 0x87654321)
+
+def test_virtual_alloc_reserves_released_fixed_address():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"]()])
+    virtual_alloc = machine.resolve_export("kernel32.dll", name = "VirtualAlloc")
+    virtual_free = machine.resolve_export("kernel32.dll", name = "VirtualFree")
+
+    original = machine.call(virtual_alloc, args = [0, 0x30000, 0x3000, 0x04]).value
+    not_equal(original, 0)
+    equal(machine.call(virtual_free, args = [original, 0, 0x8000]).value, 1)
+    fixed = original + 0x10000
+    equal(machine.call(virtual_alloc, args = [fixed, 0x1000, 0x2000, 0x01]).value, fixed)
+    equal(machine.call(virtual_alloc, args = [fixed, 0x1000, 0x1000, 0x04]).value, fixed)
+    machine.write_u32le(fixed, 0x12345678)
+    equal(machine.read_u32le(fixed), 0x12345678)
+    equal(machine.call(virtual_alloc, args = [fixed + 0x10000, 0x1000, 0x1000, 0x04]).value, 0)
+    # A subsequent automatic allocation can still consume the leading part
+    # of the released range without colliding with the fixed reservation.
+    equal(machine.call(virtual_alloc, args = [0, 0x10000, 0x3000, 0x04]).value, original)
 
 def test_kernel_non_debugged_process_introspection():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -1577,6 +1876,7 @@ def test_cryptoapi_verification_context_lifecycle():
     acquire = machine.resolve_export("advapi32.dll", name = "CryptAcquireContextW")
     release = machine.resolve_export("advapi32.dll", name = "CryptReleaseContext")
     random = machine.resolve_export("advapi32.dll", name = "CryptGenRandom")
+    rtl_random = machine.resolve_export("advapi32.dll", name = "SystemFunction036")
     create_hash = machine.resolve_export("advapi32.dll", name = "CryptCreateHash")
     hash_data = machine.resolve_export("advapi32.dll", name = "CryptHashData")
     get_hash = machine.resolve_export("advapi32.dll", name = "CryptGetHashParam")
@@ -1590,6 +1890,14 @@ def test_cryptoapi_verification_context_lifecycle():
     random_output = machine.allocate(size = 40)
     equal(machine.call(random, args = [handle, 40, random_output]).value, 1)
     not_equal(machine.read(random_output, 40), b"\x00" * 40)
+    rtl_random_output = machine.allocate(size = 64)
+    equal(machine.call(rtl_random, args = [rtl_random_output, 32]).value, 1)
+    first_random = machine.read(rtl_random_output, 32)
+    not_equal(first_random, b"\x00" * 32)
+    equal(machine.call(rtl_random, args = [rtl_random_output + 32, 32]).value, 1)
+    not_equal(machine.read(rtl_random_output + 32, 32), first_random)
+    equal(machine.call(rtl_random, args = [0, 0]).value, 1)
+    equal(machine.call(rtl_random, args = [0, 1]).value, 0)
     equal(machine.call(create_hash, args = [handle, 0x800c, 0, 0, output]).value, 1)
     hash_handle = machine.read_u32le(output)
     first = machine.allocate(value = b"ab")
@@ -1998,6 +2306,7 @@ TEST_SUITE = suite("stdlib/internal", [
     case("registry_plugin_reads_source_hives_lazily", test_registry_plugin_reads_source_hives_lazily),
     case("registry_structured_key_parts_preserve_literal_slashes", test_registry_structured_key_parts_preserve_literal_slashes),
     case("registry_initial_keys_are_baseline_state", test_registry_initial_keys_are_baseline_state),
+    case("registry_predefined_root_override_redirects_operations", test_registry_predefined_root_override_redirects_operations),
     case("registry_can_emit_folded_key_spelling", test_registry_can_emit_folded_key_spelling),
     case("registry_system_root_routing", test_registry_system_root_routing),
     case("automation_type_library_resource_paths", test_automation_type_library_resource_paths),
@@ -2022,21 +2331,34 @@ TEST_SUITE = suite("stdlib/internal", [
     case("kernel_provider_recognizes_api_set_contracts", test_kernel_provider_recognizes_api_set_contracts),
     case("kernel_open_process_tracks_current_process", test_kernel_open_process_tracks_current_process),
     case("kernel_reports_consistent_default_language", test_kernel_reports_consistent_default_language),
+    case("kernel_validates_supported_code_pages", test_kernel_validates_supported_code_pages),
+    case("kernel_initializes_x86_slist_header", test_kernel_initializes_x86_slist_header),
+    case("kernel_reports_deterministic_current_thread_times", test_kernel_reports_deterministic_current_thread_times),
+    case("kernel_tls_apis_share_the_x86_teb_array", test_kernel_tls_apis_share_the_x86_teb_array),
+    case("kernel_short_path_preserves_components_without_aliases", test_kernel_short_path_preserves_components_without_aliases),
+    case("kernel_current_directory_resolves_relative_file_paths", test_kernel_current_directory_resolves_relative_file_paths),
+    case("kernel_init_once_executes_callback_once_and_preserves_context", test_kernel_init_once_executes_callback_once_and_preserves_context),
     case("kernel_resolves_rva_delay_imports", test_kernel_resolves_rva_delay_imports),
     case("shlwapi_ansi_to_unicode_ordinal", test_shlwapi_ansi_to_unicode_ordinal),
     case("shell32_special_folder_location_round_trip", test_shell32_special_folder_location_round_trip),
     case("oleaut_variant_time_by_value_abi", test_oleaut_variant_time_by_value_abi),
+    case("shell32_known_folder_path_uses_process_environment", test_shell32_known_folder_path_uses_process_environment),
+    case("shell32_command_line_to_argv_uses_local_allocation", test_shell32_command_line_to_argv_uses_local_allocation),
     case("winsock_helper_signatures", test_winsock_helper_signatures),
+    case("wer_process_registrations_are_reversible", test_wer_process_registrations_are_reversible),
+    case("appmodel_reports_unpacked_desktop_process", test_appmodel_reports_unpacked_desktop_process),
     case("rpc_runtime_signatures", test_rpc_runtime_signatures),
     case("kernel_virtual_file_entries", test_kernel_virtual_file_entries),
     case("profile_section_parser", test_profile_section_parser),
     case("event_log_provider_recognizes_api_set_contracts", test_event_log_provider_recognizes_api_set_contracts),
+    case("security_reports_required_sid_length", test_security_reports_required_sid_length),
     case("create_service_default_account", test_create_service_default_account),
     case("automation_registration_signatures", test_automation_registration_signatures),
     case("com_target_invocation_continues_budget", test_com_target_invocation_continues_budget),
     case("virtual_protect_restores_image_execution", test_virtual_protect_restores_image_execution),
     case("virtual_alloc_commits_reserved_subrange", test_virtual_alloc_commits_reserved_subrange),
     case("kernel_tls_api_shares_teb_slots", test_kernel_tls_api_shares_teb_slots),
+    case("virtual_alloc_reserves_released_fixed_address", test_virtual_alloc_reserves_released_fixed_address),
     case("kernel_non_debugged_process_introspection", test_kernel_non_debugged_process_introspection),
     case("kernel_system_query_provider_preserves_target_status_contract", test_kernel_system_query_provider_preserves_target_status_contract),
     case("kernel_thread_page_priority_and_process_termination", test_kernel_thread_page_priority_and_process_termination),
