@@ -1017,6 +1017,57 @@ def _advanced_inf_run_commands(commands, modifications, installed_files, version
                 "replace": "always",
             })
 
+def _advanced_inf_platform_root(candidates, version):
+    """Selects one controller-referenced install root for the target OS."""
+    ordinary = [name for name in candidates if "NEC" not in name.upper()]
+    platform = version.get("platform_id", 0)
+    major = version.get("major", 0)
+    minor = version.get("minor", 0)
+    token = ""
+    if platform == 1 and major == 4:
+        token = "WINME" if minor >= 90 else ("WIN98" if minor >= 10 else "WIN95")
+    elif platform == 2:
+        token = "WINNT%d%d" % (major, minor)
+    normalized = {
+        name: name.upper().replace("_", "").replace("-", "").replace(".", "")
+        for name in ordinary
+    }
+    matching = [name for name in ordinary if token and token in normalized[name]]
+    if len(matching) == 1:
+        return matching[0]
+    if len(matching) > 1:
+        fail("Advanced INF package controller has ambiguous %s install roots: %s" % (token, ", ".join(sorted(matching))))
+    if len(ordinary) == 1:
+        return ordinary[0]
+    if candidates:
+        fail("Advanced INF package controller has no unique install root for the target OS: " + ", ".join(sorted(candidates)))
+    return None
+
+def _advanced_inf_controller_root(package, inf, version):
+    """Finds a non-default INF root selected by a package-owned PE controller."""
+    candidates = []
+    for name, section in inf.json.items():
+        if type(section) == "dict" and _inf_directives(section, "CopyFiles"):
+            candidates.append(str(name))
+    if not candidates:
+        return None
+    referenced = {}
+    encoded = {
+        # Require both string-table boundaries so a generic root does not
+        # match the suffix of a vendor-qualified root such as NEC_WIN98_INSTALL.
+        name: binary.encode("\x00" + name + "\x00", encoding = "ascii")
+        for name in candidates
+    }
+    for member_name in package.files:
+        source = package.find(member_name)
+        if source == None or not _portable_pe_image(source):
+            continue
+        view = binary.view(source)
+        for name in candidates:
+            if view.find(encoded[name]) >= 0:
+                referenced[name] = True
+    return _advanced_inf_platform_root(sorted(referenced.keys()), version)
+
 def _advanced_inf_installer(package, system_root, version):
     modifications = []
     installed = {}
@@ -1029,12 +1080,20 @@ def _advanced_inf_installer(package, system_root, version):
     for inf_path in sorted([path for path in package.files if path.lower().endswith(".inf")]):
         member = package.find(inf_path)
         inf = windows.inf(member)
-        if inf.section("DefaultInstall") == None:
+        roots = ["DefaultInstall"] if inf.section("DefaultInstall") != None else []
+        if not roots:
+            controller_root = _advanced_inf_controller_root(package, inf, version)
+            if controller_root != None:
+                roots.append(controller_root)
+        if not roots:
             continue
         directories, strings = _advanced_inf_directories(inf, system_root)
         if target == None and "49300" in directories:
             target = directories["49300"]
-        for install in inf.install_sections("DefaultInstall"):
+        install_sections = []
+        for root in roots:
+            install_sections.extend(inf.install_sections(root))
+        for install in install_sections:
             section = install.section
             for directive, output in [("RunPreSetupCommands", pre_commands), ("RunPostSetupCommands", post_commands)]:
                 for command_section in _inf_directives(section, directive):
