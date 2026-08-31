@@ -169,13 +169,23 @@ func (b *sqliteBuilder) buildTable(root uint32, rows []Row, schema bool) error {
 	}
 	for len(level) > 20 {
 		next := make([]buildPage, 0, (len(level)+19)/20)
-		for start := 0; start < len(level); start += 20 {
-			end := min(start+20, len(level))
+		for start := 0; start < len(level); {
+			count := min(20, len(level)-start)
+			// Non-root interior pages require at least two keys, hence at
+			// least three children. Redistribute the final 21 or 22 children
+			// so that the last page is not underfull.
+			if len(level)-start == 21 {
+				count = 18
+			} else if len(level)-start == 22 {
+				count = 19
+			}
+			end := start + count
 			number := b.allocate()
 			if err := b.writeTableInterior(number, 0, level[start:end]); err != nil {
 				return err
 			}
 			next = append(next, buildPage{number: number, last: level[end-1].last})
+			start = end
 		}
 		level = next
 	}
@@ -206,10 +216,18 @@ func (b *sqliteBuilder) buildIndex(root uint32, rows []Row) error {
 }
 
 func (b *sqliteBuilder) buildIndexNode(number uint32, rows []Row) error {
-	if len(rows) <= 1 {
+	leafBytes := 0
+	for _, row := range rows {
+		size, err := b.indexCellSize(row)
+		if err != nil {
+			return err
+		}
+		leafBytes += size
+	}
+	if 8+len(rows)*2+leafBytes <= b.options.PageSize {
 		cells := make([][]byte, 0, len(rows))
-		if len(rows) == 1 {
-			cell, err := b.indexCell(rows[0])
+		for _, row := range rows {
+			cell, err := b.indexCell(row)
 			if err != nil {
 				return err
 			}
@@ -217,22 +235,60 @@ func (b *sqliteBuilder) buildIndexNode(number uint32, rows []Row) error {
 		}
 		return b.writeBtreePage(number, 0, 0x0a, 0, cells)
 	}
-	middle := len(rows) / 2
-	left, right := b.allocate(), b.allocate()
-	if err := b.buildIndexNode(left, rows[:middle]); err != nil {
+	if len(rows) < 5 {
+		return fmt.Errorf("four index records cannot fit one page")
+	}
+	// Non-root SQLite index interior pages require at least two keys. Split
+	// into three non-empty children and promote two records instead of
+	// recursively creating one-key interior pages.
+	first, second := len(rows)/3, 2*len(rows)/3
+	left, middle, right := b.allocate(), b.allocate(), b.allocate()
+	if err := b.buildIndexNode(left, rows[:first]); err != nil {
 		return err
 	}
-	if err := b.buildIndexNode(right, rows[middle+1:]); err != nil {
+	if err := b.buildIndexNode(middle, rows[first+1:second]); err != nil {
 		return err
 	}
-	cell, err := b.indexCell(rows[middle])
+	if err := b.buildIndexNode(right, rows[second+1:]); err != nil {
+		return err
+	}
+	firstCell, err := b.indexCell(rows[first])
 	if err != nil {
 		return err
 	}
-	interior := make([]byte, 4)
-	binary.BigEndian.PutUint32(interior, left)
-	interior = append(interior, cell...)
-	return b.writeBtreePage(number, 0, 0x02, right, [][]byte{interior})
+	secondCell, err := b.indexCell(rows[second])
+	if err != nil {
+		return err
+	}
+	leftInterior := make([]byte, 4)
+	binary.BigEndian.PutUint32(leftInterior, left)
+	leftInterior = append(leftInterior, firstCell...)
+	middleInterior := make([]byte, 4)
+	binary.BigEndian.PutUint32(middleInterior, middle)
+	middleInterior = append(middleInterior, secondCell...)
+	return b.writeBtreePage(number, 0, 0x02, right, [][]byte{leftInterior, middleInterior})
+}
+
+func (b *sqliteBuilder) indexCellSize(row Row) (int, error) {
+	payload, err := encodeRecord(row.Values, b.options.Encoding)
+	if err != nil {
+		return 0, err
+	}
+	usable := b.options.PageSize
+	maximumLocal := ((usable - 12) * 64 / 255) - 23
+	local := len(payload)
+	if len(payload) > maximumLocal {
+		minimumLocal := ((usable - 12) * 32 / 255) - 23
+		local = minimumLocal + (len(payload)-minimumLocal)%(usable-4)
+		if local > maximumLocal {
+			local = minimumLocal
+		}
+	}
+	overflow := 0
+	if local != len(payload) {
+		overflow = 4
+	}
+	return len(encodeVarint(uint64(len(payload)))) + local + overflow, nil
 }
 
 func (b *sqliteBuilder) tableLeafCell(row Row) ([]byte, error) {

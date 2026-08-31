@@ -788,6 +788,14 @@ Implements RegInstall directly from a loaded module's REGINST data.
     helper while preserving the selected section and caller-supplied string
     table semantics.
 
+## `windows/selfreg/appmodel.star`
+
+Windows application-model identity semantics for unpackaged processes.
+
+### `appmodel_plugin`
+
+Reports the ordinary absence of package identity for desktop binaries.
+
 ## `windows/selfreg/cabinet.star`
 
 In-memory Cabinet.dll extraction services for setup-time execution.
@@ -1083,6 +1091,14 @@ Builds registry operations from parsed type-library facts.
 ### `typelib_registration_patches`
 
 Registers referenced or self-registering embedded MSFT type libraries.
+
+## `windows/selfreg/wer.star`
+
+Process-local Windows Error Reporting registration semantics.
+
+### `wer_plugin`
+
+Models WER's in-process registration surface without reporting externally.
 
 ## `windows/selfreg/win32.star`
 

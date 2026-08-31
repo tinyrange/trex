@@ -7,6 +7,13 @@ _ROOTS = {
     0x80000003: ("DEFAULT", "/@users"),
 }
 
+_BASELINE_KEYS = [
+    ("SOFTWARE", "/Classes/AppID"),
+    ("SOFTWARE", "/Classes/CLSID"),
+    ("SOFTWARE", "/Classes/Interface"),
+    ("SOFTWARE", "/Classes/TypeLib"),
+]
+
 _TYPES = {
     0: "REG_NONE",
     1: "REG_SZ",
@@ -56,6 +63,7 @@ _CALLS = {
     "regqueryinfokeyw": 12,
     "regnotifychangekeyvalue": 5,
     "regdisablepredefinedcache": 0,
+    "regoverridepredefkey": 2,
 }
 
 _NATIVE_CALLS = {
@@ -430,6 +438,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         fail("registry output_key_case must be preserve or folded")
     state = {
         "handles": dict(_ROOTS),
+        "overrides": {},
         "next_handle": 0x10000,
         "patches": [],
         "keys": dict(prepared_state.get("keys", {})) if prepared_state != None else {},
@@ -545,6 +554,11 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         ensure_key(root[0], root[1])
     for hive in ["SYSTEM", "SOFTWARE", "SAM", "SECURITY", "DEFAULT"]:
         ensure_key(hive, "/")
+    # These empty HKCR namespaces are part of a normal COM-capable Windows
+    # installation. Keep them in baseline state so opening a standard parent
+    # does not manufacture an output patch.
+    for hive, key in _BASELINE_KEYS:
+        ensure_key(hive, key)
     load_keys(keys)
     load_values(values)
 
@@ -561,6 +575,8 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         return handle
 
     def key_for(handle):
+        if handle in _ROOTS and handle in state["overrides"]:
+            return state["overrides"][handle]
         return state["handles"].get(handle)
 
     def us_targets(handle, ignore_user = False):
@@ -883,10 +899,21 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             return 0
         if name == "regdisablepredefinedcache":
             return 0
+        if name == "regoverridepredefkey":
+            if args[0] not in _ROOTS:
+                return 87  # ERROR_INVALID_PARAMETER
+            if not args[1]:
+                state["overrides"].pop(args[0], None)
+                return 0
+            target = key_for(args[1])
+            if target == None:
+                return 6  # ERROR_INVALID_HANDLE
+            state["overrides"][args[0]] = target
+            return 0
         if name == "regopencurrentuser":
             if not args[1]:
                 return 87
-            root = _ROOTS[0x80000001]
+            root = key_for(0x80000001)
             event.machine.write(args[1], binary.u32le(allocate_handle(root[0], root[1])))
             return 0
         if name.startswith("shregopenuskey") or name.startswith("shregcreateuskey"):
@@ -1285,6 +1312,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
 
     def reset():
         state["handles"] = dict(_ROOTS)
+        state["overrides"] = {}
         state["next_handle"] = 0x10000
         state["patches"] = []
         state["keys"] = {}
@@ -1302,6 +1330,8 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         state["us_handles"] = {}
         for root in _ROOTS.values():
             ensure_key(root[0], root[1])
+        for hive, key in _BASELINE_KEYS:
+            ensure_key(hive, key)
         load_keys(keys)
         load_values(values)
 

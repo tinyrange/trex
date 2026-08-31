@@ -48,6 +48,36 @@ func TestPESectionMappingRejectsMissingVirtualData(t *testing.T) {
 	}
 }
 
+func TestPE32TLSMetadataPreservesTemplateIndexAndCallbacks(t *testing.T) {
+	const base = uint32(0x00400000)
+	mapped := make([]byte, 0x1000)
+	optional := &pe.OptionalHeader32{}
+	optional.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_TLS] = pe.DataDirectory{VirtualAddress: 0x100, Size: 24}
+	tls := mapped[0x100:0x118]
+	binary.LittleEndian.PutUint32(tls[0:4], base+0x200)
+	binary.LittleEndian.PutUint32(tls[4:8], base+0x204)
+	binary.LittleEndian.PutUint32(tls[8:12], base+0x300)
+	binary.LittleEndian.PutUint32(tls[12:16], base+0x400)
+	binary.LittleEndian.PutUint32(tls[16:20], 3)
+	copy(mapped[0x200:0x204], []byte{0xff, 0xff, 0xff, 0xff})
+	binary.LittleEndian.PutUint32(mapped[0x400:0x404], base+0x500)
+	binary.LittleEndian.PutUint32(mapped[0x404:0x408], base+0x600)
+
+	template, zeroFill, index, callbacks, err := pe32TLSMetadata(mapped, optional, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := template, []byte{0xff, 0xff, 0xff, 0xff}; !bytes.Equal(got, want) {
+		t.Fatalf("template = %x, want %x", got, want)
+	}
+	if zeroFill != 3 || index != base+0x300 {
+		t.Fatalf("zero fill/index = %#x/%#x, want 3/%#x", zeroFill, index, base+0x300)
+	}
+	if len(callbacks) != 2 || callbacks[0] != base+0x500 || callbacks[1] != base+0x600 {
+		t.Fatalf("callbacks = %#v", callbacks)
+	}
+}
+
 func TestEmulatorX86FreeReclaimsPluginAllocation(t *testing.T) {
 	machine := newRawX86TestMachine(t, starlark.Bytes("\xc3"), nil)
 	allocate := func(size, alignment int) uint32 {
@@ -81,6 +111,244 @@ func TestEmulatorX86FreeReclaimsPluginAllocation(t *testing.T) {
 	}
 	if _, err := machine.freeBuiltin(nil, nil, starlark.Tuple{starlark.MakeUint(uint(first + 1))}, nil); err == nil {
 		t.Fatal("free accepted an interior pointer")
+	}
+}
+
+func TestEmulatorX86RequestedAllocationConsumesReclaimedRange(t *testing.T) {
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xc3"), nil)
+	allocate := func(size int, address *uint32) uint32 {
+		kwargs := []starlark.Tuple{{starlark.String("size"), starlark.MakeInt(size)}}
+		if address != nil {
+			kwargs = append(kwargs, starlark.Tuple{starlark.String("address"), starlark.MakeUint(uint(*address))})
+		}
+		value, err := machine.allocateBuiltin(nil, nil, nil, kwargs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, _ := value.(starlark.Int).Uint64()
+		return uint32(result)
+	}
+	first := allocate(0x100, nil)
+	if _, err := machine.freeBuiltin(nil, nil, starlark.Tuple{starlark.MakeUint(uint(first))}, nil); err != nil {
+		t.Fatal(err)
+	}
+	fixed := first + 0x40
+	if got := allocate(0x40, &fixed); got != fixed {
+		t.Fatalf("fixed allocation = %#x, want %#x", got, fixed)
+	}
+	if got := allocate(0x40, nil); got != first {
+		t.Fatalf("leading reclaimed allocation = %#x, want %#x", got, first)
+	}
+	if got := allocate(0x40, nil); got != first+0x80 {
+		t.Fatalf("trailing reclaimed allocation = %#x, want %#x", got, first+0x80)
+	}
+}
+
+func TestEmulatorX86PrefetchIsNonFaultingHint(t *testing.T) {
+	// mov eax,0xdeadbeef; prefetcht0 [eax]; mov eax,42; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\xef\xbe\xad\xde\x0f\x18\x08\xb8\x2a\x00\x00\x00\xc3"), nil)
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-prefetch-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := recordUint32(t, result, "value"); got != 42 {
+		t.Fatalf("value = %d, want 42", got)
+	}
+}
+
+func TestEmulatorX86PackedDwordEquality(t *testing.T) {
+	// pcmpeqd xmm0,xmm0; movd eax,xmm0; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x66\x0f\x76\xc0\x66\x0f\x7e\xc0\xc3"), nil)
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-pcmpeqd-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := recordUint32(t, result, "value"); got != math.MaxUint32 {
+		t.Fatalf("value = %#x, want %#x", got, uint32(math.MaxUint32))
+	}
+}
+
+func TestEmulatorX86CPUIDReportsStableVendor(t *testing.T) {
+	// xor eax,eax; cpuid; mov eax,ebx; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x31\xc0\x0f\xa2\x89\xd8\xc3"), nil)
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-cpuid-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := recordUint32(t, result, "value"); got != 0x756e6547 {
+		t.Fatalf("vendor prefix = %#x, want %#x", got, uint32(0x756e6547))
+	}
+}
+
+func TestEmulatorX86ConvertsSignedIntegerToScalarDouble(t *testing.T) {
+	// mov eax,-2; cvtsi2sd xmm0,eax; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\xfe\xff\xff\xff\xf2\x0f\x2a\xc0\xc3"), nil)
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-cvtsi2sd-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := math.Float64frombits(binary.LittleEndian.Uint64(machine.xmm[0][:8])); got != -2 {
+		t.Fatalf("xmm0 scalar = %g, want -2", got)
+	}
+}
+
+func TestEmulatorX86TruncatesScalarDoubleToSignedInteger(t *testing.T) {
+	// mov eax,-2; cvtsi2sd xmm0,eax; addsd xmm0,xmm0; cvttsd2si eax,xmm0; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\xfe\xff\xff\xff\xf2\x0f\x2a\xc0\xf2\x0f\x58\xc0\xf2\x0f\x2c\xc0\xc3"), nil)
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-cvttsd2si-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := recordUint32(t, result, "value"); got != uint32(0xfffffffc) {
+		t.Fatalf("value = %#x, want -4", got)
+	}
+}
+
+func TestEmulatorX86ScalarFloatMultiply(t *testing.T) {
+	// mov eax,2.0f; movd xmm0,eax; mulss xmm0,xmm0; movd eax,xmm0; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\x00\x00\x00\x40\x66\x0f\x6e\xc0\xf3\x0f\x59\xc0\x66\x0f\x7e\xc0\xc3"), nil)
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-mulss-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := math.Float32frombits(recordUint32(t, result, "value")); got != 4 {
+		t.Fatalf("value = %g, want 4", got)
+	}
+}
+
+func TestEmulatorX86RoundsX87ValueToIntegral(t *testing.T) {
+	// fld qword ptr [0x2000]; frndint; fstp qword ptr [0x2008]; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xdd\x05\x00\x20\x00\x00\xd9\xfc\xdd\x1d\x08\x20\x00\x00\xc3"), nil)
+	data := make([]byte, 16)
+	binary.LittleEndian.PutUint64(data, math.Float64bits(2.5))
+	if err := machine.addMapping("x87 round operands", 0x2000, data, true, true, false); err != nil {
+		t.Fatal(err)
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-frndint-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	stored, err := machine.readMemory(0x2008, 8, 'r')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := math.Float64frombits(binary.LittleEndian.Uint64(stored)); got != 2 {
+		t.Fatalf("rounded value = %g, want 2", got)
+	}
+}
+
+func TestEmulatorX86PacksSignedWordsToUnsignedBytes(t *testing.T) {
+	// packuswb xmm0,xmm1; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x66\x0f\x67\xc1\xc3"), nil)
+	left := []int16{-1, 0, 1, 254, 255, 256, 32767, -32768}
+	right := []int16{2, 3, 4, 5, 6, 7, 8, 9}
+	for index, value := range left {
+		binary.LittleEndian.PutUint16(machine.xmm[0][index*2:], uint16(value))
+	}
+	for index, value := range right {
+		binary.LittleEndian.PutUint16(machine.xmm[1][index*2:], uint16(value))
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-packuswb-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	want := [16]byte{0, 0, 1, 254, 255, 255, 255, 0, 2, 3, 4, 5, 6, 7, 8, 9}
+	if machine.xmm[0] != want {
+		t.Fatalf("packed bytes = %v, want %v", machine.xmm[0], want)
+	}
+}
+
+func TestEmulatorX86UnpacksLowBytes(t *testing.T) {
+	// punpcklbw xmm0,xmm0; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x66\x0f\x60\xc0\xc3"), nil)
+	for index := range machine.xmm[0] {
+		machine.xmm[0][index] = byte(index)
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-punpcklbw-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	want := [16]byte{0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7}
+	if machine.xmm[0] != want {
+		t.Fatalf("unpacked bytes = %v, want %v", machine.xmm[0], want)
+	}
+}
+
+func TestEmulatorX86PackedArithmeticWordShift(t *testing.T) {
+	// psraw xmm0,8; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x66\x0f\x71\xe0\x08\xc3"), nil)
+	binary.LittleEndian.PutUint16(machine.xmm[0][0:], 0x8000)
+	binary.LittleEndian.PutUint16(machine.xmm[0][2:], 0x7f00)
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-psraw-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := binary.LittleEndian.Uint16(machine.xmm[0][0:]); got != 0xff80 {
+		t.Fatalf("negative shifted word = %#x, want 0xff80", got)
+	}
+	if got := binary.LittleEndian.Uint16(machine.xmm[0][2:]); got != 0x007f {
+		t.Fatalf("positive shifted word = %#x, want 0x007f", got)
+	}
+}
+
+func TestEmulatorX86PackedByteMoveMask(t *testing.T) {
+	// pmovmskb eax,xmm1; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x66\x0f\xd7\xc1\xc3"), nil)
+	for index := range machine.xmm[1] {
+		if index%2 == 0 {
+			machine.xmm[1][index] = 0x80
+		}
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-pmovmskb-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := recordUint32(t, result, "value"); got != 0x5555 {
+		t.Fatalf("move mask = %#x, want 0x5555", got)
 	}
 }
 
@@ -179,6 +447,28 @@ func TestEmulatorX86RDTSCUsesDeterministicInstructionClock(t *testing.T) {
 	}
 }
 
+func TestEmulatorX86BitTestRegisterAndMemoryBitString(t *testing.T) {
+	thread := &starlark.Thread{Name: "emulator-bt-test"}
+	register := newRawX86TestMachine(t, starlark.Bytes("\xb8\x08\x00\x00\x00\x0f\xba\xe0\x03\x0f\x92\xc0\x0f\xb6\xc0\xc3"), nil)
+	result, err := register.callAddress(thread, register.entry, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := recordUint32(t, result.(*starlarkRecord), "value"); got != 1 {
+		t.Fatalf("BT register carry = %d, want 1", got)
+	}
+
+	// ECX=63 selects bit 31 in the second DWORD rooted at [ESP].
+	memory := newRawX86TestMachine(t, starlark.Bytes("\xb8\x00\x00\x00\x80\x50\x6a\x01\xb9\x3f\x00\x00\x00\x0f\xa3\x0c\x24\x0f\x92\xc0\x0f\xb6\xc0\x83\xc4\x08\xc3"), nil)
+	result, err = memory.callAddress(thread, memory.entry, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := recordUint32(t, result.(*starlarkRecord), "value"); got != 1 {
+		t.Fatalf("BT memory bit-string carry = %d, want 1", got)
+	}
+}
+
 func TestEmulatorX86BSWAPReversesRegisterBytes(t *testing.T) {
 	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\x78\x56\x34\x12\x0f\xc8\xc3"), nil)
 	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-bswap-test"})
@@ -244,6 +534,22 @@ func TestEmulatorX86CWDESignExtendsAX(t *testing.T) {
 	}
 	if got, want := recordUint32(t, result, "value"), uint32(0xffff8001); got != want {
 		t.Fatalf("EAX = %#x, want %#x", got, want)
+	}
+}
+
+func TestEmulatorX86WordSignExtensionInstructionsPreserveUpperHalves(t *testing.T) {
+	// mov eax,12345680h; cbw; mov edx,56780000h; cwd; mov eax,edx; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\x80\x56\x34\x12\x66\x98\xba\x00\x00\x78\x56\x66\x99\x89\xd0\xc3"), nil)
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-cbw-cwd-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got, want := recordString(t, result, "reason"), "return"; got != want {
+		t.Fatalf("reason = %q, want %q (detail %s)", got, want, recordString(t, result, "detail"))
+	}
+	if got, want := recordUint32(t, result, "value"), uint32(0x5678ffff); got != want {
+		t.Fatalf("EDX after CWD = %#x, want %#x", got, want)
 	}
 }
 
@@ -375,6 +681,288 @@ func TestEmulatorX86SetOverflowConditions(t *testing.T) {
 				t.Fatalf("eax = %#x, want %#x", got, test.want)
 			}
 		})
+	}
+}
+
+func TestEmulatorX86JumpOverflowConditions(t *testing.T) {
+	tests := []struct {
+		name string
+		code starlark.Bytes
+		want uint32
+	}{
+		{
+			name: "jump on overflow",
+			// MOV EAX, 0x7fffffff; ADD EAX, 1; JO return; MOV EAX, 0; RET.
+			code: starlark.Bytes("\xb8\xff\xff\xff\x7f\x83\xc0\x01\x70\x05\xb8\x00\x00\x00\x00\xc3"),
+			want: 0x80000000,
+		},
+		{
+			name: "jump on no overflow",
+			// XOR EAX, EAX; ADD EAX, 1; JNO return; MOV EAX, 0; RET.
+			code: starlark.Bytes("\x31\xc0\x83\xc0\x01\x71\x05\xb8\x00\x00\x00\x00\xc3"),
+			want: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := newRawX86TestMachine(t, test.code, nil)
+			resultValue, err := machine.run(&starlark.Thread{Name: "emulator-jump-overflow-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := resultValue.(*starlarkRecord)
+			if got := recordString(t, result, "reason"); got != "return" {
+				t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+			}
+			if got := recordUint32(t, result, "value"); got != test.want {
+				t.Fatalf("eax = %#x, want %#x", got, test.want)
+			}
+		})
+	}
+}
+
+func TestEmulatorX86XORPS(t *testing.T) {
+	// XORPS XMM0, XMM1; RET.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x0f\x57\xc1\xc3"), nil)
+	for index := range machine.xmm[0] {
+		machine.xmm[0][index] = byte(index)
+		machine.xmm[1][index] = byte(0xf0 + index)
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-xorps-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	for index, got := range machine.xmm[0] {
+		want := byte(index) ^ byte(0xf0+index)
+		if got != want {
+			t.Fatalf("xmm0[%d] = %#x, want %#x", index, got, want)
+		}
+	}
+}
+
+func TestEmulatorX86MOVUPS(t *testing.T) {
+	// MOVUPS XMM0, XMM1; RET.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x0f\x10\xc1\xc3"), nil)
+	for index := range machine.xmm[1] {
+		machine.xmm[1][index] = byte(0x80 + index)
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-movups-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if machine.xmm[0] != machine.xmm[1] {
+		t.Fatalf("xmm0 = %x, want %x", machine.xmm[0], machine.xmm[1])
+	}
+}
+
+func TestEmulatorX86MOVSDXMM(t *testing.T) {
+	// MOVSD XMM0, XMM1; RET.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xf2\x0f\x10\xc1\xc3"), nil)
+	for index := range machine.xmm[0] {
+		machine.xmm[0][index] = byte(0x40 + index)
+		machine.xmm[1][index] = byte(0x80 + index)
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-movsd-xmm-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	for index, got := range machine.xmm[0] {
+		want := byte(0x40 + index)
+		if index < 8 {
+			want = byte(0x80 + index)
+		}
+		if got != want {
+			t.Fatalf("xmm0[%d] = %#x, want %#x", index, got, want)
+		}
+	}
+}
+
+func TestEmulatorX86MOVQXMM(t *testing.T) {
+	// MOVQ XMM0, XMM1; RET.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xf3\x0f\x7e\xc1\xc3"), nil)
+	for index := range machine.xmm[0] {
+		machine.xmm[0][index] = 0xff
+		machine.xmm[1][index] = byte(0x80 + index)
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-movq-xmm-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	for index, got := range machine.xmm[0] {
+		want := byte(0)
+		if index < 8 {
+			want = byte(0x80 + index)
+		}
+		if got != want {
+			t.Fatalf("xmm0[%d] = %#x, want %#x", index, got, want)
+		}
+	}
+}
+
+func TestEmulatorX86ConditionalMove(t *testing.T) {
+	tests := []struct {
+		name string
+		code starlark.Bytes
+		want uint32
+	}{
+		{
+			name: "taken",
+			// MOV EAX, 1; MOV EBX, 2; CMP EAX, EAX; CMOVE EAX, EBX; RET.
+			code: starlark.Bytes("\xb8\x01\x00\x00\x00\xbb\x02\x00\x00\x00\x39\xc0\x0f\x44\xc3\xc3"),
+			want: 2,
+		},
+		{
+			name: "not taken",
+			// MOV EAX, 1; MOV EBX, 2; CMP EAX, EBX; CMOVE EAX, EBX; RET.
+			code: starlark.Bytes("\xb8\x01\x00\x00\x00\xbb\x02\x00\x00\x00\x39\xd8\x0f\x44\xc3\xc3"),
+			want: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := newRawX86TestMachine(t, test.code, nil)
+			resultValue, err := machine.run(&starlark.Thread{Name: "emulator-conditional-move-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := resultValue.(*starlarkRecord)
+			if got := recordString(t, result, "reason"); got != "return" {
+				t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+			}
+			if got := recordUint32(t, result, "value"); got != test.want {
+				t.Fatalf("eax = %#x, want %#x", got, test.want)
+			}
+		})
+	}
+}
+
+func TestEmulatorX86MOVD(t *testing.T) {
+	// MOV EBX, 0x12345678; MOVD XMM0, EBX; MOVD EAX, XMM0; RET.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xbb\x78\x56\x34\x12\x66\x0f\x6e\xc3\x66\x0f\x7e\xc0\xc3"), nil)
+	for index := range machine.xmm[0] {
+		machine.xmm[0][index] = 0xff
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-movd-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := recordUint32(t, result, "value"); got != 0x12345678 {
+		t.Fatalf("eax = %#x, want %#x", got, uint32(0x12345678))
+	}
+	for index, got := range machine.xmm[0][4:] {
+		if got != 0 {
+			t.Fatalf("xmm0[%d] = %#x, want zero", index+4, got)
+		}
+	}
+}
+
+func TestEmulatorX86PackedBitwise(t *testing.T) {
+	// POR XMM0, XMM1; PAND XMM0, XMM2; PXOR XMM0, XMM3; RET.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x66\x0f\xeb\xc1\x66\x0f\xdb\xc2\x66\x0f\xef\xc3\xc3"), nil)
+	for index := range machine.xmm[0] {
+		machine.xmm[0][index] = 0x0f
+		machine.xmm[1][index] = 0x30
+		machine.xmm[2][index] = 0x3c
+		machine.xmm[3][index] = 0x03
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-packed-bitwise-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	for index, got := range machine.xmm[0] {
+		if got != 0x3f {
+			t.Fatalf("xmm0[%d] = %#x, want 0x3f", index, got)
+		}
+	}
+}
+
+func TestEmulatorX86ScalarDoubleArithmetic(t *testing.T) {
+	// SUBSD XMM0, XMM1; RET.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xf2\x0f\x5c\xc1\xc3"), nil)
+	binary.LittleEndian.PutUint64(machine.xmm[0][:], math.Float64bits(10.5))
+	binary.LittleEndian.PutUint64(machine.xmm[1][:], math.Float64bits(2.25))
+	for index := 8; index < len(machine.xmm[0]); index++ {
+		machine.xmm[0][index] = byte(0x40 + index)
+	}
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-scalar-double-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := math.Float64frombits(binary.LittleEndian.Uint64(machine.xmm[0][:])); got != 8.25 {
+		t.Fatalf("xmm0 low double = %g, want 8.25", got)
+	}
+	for index, got := range machine.xmm[0][8:] {
+		want := byte(0x48 + index)
+		if got != want {
+			t.Fatalf("xmm0[%d] = %#x, want %#x", index+8, got, want)
+		}
+	}
+}
+
+func TestEmulatorX86ScalarDoubleCompare(t *testing.T) {
+	// UCOMISD XMM0, XMM1; SETB AL; RET.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\x66\x0f\x2e\xc1\x0f\x92\xc0\xc3"), nil)
+	binary.LittleEndian.PutUint64(machine.xmm[0][:], math.Float64bits(1.0))
+	binary.LittleEndian.PutUint64(machine.xmm[1][:], math.Float64bits(2.0))
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-scalar-double-compare-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := recordUint32(t, result, "value"); got != 1 {
+		t.Fatalf("eax = %#x, want 1", got)
+	}
+	if !machine.carry || machine.zero || machine.parity || machine.sign || machine.overflow {
+		t.Fatalf("flags after 1.0 < 2.0: c=%t z=%t p=%t s=%t o=%t", machine.carry, machine.zero, machine.parity, machine.sign, machine.overflow)
+	}
+}
+
+func TestEmulatorX86ScalarDoubleMinimum(t *testing.T) {
+	// MINSD XMM0, XMM1; RET.
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xf2\x0f\x5d\xc1\xc3"), nil)
+	binary.LittleEndian.PutUint64(machine.xmm[0][:], math.Float64bits(9.5))
+	binary.LittleEndian.PutUint64(machine.xmm[1][:], math.Float64bits(3.25))
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-scalar-double-minimum-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := math.Float64frombits(binary.LittleEndian.Uint64(machine.xmm[0][:])); got != 3.25 {
+		t.Fatalf("xmm0 low double = %g, want 3.25", got)
 	}
 }
 

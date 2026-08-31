@@ -131,12 +131,16 @@ type emulatorModuleExport struct {
 }
 
 type emulatorModule struct {
-	name     string
-	base     uint32
-	entry    uint32
-	primary  bool
-	exports  map[string]emulatorModuleExport
-	ordinals map[uint32]emulatorModuleExport
+	name         string
+	base         uint32
+	entry        uint32
+	primary      bool
+	tlsTemplate  []byte
+	tlsZeroFill  uint32
+	tlsIndex     uint32
+	tlsCallbacks []uint32
+	exports      map[string]emulatorModuleExport
+	ordinals     map[uint32]emulatorModuleExport
 }
 
 type emulatorCRC32Loop struct {
@@ -235,6 +239,7 @@ type emulatorDecodedEntry struct {
 
 type emulatorCPUContext struct {
 	registers      emulatorRegisterFile
+	xmm            [32][16]byte
 	eip            uint32
 	callDepth      int
 	callFrames     []emulatorCallFrame
@@ -405,6 +410,7 @@ type emulatorX86 struct {
 	mappings            []emulatorMapping
 	mappingCache        [2]int
 	registers           emulatorRegisterFile
+	xmm                 [32][16]byte
 	eip                 uint32
 	entry               uint32
 	exports             map[string]uint32
@@ -718,7 +724,15 @@ func (m *emulatorX86) mapPE(value starlark.Value, name string, primary bool) (*e
 	if err := m.addMapping("module:"+canonicalName, base, mapped, true, true, true); err != nil {
 		return nil, err
 	}
-	module := &emulatorModule{name: canonicalName, base: base, entry: base + optional.AddressOfEntryPoint, primary: primary, exports: make(map[string]emulatorModuleExport), ordinals: make(map[uint32]emulatorModuleExport)}
+	tlsTemplate, tlsZeroFill, tlsIndex, tlsCallbacks, err := pe32TLSMetadata(mapped, optional, base)
+	if err != nil {
+		return nil, fmt.Errorf("PE TLS: %w", err)
+	}
+	module := &emulatorModule{
+		name: canonicalName, base: base, entry: base + optional.AddressOfEntryPoint, primary: primary,
+		tlsTemplate: tlsTemplate, tlsZeroFill: tlsZeroFill, tlsIndex: tlsIndex, tlsCallbacks: tlsCallbacks,
+		exports: make(map[string]emulatorModuleExport), ordinals: make(map[uint32]emulatorModuleExport),
+	}
 	m.modules[canonicalName] = module
 	m.moduleValuesCache = nil
 	if primary {
@@ -758,6 +772,73 @@ func (m *emulatorX86) mapPE(value starlark.Value, name string, primary bool) (*e
 		return nil, err
 	}
 	return module, nil
+}
+
+func pe32TLSMetadata(mapped []byte, optional *pe.OptionalHeader32, base uint32) ([]byte, uint32, uint32, []uint32, error) {
+	directory := optional.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_TLS]
+	if directory.VirtualAddress == 0 || directory.Size == 0 {
+		return nil, 0, 0, nil, nil
+	}
+	if directory.Size < 24 || uint64(directory.VirtualAddress)+24 > uint64(len(mapped)) {
+		return nil, 0, 0, nil, fmt.Errorf("directory %#x+%#x lies outside image", directory.VirtualAddress, directory.Size)
+	}
+	tls := mapped[directory.VirtualAddress : directory.VirtualAddress+24]
+	start := binary.LittleEndian.Uint32(tls[0:4])
+	end := binary.LittleEndian.Uint32(tls[4:8])
+	index := binary.LittleEndian.Uint32(tls[8:12])
+	callbacksAddress := binary.LittleEndian.Uint32(tls[12:16])
+	zeroFill := binary.LittleEndian.Uint32(tls[16:20])
+	offset := func(address uint32, size uint64) (uint32, error) {
+		if address < base || uint64(address-base)+size > uint64(len(mapped)) {
+			return 0, fmt.Errorf("address %#x size %#x lies outside image %#x+%#x", address, size, base, len(mapped))
+		}
+		return address - base, nil
+	}
+	if index == 0 {
+		return nil, 0, 0, nil, fmt.Errorf("AddressOfIndex is null")
+	}
+	if _, err := offset(index, 4); err != nil {
+		return nil, 0, 0, nil, err
+	}
+	var template []byte
+	if start != 0 || end != 0 {
+		if end < start {
+			return nil, 0, 0, nil, fmt.Errorf("raw-data range %#x..%#x is inverted", start, end)
+		}
+		startOffset, err := offset(start, uint64(end-start))
+		if err != nil {
+			return nil, 0, 0, nil, err
+		}
+		template = bytes.Clone(mapped[startOffset : startOffset+(end-start)])
+	}
+	if uint64(len(template))+uint64(zeroFill) > uint64(len(mapped)) {
+		return nil, 0, 0, nil, fmt.Errorf("thread template size %#x exceeds image-sized bound", uint64(len(template))+uint64(zeroFill))
+	}
+	callbacks := []uint32{}
+	if callbacksAddress != 0 {
+		callbacksOffset, err := offset(callbacksAddress, 4)
+		if err != nil {
+			return nil, 0, 0, nil, err
+		}
+		for count := 0; count < 4096; count++ {
+			at := uint64(callbacksOffset) + uint64(count)*4
+			if at+4 > uint64(len(mapped)) {
+				return nil, 0, 0, nil, fmt.Errorf("callback table is unterminated")
+			}
+			callback := binary.LittleEndian.Uint32(mapped[at : at+4])
+			if callback == 0 {
+				break
+			}
+			if _, err := offset(callback, 1); err != nil {
+				return nil, 0, 0, nil, fmt.Errorf("callback %d: %w", count, err)
+			}
+			callbacks = append(callbacks, callback)
+			if count == 4095 {
+				return nil, 0, 0, nil, fmt.Errorf("callback table exceeds limit")
+			}
+		}
+	}
+	return template, zeroFill, index, callbacks, nil
 }
 
 // peSectionDataForMapping returns the bytes the Windows image loader maps for
@@ -1719,13 +1800,29 @@ func (m *emulatorX86) moduleValues() *starlark.List {
 	sort.Strings(names)
 	values := make([]starlark.Value, len(names))
 	for index, name := range names {
-		module := m.modules[name]
-		values[index] = newStarlarkRecord(map[string]starlark.Value{"name": starlark.String(module.name), "base": starlark.MakeUint64(uint64(module.base)), "entry": starlark.MakeUint64(uint64(module.entry)), "primary": starlark.Bool(module.primary)})
+		values[index] = emulatorModuleValue(m.modules[name])
 	}
 	result := starlark.NewList(values)
 	result.Freeze()
 	m.moduleValuesCache = result
 	return result
+}
+
+func emulatorModuleValue(module *emulatorModule) starlark.Value {
+	callbacks := make([]starlark.Value, len(module.tlsCallbacks))
+	for index, address := range module.tlsCallbacks {
+		callbacks[index] = starlark.MakeUint64(uint64(address))
+	}
+	return newStarlarkRecord(map[string]starlark.Value{
+		"name":          starlark.String(module.name),
+		"base":          starlark.MakeUint64(uint64(module.base)),
+		"entry":         starlark.MakeUint64(uint64(module.entry)),
+		"primary":       starlark.Bool(module.primary),
+		"tls_template":  starlark.Bytes(module.tlsTemplate),
+		"tls_zero_fill": starlark.MakeUint64(uint64(module.tlsZeroFill)),
+		"tls_index":     starlark.MakeUint64(uint64(module.tlsIndex)),
+		"tls_callbacks": starlark.NewList(callbacks),
+	})
 }
 
 func (m *emulatorX86) loadModuleBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -1741,7 +1838,7 @@ func (m *emulatorX86) loadModuleBuiltin(_ *starlark.Thread, _ *starlark.Builtin,
 	if err != nil {
 		return nil, fmt.Errorf("load_module: %w", err)
 	}
-	return newStarlarkRecord(map[string]starlark.Value{"name": starlark.String(module.name), "base": starlark.MakeUint64(uint64(module.base)), "entry": starlark.MakeUint64(uint64(module.entry)), "primary": starlark.Bool(module.primary)}), nil
+	return emulatorModuleValue(module), nil
 }
 
 func (m *emulatorX86) provideExportBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -1987,6 +2084,7 @@ func (m *emulatorX86) stackSlot() (int, uint32, error) {
 func (m *emulatorX86) captureContext() (emulatorCPUContext, error) {
 	context := emulatorCPUContext{
 		registers:      m.registers,
+		xmm:            m.xmm,
 		eip:            m.eip,
 		callDepth:      m.callDepth,
 		callFrames:     append([]emulatorCallFrame(nil), m.callFrames...),
@@ -2014,7 +2112,7 @@ func (m *emulatorX86) captureContext() (emulatorCPUContext, error) {
 }
 
 func (m *emulatorX86) restoreContext(context emulatorCPUContext) error {
-	m.registers = context.registers
+	m.registers, m.xmm = context.registers, context.xmm
 	m.eip = context.eip
 	m.callDepth = context.callDepth
 	m.callFrames = append(m.callFrames[:0], context.callFrames...)
@@ -2104,7 +2202,7 @@ func (m *emulatorX86) callBuiltinNamed(thread *starlark.Thread, builtinName stri
 		return nil, err
 	}
 	if preserve {
-		registers := m.registers
+		registers, xmm := m.registers, m.xmm
 		eip, callDepth, callFrames := m.eip, m.callDepth, m.callFrames
 		zero, carry, parity, sign, overflow, direction := m.zero, m.carry, m.parity, m.sign, m.overflow, m.direction
 		x87ControlWord, x87StatusWord, x87Stack, x87Top, x87Depth := m.x87ControlWord, m.x87StatusWord, m.x87Stack, m.x87Top, m.x87Depth
@@ -2133,6 +2231,7 @@ func (m *emulatorX86) callBuiltinNamed(thread *starlark.Thread, builtinName stri
 		}
 		m.invokeStackSlots = append(m.invokeStackSlots, slot)
 		m.registers = emulatorRegisterFile{}
+		m.xmm = [32][16]byte{}
 		result, err := m.callAddressWithRegistersAt(thread, uint32(address), values, initialRegisters, nestedStackTop)
 		m.invokeStackSlots = m.invokeStackSlots[:len(m.invokeStackSlots)-1]
 		m.invokeDepth--
@@ -2141,7 +2240,7 @@ func (m *emulatorX86) callBuiltinNamed(thread *starlark.Thread, builtinName stri
 				err = fmt.Errorf("invoke: restore exception list: %w", restoreErr)
 			}
 		}
-		m.registers = registers
+		m.registers, m.xmm = registers, xmm
 		m.eip, m.callDepth, m.callFrames = eip, callDepth, callFrames
 		m.zero, m.carry, m.parity, m.sign, m.overflow, m.direction = zero, carry, parity, sign, overflow, direction
 		m.x87ControlWord, m.x87StatusWord, m.x87Stack, m.x87Top, m.x87Depth = x87ControlWord, x87StatusWord, x87Stack, x87Top, x87Depth
@@ -2162,6 +2261,7 @@ func (m *emulatorX86) callAddressWithRegisters(thread *starlark.Thread, address 
 
 func (m *emulatorX86) callAddressWithRegistersAt(thread *starlark.Thread, address uint32, values []uint32, initial map[x86asm.Reg]uint32, stackTop uint32) (starlark.Value, error) {
 	m.registers = emulatorRegisterFile{}
+	m.xmm = [32][16]byte{}
 	m.zero, m.carry, m.sign, m.overflow, m.direction = false, false, false, false, false
 	m.registers[x86asm.ESP] = stackTop
 	m.registers[x86asm.EBP] = stackTop
@@ -3294,7 +3394,8 @@ func emulatorConditionalJump(operation x86asm.Op) bool {
 	switch operation {
 	case x86asm.JECXZ, x86asm.JE, x86asm.JNE, x86asm.JB, x86asm.JAE,
 		x86asm.JBE, x86asm.JA, x86asm.JL, x86asm.JGE, x86asm.JLE,
-		x86asm.JG, x86asm.JS, x86asm.JNS, x86asm.JP, x86asm.JNP:
+		x86asm.JG, x86asm.JS, x86asm.JNS, x86asm.JP, x86asm.JNP,
+		x86asm.JO, x86asm.JNO:
 		return true
 	default:
 		return false
@@ -4156,10 +4257,35 @@ func (m *emulatorX86) run(thread *starlark.Thread) (starlark.Value, error) {
 func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst, next uint32) (string, string, error) {
 	m.eip = next
 	switch instruction.Op {
-	case x86asm.NOP, x86asm.FWAIT, x86asm.FNCLEX:
+	case x86asm.NOP, x86asm.FWAIT, x86asm.FNCLEX,
+		x86asm.PREFETCHNTA, x86asm.PREFETCHT0, x86asm.PREFETCHT1, x86asm.PREFETCHT2, x86asm.PREFETCHW:
 	case x86asm.RDTSC:
 		m.registers[x86asm.EAX] = uint32(m.timestampCounter)
 		m.registers[x86asm.EDX] = uint32(m.timestampCounter >> 32)
+	case x86asm.CPUID:
+		leaf := m.registers[x86asm.EAX]
+		switch leaf {
+		case 0:
+			m.registers[x86asm.EAX] = 1
+			m.registers[x86asm.EBX] = 0x756e6547 // "Genu"
+			m.registers[x86asm.EDX] = 0x49656e69 // "ineI"
+			m.registers[x86asm.ECX] = 0x6c65746e // "ntel"
+		case 1:
+			m.registers[x86asm.EAX] = 0x00000663
+			m.registers[x86asm.EBX] = 0
+			m.registers[x86asm.ECX] = 0
+			m.registers[x86asm.EDX] = 1<<0 | 1<<4 | 1<<8 | 1<<15 | 1<<23 | 1<<24 | 1<<25 | 1<<26
+		case 0x80000000:
+			m.registers[x86asm.EAX] = 0x80000001
+			m.registers[x86asm.EBX] = 0
+			m.registers[x86asm.ECX] = 0
+			m.registers[x86asm.EDX] = 0
+		default:
+			m.registers[x86asm.EAX] = 0
+			m.registers[x86asm.EBX] = 0
+			m.registers[x86asm.ECX] = 0
+			m.registers[x86asm.EDX] = 0
+		}
 	case x86asm.FNSTCW:
 		if err := m.setOperand(instruction.Args[0], 2, uint32(m.x87ControlWord)); err != nil {
 			return "", "", err
@@ -4336,6 +4462,14 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 			return "", "", err
 		}
 		m.x87Pop()
+	case x86asm.FRNDINT:
+		value, err := m.x87Value(0)
+		if err != nil {
+			return "", "", err
+		}
+		if !math.IsNaN(value) && !math.IsInf(value, 0) {
+			m.x87Stack[m.x87Top] = float64(m.x87Round(value))
+		}
 	case x86asm.FISTP:
 		value, err := m.x87Value(0)
 		if err != nil {
@@ -4352,6 +4486,447 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		}
 		if err := m.setOperand(instruction.Args[0], instruction.MemBytes, v); err != nil {
 			return "", "", err
+		}
+	case x86asm.XORPS, x86asm.PXOR, x86asm.POR, x86asm.PAND, x86asm.PANDN:
+		left, err := m.vector128Value(instruction.Args[0])
+		if err != nil {
+			return "", "", err
+		}
+		right, err := m.vector128Value(instruction.Args[1])
+		if err != nil {
+			return "", "", err
+		}
+		for index := range left {
+			switch instruction.Op {
+			case x86asm.XORPS, x86asm.PXOR:
+				left[index] ^= right[index]
+			case x86asm.POR:
+				left[index] |= right[index]
+			case x86asm.PAND:
+				left[index] &= right[index]
+			case x86asm.PANDN:
+				left[index] = ^left[index] & right[index]
+			}
+		}
+		if err := m.setVector128(instruction.Args[0], left); err != nil {
+			return "", "", err
+		}
+	case x86asm.PCMPEQB, x86asm.PCMPEQW, x86asm.PCMPEQD, x86asm.PCMPGTB, x86asm.PCMPGTW, x86asm.PCMPGTD:
+		left, err := m.vector128Value(instruction.Args[0])
+		if err != nil {
+			return "", "", err
+		}
+		right, err := m.vector128Value(instruction.Args[1])
+		if err != nil {
+			return "", "", err
+		}
+		width := 1
+		if instruction.Op == x86asm.PCMPEQW || instruction.Op == x86asm.PCMPGTW {
+			width = 2
+		} else if instruction.Op == x86asm.PCMPEQD || instruction.Op == x86asm.PCMPGTD {
+			width = 4
+		}
+		greater := instruction.Op == x86asm.PCMPGTB || instruction.Op == x86asm.PCMPGTW || instruction.Op == x86asm.PCMPGTD
+		for offset := 0; offset < len(left); offset += width {
+			matches := false
+			switch width {
+			case 1:
+				if greater {
+					matches = int8(left[offset]) > int8(right[offset])
+				} else {
+					matches = left[offset] == right[offset]
+				}
+			case 2:
+				leftValue := binary.LittleEndian.Uint16(left[offset:])
+				rightValue := binary.LittleEndian.Uint16(right[offset:])
+				if greater {
+					matches = int16(leftValue) > int16(rightValue)
+				} else {
+					matches = leftValue == rightValue
+				}
+			case 4:
+				leftValue := binary.LittleEndian.Uint32(left[offset:])
+				rightValue := binary.LittleEndian.Uint32(right[offset:])
+				if greater {
+					matches = int32(leftValue) > int32(rightValue)
+				} else {
+					matches = leftValue == rightValue
+				}
+			}
+			fill := byte(0)
+			if matches {
+				fill = 0xff
+			}
+			for index := 0; index < width; index++ {
+				left[offset+index] = fill
+			}
+		}
+		if err := m.setVector128(instruction.Args[0], left); err != nil {
+			return "", "", err
+		}
+	case x86asm.PACKUSWB:
+		left, err := m.vector128Value(instruction.Args[0])
+		if err != nil {
+			return "", "", err
+		}
+		right, err := m.vector128Value(instruction.Args[1])
+		if err != nil {
+			return "", "", err
+		}
+		var output [16]byte
+		for index := 0; index < 16; index++ {
+			source := left[:]
+			offset := index * 2
+			if index >= 8 {
+				source = right[:]
+				offset = (index - 8) * 2
+			}
+			value := int16(binary.LittleEndian.Uint16(source[offset:]))
+			if value < 0 {
+				output[index] = 0
+			} else if value > 255 {
+				output[index] = 255
+			} else {
+				output[index] = byte(value)
+			}
+		}
+		if err := m.setVector128(instruction.Args[0], output); err != nil {
+			return "", "", err
+		}
+	case x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.PUNPCKLDQ, x86asm.PUNPCKLQDQ,
+		x86asm.PUNPCKHBW, x86asm.PUNPCKHWD, x86asm.PUNPCKHDQ, x86asm.PUNPCKHQDQ:
+		left, err := m.vector128Value(instruction.Args[0])
+		if err != nil {
+			return "", "", err
+		}
+		right, err := m.vector128Value(instruction.Args[1])
+		if err != nil {
+			return "", "", err
+		}
+		width := 1
+		switch instruction.Op {
+		case x86asm.PUNPCKLWD, x86asm.PUNPCKHWD:
+			width = 2
+		case x86asm.PUNPCKLDQ, x86asm.PUNPCKHDQ:
+			width = 4
+		case x86asm.PUNPCKLQDQ, x86asm.PUNPCKHQDQ:
+			width = 8
+		}
+		high := instruction.Op == x86asm.PUNPCKHBW || instruction.Op == x86asm.PUNPCKHWD || instruction.Op == x86asm.PUNPCKHDQ || instruction.Op == x86asm.PUNPCKHQDQ
+		start := 0
+		if high {
+			start = 8
+		}
+		var output [16]byte
+		for index := 0; index < 8/width; index++ {
+			sourceOffset := start + index*width
+			destinationOffset := index * width * 2
+			copy(output[destinationOffset:destinationOffset+width], left[sourceOffset:sourceOffset+width])
+			copy(output[destinationOffset+width:destinationOffset+width*2], right[sourceOffset:sourceOffset+width])
+		}
+		if err := m.setVector128(instruction.Args[0], output); err != nil {
+			return "", "", err
+		}
+	case x86asm.PSLLW, x86asm.PSLLD, x86asm.PSLLQ, x86asm.PSRLW, x86asm.PSRLD, x86asm.PSRLQ, x86asm.PSRAW, x86asm.PSRAD:
+		value, err := m.vector128Value(instruction.Args[0])
+		if err != nil {
+			return "", "", err
+		}
+		count := uint64(0)
+		if immediate, ok := instruction.Args[1].(x86asm.Imm); ok {
+			count = uint64(immediate)
+		} else {
+			countValue, err := m.vector128Value(instruction.Args[1])
+			if err != nil {
+				return "", "", err
+			}
+			count = binary.LittleEndian.Uint64(countValue[:8])
+		}
+		width := 2
+		if instruction.Op == x86asm.PSLLD || instruction.Op == x86asm.PSRLD || instruction.Op == x86asm.PSRAD {
+			width = 4
+		} else if instruction.Op == x86asm.PSLLQ || instruction.Op == x86asm.PSRLQ {
+			width = 8
+		}
+		bits := uint64(width * 8)
+		for offset := 0; offset < len(value); offset += width {
+			switch width {
+			case 2:
+				current := binary.LittleEndian.Uint16(value[offset:])
+				result := uint16(0)
+				if instruction.Op == x86asm.PSRAW {
+					shift := min(count, bits-1)
+					result = uint16(int16(current) >> shift)
+				} else if count < bits {
+					if instruction.Op == x86asm.PSLLW {
+						result = current << count
+					} else {
+						result = current >> count
+					}
+				}
+				binary.LittleEndian.PutUint16(value[offset:], result)
+			case 4:
+				current := binary.LittleEndian.Uint32(value[offset:])
+				result := uint32(0)
+				if instruction.Op == x86asm.PSRAD {
+					shift := min(count, bits-1)
+					result = uint32(int32(current) >> shift)
+				} else if count < bits {
+					if instruction.Op == x86asm.PSLLD {
+						result = current << count
+					} else {
+						result = current >> count
+					}
+				}
+				binary.LittleEndian.PutUint32(value[offset:], result)
+			case 8:
+				current := binary.LittleEndian.Uint64(value[offset:])
+				result := uint64(0)
+				if count < bits {
+					if instruction.Op == x86asm.PSLLQ {
+						result = current << count
+					} else {
+						result = current >> count
+					}
+				}
+				binary.LittleEndian.PutUint64(value[offset:], result)
+			}
+		}
+		if err := m.setVector128(instruction.Args[0], value); err != nil {
+			return "", "", err
+		}
+	case x86asm.PMOVMSKB:
+		value, err := m.vector128Value(instruction.Args[1])
+		if err != nil {
+			return "", "", err
+		}
+		mask := uint32(0)
+		for index, item := range value {
+			mask |= uint32(item>>7) << index
+		}
+		if err := m.setOperand(instruction.Args[0], 4, mask); err != nil {
+			return "", "", err
+		}
+	case x86asm.MOVAPS, x86asm.MOVUPS, x86asm.MOVAPD, x86asm.MOVUPD, x86asm.MOVDQA, x86asm.MOVDQU:
+		value, err := m.vector128Value(instruction.Args[1])
+		if err != nil {
+			return "", "", err
+		}
+		if err := m.setVector128(instruction.Args[0], value); err != nil {
+			return "", "", err
+		}
+	case x86asm.MOVSD_XMM, x86asm.MOVSS:
+		width := 8
+		if instruction.Op == x86asm.MOVSS {
+			width = 4
+		}
+		value, sourceMemory, err := m.vectorScalarValue(instruction.Args[1], width)
+		if err != nil {
+			return "", "", err
+		}
+		if err := m.setVectorScalar(instruction.Args[0], value, width, sourceMemory); err != nil {
+			return "", "", err
+		}
+	case x86asm.MOVQ:
+		value, _, err := m.vectorScalarValue(instruction.Args[1], 8)
+		if err != nil {
+			return "unsupported", fmt.Sprintf("unsupported %s at 0x%08x: %s", instruction, next-uint32(instruction.Len), err), nil
+		}
+		if err := m.setVectorScalar(instruction.Args[0], value, 8, true); err != nil {
+			return "unsupported", fmt.Sprintf("unsupported %s at 0x%08x: %s", instruction, next-uint32(instruction.Len), err), nil
+		}
+	case x86asm.MOVD:
+		if register, ok := instruction.Args[0].(x86asm.Reg); ok && register >= x86asm.X0 && register <= x86asm.X31 {
+			value, err := m.operandValueWidth(instruction.Args[1], next, 4)
+			if err != nil {
+				return "", "", err
+			}
+			var data [4]byte
+			binary.LittleEndian.PutUint32(data[:], value)
+			if err := m.setVectorScalar(instruction.Args[0], data[:], 4, true); err != nil {
+				return "", "", err
+			}
+		} else {
+			value, _, err := m.vectorScalarValue(instruction.Args[1], 4)
+			if err != nil {
+				return "unsupported", fmt.Sprintf("unsupported %s at 0x%08x: %s", instruction, next-uint32(instruction.Len), err), nil
+			}
+			if err := m.setOperand(instruction.Args[0], 4, binary.LittleEndian.Uint32(value)); err != nil {
+				return "", "", err
+			}
+		}
+	case x86asm.CVTSI2SD, x86asm.CVTSI2SS:
+		value, err := m.operandValueWidth(instruction.Args[1], next, 4)
+		if err != nil {
+			return "", "", err
+		}
+		if instruction.Op == x86asm.CVTSI2SD {
+			var data [8]byte
+			binary.LittleEndian.PutUint64(data[:], math.Float64bits(float64(int32(value))))
+			if err := m.setVectorScalar(instruction.Args[0], data[:], 8, false); err != nil {
+				return "", "", err
+			}
+		} else {
+			var data [4]byte
+			binary.LittleEndian.PutUint32(data[:], math.Float32bits(float32(int32(value))))
+			if err := m.setVectorScalar(instruction.Args[0], data[:], 4, false); err != nil {
+				return "", "", err
+			}
+		}
+	case x86asm.CVTTSD2SI, x86asm.CVTTSS2SI, x86asm.CVTSD2SI, x86asm.CVTSS2SI:
+		width := 8
+		if instruction.Op == x86asm.CVTTSS2SI || instruction.Op == x86asm.CVTSS2SI {
+			width = 4
+		}
+		data, _, err := m.vectorScalarValue(instruction.Args[1], width)
+		if err != nil {
+			return "", "", err
+		}
+		value := 0.0
+		if width == 8 {
+			value = math.Float64frombits(binary.LittleEndian.Uint64(data))
+		} else {
+			value = float64(math.Float32frombits(binary.LittleEndian.Uint32(data)))
+		}
+		if instruction.Op == x86asm.CVTSD2SI || instruction.Op == x86asm.CVTSS2SI {
+			value = math.RoundToEven(value)
+		} else {
+			value = math.Trunc(value)
+		}
+		converted := uint32(0x80000000)
+		if !math.IsNaN(value) && value >= -2147483648 && value < 2147483648 {
+			converted = uint32(int32(value))
+		}
+		if err := m.setOperand(instruction.Args[0], 4, converted); err != nil {
+			return "", "", err
+		}
+	case x86asm.CVTSD2SS, x86asm.CVTSS2SD:
+		sourceWidth := 8
+		if instruction.Op == x86asm.CVTSS2SD {
+			sourceWidth = 4
+		}
+		data, _, err := m.vectorScalarValue(instruction.Args[1], sourceWidth)
+		if err != nil {
+			return "", "", err
+		}
+		if instruction.Op == x86asm.CVTSD2SS {
+			value := math.Float64frombits(binary.LittleEndian.Uint64(data))
+			var output [4]byte
+			binary.LittleEndian.PutUint32(output[:], math.Float32bits(float32(value)))
+			if err := m.setVectorScalar(instruction.Args[0], output[:], 4, false); err != nil {
+				return "", "", err
+			}
+		} else {
+			value := math.Float32frombits(binary.LittleEndian.Uint32(data))
+			var output [8]byte
+			binary.LittleEndian.PutUint64(output[:], math.Float64bits(float64(value)))
+			if err := m.setVectorScalar(instruction.Args[0], output[:], 8, false); err != nil {
+				return "", "", err
+			}
+		}
+	case x86asm.ADDSD, x86asm.SUBSD, x86asm.MULSD, x86asm.DIVSD, x86asm.MINSD, x86asm.MAXSD:
+		leftBytes, _, err := m.vectorScalarValue(instruction.Args[0], 8)
+		if err != nil {
+			return "", "", err
+		}
+		rightBytes, _, err := m.vectorScalarValue(instruction.Args[1], 8)
+		if err != nil {
+			return "", "", err
+		}
+		left := math.Float64frombits(binary.LittleEndian.Uint64(leftBytes))
+		right := math.Float64frombits(binary.LittleEndian.Uint64(rightBytes))
+		result := float64(0)
+		switch instruction.Op {
+		case x86asm.ADDSD:
+			result = left + right
+		case x86asm.SUBSD:
+			result = left - right
+		case x86asm.MULSD:
+			result = left * right
+		case x86asm.DIVSD:
+			result = left / right
+		case x86asm.MINSD:
+			result = right
+			if !math.IsNaN(left) && !math.IsNaN(right) && left < right {
+				result = left
+			}
+		case x86asm.MAXSD:
+			result = right
+			if !math.IsNaN(left) && !math.IsNaN(right) && left > right {
+				result = left
+			}
+		}
+		var data [8]byte
+		binary.LittleEndian.PutUint64(data[:], math.Float64bits(result))
+		if err := m.setVectorScalar(instruction.Args[0], data[:], 8, false); err != nil {
+			return "", "", err
+		}
+	case x86asm.ADDSS, x86asm.SUBSS, x86asm.MULSS, x86asm.DIVSS, x86asm.MINSS, x86asm.MAXSS:
+		leftBytes, _, err := m.vectorScalarValue(instruction.Args[0], 4)
+		if err != nil {
+			return "", "", err
+		}
+		rightBytes, _, err := m.vectorScalarValue(instruction.Args[1], 4)
+		if err != nil {
+			return "", "", err
+		}
+		left := math.Float32frombits(binary.LittleEndian.Uint32(leftBytes))
+		right := math.Float32frombits(binary.LittleEndian.Uint32(rightBytes))
+		result := float32(0)
+		switch instruction.Op {
+		case x86asm.ADDSS:
+			result = left + right
+		case x86asm.SUBSS:
+			result = left - right
+		case x86asm.MULSS:
+			result = left * right
+		case x86asm.DIVSS:
+			result = left / right
+		case x86asm.MINSS:
+			result = right
+			if !math.IsNaN(float64(left)) && !math.IsNaN(float64(right)) && left < right {
+				result = left
+			}
+		case x86asm.MAXSS:
+			result = right
+			if !math.IsNaN(float64(left)) && !math.IsNaN(float64(right)) && left > right {
+				result = left
+			}
+		}
+		var data [4]byte
+		binary.LittleEndian.PutUint32(data[:], math.Float32bits(result))
+		if err := m.setVectorScalar(instruction.Args[0], data[:], 4, false); err != nil {
+			return "", "", err
+		}
+	case x86asm.COMISD, x86asm.UCOMISD, x86asm.COMISS, x86asm.UCOMISS:
+		width := 8
+		if instruction.Op == x86asm.COMISS || instruction.Op == x86asm.UCOMISS {
+			width = 4
+		}
+		leftBytes, _, err := m.vectorScalarValue(instruction.Args[0], width)
+		if err != nil {
+			return "", "", err
+		}
+		rightBytes, _, err := m.vectorScalarValue(instruction.Args[1], width)
+		if err != nil {
+			return "", "", err
+		}
+		left, right := float64(0), float64(0)
+		if width == 8 {
+			left = math.Float64frombits(binary.LittleEndian.Uint64(leftBytes))
+			right = math.Float64frombits(binary.LittleEndian.Uint64(rightBytes))
+		} else {
+			left = float64(math.Float32frombits(binary.LittleEndian.Uint32(leftBytes)))
+			right = float64(math.Float32frombits(binary.LittleEndian.Uint32(rightBytes)))
+		}
+		m.zero, m.parity, m.carry = false, false, false
+		m.sign, m.overflow = false, false
+		if math.IsNaN(left) || math.IsNaN(right) {
+			m.zero, m.parity, m.carry = true, true, true
+		} else if left < right {
+			m.carry = true
+		} else if left == right {
+			m.zero = true
 		}
 	case x86asm.BSWAP:
 		if _, ok := instruction.Args[0].(x86asm.Reg); !ok || m.operandWidth(instruction.Args[0], instruction.MemBytes) != 4 {
@@ -4390,6 +4965,40 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 				return "", "", err
 			}
 		}
+	case x86asm.BT:
+		width := m.operandWidth(instruction.Args[0], instruction.MemBytes)
+		if width != 2 && width != 4 {
+			return "unsupported", fmt.Sprintf("unsupported BT width %d at 0x%08x", width, next-uint32(instruction.Len)), nil
+		}
+		bitOffset, err := m.operandValueWidth(instruction.Args[1], next, instruction.MemBytes)
+		if err != nil {
+			return "", "", err
+		}
+		bitWidth := uint32(width * 8)
+		bit := bitOffset % bitWidth
+		value := uint32(0)
+		if memory, ok := instruction.Args[0].(x86asm.Mem); ok {
+			address, err := m.effectiveAddress(memory)
+			if err != nil {
+				return "", "", err
+			}
+			// A register bit offset addresses a bit string rooted at the memory
+			// operand. Immediate offsets are masked to the selected element.
+			if _, registerOffset := instruction.Args[1].(x86asm.Reg); registerOffset {
+				address += bitOffset / bitWidth * uint32(width)
+			}
+			data, err := m.readMemory(address, width, 'r')
+			if err != nil {
+				return "", "", err
+			}
+			value = littleEndianValue(data)
+		} else {
+			value, err = m.operandValueWidth(instruction.Args[0], next, instruction.MemBytes)
+			if err != nil {
+				return "", "", err
+			}
+		}
+		m.carry = value&(uint32(1)<<bit) != 0
 	case x86asm.XCHG:
 		width := m.operandWidth(instruction.Args[0], instruction.MemBytes)
 		if _, ok := instruction.Args[1].(x86asm.Mem); ok {
@@ -4777,6 +5386,15 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		}
 	case x86asm.CDQ:
 		m.registers[x86asm.EDX] = uint32(int32(m.registers[x86asm.EAX]) >> 31)
+	case x86asm.CWD:
+		extension := uint32(0)
+		if m.registerValue(x86asm.AX)&0x8000 != 0 {
+			extension = 0xffff
+		}
+		m.registers[x86asm.EDX] = m.registers[x86asm.EDX]&0xffff0000 | extension
+	case x86asm.CBW:
+		extension := uint32(uint16(int16(int8(m.registerValue(x86asm.AL)))))
+		m.registers[x86asm.EAX] = m.registers[x86asm.EAX]&0xffff0000 | extension
 	case x86asm.CWDE:
 		m.registers[x86asm.EAX] = uint32(int32(int16(m.registerValue(x86asm.AX))))
 	case x86asm.MUL:
@@ -4851,6 +5469,54 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 			m.subFlags(left, right, width)
 		} else {
 			m.logicalFlags(result, width)
+		}
+	case x86asm.CMOVE, x86asm.CMOVNE, x86asm.CMOVB, x86asm.CMOVAE, x86asm.CMOVBE, x86asm.CMOVA,
+		x86asm.CMOVL, x86asm.CMOVGE, x86asm.CMOVLE, x86asm.CMOVG, x86asm.CMOVS, x86asm.CMOVNS,
+		x86asm.CMOVP, x86asm.CMOVNP, x86asm.CMOVO, x86asm.CMOVNO:
+		condition := false
+		switch instruction.Op {
+		case x86asm.CMOVE:
+			condition = m.zero
+		case x86asm.CMOVNE:
+			condition = !m.zero
+		case x86asm.CMOVB:
+			condition = m.carry
+		case x86asm.CMOVAE:
+			condition = !m.carry
+		case x86asm.CMOVBE:
+			condition = m.carry || m.zero
+		case x86asm.CMOVA:
+			condition = !m.carry && !m.zero
+		case x86asm.CMOVL:
+			condition = m.sign != m.overflow
+		case x86asm.CMOVGE:
+			condition = m.sign == m.overflow
+		case x86asm.CMOVLE:
+			condition = m.zero || m.sign != m.overflow
+		case x86asm.CMOVG:
+			condition = !m.zero && m.sign == m.overflow
+		case x86asm.CMOVS:
+			condition = m.sign
+		case x86asm.CMOVNS:
+			condition = !m.sign
+		case x86asm.CMOVP:
+			condition = m.parity
+		case x86asm.CMOVNP:
+			condition = !m.parity
+		case x86asm.CMOVO:
+			condition = m.overflow
+		case x86asm.CMOVNO:
+			condition = !m.overflow
+		}
+		width := m.operandWidth(instruction.Args[0], instruction.MemBytes)
+		value, err := m.operandValueWidth(instruction.Args[1], next, width)
+		if err != nil {
+			return "", "", err
+		}
+		if condition {
+			if err := m.setOperand(instruction.Args[0], width, value); err != nil {
+				return "", "", err
+			}
 		}
 	case x86asm.SETE, x86asm.SETNE, x86asm.SETB, x86asm.SETAE, x86asm.SETBE, x86asm.SETA,
 		x86asm.SETL, x86asm.SETGE, x86asm.SETLE, x86asm.SETG, x86asm.SETS, x86asm.SETNS,
@@ -5011,6 +5677,14 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		}
 	case x86asm.JP, x86asm.JNP:
 		if m.parity == (instruction.Op == x86asm.JP) {
+			target, err := m.branchTarget(instruction.Args[0], next)
+			if err != nil {
+				return "", "", err
+			}
+			m.eip = target
+		}
+	case x86asm.JO, x86asm.JNO:
+		if m.overflow == (instruction.Op == x86asm.JO) {
 			target, err := m.branchTarget(instruction.Args[0], next)
 			if err != nil {
 				return "", "", err
@@ -5252,7 +5926,7 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 			m.registers[x86asm.ECX] = 0
 		}
 	default:
-		return "unsupported", fmt.Sprintf("unsupported instruction %s at 0x%08x", instruction.Op, next-uint32(instruction.Len)), nil
+		return "unsupported", fmt.Sprintf("unsupported instruction %s at 0x%08x", instruction, next-uint32(instruction.Len)), nil
 	}
 	return "", "", nil
 }
@@ -5420,6 +6094,96 @@ func (m *emulatorX86) setX87FloatOperand(argument x86asm.Arg, width int, value f
 
 func (m *emulatorX86) operandValue(argument x86asm.Arg, next uint32) (uint32, error) {
 	return m.operandValueWidth(argument, next, 4)
+}
+
+func (m *emulatorX86) vector128Value(argument x86asm.Arg) ([16]byte, error) {
+	var output [16]byte
+	switch value := argument.(type) {
+	case x86asm.Reg:
+		if value < x86asm.X0 || value > x86asm.X31 {
+			return output, fmt.Errorf("unsupported 128-bit register %s", value)
+		}
+		return m.xmm[int(value-x86asm.X0)], nil
+	case x86asm.Mem:
+		address, err := m.effectiveAddress(value)
+		if err != nil {
+			return output, err
+		}
+		data, err := m.readMemory(address, len(output), 'r')
+		if err != nil {
+			return output, err
+		}
+		copy(output[:], data)
+		return output, nil
+	default:
+		return output, fmt.Errorf("unsupported 128-bit operand %T", argument)
+	}
+}
+
+func (m *emulatorX86) setVector128(argument x86asm.Arg, value [16]byte) error {
+	switch target := argument.(type) {
+	case x86asm.Reg:
+		if target < x86asm.X0 || target > x86asm.X31 {
+			return fmt.Errorf("unsupported 128-bit register %s", target)
+		}
+		m.xmm[int(target-x86asm.X0)] = value
+		return nil
+	case x86asm.Mem:
+		address, err := m.effectiveAddress(target)
+		if err != nil {
+			return err
+		}
+		return m.writeMemory(address, value[:])
+	default:
+		return fmt.Errorf("unsupported 128-bit destination %T", argument)
+	}
+}
+
+func (m *emulatorX86) vectorScalarValue(argument x86asm.Arg, width int) ([]byte, bool, error) {
+	if width != 4 && width != 8 {
+		return nil, false, fmt.Errorf("unsupported vector scalar width %d", width)
+	}
+	switch value := argument.(type) {
+	case x86asm.Reg:
+		if value < x86asm.X0 || value > x86asm.X31 {
+			return nil, false, fmt.Errorf("unsupported vector scalar register %s", value)
+		}
+		output := make([]byte, width)
+		copy(output, m.xmm[int(value-x86asm.X0)][:width])
+		return output, false, nil
+	case x86asm.Mem:
+		address, err := m.effectiveAddress(value)
+		if err != nil {
+			return nil, true, err
+		}
+		output, err := m.readMemory(address, width, 'r')
+		return output, true, err
+	default:
+		return nil, false, fmt.Errorf("unsupported vector scalar operand %T", argument)
+	}
+}
+
+func (m *emulatorX86) setVectorScalar(argument x86asm.Arg, value []byte, width int, sourceMemory bool) error {
+	switch target := argument.(type) {
+	case x86asm.Reg:
+		if target < x86asm.X0 || target > x86asm.X31 {
+			return fmt.Errorf("unsupported vector scalar register %s", target)
+		}
+		index := int(target - x86asm.X0)
+		if sourceMemory {
+			m.xmm[index] = [16]byte{}
+		}
+		copy(m.xmm[index][:width], value)
+		return nil
+	case x86asm.Mem:
+		address, err := m.effectiveAddress(target)
+		if err != nil {
+			return err
+		}
+		return m.writeMemory(address, value[:width])
+	default:
+		return fmt.Errorf("unsupported vector scalar destination %T", argument)
+	}
 }
 
 func (m *emulatorX86) operandValueWidth(argument x86asm.Arg, next uint32, width int) (uint32, error) {
@@ -6016,8 +6780,30 @@ func (m *emulatorX86) allocateBuiltin(_ *starlark.Thread, _ *starlark.Builtin, a
 		}
 		return nil, err
 	}
+	if requestedValue != starlark.None {
+		m.consumeFreeAllocation(address, uint32(size))
+	}
 	m.allocations[address] = true
 	return starlark.MakeUint64(uint64(address)), nil
+}
+
+func (m *emulatorX86) consumeFreeAllocation(start, size uint32) {
+	end := uint64(start) + uint64(size)
+	remaining := m.freeAllocations[:0]
+	for _, available := range m.freeAllocations {
+		availableEnd := uint64(available.start) + uint64(available.size)
+		if end <= uint64(available.start) || availableEnd <= uint64(start) {
+			remaining = append(remaining, available)
+			continue
+		}
+		if available.start < start {
+			remaining = append(remaining, emulatorFreeRange{start: available.start, size: start - available.start})
+		}
+		if end < availableEnd {
+			remaining = append(remaining, emulatorFreeRange{start: uint32(end), size: uint32(availableEnd - end)})
+		}
+	}
+	m.freeAllocations = remaining
 }
 
 func (m *emulatorX86) availableAllocation(start, size, alignment uint32) (uint32, bool) {

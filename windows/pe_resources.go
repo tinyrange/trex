@@ -1513,6 +1513,9 @@ func peExports(data []byte) ([]peExport, error) {
 	functionsRVA := binary.LittleEndian.Uint32(data[exportOffset+28 : exportOffset+32])
 	namesRVA := binary.LittleEndian.Uint32(data[exportOffset+32 : exportOffset+36])
 	ordinalsRVA := binary.LittleEndian.Uint32(data[exportOffset+36 : exportOffset+40])
+	if functionCount == 0 {
+		return nil, nil
+	}
 
 	functionsOff, err := peRVAOffset(pf, functionsRVA)
 	if err != nil {

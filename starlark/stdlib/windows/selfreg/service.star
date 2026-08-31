@@ -14,6 +14,8 @@ _SIGNATURES = {
     "openscmanagerw": 3,
     "openservicea": 3,
     "openservicew": 3,
+    "queryserviceconfig2a": 5,
+    "queryserviceconfig2w": 5,
     "queryservicestatus": 2,
     "registerservicectrlhandlera": 2,
     "registerservicectrlhandlerw": 2,
@@ -215,6 +217,30 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
             if args[10]:
                 set_value(service, "DisplayName", "REG_SZ", _cstring(machine, args[10], wide))
             return 1
+        if name.startswith("queryserviceconfig2"):
+            service = service_for(args[0])
+            if service == None or not args[4]:
+                return 0
+            if args[1] == 1:  # SERVICE_CONFIG_DESCRIPTION
+                description = registry.get_value("SYSTEM", service_key(service), "Description", "")
+                encoded = binary.encode(description, encoding = "utf16le" if wide else "ascii", nul = True) if description else b""
+                required = 4 + len(encoded)
+                machine.write_u32le(args[4], required)
+                if not args[2] or args[3] < required:
+                    return 0
+                machine.write_u32le(args[2], args[2] + 4 if description else 0)
+                if description:
+                    machine.write(args[2] + 4, encoded)
+                return 1
+            if args[1] == 3:  # SERVICE_CONFIG_DELAYED_AUTO_START_INFO
+                machine.write_u32le(args[4], 4)
+                if not args[2] or args[3] < 4:
+                    return 0
+                delayed = registry.get_value("SYSTEM", service_key(service), "DelayedAutoStart", 0)
+                machine.write_u32le(args[2], int(delayed))
+                return 1
+            machine.write_u32le(args[4], 0)
+            return 0
         if name == "closeservicehandle":
             return 1 if state["handles"].pop(args[0], None) != None else 0
         if name == "deleteservice":

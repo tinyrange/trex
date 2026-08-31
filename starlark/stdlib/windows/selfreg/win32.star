@@ -7,18 +7,24 @@ load("@stdlib//windows:security.star", "legacy_lsa_secret_crypt", "sddl_security
 
 _KERNEL_SIGNATURES = {
     "addrefactctx": 1,
+    "acquiresrwlockexclusive": 1,
+    "acquiresrwlockshared": 1,
     "changetimerqueuetimer": 4,
     "closehandle": 1,
     "createeventa": 4,
     "createeventw": 4,
+    "createeventexw": 4,
     "createsemaphorea": 4,
     "createsemaphorew": 4,
     "createmutexa": 3,
     "createmutexw": 3,
+    "createmutexexw": 4,
     "createfilea": 7,
     "createfilew": 7,
     "createfilemappinga": 6,
     "createfilemappingw": 6,
+    "createprocessa": 10,
+    "createprocessw": 10,
     "copyfilea": 3,
     "copyfilew": 3,
     "comparefiletime": 2,
@@ -100,6 +106,11 @@ _KERNEL_SIGNATURES = {
     "getcurrentthread": 0,
     "getcurrentthreadid": 0,
     "getthreadpriority": 1,
+    "getthreadlocale": 0,
+    "getthreadpreferreduilanguages": 4,
+    "getuserpreferreduilanguages": 4,
+    "getsystempreferreduilanguages": 4,
+    "getthreadtimes": 5,
     "getfileattributesa": 1,
     "getfileattributesw": 1,
     "getfileattributesexa": 3,
@@ -108,6 +119,8 @@ _KERNEL_SIGNATURES = {
     "getfilesizeex": 2,
     "getfiletime": 4,
     "getfiletype": 1,
+    "getshortpathnamea": 3,
+    "getshortpathnamew": 3,
     "globaladdatoma": 1,
     "globaladdatomw": 1,
     "getexitcodethread": 2,
@@ -120,10 +133,10 @@ _KERNEL_SIGNATURES = {
     "getlocaleinfow": 4,
     "getprocaddress": 2,
     "getprocessheap": 0,
+    "getprocessshutdownparameters": 2,
     "getprocessversion": 1,
+    "getproductinfo": 5,
     "getsystemtimeasfiletime": 1,
-    "getshortpathnamea": 3,
-    "getshortpathnamew": 3,
     "gettempfilenamea": 4,
     "gettempfilenamew": 4,
     "gettemppatha": 2,
@@ -131,7 +144,9 @@ _KERNEL_SIGNATURES = {
     "getsystemtime": 1,
     "getsystemtimeadjustment": 3,
     "getsysteminfo": 1,
+    "getnativesysteminfo": 1,
     "isdebuggerpresent": 0,
+    "isvalidcodepage": 1,
     "isprocessorfeaturepresent": 1,
     "gettimeformata": 6,
     "gettimeformatw": 6,
@@ -182,6 +197,8 @@ _KERNEL_SIGNATURES = {
     "interlockedcompareexchange": 3,
     "interlockedexchange": 2,
     "interlockedexchangeadd": 2,
+    "initializeslisthead": 1,
+    "initonceexecuteonce": 4,
     "interlockedincrement": 1,
     "localalloc": 2,
     "localrealloc": 3,
@@ -207,6 +224,8 @@ _KERNEL_SIGNATURES = {
     "ntwritefile": 9,
     "initializecriticalsection": 1,
     "initializecriticalsectionandspincount": 2,
+    "initializecriticalsectionex": 3,
+    "initializeconditionvariable": 1,
     "isdbcsleadbyte": 1,
     "isbadcodeptr": 1,
     "isbadreadptr": 2,
@@ -281,6 +300,7 @@ _KERNEL_SIGNATURES = {
     "sethandlecount": 1,
     "setprocessshutdownparameters": 2,
     "setthreadpriority": 2,
+    "setthreadlocale": 1,
     "setsystemtimeadjustment": 2,
     "setfileattributesa": 2,
     "setfileattributesw": 2,
@@ -301,6 +321,8 @@ _KERNEL_SIGNATURES = {
     "unregisterwait": 1,
     "unregisterwaitex": 2,
     "unmapviewoffile": 1,
+    "wakeallconditionvariable": 1,
+    "wakeconditionvariable": 1,
     "virtualalloc": 4,
     "virtualfree": 3,
     "virtualprotect": 4,
@@ -314,8 +336,12 @@ _KERNEL_SIGNATURES = {
     "searchpatha": 6,
     "searchpathw": 6,
     "releasemutex": 1,
+    "releasesrwlockexclusive": 1,
+    "releasesrwlockshared": 1,
     "releasesemaphore": 3,
     "tryentercriticalsection": 1,
+    "tryacquiresrwlockexclusive": 1,
+    "tryacquiresrwlockshared": 1,
     "waitforsingleobject": 2,
     "waitforsingleobjectex": 3,
     "waitformultipleobjects": 4,
@@ -336,6 +362,7 @@ _KERNEL_SIGNATURES = {
     "rtlacquireresourceshared": 2,
     "rtlallocateheap": 3,
     "rtlcreateheap": 6,
+    "rtlcapturestackbacktrace": 4,
     "rtlfreeheap": 3,
     "rtlgetntproducttype": 1,
     "rtlgetntversionnumbers": 3,
@@ -360,6 +387,13 @@ _KERNEL_SIGNATURES = {
     "rtlfillmemory": 3,
     "rtlmovememory": 3,
     "rtlzeromemory": 2,
+}
+
+_MULTIMEDIA_SIGNATURES = {
+    "timebeginperiod": 1,
+    "timeendperiod": 1,
+    "timegetdevcaps": 2,
+    "timegettime": 0,
 }
 
 _OLE_SIGNATURES = {
@@ -487,7 +521,7 @@ def _write_string(machine, address, value, wide, capacity = 0):
     return len(value)
 
 def _dos_short_path(value):
-    """Returns the deterministic first 8.3 alias for a Windows path."""
+    """Returns a deterministic first 8.3 alias for an explicit policy use."""
     output = []
     for component in value.replace("/", "\\").split("\\"):
         if not component or component.endswith(":"):
@@ -507,8 +541,6 @@ def _dos_short_path(value):
             character = extension[index].upper()
             if character in valid:
                 folded_extension += character
-        # Case alone does not make an otherwise valid 8.3 component long.
-        # FAT preserves display case separately from the short-name identity.
         if stem.upper() == folded_stem and len(stem) <= 8 and extension.upper() == folded_extension and len(extension) <= 3:
             short = component
         else:
@@ -773,6 +805,11 @@ def event_log_plugin():
     state = {"next_handle": 0x50000, "sources": {}, "events": [], "trace_providers": {}, "trace_messages": []}
     signatures = {
         "deregistereventsource": 1,
+        "eventenabled": 3,
+        "eventregister": 4,
+        "eventsetinformation": 5,
+        "eventunregister": 2,
+        "eventwrite": 5,
         "gettraceenableflags": 2,
         "gettraceenablelevel": 2,
         "gettraceloggerhandle": 1,
@@ -792,6 +829,29 @@ def event_log_plugin():
         machine = event.machine
         wide = name.endswith("w")
         encoding = "utf16le" if wide else "ascii"
+        if name == "eventregister":
+            if not args[0] or not args[3]:
+                return 87
+            handle = state["next_handle"]
+            state["next_handle"] = handle + 1
+            state["trace_providers"][handle] = {
+                "callback": args[1],
+                "context": args[2],
+                "control_guid": _guid_text(machine, args[0]),
+            }
+            machine.write_u64le(args[3], handle)
+            return 0
+        if name == "eventunregister":
+            handle = args[0] | (args[1] << 32)
+            return 0 if state["trace_providers"].pop(handle, None) != None else 6
+        if name == "eventenabled":
+            return 0
+        if name == "eventwrite":
+            handle = args[0] | (args[1] << 32)
+            return 0 if handle in state["trace_providers"] else 6
+        if name == "eventsetinformation":
+            handle = args[0] | (args[1] << 32)
+            return 0 if handle in state["trace_providers"] else 6
         if name.startswith("registertraceguids"):
             if not args[7] or args[3] > 65536:
                 return 87  # ERROR_INVALID_PARAMETER
@@ -1157,7 +1217,7 @@ def _kernel_provider_module(name):
     normalized = name.replace("/", "\\").split("\\")[-1].lower()
     return normalized in ["kernel32.dll", "ntdll.dll"] or normalized.startswith("api-ms-win-core-") or normalized.startswith("ext-ms-win-")
 
-def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800, tls_slots = 0):
+def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, on_process_create = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800, tls_slots = 0):
     """Models deterministic allocation, strings, paths, files, and OS facts.
 
     `files` maps guest paths to bytes or trex files. They are made
@@ -1186,6 +1246,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     product_type = version.get("product_type", "WinNT").lower()
     product_type_number = 1 if product_type == "winnt" else (2 if product_type == "lanmannt" else 3)
     suite_mask = int(version.get("suite_mask", 0))
+    product_info = int(version.get("product_info", 0x30))  # PRODUCT_PROFESSIONAL
     system_time_fields = clock.utc(system_time)
     system_time_ticks = _filetime_ticks(
         system_time_fields["year"],
@@ -1218,10 +1279,10 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         for path, entry in prepared_file_entries.items()
     }
     module_directory = normalized_module.rsplit("\\", 1)[0] if "\\" in normalized_module else windows_directory
-    current_directory = environment.get("CD", module_directory).replace("/", "\\").rstrip("\\")
+    current_directory = environment.get("CurrentDirectory", environment.get("CD", module_directory)).replace("/", "\\").rstrip("\\")
     if thread_instruction_limit < 1 or thread_instruction_limit > 10000000:
         fail("kernel thread instruction limit must be between 1 and 10000000")
-    state = {"last_error": 0, "modules": {}, "handles": {}, "next_handle": 0x40000, "next_luid": 0x1000, "next_etw_handle": 1, "main": 0, "current_actctx": 0, "actctx_refs": 0, "tls": {}, "tls_slots": tls_slots, "next_tls": 0, "next_temp": 1, "next_thread_id": 16, "threads": [], "executions": {}, "current_thread": None, "thread_priorities": {8: 0}, "thread_io_priorities": {8: 2}, "thread_page_priorities": {8: 5}, "timer_callbacks": [], "tick_count": 0, "time_adjustment": 156250, "time_increment": 156250, "time_adjustment_disabled": False, "paths": paths, "named_mappings": {}, "views": {}, "file_queries": [], "volume_queries": [], "module_queries": [], "procedure_queries": [], "process_queries": [], "thread_queries": [], "system_queries": [], "profile_queries": [], "debug_output": [], "heaps": {1: True}, "allocations": {}, "resources": {}, "critical_sections": {}, "global_allocations": {}, "local_allocations": {}, "virtual_allocations": {}, "virtual_protections": {}, "standard_handles": {}, "command_line": command_line, "command_lines": {}, "current_directory": current_directory, "process_exit_code": None, "process_userdata": 0, "unhandled_exception_filter": 0}
+    state = {"last_error": 0, "modules": {}, "handles": {}, "next_handle": 0x40000, "next_luid": 0x1000, "next_etw_handle": 1, "main": 0, "current_actctx": 0, "actctx_refs": 0, "tls": {}, "tls_slots": tls_slots, "next_tls": 0, "init_once": {}, "next_temp": 1, "next_thread_id": 16, "threads": [], "executions": {}, "current_thread": None, "thread_locale": 0x0409, "thread_priorities": {8: 0}, "thread_io_priorities": {8: 2}, "thread_page_priorities": {8: 5}, "timer_callbacks": [], "tick_count": 0, "time_adjustment": 156250, "time_increment": 156250, "time_adjustment_disabled": False, "paths": paths, "current_directory": current_directory, "named_mappings": {}, "views": {}, "file_queries": [], "volume_queries": [], "module_queries": [], "procedure_queries": [], "process_queries": [], "thread_queries": [], "system_queries": [], "profile_queries": [], "debug_output": [], "heaps": {1: True}, "allocations": {}, "resources": {}, "critical_sections": {}, "condition_variables": {}, "global_allocations": {}, "local_allocations": {}, "virtual_allocations": {}, "virtual_protections": {}, "standard_handles": {}, "command_line": command_line, "command_lines": {}, "process_exit_code": None, "process_userdata": 0, "unhandled_exception_filter": 0}
 
     def entry_data(entry):
         if entry == None or entry.get("directory", False):
@@ -1244,7 +1305,12 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         return handle
 
     def file_path(machine, address, wide):
-        return _normalize_virtual_path(machine.read_cstring(address, encoding = "utf16le" if wide else "ascii"))
+        supplied = machine.read_cstring(address, encoding = "utf16le" if wide else "ascii").replace("/", "\\")
+        if len(supplied) >= 2 and supplied[1] == ":" or supplied.startswith("\\\\"):
+            return _normalize_virtual_path(supplied)
+        if supplied.startswith("\\") and len(state["current_directory"]) >= 2 and state["current_directory"][1] == ":":
+            return _normalize_virtual_path(state["current_directory"][:2] + supplied)
+        return _normalize_virtual_path(state["current_directory"] + "\\" + supplied)
 
     def file_handle(handle):
         entry = state["handles"].get(handle)
@@ -2203,6 +2269,33 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 address = machine.allocate(size = len(value) + 8, value = value, name = name)
                 state["command_lines"][name] = address
             return address
+        if name in ["getcurrentdirectorya", "getcurrentdirectoryw"]:
+            wide = name.endswith("w")
+            required = len(state["current_directory"]) + 1
+            if not args[0] or not args[1] or args[0] < required:
+                return required
+            _write_string(machine, args[1], state["current_directory"], wide, args[0])
+            state["last_error"] = 0
+            return required - 1
+        if name in ["setcurrentdirectorya", "setcurrentdirectoryw"]:
+            if not args[0]:
+                state["last_error"] = 87
+                return 0
+            wide = name.endswith("w")
+            supplied = machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii").replace("/", "\\").rstrip("\\")
+            normalized = file_path(machine, args[0], wide)
+            entry = state["paths"].get(normalized)
+            if entry == None or not entry.get("directory", False):
+                state["last_error"] = 3  # ERROR_PATH_NOT_FOUND
+                return 0
+            if len(supplied) >= 2 and supplied[1] == ":" or supplied.startswith("\\\\"):
+                state["current_directory"] = supplied
+            elif supplied.startswith("\\"):
+                state["current_directory"] = state["current_directory"][:2] + supplied
+            else:
+                state["current_directory"] = state["current_directory"] + "\\" + supplied
+            state["last_error"] = 0
+            return 1
         if name in ["getcomputernameexa", "getcomputernameexw"]:
             if not args[2] or args[0] > 7:
                 state["last_error"] = 87  # ERROR_INVALID_PARAMETER
@@ -2311,6 +2404,19 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if name == "getthreadpriority":
                 return state["thread_priorities"].get(thread_id, 0)
             state["thread_priorities"][thread_id] = args[1]
+            state["last_error"] = 0
+            return 1
+        if name == "getthreadtimes":
+            if thread_id_for_handle(args[0]) == None:
+                state["last_error"] = 6  # ERROR_INVALID_HANDLE
+                return 0
+            if not args[1] or not args[2] or not args[3] or not args[4]:
+                state["last_error"] = 87  # ERROR_INVALID_PARAMETER
+                return 0
+            machine.write_u64le(args[1], system_time_ticks)
+            machine.write_u64le(args[2], 0)
+            machine.write_u64le(args[3], 0)
+            machine.write_u64le(args[4], 0)
             state["last_error"] = 0
             return 1
         if name in ["decodepointer", "encodepointer"]:
@@ -2476,16 +2582,23 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1
         if name == "delayloadfailurehook":
             return 0
-        if name in ["createeventa", "createeventw"]:
+        if name in ["createeventa", "createeventw", "createeventexw"]:
             wide = name.endswith("w")
-            object_name = machine.read_cstring(args[3], encoding = "utf16le" if wide else "ascii") if args[3] else ""
+            extended = name == "createeventexw"
+            name_argument = args[1] if extended else args[3]
+            object_name = machine.read_cstring(name_argument, encoding = "utf16le" if wide else "ascii") if name_argument else ""
             if object_name:
                 for handle, entry in state["handles"].items():
                     if type(entry) == "dict" and entry.get("kind") == "event" and entry["value"].get("name", "").lower() == object_name.lower():
                         state["last_error"] = 183
                         return handle
             state["last_error"] = 0
-            return create_handle("event", {"name": object_name, "manual_reset": bool(args[1]), "signaled": bool(args[2])})
+            flags = args[2] if extended else 0
+            return create_handle("event", {
+                "name": object_name,
+                "manual_reset": bool(flags & 1) if extended else bool(args[1]),
+                "signaled": bool(flags & 2) if extended else bool(args[2]),
+            })
         if name in ["openeventa", "openeventw"]:
             wide = name.endswith("w")
             object_name = machine.read_cstring(args[2], encoding = "utf16le" if wide else "ascii") if args[2] else ""
@@ -2521,15 +2634,17 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 machine.write_u32le(args[2], value["count"])
             value["count"] += args[1]
             return 1
-        if name in ["createmutexa", "createmutexw"]:
+        if name in ["createmutexa", "createmutexw", "createmutexexw"]:
             wide = name.endswith("w")
-            mutex_name = machine.read_cstring(args[2], encoding = "utf16le" if wide else "ascii") if args[2] else ""
+            extended = name == "createmutexexw"
+            name_argument = args[1] if extended else args[2]
+            mutex_name = machine.read_cstring(name_argument, encoding = "utf16le" if wide else "ascii") if name_argument else ""
             for handle, entry in state["handles"].items():
                 if type(entry) == "dict" and entry.get("kind") == "mutex" and entry["value"].get("name", "").lower() == mutex_name.lower():
                     state["last_error"] = 183  # ERROR_ALREADY_EXISTS
                     return handle
             state["last_error"] = 0
-            return create_handle("mutex", {"name": mutex_name, "owned": bool(args[1])})
+            return create_handle("mutex", {"name": mutex_name, "owned": bool(args[2] & 1) if extended else bool(args[1])})
         if name in ["openmutexa", "openmutexw"]:
             wide = name.endswith("w")
             mutex_name = machine.read_cstring(args[2], encoding = "utf16le" if wide else "ascii") if args[2] else ""
@@ -2743,18 +2858,6 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                     machine.write(address, timestamp.bytes())
             state["last_error"] = 0
             return 1
-        if name in ["getshortpathnamea", "getshortpathnamew"]:
-            wide = name.endswith("w")
-            if not args[0]:
-                state["last_error"] = 87
-                return 0
-            value = _dos_short_path(machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii"))
-            required = len(value) + 1
-            if not args[1] or args[2] < required:
-                return required
-            _write_string(machine, args[1], value, wide, args[2])
-            state["last_error"] = 0
-            return len(value)
         if name in ["setcurrentdirectorya", "setcurrentdirectoryw"]:
             wide = name.endswith("w")
             if not args[0]:
@@ -3183,8 +3286,32 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1
         if name in ["getsystemdefaultlangid", "getuserdefaultlangid", "getsystemdefaultuilanguage", "getuserdefaultuilanguage"]:
             return 0x0409
+        if name in ["getthreadpreferreduilanguages", "getuserpreferreduilanguages", "getsystempreferreduilanguages"]:
+            if not args[1] or not args[3]:
+                state["last_error"] = 87
+                return 0
+            value = binary.encode("en-US\x00", encoding = "utf16le", nul = True)
+            required = len(value) // 2
+            capacity = machine.read_u32le(args[3])
+            machine.write_u32le(args[1], 1)
+            machine.write_u32le(args[3], required)
+            if not args[2] or capacity < required:
+                state["last_error"] = 122
+                return 0
+            machine.write(args[2], value)
+            state["last_error"] = 0
+            return 1
         if name in ["getsystemdefaultlcid", "getuserdefaultlcid"]:
             return 0x0409
+        if name == "getthreadlocale":
+            return state["thread_locale"]
+        if name == "setthreadlocale":
+            if not args[0]:
+                state["last_error"] = 87
+                return 0
+            state["thread_locale"] = args[0]
+            state["last_error"] = 0
+            return 1
         if name in ["getlocaleinfoa", "getlocaleinfow"]:
             wide = name.endswith("w")
             values = {
@@ -3209,6 +3336,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1252
         if name == "getoemcp":
             return 437
+        if name == "isvalidcodepage":
+            return 1 if args[0] in [37, 437, 65001, 1252] else 0
         if name == "getcpinfo":
             if not args[1]:
                 state["last_error"] = 87
@@ -3438,7 +3567,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 output.u16le(field)
             machine.write(args[1], output.bytes())
             return 1
-        if name == "getsysteminfo":
+        if name in ["getsysteminfo", "getnativesysteminfo"]:
             info = binary.builder(capacity = 36)
             info.u16le(0)  # PROCESSOR_ARCHITECTURE_INTEL
             info.u16le(0)
@@ -3503,6 +3632,21 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 return 1  # FILE_TYPE_DISK
             state["last_error"] = 6
             return 0
+        if name in ["getshortpathnamea", "getshortpathnamew"]:
+            if not args[0]:
+                state["last_error"] = 87
+                return 0
+            wide = name.endswith("w")
+            value = machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
+            required = len(value) + 1
+            if not args[1] or args[2] < required:
+                state["last_error"] = 122  # ERROR_INSUFFICIENT_BUFFER
+                return required
+            # A component without a generated 8.3 alias is returned in its
+            # existing form. This is a valid GetShortPathName result on NTFS.
+            _write_string(machine, args[1], value, wide, args[2])
+            state["last_error"] = 0
+            return len(value)
         if name == "sethandlecount":
             return args[0]
         if name == "seterrormode":
@@ -3514,6 +3658,15 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1
         if name == "setprocessshutdownparameters":
             state["shutdown_parameters"] = {"level": args[0], "flags": args[1]}
+            return 1
+        if name == "getprocessshutdownparameters":
+            if not args[0] or not args[1]:
+                state["last_error"] = 87
+                return 0
+            parameters = state.get("shutdown_parameters", {"level": 0x280, "flags": 0})
+            machine.write_u32le(args[0], parameters["level"])
+            machine.write_u32le(args[1], parameters["flags"])
+            state["last_error"] = 0
             return 1
         if name == "setsystemtimeadjustment":
             state["time_adjustment"] = args[0]
@@ -3563,6 +3716,13 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return legacy_platform | ((version_build & 0x7fff) << 16) | (version_minor << 8) | version_major
         if name == "getprocessversion":
             return (version_major << 16) | version_minor
+        if name == "getproductinfo":
+            if not args[4]:
+                state["last_error"] = 87
+                return 0
+            machine.write_u32le(args[4], product_info)
+            state["last_error"] = 0
+            return 1
         if name == "versetconditionmask":
             mask = args[0] | (args[1] << 32)
             result = _version_condition_mask(mask, args[2], args[3])
@@ -3848,6 +4008,55 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 0
         if name == "getlasterror":
             return state["last_error"]
+        if name in ["createprocessa", "createprocessw"]:
+            wide = name.endswith("w")
+            request = {
+                "api": name,
+                "application": machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii") if args[0] else "",
+                "command_line": machine.read_cstring(args[1], encoding = "utf16le" if wide else "ascii") if args[1] else "",
+                "inherit_handles": bool(args[4]),
+                "flags": args[5],
+                "current_directory": machine.read_cstring(args[7], encoding = "utf16le" if wide else "ascii") if args[7] else state["current_directory"],
+            }
+            state["process_queries"].append(request)
+            result = on_process_create(machine, request) if on_process_create != None else None
+            if result == None:
+                state["last_error"] = 2
+                return 0
+            if not args[9]:
+                state["last_error"] = 87
+                return 0
+            process_handle = create_handle("process_reference", {"id": result.get("process_id", 16), "exit_code": result.get("exit_code", 0)})
+            thread_handle = create_handle("thread_reference", {"id": result.get("thread_id", 20), "state": "terminated"})
+            machine.write_u32le(args[9], process_handle)
+            machine.write_u32le(args[9] + 4, thread_handle)
+            machine.write_u32le(args[9] + 8, result.get("process_id", 16))
+            machine.write_u32le(args[9] + 12, result.get("thread_id", 20))
+            state["last_error"] = 0
+            return 1
+        if name == "rtlcapturestackbacktrace":
+            skip, capture, output, hash_output = args
+            if capture > 62 or (capture and not output):
+                return 0
+            if skip or not capture:
+                if hash_output:
+                    machine.write_u32le(hash_output, 0)
+                return 0
+            address = machine.get_register("eip")
+            machine.write_u32le(output, address)
+            if hash_output:
+                machine.write_u32le(hash_output, address)
+            return 1
+        if name == "timegettime":
+            return state["tick_count"] & 0xffffffff
+        if name in ["timebeginperiod", "timeendperiod"]:
+            return 0 if args[0] > 0 and args[0] <= 0xffff else 97  # TIMERR_NOERROR / TIMERR_NOCANDO
+        if name == "timegetdevcaps":
+            if not args[0] or args[1] < 8:
+                return 97
+            machine.write_u32le(args[0], 1)
+            machine.write_u32le(args[0] + 4, 1000000)
+            return 0
         if name == "getcurrentactctx":
             if not args[0]:
                 state["last_error"] = 87
@@ -3868,6 +4077,9 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return None
         if name == "tlsalloc":
             index = state["next_tls"]
+            if index >= 64:
+                state["last_error"] = 8  # ERROR_NOT_ENOUGH_MEMORY
+                return 0xffffffff
             state["next_tls"] = index + 1
             state["tls"][index] = 0
             if state["tls_slots"] and index < 64:
@@ -3905,10 +4117,17 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1
         if name in ["disablethreadlibrarycalls", "freelibrary"]:
             return 1
-        if name in ["initializecriticalsection", "initializecriticalsectionandspincount", "rtlinitializecriticalsection", "rtlinitializecriticalsectionandspincount"]:
+        if name in ["initializecriticalsection", "initializecriticalsectionandspincount", "initializecriticalsectionex", "rtlinitializecriticalsection", "rtlinitializecriticalsectionandspincount"]:
             machine.write(args[0], b"\x00" * 24)
             state["critical_sections"][args[0]] = {"owner": None, "depth": 0}
             return 0 if name.startswith("rtl") else 1
+        if name == "initializeconditionvariable":
+            machine.write_u32le(args[0], 0)
+            state["condition_variables"][args[0]] = 0
+            return None
+        if name in ["wakeconditionvariable", "wakeallconditionvariable"]:
+            state["condition_variables"][args[0]] = state["condition_variables"].get(args[0], 0) + 1
+            return None
         if name == "rtlinitializeresource":
             if args[0]:
                 # RTL_RESOURCE is opaque to callers. Keep deterministic bytes
@@ -3946,6 +4165,14 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             leave_critical_section(machine, args[0])
             return None
         if name == "tryentercriticalsection":
+            return 1 if enter_critical_section(machine, args[0], False) else 0
+        if name in ["acquiresrwlockexclusive", "acquiresrwlockshared"]:
+            enter_critical_section(machine, args[0], True)
+            return None
+        if name in ["releasesrwlockexclusive", "releasesrwlockshared"]:
+            leave_critical_section(machine, args[0])
+            return None
+        if name in ["tryacquiresrwlockexclusive", "tryacquiresrwlockshared"]:
             return 1 if enter_critical_section(machine, args[0], False) else 0
         if name == "isdbcsleadbyte":
             return 0
@@ -4223,7 +4450,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return address
         if name == "virtualalloc":
             requested, size, allocation_type, protect = args
-            if size <= 0 or not allocation_type & 0x3000:
+            if size <= 0 or allocation_type & 0x3000 == 0:
                 state["last_error"] = 87
                 return 0
             readable = protect not in [0x01]
@@ -4232,19 +4459,30 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if requested:
                 for base, allocation in state["virtual_allocations"].items():
                     if requested >= base and requested + size <= base + allocation["size"]:
+                        if allocation_type & 0x1000:
+                            machine.protect(requested, size, readable = readable, writable = writable, executable = executable)
                         allocation["protect"] = protect
-                        machine.protect(
-                            requested,
-                            size,
-                            readable = readable,
-                            writable = writable,
-                            executable = executable,
-                        )
+                        state["last_error"] = 0
                         return requested
-                state["last_error"] = 487  # ERROR_INVALID_ADDRESS
-                return 0
-            address = machine.allocate(size = size, name = "VirtualAlloc", readable = readable, writable = writable, executable = executable)
+                if allocation_type & 0x2000 == 0:  # A free address requires MEM_RESERVE.
+                    state["last_error"] = 487  # ERROR_INVALID_ADDRESS
+                    return 0
+                # NT rounds an explicit reservation down to the allocation
+                # granularity and covers every requested page.
+                end = (requested + size + 0xfff) & ~0xfff
+                requested = requested & ~0xffff
+                size = end - requested
+                for mapping in machine.mappings:
+                    if requested < mapping.start + mapping.size and mapping.start < requested + size:
+                        state["last_error"] = 487
+                        return 0
+            if allocation_type & 0x1000 == 0:
+                readable = False
+                writable = False
+                executable = False
+            address = machine.allocate(size = size, address = requested if requested else None, name = "VirtualAlloc", readable = readable, writable = writable, executable = executable)
             state["virtual_allocations"][address] = {"size": size, "type": allocation_type, "protect": protect}
+            state["last_error"] = 0
             return address
         if name == "virtualfree":
             address, size, free_type = args
@@ -4397,6 +4635,27 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             builder.u32le(value)
             machine.write(args[0], builder.bytes())
             return value
+        if name == "initializeslisthead":
+            machine.write(args[0], b"\x00" * 8)
+            return 0
+        if name == "initonceexecuteonce":
+            if not args[0] or not args[1]:
+                state["last_error"] = 87
+                return 0
+            completed = state["init_once"].get(args[0])
+            if completed != None:
+                if args[3]:
+                    machine.write_u32le(args[3], completed)
+                return 1
+            result = machine.invoke(args[1], args = [args[0], args[2], args[3]])
+            if result.reason != "return":
+                fail("InitOnce callback stopped with {}: {}".format(result.reason, result.detail))
+            if result.value == 0:
+                return 0
+            context = machine.read_u32le(args[3]) if args[3] else 0
+            state["init_once"][args[0]] = context
+            machine.write_u32le(args[0], 2)  # RTL_RUN_ONCE complete
+            return 1
         if name == "interlockedcompareexchange":
             previous = machine.read_u32le(args[0])
             if previous == args[2]:
@@ -4448,6 +4707,9 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write_u32le(fs + 4, machine.stack.high)
             machine.write_u32le(fs + 8, machine.stack.low)
             machine.write_u32le(fs + 0x18, fs)
+            if not state["tls_slots"]:
+                state["tls_slots"] = machine.allocate(size = 64 * 4, name = "TEB.ThreadLocalStoragePointer")
+            machine.write_u32le(fs + 0x2c, state["tls_slots"])
         main_name = module_name(module_path)
         for module in machine.modules:
             state["modules"][module.name] = module.base
@@ -4465,15 +4727,19 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             providers = ["ntdll.dll"] if function.startswith("rtl") or function.startswith("nt") or function.startswith("zw") or function.startswith("ldr") or function.startswith("dbg") or function.startswith("etw") else ["kernel32.dll"]
             # Win9x exposes the RTL memory helpers through Kernel32, while NT
             # exports the same contract from NTDLL.
-            if function in ["rtlfillmemory", "rtlmovememory", "rtlzeromemory"]:
+            if function in ["rtlfillmemory", "rtlmovememory", "rtlzeromemory", "rtlcapturestackbacktrace"]:
                 providers = ["kernel32.dll", "ntdll.dll"]
             for provider in providers:
                 machine.provide_export(callback, module = provider, name = function, argc = argc)
+        for function, argc in _MULTIMEDIA_SIGNATURES.items():
+            machine.provide_export(callback, module = "winmm.dll", name = function, argc = argc)
         machine.provide_export(get_process_dword, module = "kernel32.dll", ordinal = 18, argc = 2)
         for imported in machine.imports:
             function = imported.name.lower()
             if _kernel_provider_module(imported.module) and function in _KERNEL_SIGNATURES:
                 machine.hook(callback, address = imported.address, argc = _KERNEL_SIGNATURES[function])
+            elif imported.module.lower() == "winmm.dll" and function in _MULTIMEDIA_SIGNATURES:
+                machine.hook(callback, address = imported.address, argc = _MULTIMEDIA_SIGNATURES[function])
             elif imported.module.lower() == "kernel32.dll" and imported.ordinal == 18:
                 machine.hook(get_process_dword, address = imported.address, argc = 2)
     return emulator.plugin(install, name = "windows.kernel32", state = state)
@@ -7490,6 +7756,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         "equalsid": 2,
         "freesid": 1,
         "getlengthsid": 1,
+        "getsidlengthrequired": 1,
         "getaclinformation": 4,
         "getace": 3,
         "getsecuritydescriptorlength": 1,
@@ -7507,6 +7774,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         "getusernamea": 2,
         "getusernamew": 2,
         "initializeacl": 3,
+        "initializesid": 3,
         "initializesecuritydescriptor": 2,
         "impersonateloggedonuser": 1,
         "isvalidsecuritydescriptor": 1,
@@ -7565,6 +7833,8 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         "setsecurityinfo": 7,
         "setfilesecuritya": 3,
         "setfilesecurityw": 3,
+        "setnamedsecurityinfoa": 7,
+        "setnamedsecurityinfow": 7,
         "setthreadtoken": 2,
         "systemfunction004": 3,
         "systemfunction005": 3,
@@ -8135,6 +8405,22 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             state["actions"].append({"api": name, "path": path, "information": args[1]})
             set_last_error(0)
             return 1
+        if name in ["setnamedsecurityinfoa", "setnamedsecurityinfow"]:
+            if not args[0] or args[1] < 1 or args[1] > 8:
+                return 87
+            wide = name.endswith("w")
+            object_name = machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
+            if args[1] == 1 and kernel != None:
+                path = _normalize_virtual_path(object_name)
+                if path not in kernel.state["paths"]:
+                    return 2
+            state["actions"].append({
+                "api": name,
+                "object": object_name,
+                "object_type": args[1],
+                "information": args[2],
+            })
+            return 0
         if name == "gettokeninformation":
             return token_information(machine, args[1], args[2], args[3], args[4])
         if name in ["allocateandinitializesid", "rtlallocateandinitializesid"]:
@@ -8173,17 +8459,22 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
                 set_last_error(87)
                 return 0
             return sid_length(machine, args[0])
+        if name == "getsidlengthrequired":
+            return 8 + args[0] * 4
         if name == "rtllengthrequiredsid":
             return 8 + args[0] * 4
-        if name == "rtlinitializesid":
+        if name in ["initializesid", "rtlinitializesid"]:
             if not args[0] or not args[1] or args[2] > 15:
+                if name == "initializesid":
+                    set_last_error(87)
+                    return 0
                 return 0xc000000d
             header = binary.builder(capacity = 8)
             header.u8(1)
             header.u8(args[2])
             header.append(machine.read(args[1], 6))
             machine.write(args[0], header.bytes())
-            return 0
+            return 1 if name == "initializesid" else 0
         if name == "rtllengthsid":
             return sid_length(machine, args[0]) if args[0] else 0
         if name == "rtlvalidsid":
@@ -9732,6 +10023,20 @@ def shell_plugin(module_path, kernel = None):
             suffix = machine.read_cstring(args[1], encoding = encoding).replace("/", "\\").lstrip("\\")
             _write_string(machine, args[0], base + ("\\" if base and suffix else "") + suffix, wide)
             return 1
+        if function in ["pathcommonprefixa", "pathcommonprefixw"]:
+            wide = function.endswith("w")
+            encoding = "utf16le" if wide else "ascii"
+            left = machine.read_cstring(args[0], encoding = encoding).replace("/", "\\")
+            right = machine.read_cstring(args[1], encoding = encoding).replace("/", "\\")
+            common = 0
+            maximum = min(len(left), len(right))
+            while common < maximum and left[common].lower() == right[common].lower():
+                common += 1
+            if common < len(left) and common < len(right) and left[common:common + 1] != "\\" and right[common:common + 1] != "\\":
+                common = left[:common].rfind("\\") + 1
+            if args[2]:
+                _write_string(machine, args[2], left[:common], wide, 260)
+            return common
         if function in ["pathcanonicalizea", "pathcanonicalizew"]:
             wide = function.endswith("w")
             encoding = "utf16le" if wide else "ascii"
@@ -10015,7 +10320,7 @@ def shell_plugin(module_path, kernel = None):
         machine.provide_export(lambda event: callback(event, "strrettobufa"), module = "shlwapi.dll", name = "StrRetToBufA", argc = 4)
         machine.provide_export(lambda event: callback(event, "strrettobufw"), module = "shlwapi.dll", name = "StrRetToBufW", argc = 4)
         signatures = {23: 3, 24: 3, 38: 1, 52: 7, 80: 3, 83: 1, 85: 4, 97: 2, 107: 4, 112: 3, 132: 1, 133: 1, 151: 3, 152: 3, 153: 3, 154: 3, 155: 2, 156: 2, 157: 2, 158: 2, 169: 1, 193: 0, 215: 3, 217: 3, 219: 4, 222: 1, 223: 1, 224: 1, 236: 1, 241: 0, 266: 4, 267: 4, 269: 2, 270: 2, 276: 0, 294: 5, 295: 4, 296: 3, 308: 2, 309: 1, 312: 6, 342: 3, 345: 3, 346: 3, 356: 3, 364: 3, 365: 3, 376: 0, 377: 3, 378: 3, 394: 4, 413: 1, 418: 1, 419: 0, 424: 1, 437: 1, 441: 3, 447: 1, 448: 1, 455: 2, 456: 2, 459: 3, 460: 3, 461: 1, 476: 2}
-        named_signatures = {"assoccreate": 3, "pathaddbackslasha": 1, "pathaddbackslashw": 1, "pathappenda": 2, "pathappendw": 2, "pathbuildroota": 2, "pathbuildrootw": 2, "pathcanonicalizea": 2, "pathcanonicalizew": 2, "pathcombinea": 3, "pathcombinew": 3, "pathfileexistsa": 1, "pathfileexistsw": 1, "pathfindextensiona": 1, "pathfindextensionw": 1, "pathfindfilenamea": 1, "pathfindfilenamew": 1, "pathgetargsa": 1, "pathgetargsw": 1, "pathisfilespeca": 1, "pathisfilespecw": 1, "pathisrelativew": 1, "pathisuncw": 1, "pathisuncservera": 1, "pathisuncserverw": 1, "pathisuncserversharea": 1, "pathisuncserversharew": 1, "pathmakeprettya": 1, "pathmakeprettyw": 1, "pathmakesystemfoldera": 1, "pathmakesystemfolderw": 1, "pathparseiconlocationa": 1, "pathparseiconlocationw": 1, "pathquotespacesa": 1, "pathquotespacesw": 1, "pathremoveargsa": 1, "pathremoveargsw": 1, "pathremovebackslasha": 1, "pathremovebackslashw": 1, "pathremoveblanksa": 1, "pathremoveblanksw": 1, "pathremoveextensiona": 1, "pathremoveextensionw": 1, "pathremovefilespeca": 1, "pathremovefilespecw": 1, "pathrenameextensiona": 2, "pathrenameextensionw": 2, "pathstrippatha": 1, "pathstrippathw": 1, "pathunexpandenvstringsw": 3, "pathunquotespacesa": 1, "pathunquotespacesw": 1, "shcreateshellpalette": 1, "shgetinversecmap": 2, "shreggetboolusvaluea": 4, "shreggetboolusvaluew": 4, "strcatbuffa": 3, "strcatbuffw": 3, "strcatw": 2, "strchra": 2, "strchrw": 2, "strcspna": 2, "strcmpia": 2, "strcmpiw": 2, "strcmpnia": 3, "strcmpniw": 3, "strcpynw": 3, "strcpyw": 2, "strdupa": 1, "strdupw": 1, "strrchra": 3, "strspnw": 2, "strstra": 2, "strstria": 2, "strstrw": 2, "strstriw": 2, "strtointa": 1, "strtointw": 1, "urlcanonicalizea": 4, "urlcanonicalizew": 4, "wnsprintfa": 16, "wnsprintfw": 16, "wvnsprintfw": 4}
+        named_signatures = {"assoccreate": 3, "pathaddbackslasha": 1, "pathaddbackslashw": 1, "pathappenda": 2, "pathappendw": 2, "pathbuildroota": 2, "pathbuildrootw": 2, "pathcanonicalizea": 2, "pathcanonicalizew": 2, "pathcombinea": 3, "pathcombinew": 3, "pathcommonprefixa": 3, "pathcommonprefixw": 3, "pathfileexistsa": 1, "pathfileexistsw": 1, "pathfindextensiona": 1, "pathfindextensionw": 1, "pathfindfilenamea": 1, "pathfindfilenamew": 1, "pathgetargsa": 1, "pathgetargsw": 1, "pathisfilespeca": 1, "pathisfilespecw": 1, "pathisrelativew": 1, "pathisuncw": 1, "pathisuncservera": 1, "pathisuncserverw": 1, "pathisuncserversharea": 1, "pathisuncserversharew": 1, "pathmakeprettya": 1, "pathmakeprettyw": 1, "pathmakesystemfoldera": 1, "pathmakesystemfolderw": 1, "pathparseiconlocationa": 1, "pathparseiconlocationw": 1, "pathquotespacesa": 1, "pathquotespacesw": 1, "pathremoveargsa": 1, "pathremoveargsw": 1, "pathremovebackslasha": 1, "pathremovebackslashw": 1, "pathremoveblanksa": 1, "pathremoveblanksw": 1, "pathremoveextensiona": 1, "pathremoveextensionw": 1, "pathremovefilespeca": 1, "pathremovefilespecw": 1, "pathrenameextensiona": 2, "pathrenameextensionw": 2, "pathstrippatha": 1, "pathstrippathw": 1, "pathunexpandenvstringsw": 3, "pathunquotespacesa": 1, "pathunquotespacesw": 1, "shcreateshellpalette": 1, "shgetinversecmap": 2, "shreggetboolusvaluea": 4, "shreggetboolusvaluew": 4, "strcatbuffa": 3, "strcatbuffw": 3, "strcatw": 2, "strchra": 2, "strchrw": 2, "strcspna": 2, "strcmpia": 2, "strcmpiw": 2, "strcmpnia": 3, "strcmpniw": 3, "strcpynw": 3, "strcpyw": 2, "strdupa": 1, "strdupw": 1, "strrchra": 3, "strspnw": 2, "strstra": 2, "strstria": 2, "strstrw": 2, "strstriw": 2, "strtointa": 1, "strtointw": 1, "urlcanonicalizea": 4, "urlcanonicalizew": 4, "wnsprintfa": 16, "wnsprintfw": 16, "wvnsprintfw": 4}
         for ordinal, argc in signatures.items():
             def bound_ordinal(event, function = ordinal):
                 return callback(event, function)
@@ -10189,12 +10494,30 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
         0x1b: profile + "\\PrintHood",
         0x1c: profile + "\\Application Data",
         0x1f: windows_directory + "\\All Users\\Favorites",
-        0x23: windows_directory + "\\All Users\\Application Data",
+        0x23: environment.get("ProgramData", windows_directory + "\\All Users\\Application Data"),
         0x24: windows_directory,
         0x25: system_directory,
         0x26: "C:\\Program Files",
         0x27: profile + "\\My Pictures",
         0x2b: "C:\\Program Files\\Common Files",
+    }
+    known_folder_paths = {
+        "{1777F761-68AD-4D8A-87BD-30B759FA33DD}": profile + "\\Favorites",
+        "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}": profile + "\\AppData\\Roaming",
+        "{5E6C858F-0E22-4760-9AFE-EA3317B67173}": profile,
+        "{625B53C3-AB48-4EC1-BA1F-A1EF4146FC19}": profile + "\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu",
+        "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}": environment.get("ProgramData", "C:\\ProgramData"),
+        "{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}": environment.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+        "{905E63B6-C1BF-494E-B29C-65B732D3D21A}": environment.get("ProgramFiles", "C:\\Program Files"),
+        "{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}": profile + "\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+        "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}": profile + "\\Desktop",
+        "{B97D20BB-F46A-4C97-BA10-5E3608430854}": profile + "\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+        "{DE974D24-D9C6-4D3E-BF91-F4455120B917}": environment.get("CommonProgramFiles(x86)", "C:\\Program Files (x86)\\Common Files"),
+        "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}": profile + "\\AppData\\Local",
+        "{F38BF404-1D43-42F2-9305-67DE0B28FC23}": windows_directory,
+        "{F7F1ED05-9F6D-47A2-AAAE-29D317C6F066}": environment.get("CommonProgramFiles", "C:\\Program Files\\Common Files"),
+        "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}": profile + "\\Documents",
+        "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}": windows_directory + "\\System32",
     }
 
     def desktop_folder(machine):
@@ -10276,6 +10599,36 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
         return state["desktop"]
 
     def callback(event, function):
+        if function == "commandlinetoargvw":
+            if not event.args[0] or not event.args[1]:
+                return 0
+            command_line = event.machine.read_cstring(event.args[0], encoding = "utf16le")
+            arguments = command_line_arguments(command_line)
+            if not arguments:
+                arguments = [module_path]
+            encoded = [binary.encode(value, encoding = "utf16le", nul = True) for value in arguments]
+            pointer_bytes = (len(arguments) + 1) * 4
+            allocation_size = pointer_bytes
+            for value in encoded:
+                allocation_size += len(value)
+            allocator = event.machine.resolve_export("kernel32.dll", name = "LocalAlloc")
+            address = 0
+            if allocator:
+                allocated = event.machine.invoke(allocator, args = [0, allocation_size])
+                if allocated.reason == "return":
+                    address = allocated.value
+            if not address:
+                address = event.machine.allocate(size = allocation_size, name = "CommandLineToArgvW")
+            pointers = binary.builder(capacity = pointer_bytes)
+            string_address = address + pointer_bytes
+            for value in encoded:
+                pointers.u32le(string_address)
+                event.machine.write(string_address, value)
+                string_address += len(value)
+            pointers.u32le(0)
+            event.machine.write(address, pointers.bytes())
+            event.machine.write_u32le(event.args[1], len(arguments))
+            return address
         if function == "dllgetversion":
             if not event.args[0] or event.machine.read_u32le(event.args[0]) < 20:
                 return 0x80070057
@@ -10295,6 +10648,19 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
                 event.machine.write(event.args[4], b"\x00\x00" if function.endswith("w") else b"\x00")
                 return 0x80070002  # HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
             _write_string(event.machine, event.args[4], path, function.endswith("w"), 260)
+            return 0
+        if function == "shgetknownfolderpath":
+            if not event.args[0] or not event.args[3]:
+                return 0x80070057  # E_INVALIDARG
+            event.machine.write_u32le(event.args[3], 0)
+            path = known_folder_paths.get(_guid_text(event.machine, event.args[0]))
+            if path == None:
+                return 0x80070002  # HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
+            value = event.machine.allocate(
+                value = binary.encode(path, encoding = "utf16le", nul = True),
+                name = "SHGetKnownFolderPath",
+            )
+            event.machine.write_u32le(event.args[3], value)
             return 0
         if function == "shgetdesktopfolder":
             if not event.args[0]:
@@ -10372,9 +10738,11 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
 
     def install(machine):
         signatures = {2: 6, 4: 1, 68: 3, 155: 1, 640: 6, 641: 1, 708: 3, 709: 3}
+        machine.provide_export(lambda event: callback(event, "commandlinetoargvw"), module = "shell32.dll", name = "CommandLineToArgvW", argc = 2)
         machine.provide_export(lambda event: callback(event, "dllgetversion"), module = "shell32.dll", name = "DllGetVersion", argc = 1)
         machine.provide_export(lambda event: callback(event, "shgetfolderpatha"), module = "shell32.dll", name = "SHGetFolderPathA", argc = 5)
         machine.provide_export(lambda event: callback(event, "shgetfolderpathw"), module = "shell32.dll", name = "SHGetFolderPathW", argc = 5)
+        machine.provide_export(lambda event: callback(event, "shgetknownfolderpath"), module = "shell32.dll", name = "SHGetKnownFolderPath", argc = 4)
         machine.provide_export(lambda event: callback(event, "shgetdesktopfolder"), module = "shell32.dll", name = "SHGetDesktopFolder", argc = 1)
         machine.provide_export(lambda event: callback(event, "shgetmalloc"), module = "shell32.dll", name = "SHGetMalloc", argc = 1)
         machine.provide_export(lambda event: callback(event, "shgetspecialfolderlocation"), module = "shell32.dll", name = "SHGetSpecialFolderLocation", argc = 3)
