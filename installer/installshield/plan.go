@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tinyrange/trex/installer/installshield/installscript"
+	wiseinstaller "github.com/tinyrange/trex/installer/wise"
 	starfile "github.com/tinyrange/trex/storage/star"
 	windowspe "github.com/tinyrange/trex/windows/pe"
 	"go.starlark.net/starlark"
@@ -49,6 +50,12 @@ func (i *Installer) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 			}
 			locations[strings.ToLower(component)] = destination
 		}
+	}
+	if payload, ok := i.payload.(*wiseinstaller.Archive); ok {
+		if components != nil {
+			return nil, fmt.Errorf("installer.plan: Wise installers do not expose selectable components")
+		}
+		return payload.Plan(locations, variables)
 	}
 
 	files := make([]starlark.Value, 0)
@@ -220,15 +227,19 @@ func (i *Installer) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 
 func (i *Installer) installPlanProfiles() (*starlark.Dict, error) {
 	profiles := starlark.NewDict(0)
-	for _, member := range i.container.Files() {
+	members, err := installerContainerFiles(i.container)
+	if err != nil {
+		return nil, err
+	}
+	for _, member := range members {
 		if !strings.HasSuffix(strings.ToLower(member.Name), ".ini") {
 			continue
 		}
-		value, err := i.container.Lookup(member.Name)
+		value, err := installerContainerLookup(i.container, member.Name)
 		if err != nil {
 			return nil, err
 		}
-		file := starfile.File(value)
+		file := value
 		if file.Size() < 0 || file.Size() > 1<<20 {
 			continue
 		}
