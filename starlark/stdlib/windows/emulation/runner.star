@@ -56,6 +56,14 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         profile_limit = profile_limit,
         fs_base = 0x7ffde000,
     )
+    # Programs compiled against the Win32 TLS ABI may access the TEB's slot
+    # array directly instead of calling TlsGetValue. Keep that conventional
+    # view backed by the same storage used by the semantic kernel APIs.
+    tls_slots = machine.allocate(size = 64 * 4, name = "thread local storage slots")
+    machine.write_u32le(0x7ffde000 + 0x18, 0x7ffde000)
+    machine.write_u32le(0x7ffde000 + 0x20, 4)
+    machine.write_u32le(0x7ffde000 + 0x24, 8)
+    machine.write_u32le(0x7ffde000 + 0x2c, tls_slots)
     loaded_target_modules = []
     for name, image in modules.items():
         loaded_target_modules.append(machine.load_module(image = image, name = name))
@@ -162,7 +170,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     process_environment.update(environment)
     registry = registry_plugin(values = registry_values, keys = registry_keys, hives = registry_hives, user_sid = user_sid, output_key_case = registry_output_key_case, prepared_state = prepared_registry_state)
     versions = version_plugin(file, module_path = module, module_files = module_images)
-    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time)
+    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time, tls_slots = tls_slots)
     setup = setupapi_plugin(infs = setup_infs, directories = setup_directories, registry = registry, kernel = kernel)
     advpack = advpack_plugin(registry, module_images, kernel = kernel, setup = setup)
     performance = loadperf_plugin(registry, kernel)
