@@ -1464,7 +1464,7 @@ def _registry_modification(write):
         "name": write.get("name", ""),
     }
     if operation == "set_value":
-        modification["type"] = "REG_SZ"
+        modification["type"] = write.get("type", "REG_SZ")
         modification["value"] = write.get("data", "")
     return modification
 
@@ -1735,7 +1735,7 @@ def installer(source, target = None, components = None, locations = {}, variable
         member = package.container.find(entry["source"]) if entry.get("container", False) else package.find(entry["source"])
         if member == None or type(member) != "file":
             fail("installer payload member is missing: " + entry["source"])
-        version = windows.pe(member).version if _versioned_image_name(entry["destination"]) else None
+        file_version = windows.pe(member).version if _versioned_image_name(entry["destination"]) else None
         modifications.append({
             "operation": "write_file",
             "path": entry["destination"],
@@ -1743,7 +1743,7 @@ def installer(source, target = None, components = None, locations = {}, variable
             # Versioned destination files are retained unless the package is
             # strictly newer. The image adapter performs the comparison because
             # it owns the base image and can inspect the existing destination.
-            "replace": "if_newer" if version != None else "always",
+            "replace": "if_newer" if file_version != None else "always",
         })
         installed_names[_base(entry["destination"]).lower()] = True
         target_sizes[entry["destination"].lower()] = member.size
@@ -1772,7 +1772,11 @@ def installer(source, target = None, components = None, locations = {}, variable
                 icon_location = shortcut["icon"] if shortcut["icon"] else target_path,
                 icon_index = shortcut["icon_index"],
                 target_size = target_sizes.get(target_path.lower(), 0),
-                system_root = system_root,
+                # Windows 9x does not define NT's SystemDrive/SystemRoot
+                # environment variables. Its shell treats an otherwise valid
+                # link carrying those expanded targets as inaccessible, so
+                # retain the literal ID-list and LinkInfo target there.
+                system_root = "" if version.get("platform_id") == 1 else system_root,
             )
         elif shortcut_type == 1:
             extension = ".url"

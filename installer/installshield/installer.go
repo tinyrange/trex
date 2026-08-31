@@ -12,6 +12,7 @@ import (
 
 	cabarchive "github.com/tinyrange/trex/archive/cab"
 	"github.com/tinyrange/trex/installer/installshield/installscript"
+	wiseinstaller "github.com/tinyrange/trex/installer/wise"
 	bytecache "github.com/tinyrange/trex/storage/cache"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
@@ -31,7 +32,7 @@ type Installer struct {
 	format    string
 	offset    int64
 	size      int64
-	container *cabarchive.Archive
+	container starlark.Value
 	payload   installerPayload
 	packages  []installerPackage
 }
@@ -128,7 +129,8 @@ func ProbeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 		fields["format"] = starlark.String(installer.format)
 		fields["offset"] = starlark.MakeInt64(installer.offset)
 		fields["size"] = starlark.MakeInt64(installer.size)
-		fields["container_files"] = starlark.MakeInt(len(installer.container.Files()))
+		files, _ := installerContainerFiles(installer.container)
+		fields["container_files"] = starlark.MakeInt(len(files))
 		if files, attrErr := installer.payload.Attr("files"); attrErr == nil {
 			if list, ok := files.(*starlark.List); ok {
 				fields["payload_files"] = starlark.MakeInt(list.Len())
@@ -199,9 +201,54 @@ func OpenInstaller(file starfile.File, maximumScan int64, cache bool, store *byt
 		}
 	}
 	if scanSize < file.Size() {
-		return nil, fmt.Errorf("installer: no supported payload found in the first %d bytes", scanSize)
+		if wise, err := wiseinstaller.Open(file, maximumScan); err == nil {
+			return &Installer{format: "wise", offset: 0, size: file.Size(), container: wise, payload: wise}, nil
+		} else {
+			return nil, fmt.Errorf("installer: no supported payload found in the first %d bytes; %v", scanSize, err)
+		}
 	}
-	return nil, fmt.Errorf("installer: no supported payload found")
+	if wise, err := wiseinstaller.Open(file, maximumScan); err == nil {
+		return &Installer{format: "wise", offset: 0, size: file.Size(), container: wise, payload: wise}, nil
+	} else {
+		return nil, fmt.Errorf("installer: no supported payload found; %v", err)
+	}
+}
+
+type installerContainerFile struct {
+	Name string
+	Size int64
+}
+
+func installerContainerFiles(container starlark.Value) ([]installerContainerFile, error) {
+	switch value := container.(type) {
+	case *cabarchive.Archive:
+		files := value.Files()
+		output := make([]installerContainerFile, len(files))
+		for index, file := range files {
+			output[index] = installerContainerFile{Name: file.Name, Size: file.Size}
+		}
+		return output, nil
+	case *wiseinstaller.Archive:
+		files := value.Files()
+		output := make([]installerContainerFile, len(files))
+		for index, file := range files {
+			output[index] = installerContainerFile{Name: file.Name, Size: file.Size}
+		}
+		return output, nil
+	default:
+		return nil, fmt.Errorf("installer: unsupported container %s", container.Type())
+	}
+}
+
+func installerContainerLookup(container starlark.Value, name string) (starfile.File, error) {
+	switch value := container.(type) {
+	case *cabarchive.Archive:
+		return value.Lookup(name)
+	case *wiseinstaller.Archive:
+		return value.Lookup(name)
+	default:
+		return nil, fmt.Errorf("installer: unsupported container %s", container.Type())
+	}
 }
 
 func installerNestedPayload(container *cabarchive.Archive) (installerPayload, []installerPackage, string, error) {
@@ -417,12 +464,16 @@ func (i *Installer) installScript() (*installscript.Script, error) {
 		}
 		return nil, nil
 	}
-	for _, member := range i.container.Files() {
+	members, err := installerContainerFiles(i.container)
+	if err != nil {
+		return nil, err
+	}
+	for _, member := range members {
 		base := path.Base(member.Name)
 		if !strings.EqualFold(base, "setup.inx") && !strings.EqualFold(base, "setup.ins") {
 			continue
 		}
-		value, err := i.container.Lookup(member.Name)
+		value, err := installerContainerLookup(i.container, member.Name)
 		if err != nil {
 			return nil, fmt.Errorf("installer: %s: %w", base, err)
 		}

@@ -13,9 +13,10 @@ def main(args):
     source = disc.find(args[1])
     if source == None or type(source) != "file":
         fail("installer path not found: %s" % args[1])
-    installer = archive.installer(source)
-    payload = installer.payload
-    script = installer.installscript
+    probe = archive.installer_probe(source)
+    installer = archive.installer(source) if probe["supported"] else None
+    payload = installer.payload if installer != None else None
+    script = installer.installscript if installer != None else None
     # Bind the imported helper in main's scope so the scoped REPL can use it.
     analyze_installer = analyze
     installer_modifications = installation
@@ -23,6 +24,9 @@ def main(args):
     class_ids = windows_class_ids
     registration_patches = inspect_registration
 
-    print("disc, source, installer, payload, script, analyze_installer, installer_modifications, run_executable, class_ids, and registration_patches are available")
-    print("format=%s files=%d" % (installer.format, len(installer.files)))
+    print("disc, source, probe, installer, payload, script, analyze_installer, installer_modifications, run_executable, class_ids, and registration_patches are available")
+    if installer == None:
+        print("unsupported installer:", probe)
+    else:
+        print("format=%s files=%d" % (installer.format, len(installer.files)))
     repl()
