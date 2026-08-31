@@ -1157,7 +1157,7 @@ def _kernel_provider_module(name):
     normalized = name.replace("/", "\\").split("\\")[-1].lower()
     return normalized in ["kernel32.dll", "ntdll.dll"] or normalized.startswith("api-ms-win-core-") or normalized.startswith("ext-ms-win-")
 
-def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800):
+def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800, tls_slots = 0):
     """Models deterministic allocation, strings, paths, files, and OS facts.
 
     `files` maps guest paths to bytes or trex files. They are made
@@ -1221,7 +1221,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     current_directory = environment.get("CD", module_directory).replace("/", "\\").rstrip("\\")
     if thread_instruction_limit < 1 or thread_instruction_limit > 10000000:
         fail("kernel thread instruction limit must be between 1 and 10000000")
-    state = {"last_error": 0, "modules": {}, "handles": {}, "next_handle": 0x40000, "next_luid": 0x1000, "next_etw_handle": 1, "main": 0, "current_actctx": 0, "actctx_refs": 0, "tls": {}, "next_tls": 0, "next_temp": 1, "next_thread_id": 16, "threads": [], "executions": {}, "current_thread": None, "thread_priorities": {8: 0}, "thread_io_priorities": {8: 2}, "thread_page_priorities": {8: 5}, "timer_callbacks": [], "tick_count": 0, "time_adjustment": 156250, "time_increment": 156250, "time_adjustment_disabled": False, "paths": paths, "named_mappings": {}, "views": {}, "file_queries": [], "volume_queries": [], "module_queries": [], "procedure_queries": [], "process_queries": [], "thread_queries": [], "system_queries": [], "profile_queries": [], "debug_output": [], "heaps": {1: True}, "allocations": {}, "resources": {}, "critical_sections": {}, "global_allocations": {}, "local_allocations": {}, "virtual_allocations": {}, "virtual_protections": {}, "standard_handles": {}, "command_line": command_line, "command_lines": {}, "current_directory": current_directory, "process_exit_code": None, "process_userdata": 0, "unhandled_exception_filter": 0}
+    state = {"last_error": 0, "modules": {}, "handles": {}, "next_handle": 0x40000, "next_luid": 0x1000, "next_etw_handle": 1, "main": 0, "current_actctx": 0, "actctx_refs": 0, "tls": {}, "tls_slots": tls_slots, "next_tls": 0, "next_temp": 1, "next_thread_id": 16, "threads": [], "executions": {}, "current_thread": None, "thread_priorities": {8: 0}, "thread_io_priorities": {8: 2}, "thread_page_priorities": {8: 5}, "timer_callbacks": [], "tick_count": 0, "time_adjustment": 156250, "time_increment": 156250, "time_adjustment_disabled": False, "paths": paths, "named_mappings": {}, "views": {}, "file_queries": [], "volume_queries": [], "module_queries": [], "procedure_queries": [], "process_queries": [], "thread_queries": [], "system_queries": [], "profile_queries": [], "debug_output": [], "heaps": {1: True}, "allocations": {}, "resources": {}, "critical_sections": {}, "global_allocations": {}, "local_allocations": {}, "virtual_allocations": {}, "virtual_protections": {}, "standard_handles": {}, "command_line": command_line, "command_lines": {}, "current_directory": current_directory, "process_exit_code": None, "process_userdata": 0, "unhandled_exception_filter": 0}
 
     def entry_data(entry):
         if entry == None or entry.get("directory", False):
@@ -2197,7 +2197,10 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if address == None:
                 wide = name.endswith("w")
                 value = _encoded(command_line, wide)
-                address = machine.allocate(value = value, name = name)
+                # System strings live in heap-backed process structures. Keep
+                # a small zero-filled tail so aligned CRT scans may legally
+                # read the word containing the terminating NUL.
+                address = machine.allocate(size = len(value) + 8, value = value, name = name)
                 state["command_lines"][name] = address
             return address
         if name in ["getcomputernameexa", "getcomputernameexw"]:
@@ -3867,14 +3870,22 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             index = state["next_tls"]
             state["next_tls"] = index + 1
             state["tls"][index] = 0
+            if state["tls_slots"] and index < 64:
+                machine.write_u32le(state["tls_slots"] + index * 4, 0)
             return index
         if name == "tlsfree":
             state["tls"][args[0]] = None
+            if state["tls_slots"] and args[0] < 64:
+                machine.write_u32le(state["tls_slots"] + args[0] * 4, 0)
             return 1
         if name == "tlsgetvalue":
+            if state["tls_slots"] and args[0] < 64:
+                return machine.read_u32le(state["tls_slots"] + args[0] * 4)
             return state["tls"].get(args[0], 0) or 0
         if name == "tlssetvalue":
             state["tls"][args[0]] = args[1]
+            if state["tls_slots"] and args[0] < 64:
+                machine.write_u32le(state["tls_slots"] + args[0] * 4, args[1])
             return 1
         if name in ["closehandle", "ntclose"]:
             state["handles"].pop(args[0], None)
@@ -4215,16 +4226,23 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if size <= 0 or not allocation_type & 0x3000:
                 state["last_error"] = 87
                 return 0
+            readable = protect not in [0x01]
+            writable = protect in [0x04, 0x08, 0x40, 0x80]
+            executable = protect in [0x10, 0x20, 0x40, 0x80]
             if requested:
                 for base, allocation in state["virtual_allocations"].items():
                     if requested >= base and requested + size <= base + allocation["size"]:
                         allocation["protect"] = protect
+                        machine.protect(
+                            requested,
+                            size,
+                            readable = readable,
+                            writable = writable,
+                            executable = executable,
+                        )
                         return requested
                 state["last_error"] = 487  # ERROR_INVALID_ADDRESS
                 return 0
-            readable = protect not in [0x01]
-            writable = protect in [0x04, 0x08, 0x40, 0x80]
-            executable = protect in [0x10, 0x20, 0x40, 0x80]
             address = machine.allocate(size = size, name = "VirtualAlloc", readable = readable, writable = writable, executable = executable)
             state["virtual_allocations"][address] = {"size": size, "type": allocation_type, "protect": protect}
             return address
@@ -10804,7 +10822,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
             return 0 if window == None else window.get("menu", 0)
         if name == "drawmenubar":
             return 1 if event.args[0] in state["windows"] else 0
-        if name == "getactivewindow":
+        if name in ["getactivewindow", "getforegroundwindow"]:
             # Registration-time execution has no host window manager. Return
             # the last process-created window when one exists.
             handles = state["windows"].keys()
@@ -11347,6 +11365,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
             "DestroyWindow": 1,
             "IsWindow": 1,
             "GetActiveWindow": 0,
+            "GetForegroundWindow": 0,
             "DefWindowProcA": 4, "DefWindowProcW": 4,
             "ShowWindow": 2, "UpdateWindow": 1,
             "MessageBeep": 1,

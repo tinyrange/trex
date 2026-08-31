@@ -389,6 +389,68 @@ setup.ini,group,,"""New Link"", ""C:\Program Files\Thing\thing.exe""
         ("delete_file", r"C:\WINDOWS\Start Menu\Programs\Accessories\Old Link.lnk"),
         ("write_file", r"C:\WINDOWS\Start Menu\Programs\Accessories\New Link.lnk"),
     ])
+
+def test_acme_setup_table_adapters():
+    module = testing.module("@stdlib//windows:installer.star")
+    equal(module["_acme_csv"]('"""Install"", ""WORDVIEW.EXE"""'), ["Install", "WORDVIEW.EXE"])
+    equal(module["_acme_csv"]('"Shared Files,MSO97V_DLL,MSO97V.DLL,,41"'), [
+        "Shared Files", "MSO97V_DLL", "MSO97V.DLL", "", "41",
+    ])
+    equal(module["_acme_csv"]('"""HKEY_LOCAL_MACHINE"", ""Software\\Example"", ""Name"", ""Value"", """""'), [
+        "HKEY_LOCAL_MACHINE", r"Software\Example", "Name", "Value", "",
+    ])
+    parsed = module["_acme_stf"](binary.view(binary.encode(
+        "App Name\tExample\r\n" +
+        "Batch Mode Root Object ID\t32 : 1\r\n" +
+        "ObjID\tInstall During Batch Mode\tTitle\tDescr\tType\tData\tBMP Id\tVital\tShared\tDir Chang\tDest Dir\r\n" +
+        "32\tyes\tBatch\t\tGroup\t40\t\t\t\t\t%D\\setup\r\n",
+        encoding = "ascii",
+    )))
+    equal(parsed["header"]["Batch Mode Root Object ID"], "32 : 1")
+    equal(parsed["objects"]["32"], {
+        "id": "32",
+        "batch": True,
+        "title": "Batch",
+        "type": "Group",
+        "data": "40",
+        "destination": r"%D\setup",
+    })
+    equal(module["_acme_expand"](
+        r"%D\%41\%F41 %%1",
+        r"C:\Program Files\Example",
+        r"C:\WINDOWS",
+        {"41": r"C:\Program Files\Example"},
+        {"41": "example.exe"},
+        current = r"C:\Program Files\Example\setup",
+    ), r"C:\Program Files\Example\setup\C:\Program Files\Example\example.exe %1")
+    equal(module["_acme_expand"](
+        r"%p\Example",
+        "",
+        r"C:\WINDOWS",
+        {},
+        {},
+    ), r"C:\WINDOWS\Program Files\Example")
+    equal(module["_acme_registry_modification"]("CLASSES", r"Example\shell\open", "", "example.exe"), {
+        "operation": "registry_set_value",
+        "root": "HKEY_LOCAL_MACHINE",
+        "key": r"Software\Classes\Example\shell\open",
+        "name": "(default)",
+        "type": "REG_SZ",
+        "value": "example.exe",
+    })
+    equal(module["_acme_registry_modification"](
+        "HKEY_LOCAL_MACHINE",
+        r"Software\Microsoft\Windows\CurrentVersion\SharedDLLs",
+        r"C:\WINDOWS\SYSTEM\MSO97V.DLL",
+        1,
+        registry_type = "REG_DWORD",
+    )["type"], "REG_DWORD")
+    shared = windows.inf(r'''[Shared Files]
+"MSO7ENUV_DLL"=1,msv7enu.dll,,,,,,,,,,,,Microsoft Shared
+''')
+    # InstallShared's STF component name is only a detection symbol. The INF
+    # row supplies the payload and installed filename.
+    equal(module["_acme_inf_entries"](shared, "Shared Files", symbol = "MSO7ENUV_DLL")[0][1], "msv7enu.dll")
     section = windows.inf(r'''[Commands]
 one="%17%\helper.exe",/RegServer
 ''').section("Commands")
@@ -1323,6 +1385,33 @@ def test_virtual_protect_restores_image_execution():
     equal(machine.read_u32le(output), 0x40)
     equal(machine.call(machine.entry).value, 0x1234)
 
+def test_virtual_alloc_commits_reserved_subrange():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["kernel32_plugin"]()])
+    virtual_alloc = machine.resolve_export("kernel32.dll", name = "VirtualAlloc")
+    reserved = machine.call(virtual_alloc, args = [0, 0x1000, 0x2000, 0x01]).value
+    true(reserved != 0)
+    committed = machine.call(virtual_alloc, args = [reserved, 0x1000, 0x1000, 0x04]).value
+    equal(committed, reserved)
+    machine.write(committed + 6, b"acme")
+    equal(machine.read(committed + 6, 4), b"acme")
+
+def test_kernel_tls_api_shares_teb_slots():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3", fs_base = 0x7ffde000)
+    slots = machine.allocate(size = 64 * 4)
+    machine.write_u32le(machine.segment_base("fs") + 0x2c, slots)
+    machine.use([module["kernel32_plugin"](tls_slots = slots)])
+    tls_alloc = machine.resolve_export("kernel32.dll", name = "TlsAlloc")
+    tls_get = machine.resolve_export("kernel32.dll", name = "TlsGetValue")
+    tls_set = machine.resolve_export("kernel32.dll", name = "TlsSetValue")
+    index = machine.call(tls_alloc).value
+    equal(machine.call(tls_set, args = [index, 0x12345678]).value, 1)
+    equal(machine.read_u32le(machine.read_u32le(machine.segment_base("fs") + 0x2c) + index * 4), 0x12345678)
+    machine.write_u32le(slots + index * 4, 0x87654321)
+    equal(machine.call(tls_get, args = [index]).value, 0x87654321)
+
 def test_kernel_non_debugged_process_introspection():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     machine = emulator.x86(code = b"\xc3", fs_base = 0x7ffde000)
@@ -1792,10 +1881,12 @@ def test_registration_ui_object_handles():
     bitmap = machine.call(machine.resolve_export("gdi32.dll", name = "CreateDIBitmap"), args = [0, 0, 0, 0, 0, 0])
     equal(bitmap.value, 0xda100001)
     equal(machine.call(machine.resolve_export("user32.dll", name = "GetActiveWindow")).value, 0)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "GetForegroundWindow")).value, 0)
     modeless = machine.call(machine.resolve_export("user32.dll", name = "CreateDialogParamA"), args = [0, 1, 0, 0, 0])
     true(modeless.value != 0)
     equal(machine.call(machine.resolve_export("user32.dll", name = "IsWindow"), args = [modeless.value]).value, 1)
     equal(machine.call(machine.resolve_export("user32.dll", name = "GetActiveWindow")).value, modeless.value)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "GetForegroundWindow")).value, modeless.value)
     indirect = machine.call(machine.resolve_export("user32.dll", name = "CreateDialogIndirectParamA"), args = [0, 0x1234, modeless.value, 0, 0])
     true(indirect.value != 0)
     equal(machine.call(machine.resolve_export("user32.dll", name = "GetParent"), args = [indirect.value]).value, modeless.value)
@@ -1900,6 +1991,7 @@ TEST_SUITE = suite("stdlib/internal", [
     case("registry_system_root_routing", test_registry_system_root_routing),
     case("automation_type_library_resource_paths", test_automation_type_library_resource_paths),
     case("advanced_inf_command_and_registry_adapters", test_advanced_inf_command_and_registry_adapters),
+    case("acme_setup_table_adapters", test_acme_setup_table_adapters),
     case("registered_type_library_resolution", test_registered_type_library_resolution),
     case("setupapi_inf_lines", test_setupapi_inf_lines),
     case("kernel_synchronization_signatures", test_kernel_synchronization_signatures),
@@ -1932,6 +2024,8 @@ TEST_SUITE = suite("stdlib/internal", [
     case("automation_registration_signatures", test_automation_registration_signatures),
     case("com_target_invocation_continues_budget", test_com_target_invocation_continues_budget),
     case("virtual_protect_restores_image_execution", test_virtual_protect_restores_image_execution),
+    case("virtual_alloc_commits_reserved_subrange", test_virtual_alloc_commits_reserved_subrange),
+    case("kernel_tls_api_shares_teb_slots", test_kernel_tls_api_shares_teb_slots),
     case("kernel_non_debugged_process_introspection", test_kernel_non_debugged_process_introspection),
     case("kernel_system_query_provider_preserves_target_status_contract", test_kernel_system_query_provider_preserves_target_status_contract),
     case("kernel_thread_page_priority_and_process_termination", test_kernel_thread_page_priority_and_process_termination),

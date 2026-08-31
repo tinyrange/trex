@@ -318,6 +318,411 @@ def _parent_path(value):
     fields = value.replace("/", "\\").split("\\")
     return "\\".join(fields[:-1])
 
+def _acme_unquote(value):
+    """Removes ACME's repeated outer field quoting."""
+    result = value.strip()
+    while len(result) >= 2 and result[0] == '"' and result[-1] == '"':
+        result = result[1:-1]
+    return result
+
+def _acme_csv(value):
+    """Decodes one comma-separated ACME object argument list."""
+    encoded = value.strip()
+    # The complete STF Data cell is quoted first; embedded argument quotes are
+    # then doubled. Remove exactly that table-cell layer before CSV parsing.
+    if len(encoded) >= 2 and encoded[0] == '"' and encoded[-1] == '"':
+        encoded = encoded[1:-1].replace('""', '"')
+    return [_acme_unquote(field) for field in _advanced_inf_csv(encoded)]
+
+def _acme_stf(file):
+    """Returns the header and object rows from an ACME Setup Table File."""
+    header = {}
+    objects = {}
+    in_objects = False
+    for line in binary.text(file, encoding = "ascii").split("\r\n"):
+        fields = line.split("\t")
+        if not fields or not fields[0]:
+            continue
+        if fields[0] == "ObjID":
+            in_objects = True
+            continue
+        if not in_objects:
+            if len(fields) >= 2:
+                header[fields[0].strip()] = fields[1].strip()
+            continue
+        if not fields[0].isdigit():
+            continue
+        while len(fields) < 15:
+            fields.append("")
+        objects[fields[0]] = {
+            "id": fields[0],
+            "batch": fields[1].lower() == "yes",
+            "title": fields[2],
+            "type": fields[4],
+            "data": fields[5],
+            "destination": fields[10].strip(),
+        }
+    return {"header": header, "objects": objects}
+
+def _acme_section_value(section, name, default = ""):
+    value = _inf_value(section, name)
+    rows = _inf_rows(value)
+    return str(rows[0][0]) if rows and rows[0] else default
+
+def _acme_member(container, name):
+    return _advanced_inf_member(container, name)
+
+def _acme_context(package):
+    """Recognizes a cabinet-wrapped Microsoft ACME setup without title data."""
+    setup_list = _acme_member(package, "setup.lst")
+    if setup_list == None:
+        return None
+    setup = windows.inf(setup_list)
+    parameters = setup.section("Windows 95 Params")
+    files = setup.section("Windows 95 Files")
+    if parameters == None or files == None:
+        return None
+    command = _acme_section_value(parameters, "CmdLine")
+    cabinet_name = _acme_section_value(parameters, "CabinetFile")
+    if not cabinet_name or "acmsetup" not in command.lower() or " /t " not in (" " + command.lower() + " "):
+        return None
+    cabinet_file = _acme_member(package, cabinet_name)
+    if cabinet_file == None:
+        fail("ACME payload cabinet is missing: " + cabinet_name)
+    payload = archive.cab(cabinet_file)
+    command_fields = command.replace("/T", "/t").split()
+    table_name = None
+    for index in range(len(command_fields) - 1):
+        if command_fields[index].lower() == "/t":
+            table_name = command_fields[index + 1]
+            break
+    if table_name == None:
+        fail("ACME command does not name its setup table: " + command)
+    table = _acme_member(payload, table_name)
+    if table == None:
+        fail("ACME setup table is missing: " + table_name)
+    parsed = _acme_stf(table)
+    inf_name = parsed["header"].get("Inf File Name")
+    inf_file = _acme_member(package, inf_name) if inf_name else None
+    if inf_file == None:
+        inf_file = _acme_member(payload, inf_name) if inf_name else None
+    if inf_file == None:
+        fail("ACME setup table does not resolve its INF file")
+    return {
+        "package": package,
+        "payload": payload,
+        "table": table,
+        "table_name": table_name,
+        "stf": parsed,
+        "inf": windows.inf(inf_file),
+    }
+
+def _acme_expand(value, target, system_root, destinations, filenames, current = "", source = ""):
+    result = value
+    replacements = [
+        ("%p", system_root + r"\Program Files"),
+        ("%m", system_root),
+        ("%M", system_root + r"\SYSTEM"),
+        ("%w", system_root),
+        ("%W", system_root),
+        ("%D", current if current else target),
+        ("%d", current if current else target),
+        ("%s", source),
+    ]
+    for token, replacement in replacements:
+        result = result.replace(token, replacement)
+    for identifier in sorted([int(name) for name in destinations.keys()], reverse = True):
+        name = str(identifier)
+        result = result.replace("%F" + name, filenames.get(name, ""))
+        result = result.replace("%" + name, destinations[name])
+    return result.replace("%%", "%").replace("/", "\\")
+
+def _acme_default_target(stf, system_root):
+    for row in stf["objects"].values():
+        if row["type"] != "AppSearch":
+            continue
+        fields = _acme_csv(row["data"])
+        if not fields:
+            continue
+        location = fields[0]
+        if "<" in location and ">" in location:
+            location = location.split("<", 1)[1].split(">", 1)[0]
+        return _acme_expand(location, "", system_root, {}, {}).rstrip("\\")
+    name = stf["header"].get("App Name", "Application")
+    return r"C:\Program Files" + "\\" + _safe_filename(name)
+
+def _acme_inf_entries(inf, section_name, symbol = None):
+    section = inf.section(section_name)
+    if section == None:
+        fail("ACME setup references missing INF section: " + section_name)
+    output = []
+    for key, value in section.items():
+        if symbol != None and _acme_unquote(key).lower() != symbol.lower():
+            continue
+        output.extend(_inf_rows(value))
+    if symbol != None and not output:
+        fail("ACME setup references missing INF file symbol: %s,%s" % (section_name, symbol))
+    return output
+
+def _acme_registry_modification(root, key, name, value, registry_type = "REG_SZ"):
+    normalized = root.upper().replace(" ", "")
+    if normalized in ["CLASSES", "HKEY_CLASSES_ROOT"]:
+        root = "HKEY_LOCAL_MACHINE"
+        key = "Software\\Classes" + ("\\" + key.strip("\\") if key else "")
+    elif normalized in ["MACHINE", "HKEY_LOCAL_MACHINE"]:
+        root = "HKEY_LOCAL_MACHINE"
+    elif normalized in ["CURRENT_USER", "HKEY_CURRENT_USER"]:
+        root = "HKEY_CURRENT_USER"
+    else:
+        fail("ACME setup uses unsupported registry root: " + root)
+    return {
+        "operation": "registry_set_value",
+        "root": root,
+        "key": key.strip("\\"),
+        "name": name if name else "(default)",
+        "type": registry_type,
+        "value": value,
+    }
+
+def _acme_installer(package, context, target, system_root, version):
+    stf = context["stf"]
+    objects = stf["objects"]
+    target = target or _acme_default_target(stf, system_root)
+    modifications = []
+    destinations = {}
+    filenames = {}
+    installed_files = {}
+    installed_names = {}
+    executed = {}
+    predicates = {}
+
+    def custom_fields(row):
+        return _acme_csv(row["data"])
+
+    # ACME object references are lazy. Resolve the standard shell-folder
+    # queries and batch predicates before traversing the install graph.
+    for identifier, row in objects.items():
+        if row["type"] == "CustomAction":
+            fields = custom_fields(row)
+            callee = fields[1].lower() if len(fields) > 1 else ""
+            argument = fields[2] if len(fields) > 2 else ""
+            if callee == "onwindowsnt":
+                predicates[identifier] = version.get("platform_id") == 2
+            elif callee in ["checkreg", "replacewordinstall"]:
+                # A native image is a fresh product installation unless the
+                # caller supplies an already-installed application's effects.
+                predicates[identifier] = False
+            elif callee == "getpathfromreg":
+                query = _acme_csv(argument)
+                value_name = query[2].lower() if len(query) > 2 else ""
+                if value_name == "programs":
+                    destinations[identifier] = system_root + r"\Start Menu\Programs"
+                elif value_name == "desktop":
+                    destinations[identifier] = system_root + r"\Desktop"
+        elif row["type"] == "DetectOlderFile":
+            predicates[identifier] = False
+
+    def expanded(value, current = "", source = ""):
+        return _acme_expand(value, target, system_root, destinations, filenames, current = current, source = source)
+
+    def add_file(source_name, destination, output_name = None, object_id = None, replace = None):
+        source = _acme_member(context["payload"], source_name)
+        if source == None:
+            source = _acme_member(package, source_name)
+        if source == None:
+            fail("ACME payload member is missing: " + source_name)
+        filename = output_name if output_name else _base(source_name)
+        path = destination.rstrip("\\") + "\\" + filename
+        identity = path.lower()
+        if identity in installed_files:
+            if object_id != None:
+                destinations[object_id] = destination.rstrip("\\")
+                filenames[object_id] = filename
+            return
+        modifications.append({
+            "operation": "write_file",
+            "path": path,
+            "source": source,
+            "replace": replace if replace != None else ("if_newer" if _versioned_image_name(path) and _portable_pe_image(source) else "always"),
+        })
+        installed_files[identity] = source
+        installed_names[filename.lower()] = True
+        if object_id != None:
+            destinations[object_id] = destination.rstrip("\\")
+            filenames[object_id] = filename
+
+    def add_inf_files(section, destination, symbol = None, output_name = None, object_id = None, replace = None):
+        entries = _acme_inf_entries(context["inf"], section, symbol = symbol)
+        for index in range(len(entries)):
+            entry = entries[index]
+            if len(entry) < 2 or not entry[1]:
+                continue
+            renamed = output_name
+            if renamed == None and len(entry) > 11 and entry[11]:
+                renamed = entry[11]
+            add_file(entry[1], destination, output_name = renamed, object_id = object_id if index == 0 else None, replace = replace)
+
+    def run(identifier, inherited):
+        if identifier in executed:
+            return
+        row = objects.get(identifier)
+        if row == None:
+            fail("ACME setup references missing object: " + identifier)
+        executed[identifier] = True
+        destination = expanded(row["destination"], current = inherited) if row["destination"] else inherited
+        if not destination:
+            destination = target
+        destinations.setdefault(identifier, destination.rstrip("\\"))
+        kind = row["type"]
+        fields = _acme_csv(row["data"])
+
+        if kind in ["Group", "AppMainDlg"]:
+            for child in row["data"].split():
+                run(child, destination)
+            return
+        if kind == "Depend":
+            tokens = row["data"].replace("?", " ? ").replace(":", " : ").split()
+            if "?" not in tokens:
+                return
+            pivot = tokens.index("?")
+            alternate = tokens.index(":") if ":" in tokens else len(tokens)
+            condition = tokens[0]
+            selected = tokens[pivot + 1:alternate] if predicates.get(condition, False) else tokens[alternate + 1:]
+            for child in selected:
+                run(child, destination)
+            return
+        if kind == "CopySection":
+            if fields:
+                add_inf_files(fields[0], destination)
+            return
+        if kind in ["CopyFile", "InstallSysFile"]:
+            if len(fields) >= 2:
+                add_inf_files(fields[0], destination, symbol = fields[1], object_id = identifier)
+            return
+        if kind == "InstallShared":
+            if len(fields) >= 2:
+                # The third STF field names the shared component used for
+                # detection; the INF row remains authoritative for the
+                # installed filename.
+                add_inf_files(fields[0], destination, symbol = fields[1], object_id = identifier)
+                shared_path = destination.rstrip("\\") + "\\" + filenames.get(identifier, "")
+                modifications.append(_acme_registry_modification(
+                    "HKEY_LOCAL_MACHINE",
+                    r"Software\Microsoft\Windows\CurrentVersion\SharedDLLs",
+                    shared_path,
+                    1,
+                    registry_type = "REG_DWORD",
+                ))
+            return
+        if kind == "InstallTTFFile":
+            if len(fields) >= 2:
+                add_inf_files(fields[0], destination, symbol = fields[1], object_id = identifier, replace = "if_missing")
+                if len(fields) > 2:
+                    modifications.append(_acme_registry_modification(
+                        "HKEY_LOCAL_MACHINE",
+                        r"Software\Microsoft\Windows\CurrentVersion\Fonts",
+                        fields[2],
+                        filenames.get(identifier, ""),
+                    ))
+            return
+        if kind == "RemoveSection":
+            if fields:
+                for entry in _acme_inf_entries(context["inf"], fields[0]):
+                    if len(entry) < 2 or not entry[1]:
+                        continue
+                    path = entry[1].replace("/", "\\")
+                    if path.lower().startswith("system\\"):
+                        path = system_root + "\\" + path
+                    elif ":" not in path:
+                        path = destination.rstrip("\\") + "\\" + path
+                    modifications.append({"operation": "delete_file", "path": path})
+            return
+        if kind == "WriteTableFile":
+            if fields:
+                add_file(context["table_name"], destination, output_name = fields[0])
+            return
+        if kind == "AddRegData":
+            if len(fields) >= 4:
+                source = expanded(row["destination"], current = inherited) if row["destination"] else destination
+                modifications.append(_acme_registry_modification(
+                    fields[0],
+                    expanded(fields[1], current = destination, source = source),
+                    expanded(fields[2], current = destination, source = source),
+                    expanded(fields[3], current = destination, source = source),
+                ))
+            return
+        if kind == "AddIniLine":
+            if len(fields) >= 4:
+                source = expanded(row["destination"], current = inherited) if row["destination"] else destination
+                modifications.append({
+                    "operation": "ini_set_value",
+                    "path": system_root + "\\" + fields[0],
+                    "section": fields[1],
+                    "name": fields[2],
+                    "value": expanded(fields[3], current = destination, source = source),
+                })
+            return
+        if kind in ["InstallShortcut", "AddProgmanItem"]:
+            if len(fields) >= 2:
+                shortcut_target = expanded(fields[0] if kind == "InstallShortcut" else fields[2], current = destination)
+                display = fields[1]
+                shortcut_directory = destination if kind == "InstallShortcut" else system_root + r"\Start Menu\Programs"
+                target_file = installed_files.get(shortcut_target.lower())
+                modifications.append({
+                    "operation": "write_file",
+                    "path": shortcut_directory.rstrip("\\") + "\\" + _safe_filename(display) + ".lnk",
+                    "source": windows.shortcut(
+                        target = shortcut_target,
+                        description = display,
+                        working_dir = _parent_path(shortcut_target),
+                        icon_location = shortcut_target,
+                        target_size = target_file.size if target_file != None else 0,
+                        system_root = system_root,
+                    ),
+                    "replace": "always",
+                })
+            return
+        if kind == "CustomAction":
+            callee = fields[1].lower() if len(fields) > 1 else ""
+            if callee == "addregdataex" and len(fields) > 2:
+                registry = _acme_csv(fields[2])
+                if len(registry) >= 5:
+                    modifications.append(_acme_registry_modification(
+                        registry[1],
+                        expanded(registry[2], current = destination, source = destination),
+                        expanded(registry[3], current = destination, source = destination),
+                        expanded(registry[4], current = destination, source = destination),
+                    ))
+            return
+        # Search, condition, and UI objects contribute values to the graph but
+        # have no durable effect of their own in a fresh batch installation.
+        if kind in ["AppSearch", "SearchDrives", "DetectOlderFile"]:
+            return
+        if kind == "RemoveRegEntry":
+            return
+        fail("ACME setup uses unsupported batch object type: " + kind)
+
+    root = stf["header"].get("Batch Mode Root Object ID", "").split(":", 1)[0].strip()
+    if not root:
+        fail("ACME setup table does not declare a batch root")
+    run(root, target)
+
+    requirements = {}
+    for path, source in installed_files.items():
+        if not _versioned_image_name(path) or not _portable_pe_image(source):
+            continue
+        for imported in windows.pe(source).imports:
+            name = imported["dll"].lower()
+            if name not in installed_names:
+                requirements[name] = True
+    return {
+        "format": "microsoft_acme",
+        "target": target,
+        "modifications": modifications,
+        "requirements": sorted(requirements.keys()),
+        "clock": None,
+    }
+
 def _advanced_inf_update_inis(inf, section_names, directories, strings, installed_files, system_root):
     """Models Setup.ini Program Manager groups as native shell links."""
     groups = {}
@@ -1186,6 +1591,11 @@ def installer(source, target = None, components = None, locations = {}, variable
     """
     package = source if type(source) == "installer" else archive.installer(source)
     if package.format == "embedded_cab":
+        acme = _acme_context(package)
+        if acme != None:
+            if components != None or locations or variables or additional_files or directories or registry_values or custom_actions:
+                fail("Microsoft ACME bundles derive their installation plan from package metadata")
+            return _acme_installer(package, acme, target, system_root, version)
         if target != None or components != None or locations or variables or additional_files or directories or registry_values or custom_actions:
             fail("Advanced INF bundles derive their installation plan from package metadata")
         return _advanced_inf_installer(package, system_root, version)
