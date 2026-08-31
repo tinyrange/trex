@@ -349,6 +349,17 @@ def test_automation_type_library_resource_paths():
 
 def test_advanced_inf_command_and_registry_adapters():
     module = testing.module("@stdlib//windows:installer.star")
+    select_root = module["_advanced_inf_platform_root"]
+    controller_roots = ["NEC_WIN98_INSTALL", "WIN98_INSTALL", "NEC_WIN95_INSTALL", "WIN95_INSTALL", "WINNT50_INSTALL"]
+    equal(select_root(controller_roots, {"platform_id": 1, "major": 4, "minor": 10}), "WIN98_INSTALL")
+    equal(select_root(controller_roots, {"platform_id": 1, "major": 4, "minor": 0}), "WIN95_INSTALL")
+    equal(select_root(controller_roots, {"platform_id": 2, "major": 5, "minor": 0}), "WINNT50_INSTALL")
+    equal(select_root(["ProductInstall"], {"platform_id": 1, "major": 4, "minor": 10}), "ProductInstall")
+    raises(
+        select_root,
+        args = [["FirstInstall", "SecondInstall"], {"platform_id": 1, "major": 4, "minor": 10}],
+        message = "no unique install root",
+    )
     equal(module["_advanced_inf_unquote"]("'%24%\\Program Files'"), r"%24%\Program Files")
     equal(module["_advanced_inf_unquote"]('"quoted"'), "quoted")
     equal(module["_advanced_inf_unquote"]("developer's tools"), "developer's tools")
