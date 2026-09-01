@@ -1204,6 +1204,10 @@ Models resources, bounded formatting, and a deterministic message queue.
     String-table resources follow the live loader state. `module_files` may be
     extended after installation when LoadLibrary maps a DLL lazily.
 
+### `userenv_plugin`
+
+Models portable user-profile directory and environment APIs.
+
 ### `version_plugin`
 
 Serves immutable PE version resources through the Win32 version API.

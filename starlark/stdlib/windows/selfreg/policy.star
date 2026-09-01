@@ -132,7 +132,7 @@ def _unregistered_classes(patches, classes):
         registered[key[len(prefix):-len(suffix)].strip("/")] = True
     return [class_name for class_name in classes if class_name.lower() not in registered]
 
-def registration_patches(file, module, mmc_snapins = [], replacements = {}, execute = True, execute_with_static = False, executable = False, command_line = "", plugins = [], registry_values = [], registry_keys = [], prepared_registry_state = None, environment = {}, version = {}, modules = {}, deferred_modules = [], files = {}, prepared_file_entries = None, instruction_limit = 250000, memory_limit = 32 << 20, profile = False, profile_interval = 256, profile_limit = 16384):
+def registration_patches(file, module, mmc_snapins = [], replacements = {}, execute = True, execute_with_static = False, executable = False, command_line = "", plugins = [], registry_values = [], registry_keys = [], prepared_registry_state = None, environment = {}, version = {}, modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, instruction_limit = 250000, memory_limit = 32 << 20, profile = False, profile_interval = 256, profile_limit = 16384):
     """Returns registry patches for one PE without loading system DLL images.
 
     Structured resources and static PE facts are preferred. The bounded x86
@@ -187,6 +187,7 @@ def registration_patches(file, module, mmc_snapins = [], replacements = {}, exec
                     modules = modules,
                     deferred_modules = deferred_modules,
                     files = files,
+                    directories = directories,
                     prepared_file_entries = prepared_file_entries,
                     initialize = initialize,
                     executable = executable,

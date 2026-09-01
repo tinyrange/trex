@@ -10472,6 +10472,89 @@ def lz32_plugin(kernel):
                 machine.hook(callback, address = imported.address, argc = folded[name])
     return emulator.plugin(install, name = "windows.lz32", state = state)
 
+def userenv_plugin(environment = {}, kernel = None):
+    """Models portable user-profile directory and environment APIs."""
+    state = {"environment_blocks": {}}
+    signatures = {
+        "CreateEnvironmentBlock": 3,
+        "DestroyEnvironmentBlock": 1,
+        "GetAllUsersProfileDirectoryA": 2,
+        "GetAllUsersProfileDirectoryW": 2,
+        "GetDefaultUserProfileDirectoryA": 2,
+        "GetDefaultUserProfileDirectoryW": 2,
+        "GetProfilesDirectoryA": 2,
+        "GetProfilesDirectoryW": 2,
+        "GetProfileType": 1,
+        "GetUserProfileDirectoryA": 3,
+        "GetUserProfileDirectoryW": 3,
+    }
+
+    def set_error(value):
+        if kernel != None:
+            kernel.state["last_error"] = value
+
+    def write_directory(event, value, buffer_index, size_index):
+        wide = event.name.lower().endswith("w")
+        size_address = event.args[size_index]
+        if not size_address:
+            set_error(87)
+            return 0
+        required = len(value) + 1
+        capacity = event.machine.read_u32le(size_address)
+        event.machine.write_u32le(size_address, required)
+        if not event.args[buffer_index] or capacity < required:
+            set_error(122)
+            return 0
+        _write_string(event.machine, event.args[buffer_index], value, wide)
+        set_error(0)
+        return 1
+
+    def callback(event):
+        name = event.name.lower()
+        if name == "createenvironmentblock":
+            if not event.args[0]:
+                set_error(87)
+                return 0
+            values = []
+            for key in sorted(environment.keys()):
+                values.append(str(key) + "=" + str(environment[key]))
+            data = binary.encode("\x00".join(values) + "\x00\x00", encoding = "utf16le")
+            address = event.machine.allocate(size = len(data), name = "USERENV environment block")
+            event.machine.write(address, data)
+            event.machine.write_u32le(event.args[0], address)
+            state["environment_blocks"][address] = len(data)
+            set_error(0)
+            return 1
+        if name == "destroyenvironmentblock":
+            state["environment_blocks"][event.args[0]] = None
+            set_error(0)
+            return 1
+        if name == "getprofiletype":
+            if not event.args[0]:
+                set_error(87)
+                return 0
+            event.machine.write_u32le(event.args[0], 0)
+            set_error(0)
+            return 1
+        if name.startswith("getuserprofiledirectory"):
+            return write_directory(event, environment.get("USERPROFILE", "C:\\Users\\Administrator"), 1, 2)
+        if name.startswith("getdefaultuserprofiledirectory"):
+            return write_directory(event, environment.get("DefaultUserProfile", "C:\\Users\\Default"), 0, 1)
+        if name.startswith("getallusersprofiledirectory"):
+            return write_directory(event, environment.get("ALLUSERSPROFILE", "C:\\ProgramData"), 0, 1)
+        return write_directory(event, environment.get("ProfilesDirectory", "C:\\Users"), 0, 1)
+
+    def install(machine):
+        for name, argc in signatures.items():
+            machine.provide_export(callback, module = "userenv.dll", name = name, argc = argc)
+        normalized = {name.lower(): argc for name, argc in signatures.items()}
+        for imported in machine.imports:
+            name = imported.name.lower()
+            if imported.module.lower() == "userenv.dll" and name in normalized:
+                machine.hook(callback, address = imported.address, argc = normalized[name])
+
+    return emulator.plugin(install, name = "windows.userenv", state = state)
+
 def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment = {}, malloc = None):
     """Models the process-local shell change-notification registrations."""
     state = {"next_registration": 1, "registrations": {}, "notifications": [], "shell_settings": b"\x00" * 32, "desktop": 0, "desktop_references": 1, "pidls": {}}
@@ -10497,9 +10580,9 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
         0x23: environment.get("ProgramData", windows_directory + "\\All Users\\Application Data"),
         0x24: windows_directory,
         0x25: system_directory,
-        0x26: "C:\\Program Files",
+        0x26: environment.get("ProgramFiles", "C:\\Program Files"),
         0x27: profile + "\\My Pictures",
-        0x2b: "C:\\Program Files\\Common Files",
+        0x2b: environment.get("CommonProgramFiles", "C:\\Program Files\\Common Files"),
     }
     known_folder_paths = {
         "{1777F761-68AD-4D8A-87BD-30B759FA33DD}": profile + "\\Favorites",
