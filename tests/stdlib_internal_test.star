@@ -1258,6 +1258,36 @@ def test_shell32_known_folder_path_uses_process_environment():
     equal((legacy_result.reason, legacy_result.value), ("return", 0))
     equal(machine.read_cstring(legacy_output, encoding = "utf16le"), "D:\\SharedData")
 
+def test_userenv_profile_and_environment_block_contracts():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    environment = {
+        "ProgramFiles": "C:\\Program Files (x86)",
+        "USERPROFILE": "C:\\Users\\Test",
+    }
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([
+        module["shell32_plugin"]("C:\\Windows\\System32\\shell32.dll", environment = environment),
+        module["userenv_plugin"](environment = environment),
+    ])
+    size = machine.allocate(value = binary.u32le(1))
+    profile = machine.allocate(size = 260 * 2)
+    target = machine.resolve_export("userenv.dll", name = "GetUserProfileDirectoryW")
+    equal(machine.call(target, args = [0, profile, size]).value, 0)
+    equal(machine.read_u32le(size), len("C:\\Users\\Test") + 1)
+    machine.write_u32le(size, 260)
+    equal(machine.call(target, args = [0, profile, size]).value, 1)
+    equal(machine.read_cstring(profile, encoding = "utf16le"), "C:\\Users\\Test")
+    block = machine.allocate(size = 4)
+    created = machine.call(machine.resolve_export("userenv.dll", name = "CreateEnvironmentBlock"), args = [block, 0, 0])
+    equal(created.value, 1)
+    environment_block = machine.read_u32le(block)
+    equal(machine.read_cstring(environment_block, encoding = "utf16le"), "ProgramFiles=C:\\Program Files (x86)")
+    equal(machine.call(machine.resolve_export("userenv.dll", name = "DestroyEnvironmentBlock"), args = [environment_block]).value, 1)
+    program_files = machine.allocate(size = 260 * 2)
+    folder = machine.call(machine.resolve_export("shell32.dll", name = "SHGetFolderPathW"), args = [0, 0x26, 0, 0, program_files])
+    equal(folder.value, 0)
+    equal(machine.read_cstring(program_files, encoding = "utf16le"), "C:\\Program Files (x86)")
+
 def test_shell32_command_line_to_argv_uses_local_allocation():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     machine = emulator.x86(code = b"\xc3")
@@ -2343,6 +2373,7 @@ TEST_SUITE = suite("stdlib/internal", [
     case("shell32_special_folder_location_round_trip", test_shell32_special_folder_location_round_trip),
     case("oleaut_variant_time_by_value_abi", test_oleaut_variant_time_by_value_abi),
     case("shell32_known_folder_path_uses_process_environment", test_shell32_known_folder_path_uses_process_environment),
+    case("userenv_profile_and_environment_block_contracts", test_userenv_profile_and_environment_block_contracts),
     case("shell32_command_line_to_argv_uses_local_allocation", test_shell32_command_line_to_argv_uses_local_allocation),
     case("winsock_helper_signatures", test_winsock_helper_signatures),
     case("wer_process_registrations_are_reversible", test_wer_process_registrations_are_reversible),
