@@ -3,7 +3,7 @@
 def dos(
         accelerator = "tcg",
         display_frontend = "auto",
-        machine = "pc-i440fx-5.1",
+        machine = "pc-i440fx-5.2",
         cpu = "486",
         display_device = "VGA",
         no_reboot = True,
@@ -47,7 +47,7 @@ def dos(
 def nt351(
         accelerator = "auto",
         display_frontend = "auto",
-        machine = "pc-i440fx-5.1",
+        machine = "pc-i440fx-5.2",
         network = True,
         no_reboot = True,
         block_transport = "auto"):
@@ -78,7 +78,7 @@ def nt351(
 def nt4(
         accelerator = "tcg",
         display_frontend = "auto",
-        machine = "pc-i440fx-5.1",
+        machine = "pc-i440fx-5.2",
         network = True,
         no_reboot = True,
         block_transport = "auto"):
@@ -115,7 +115,7 @@ def nt4(
 def nt5(
         accelerator = "auto",
         display_frontend = "auto",
-        machine = "pc-i440fx-5.1",
+        machine = "pc-i440fx-5.2",
         audio = True,
         network = True,
         no_reboot = True,
@@ -153,7 +153,7 @@ def nt5(
 def nt6(
         accelerator = "auto",
         display_frontend = "auto",
-        machine = "pc-i440fx-5.1",
+        machine = "pc-i440fx-5.2",
         network = True,
         no_reboot = True,
         block_transport = "auto"):
@@ -216,7 +216,7 @@ def modern_windows(
 def reactos(
         accelerator = "auto",
         display_frontend = "auto",
-        machine = "pc-i440fx-5.1",
+        machine = "pc-i440fx-5.2",
         network = True,
         no_reboot = True,
         block_transport = "auto"):

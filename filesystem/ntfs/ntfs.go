@@ -262,10 +262,12 @@ func parseNTFSVersion(version string) (byte, byte, error) {
 	switch version {
 	case "1.1":
 		return 1, 1, nil
+	case "3.0":
+		return 3, 0, nil
 	case "3.1":
 		return 3, 1, nil
 	default:
-		return 0, 0, fmt.Errorf("ntfs: unsupported version %q (want \"1.1\" or \"3.1\")", version)
+		return 0, 0, fmt.Errorf("ntfs: unsupported version %q (want \"1.1\", \"3.0\", or \"3.1\")", version)
 	}
 }
 
@@ -277,7 +279,7 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 	if size < 64*1024*1024 {
 		return nil, fmt.Errorf("ntfs: size must be at least 64 MiB")
 	}
-	if versionMajor != 1 && versionMajor != 3 || versionMinor != 1 {
+	if versionMajor == 1 && versionMinor != 1 || versionMajor == 3 && versionMinor > 1 || versionMajor != 1 && versionMajor != 3 {
 		return nil, fmt.Errorf("ntfs: unsupported version %d.%d", versionMajor, versionMinor)
 	}
 	if err := validateNTFSVolumeName(volumeName); err != nil {
