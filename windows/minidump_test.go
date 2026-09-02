@@ -4,7 +4,38 @@ import (
 	"encoding/binary"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"testing"
+
+	"go.starlark.net/starlark"
 )
+
+func TestMinidumpExceptionRecord(t *testing.T) {
+	raw := make([]byte, 168)
+	binary.LittleEndian.PutUint32(raw[0:4], 42)
+	binary.LittleEndian.PutUint32(raw[8:12], 0xe06d7363)
+	binary.LittleEndian.PutUint32(raw[12:16], 1)
+	binary.LittleEndian.PutUint64(raw[16:24], 0x1111)
+	binary.LittleEndian.PutUint64(raw[24:32], 0x2222)
+	binary.LittleEndian.PutUint32(raw[32:36], 2)
+	binary.LittleEndian.PutUint64(raw[40:48], 0x3333)
+	binary.LittleEndian.PutUint64(raw[48:56], 0x4444)
+	value, err := minidumpExceptionRecord(&starfile.Bytes{Name: "exception", Data: raw}, minidumpLocation{size: uint32(len(raw))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := value.(*starfile.Record)
+	code, _ := record.Attr("code")
+	if got := code.String(); got != "3765269347" {
+		t.Fatalf("code = %s", got)
+	}
+	threadID, _ := record.Attr("thread_id")
+	if got := threadID.String(); got != "42" {
+		t.Fatalf("thread_id = %s", got)
+	}
+	information, _ := record.Attr("information")
+	if got := information.(*starlark.List).Len(); got != 2 {
+		t.Fatalf("information length = %d", got)
+	}
+}
 
 func TestMinidumpRegistersI386(t *testing.T) {
 	context := make([]byte, 200)
@@ -60,5 +91,38 @@ func TestMinidumpFramesRejectsNonIncreasingChain(t *testing.T) {
 	frames := minidumpFrames(stack, 0x1000, 0x400123, 0x1010, 0x1020, 0)
 	if len(frames) != 2 {
 		t.Fatalf("frame count = %d, want 2", len(frames))
+	}
+}
+
+func TestMinidumpMemory64Ranges(t *testing.T) {
+	raw := make([]byte, 96)
+	binary.LittleEndian.PutUint64(raw[8:16], 2)
+	binary.LittleEndian.PutUint64(raw[16:24], 64)
+	binary.LittleEndian.PutUint64(raw[24:32], 0x1000)
+	binary.LittleEndian.PutUint64(raw[32:40], 4)
+	binary.LittleEndian.PutUint64(raw[40:48], 0x2000)
+	binary.LittleEndian.PutUint64(raw[48:56], 3)
+	copy(raw[64:71], []byte("abcdefg"))
+	file := &starfile.Bytes{Name: "dump", Data: raw}
+	ranges, err := minidumpMemoryRanges(file, map[uint32]minidumpLocation{
+		minidumpMemory64List: {rva: 8, size: 48},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ranges) != 2 {
+		t.Fatalf("range count = %d", len(ranges))
+	}
+	first := ranges[0].(*starfile.Record)
+	address := first.Get("address")
+	if address.String() != "4096" {
+		t.Fatalf("first address = %s", address)
+	}
+	data, err := starfile.ReadAll(first.Get("file").(starfile.File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "abcd" {
+		t.Fatalf("first data = %q", data)
 	}
 }

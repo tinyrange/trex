@@ -141,6 +141,77 @@ func TestNTFSHardLinksShareAFileRecord(t *testing.T) {
 	}
 }
 
+func TestNTFSPreservesReparsePointData(t *testing.T) {
+	root := filesystemapi.New()
+	root.Mkdir("/Users")
+	root.Mkdir("/Users/All Users")
+	root.SetMetadata("/Users/All Users", filesystemapi.Metadata{
+		FileAttributes:    ntfsFileAttrDir | 0x400,
+		HasFileAttributes: true,
+		ReparseTag:        0xa0000003,
+		ReparseData: &starfile.Bytes{
+			Name: "junction",
+			Data: []byte{1, 2, 3, 4, 5, 6},
+		},
+	})
+	indexBuild := &ntfsBuild{nextID: 16, versionMajor: 3, versionMinor: 1}
+	if err := indexBuild.importDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := indexBuild.prepareReparseIndex(); err != nil {
+		t.Fatal(err)
+	}
+	indexBlock := append([]byte(nil), indexBuild.reparseIndex.blocks...)
+	if err := applyNTFSReadFixup(indexBlock, ntfsSectorSize, "$R index block"); err != nil {
+		t.Fatal(err)
+	}
+	indexEntry := indexBlock[0x58 : 0x58+32]
+	if got := binary.LittleEndian.Uint32(indexEntry[16:20]); got != 0xa0000003 {
+		t.Fatalf("$R index tag = %#x, want %#x", got, uint32(0xa0000003))
+	}
+	if got := binary.LittleEndian.Uint64(indexEntry[20:28]) & 0xffffffffffff; got != 28 {
+		t.Fatalf("$R index file record = %d, want 28", got)
+	}
+	image, err := buildNTFSImageWithOptions(root, 64<<20, nil, 0, "REPARSE", 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume, err := newNTFSVolume(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := volume.paths["/users/all users"]
+	if node == nil {
+		t.Fatal("reparse directory is missing")
+	}
+	boot := make([]byte, ntfsSectorSize)
+	if _, err := image.ReadAt(boot, 0); err != nil {
+		t.Fatal(err)
+	}
+	record := make([]byte, ntfsRecordSize)
+	mftOffset := int64(binary.LittleEndian.Uint64(boot[48:56])) * ntfsCluster
+	if _, err := image.ReadAt(record, mftOffset+int64(node.id)*ntfsRecordSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyNTFSReadFixup(record, ntfsSectorSize, "reparse directory"); err != nil {
+		t.Fatal(err)
+	}
+	attributes, err := parseNTFSReadAttributes(record, ntfsCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{3, 0, 0, 0xa0, 6, 0, 0, 0, 1, 2, 3, 4, 5, 6}
+	for _, attribute := range attributes {
+		if attribute.typ == ntfsAttrReparsePoint {
+			if !bytes.Equal(attribute.value, want) {
+				t.Fatalf("reparse value = %x, want %x", attribute.value, want)
+			}
+			return
+		}
+	}
+	t.Fatal("reparse directory has no $REPARSE_POINT attribute")
+}
+
 func TestNTFSNormalizesWIMStyleExtensionlessDOSName(t *testing.T) {
 	root := filesystemapi.New()
 	root.Mkdir("/example")
@@ -591,6 +662,101 @@ func TestNTFS31PreservesImportedSecurityDescriptors(t *testing.T) {
 	}
 	if !allocations["$SDH"] || !allocations["$SII"] {
 		t.Fatalf("large security indexes have allocations %v", allocations)
+	}
+}
+
+func TestNTFS31ReaderExposesSecurityDescriptorMetadata(t *testing.T) {
+	root := filesystemapi.New()
+	root.Mkdir("/secured")
+	descriptor := ntfsSecurityDescriptor(
+		ntfsSID(5, 18),
+		ntfsSID(5, 18),
+		0x001f01ff,
+		ntfsSID(5, 21, 42),
+	)
+	root.SetMetadata("/secured", filesystemapi.Metadata{SecurityDescriptor: descriptor})
+	image, err := buildNTFSImageWithOptions(root, 64<<20, nil, 0, "SECURITY", 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume, err := newNTFSVolume(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := volume.paths["/secured"]
+	if node == nil || node.securityID == 0 {
+		t.Fatalf("secured node = %+v", node)
+	}
+	if got := volume.securityDescriptors[node.securityID]; !bytes.Equal(got, descriptor) {
+		t.Fatalf("security descriptor = %x, want %x", got, descriptor)
+	}
+	attribute, err := volume.Attr("metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := starlark.Call(
+		&starlark.Thread{Name: "test"},
+		attribute,
+		starlark.Tuple{starlark.String("/SECURED")},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := value.(interface{ Get(string) starlark.Value })
+	if got := []byte(record.Get("security_descriptor").(starlark.Bytes)); !bytes.Equal(got, descriptor) {
+		t.Fatalf("metadata security descriptor = %x, want %x", got, descriptor)
+	}
+}
+
+func TestNTFSReaderMergesNonresidentExtentsByVCN(t *testing.T) {
+	volume := &starfile.Bytes{Name: "volume", Data: make([]byte, 16*ntfsCluster)}
+	late := &ntfsReadFile{
+		volume:      volume,
+		clusterSize: ntfsCluster,
+		firstVCN:    2,
+		runs:        []ntfsDataRun{{start: 12, length: 2}},
+	}
+	early := &ntfsReadFile{
+		volume:      volume,
+		clusterSize: ntfsCluster,
+		size:        4 * ntfsCluster,
+		runs:        []ntfsDataRun{{start: 4, length: 2}},
+	}
+	merged, err := mergeNTFSReadFileExtents(late, early)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.firstVCN != 0 || merged.size != 4*ntfsCluster || len(merged.runs) != 2 {
+		t.Fatalf("merged extent = %+v", merged)
+	}
+	if merged.runs[0].start != 4 || merged.runs[1].start != 12 {
+		t.Fatalf("merged runs = %+v", merged.runs)
+	}
+}
+
+func TestNTFSReaderIgnoresStaleSecuritySegmentTail(t *testing.T) {
+	descriptor := ntfsDefaultSecurityDescriptor()
+	entryLength := 20 + len(descriptor)
+	data := make([]byte, ntfsSecureMirrorBase)
+	binary.LittleEndian.PutUint32(data[4:8], ntfsSecurityID)
+	binary.LittleEndian.PutUint32(data[16:20], uint32(entryLength))
+	copy(data[20:], descriptor)
+	next := (entryLength + 15) &^ 15
+	copy(data[next:], []byte("stale non-entry tail"))
+	stream := &ntfsReadFile{
+		name:        "$Secure:$SDS",
+		volume:      &starfile.Bytes{Name: "volume", Data: data},
+		clusterSize: ntfsCluster,
+		size:        int64(len(data)),
+		resident:    data,
+	}
+	volume := &ntfsVolume{securityDescriptors: make(map[uint32][]byte)}
+	if err := volume.readSecurityDescriptors(stream); err != nil {
+		t.Fatal(err)
+	}
+	if got := volume.securityDescriptors[ntfsSecurityID]; !bytes.Equal(got, descriptor) {
+		t.Fatalf("security descriptor = %x, want %x", got, descriptor)
 	}
 }
 

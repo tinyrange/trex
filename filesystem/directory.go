@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"path"
@@ -50,6 +51,8 @@ type Metadata struct {
 	FileAttributes     uint32
 	HasFileAttributes  bool
 	SecurityDescriptor []byte
+	ReparseTag         uint32
+	ReparseData        starfile.File
 	CreationTime       uint64
 	LastAccessTime     uint64
 	LastWriteTime      uint64
@@ -129,6 +132,8 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("remove", d.removeBuiltin), nil
 	case "set_attributes":
 		return starlark.NewBuiltin("set_attributes", d.setAttributesBuiltin), nil
+	case "set_security":
+		return starlark.NewBuiltin("set_security", d.setSecurityBuiltin), nil
 	case "files":
 		return d.fileList(), nil
 	case "fat_short_path":
@@ -137,7 +142,7 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (d *Directory) AttrNames() []string {
-	return []string{"fat_short_path", "files", "find", "mkdir", "remove", "set_attributes", "write"}
+	return []string{"fat_short_path", "files", "find", "mkdir", "remove", "set_attributes", "set_security", "write"}
 }
 
 func (d *Directory) findBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -401,6 +406,36 @@ func (d *Directory) SetAttributes(name string, attributes Attributes) error {
 		}
 	}
 	d.attributes[cleaned] = attributes
+	return nil
+}
+
+func (d *Directory) setSecurityBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	var descriptor starlark.Bytes
+	if err := starlark.UnpackArgs("set_security", args, kwargs, "name", &name, "descriptor", &descriptor); err != nil {
+		return nil, err
+	}
+	if err := d.SetSecurity(name, []byte(descriptor)); err != nil {
+		return nil, err
+	}
+	return starlark.None, nil
+}
+
+// SetSecurity associates a self-relative Windows security descriptor with an
+// existing path. Filesystem builders which cannot represent it may ignore it.
+func (d *Directory) SetSecurity(name string, descriptor []byte) error {
+	cleaned := storage.CleanPath(name)
+	if _, isDir := d.dirs[cleaned]; !isDir {
+		if _, isFile := d.files[cleaned]; !isFile {
+			return fmt.Errorf("set_security: path %q does not exist", name)
+		}
+	}
+	if len(descriptor) < 20 || descriptor[0] != 1 || binary.LittleEndian.Uint16(descriptor[2:4])&0x8000 == 0 {
+		return fmt.Errorf("set_security: descriptor must be revision-1 self-relative data")
+	}
+	metadata := d.metadata[cleaned]
+	metadata.SecurityDescriptor = append([]byte(nil), descriptor...)
+	d.SetMetadata(cleaned, metadata)
 	return nil
 }
 

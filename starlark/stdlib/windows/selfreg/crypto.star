@@ -106,7 +106,7 @@ def cryptoapi_plugin(kernel = None):
             output = binary.builder(capacity = size)
             while output.size < size:
                 seed = binary.builder()
-                seed.append(b"TinyRangeX RtlGenRandom\x00")
+                seed.append(b"trex RtlGenRandom\x00")
                 seed.u32le(state["random_counter"])
                 output.append(crypto.hash("sha256", seed.bytes()))
                 state["random_counter"] += 1

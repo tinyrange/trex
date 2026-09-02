@@ -115,6 +115,67 @@ def i386_physical_address(kd, directory_table_base, address, pae = True):
     """Translates one bounded i386 virtual address through target page tables."""
     return _i386_physical_address(kd, directory_table_base, address, pae)
 
+def _amd64_physical_address(kd, directory_table_base, address):
+    if address < 0 or address > 0xffffffffffffffff:
+        fail("amd64 virtual address is out of range")
+    upper = address >> 48
+    if upper != 0 and upper != 0xffff:
+        fail("amd64 virtual address is not canonical")
+    table = directory_table_base & 0x000ffffffffff000
+    if table == 0:
+        fail("amd64 page-map base is NULL")
+    pml4e = _physical_int(kd, table + ((address >> 39) & 0x1ff) * 8, 8)
+    if pml4e & 1 == 0:
+        fail("amd64 PML4 entry is not present")
+    directory_pointer = pml4e & 0x000ffffffffff000
+    pdpte = _physical_int(kd, directory_pointer + ((address >> 30) & 0x1ff) * 8, 8)
+    if pdpte & 1 == 0:
+        fail("amd64 page-directory-pointer entry is not present")
+    if pdpte & 0x80:
+        return (pdpte & 0x000fffffc0000000) + (address & 0x3fffffff)
+    directory = pdpte & 0x000ffffffffff000
+    pde = _physical_int(kd, directory + ((address >> 21) & 0x1ff) * 8, 8)
+    if pde & 1 == 0:
+        fail("amd64 page-directory entry is not present")
+    if pde & 0x80:
+        return (pde & 0x000fffffffe00000) + (address & 0x1fffff)
+    table = pde & 0x000ffffffffff000
+    pte = _physical_int(kd, table + ((address >> 12) & 0x1ff) * 8, 8)
+    if pte & 1 == 0:
+        fail("amd64 page-table entry is not present")
+    return (pte & 0x000ffffffffff000) + (address & 0xfff)
+
+def amd64_physical_address(kd, directory_table_base, address):
+    """Translates one canonical amd64 address through target page tables."""
+    return _amd64_physical_address(kd, directory_table_base, address)
+
+def read_amd64_virtual(kd, directory_table_base, address, size, maximum = 64 << 20):
+    """Reads one amd64 process address space through KD physical memory."""
+    if size < 0 or size > maximum or address < 0 or address > 0xffffffffffffffff or size > 0x10000000000000000 - address:
+        fail("invalid amd64 virtual-memory range")
+    output = binary.builder(capacity = size, limit = maximum)
+    consumed = 0
+    while consumed < size:
+        current = address + consumed
+        length = min(size - consumed, 0x1000 - (current & 0xfff))
+        physical = _amd64_physical_address(kd, directory_table_base, current)
+        output.append(kd.read_physical(physical, length))
+        consumed += length
+    return output.bytes()
+
+def write_amd64_virtual(kd, directory_table_base, address, value, maximum = 64 << 20):
+    """Writes one amd64 address space through KD physical-memory operations."""
+    data = binary.view(value)
+    if data.size > maximum or address < 0 or address > 0xffffffffffffffff or data.size > 0x10000000000000000 - address:
+        fail("invalid amd64 virtual-memory range")
+    consumed = 0
+    while consumed < data.size:
+        current = address + consumed
+        length = min(data.size - consumed, 0x1000 - (current & 0xfff))
+        physical = _amd64_physical_address(kd, directory_table_base, current)
+        kd.write_physical(physical, data.slice(consumed, length).bytes())
+        consumed += length
+
 def read_i386_virtual(kd, directory_table_base, address, size, pae = True, maximum = 64 << 20):
     """Reads one i386 process address space through KD physical memory."""
     if size < 0 or size > maximum or address < 0 or address + size > 1 << 32:
@@ -282,6 +343,14 @@ def write_process_virtual(kd, process, address, value, pae = True, maximum = 64 
     """Writes bounded i386 user memory using an EPROCESS address space."""
     return write_i386_virtual(kd, process["directory_table_base"], address, value, pae = pae, maximum = maximum)
 
+def read_amd64_process_virtual(kd, process, address, size, maximum = 64 << 20):
+    """Reads one amd64 process using an EPROCESS-derived page-map base."""
+    return read_amd64_virtual(kd, process["directory_table_base"], address, size, maximum = maximum)
+
+def write_amd64_process_virtual(kd, process, address, value, maximum = 64 << 20):
+    """Writes one amd64 process using an EPROCESS-derived page-map base."""
+    return write_amd64_virtual(kd, process["directory_table_base"], address, value, maximum = maximum)
+
 def _read_process_int(kd, process, address, size, pae):
     return _uint(read_process_virtual(kd, process, address, size, pae = pae))
 
@@ -334,6 +403,70 @@ def find_process_module(kd, process, offsets, name, pointer_size = 4, pae = True
         fail("process contains duplicate module name: %s" % name)
     return matches[0] if matches else None
 
+def _read_amd64_process_int(kd, process, address, size):
+    return _uint(read_amd64_process_virtual(kd, process, address, size))
+
+def _read_amd64_process_unicode_string(kd, process, address, maximum):
+    descriptor = read_amd64_process_virtual(kd, process, address, 16)
+    length = binary.read_u16le(descriptor)
+    capacity = binary.read_u16le(descriptor, 2)
+    buffer = binary.read_u64le(descriptor, 8)
+    if length > capacity or length & 1 or length > maximum:
+        fail("amd64 process UNICODE_STRING exceeds its bound")
+    if length == 0:
+        return ""
+    if buffer == 0:
+        fail("non-empty amd64 process UNICODE_STRING has no buffer")
+    return binary.text(read_amd64_process_virtual(kd, process, buffer, length), encoding = "utf16le")
+
+def process_modules_amd64(kd, process, offsets, maximum = 1024, maximum_name_bytes = 64 << 10):
+    """Reads one amd64 process's bounded PEB loader list through page tables."""
+    if process["peb"] == 0:
+        fail("process has no PEB")
+    if maximum < 1 or maximum > 65536 or maximum_name_bytes < 2 or maximum_name_bytes > 1 << 20:
+        fail("invalid amd64 process module traversal bounds")
+    pointer = lambda address: _read_amd64_process_int(kd, process, address, 8)
+    ldr = pointer(process["peb"] + offsets["peb_ldr"])
+    if ldr == 0:
+        fail("amd64 process PEB has no loader data")
+    head = ldr + offsets["ldr_list"]
+    modules = []
+    for address in walk_linked_list(pointer, head, offsets["entry_links"], maximum):
+        modules.append({
+            "address": address,
+            "base": pointer(address + offsets["entry_base"]),
+            "full_name": _read_amd64_process_unicode_string(kd, process, address + offsets["entry_full_name"], maximum_name_bytes),
+            "name": _read_amd64_process_unicode_string(kd, process, address + offsets["entry_name"], maximum_name_bytes),
+            "size": _read_amd64_process_int(kd, process, address + offsets["entry_size"], 4),
+        })
+    return modules
+
+def find_process_module_amd64(kd, process, offsets, name, maximum = 1024):
+    """Finds one case-insensitive module in an amd64 process loader list."""
+    wanted = name.lower()
+    matches = [
+        module
+        for module in process_modules_amd64(kd, process, offsets, maximum = maximum)
+        if module["name"].lower() == wanted
+    ]
+    if len(matches) > 1:
+        fail("amd64 process contains duplicate module name: %s" % name)
+    return matches[0] if matches else None
+
+def install_amd64_process_breakpoint(kd, process, address):
+    """Installs one debugger-owned INT3 in a selected amd64 process."""
+    original = read_amd64_process_virtual(kd, process, address, 1)
+    if original == b"\xcc":
+        fail("refusing to replace an existing amd64 process INT3")
+    write_amd64_process_virtual(kd, process, address, b"\xcc")
+    return {
+        "address": address,
+        "architecture": "amd64",
+        "installed": True,
+        "original": original,
+        "process": process,
+    }
+
 def install_process_breakpoint(kd, process, address, pae = True):
     """Installs one debugger-owned INT3 in a selected i386 process."""
     original = read_process_virtual(kd, process, address, 1, pae = pae)
@@ -351,6 +484,15 @@ def install_process_breakpoint(kd, process, address, pae = True):
 def restore_process_breakpoint(kd, breakpoint):
     """Restores a process breakpoint's original instruction byte once."""
     if breakpoint.get("installed", False):
+        if breakpoint.get("architecture") == "amd64":
+            write_amd64_process_virtual(
+                kd,
+                breakpoint["process"],
+                breakpoint["address"],
+                breakpoint["original"],
+            )
+            breakpoint["installed"] = False
+            return
         write_process_virtual(
             kd,
             breakpoint["process"],
@@ -363,6 +505,13 @@ def restore_process_breakpoint(kd, breakpoint):
 def rearm_process_breakpoint(kd, breakpoint):
     """Reinstalls a previously restored debugger-owned process breakpoint."""
     if not breakpoint.get("installed", False):
+        if breakpoint.get("architecture") == "amd64":
+            current = read_amd64_process_virtual(kd, breakpoint["process"], breakpoint["address"], 1)
+            if current != breakpoint["original"]:
+                fail("amd64 process breakpoint instruction changed before rearm")
+            write_amd64_process_virtual(kd, breakpoint["process"], breakpoint["address"], b"\xcc")
+            breakpoint["installed"] = True
+            return
         current = read_process_virtual(
             kd,
             breakpoint["process"],

@@ -828,7 +828,7 @@ def test_kernel_legacy_profile_and_file_metadata():
     short = machine.allocate(size = 260)
     equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetShortPathNameA"), args = [path, short, 260]).value, len(r"C:\sample.bin"))
     equal(machine.read_cstring(short), r"C:\sample.bin")
-    atom_name = machine.allocate(value = b"TinyRangeX\x00")
+    atom_name = machine.allocate(value = b"trex\x00")
     equal(
         machine.call(machine.resolve_export("kernel32.dll", name = "AddAtomA"), args = [atom_name]).value,
         machine.call(machine.resolve_export("kernel32.dll", name = "GlobalAddAtomA"), args = [atom_name]).value,
@@ -1685,8 +1685,12 @@ def test_kernel_critical_section_blocks_other_execution_and_is_recursive():
     equal(contender.run().reason, "return")
 
     srw = machine.allocate(size = 4)
+    initialize_srw = machine.resolve_export("kernel32.dll", name = "InitializeSRWLock")
     acquire_srw = machine.resolve_export("kernel32.dll", name = "TryAcquireSRWLockExclusive")
     release_srw = machine.resolve_export("kernel32.dll", name = "ReleaseSRWLockExclusive")
+    machine.write_u32le(srw, 0xffffffff)
+    equal(machine.call(initialize_srw, args = [srw]).reason, "return")
+    equal(machine.read_u32le(srw), 0)
     equal(machine.call(acquire_srw, args = [srw]).value, 1)
     machine.call(release_srw, args = [srw])
     equal(machine.call(acquire_srw, args = [srw]).value, 1)
@@ -2009,6 +2013,7 @@ def test_sddl_security_descriptor():
         "0000140000000010010100000000000304000000" +
         "0000180000000010010200000000000f0200000001000000",
     )
+
     equal(cursor.u8(), 0)
     control = cursor.u16le()
     equal(control & 0x9004, 0x9004)
@@ -2033,6 +2038,14 @@ def test_sddl_security_descriptor():
     equal(acl.u8(), 3)
     acl.u16le()
     equal(acl.u32le(), 0xc0010000)
+
+def test_mandatory_label_ace():
+    module = testing.module("@stdlib//windows:security.star")
+    low_integrity = module["sid"](16, [4096])
+    equal(
+        hex(module["mandatory_label_ace"](low_integrity, 1, flags = 0x03)),
+        "1103140001000000010100000000001000100000",
+    )
 
 def test_win32_dynamic_format_width():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -2283,7 +2296,7 @@ def test_registration_ui_object_handles():
 def test_lz32_copies_memory_backed_files():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     machine = emulator.x86(code = b"\xc3")
-    kernel = module["kernel32_plugin"](files = {r"C:\source.bin": b"TinyRangeX"})
+    kernel = module["kernel32_plugin"](files = {r"C:\source.bin": b"test-value"})
     lz = module["lz32_plugin"](kernel)
     machine.use([kernel, lz])
     source_name = machine.allocate(value = b"C:\\source.bin\x00")
@@ -2296,11 +2309,11 @@ def test_lz32_copies_memory_backed_files():
     equal(kernel.state["handles"][source]["value"]["offset"], 0)
     equal(kernel.state["handles"][source]["value"]["path"], r"c:\source.bin")
     equal(kernel.state["handles"][target]["value"]["path"], r"c:\target.bin")
-    equal(kernel.state["file_data"](kernel.state["handles"][source]["value"]["path"]), b"TinyRangeX")
+    equal(kernel.state["file_data"](kernel.state["handles"][source]["value"]["path"]), b"test-value")
     copied = machine.call(machine.resolve_export("lz32.dll", name = "LZCopy"), args = [source, target]).value
     equal(lz.state["calls"][-1]["api"], "lzcopy")
     equal(lz.state["calls"][-1]["arguments"], [source, target])
-    equal(kernel.state["file_data"](r"c:\target.bin"), b"TinyRangeX")
+    equal(kernel.state["file_data"](r"c:\target.bin"), b"test-value")
     equal(copied, 10)
     equal(kernel.state["file_data"](r"c:\source.bin"), kernel.state["file_data"](r"c:\target.bin"))
     equal(machine.call(machine.resolve_export("lz32.dll", name = "LZClose"), args = [source]).value, 0)
@@ -2318,6 +2331,36 @@ def test_kernel_dos_file_time_round_trip():
     equal(machine.call(machine.resolve_export("kernel32.dll", name = "FileTimeToDosDateTime"), args = [file_time, date_output, time_output]).value, 1)
     equal(machine.read_u16le(date_output), date)
     equal(machine.read_u16le(time_output), time)
+
+def test_netapi_reports_join_information_with_owned_buffer():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    network = module["netapi_plugin"](domain = "EXAMPLE")
+    machine.use([network])
+    name_output = machine.allocate(size = 4)
+    status_output = machine.allocate(size = 4)
+    query = machine.resolve_export("netapi32.dll", name = "NetGetJoinInformation")
+    equal(machine.call(query, args = [0, name_output, status_output]).value, 0)
+    name = machine.read_u32le(name_output)
+    equal(machine.read_cstring(name, encoding = "utf16le"), "EXAMPLE")
+    equal(machine.read_u32le(status_output), 3)
+    equal(machine.call(machine.resolve_export("netapi32.dll", name = "NetApiBufferFree"), args = [name]).value, 0)
+    equal(network.state["allocations"], {})
+
+def test_kernel_file_information_reports_memory_backed_size():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    kernel = module["kernel32_plugin"](files = {r"C:\payload.bin": b"test-value"}, volumes = {"C:": {"serial": 0x12345678}})
+    machine.use([kernel])
+    path = machine.allocate(value = binary.encode(r"C:\payload.bin", encoding = "utf16le", nul = True))
+    handle = machine.call(machine.resolve_export("kernel32.dll", name = "CreateFileW"), args = [path, 0, 0, 0, 3, 0, 0]).value
+    information = machine.allocate(size = 52)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetFileInformationByHandle"), args = [handle, information]).value, 1)
+    equal(machine.read_u32le(information), 0x80)
+    equal(machine.read_u32le(information + 28), 0x12345678)
+    equal(machine.read_u32le(information + 32), 0)
+    equal(machine.read_u32le(information + 36), 10)
+    equal(machine.read_u32le(information + 40), 1)
 
 TEST_SUITE = suite("stdlib/internal", [
     case("gdb_integer_codecs", test_gdb_integer_codecs),
@@ -2397,6 +2440,7 @@ TEST_SUITE = suite("stdlib/internal", [
     case("cryptoapi_verification_context_lifecycle", test_cryptoapi_verification_context_lifecycle),
     case("security_access_mapping", test_security_access_mapping),
     case("sddl_security_descriptor", test_sddl_security_descriptor),
+    case("mandatory_label_ace", test_mandatory_label_ace),
     case("win32_dynamic_format_width", test_win32_dynamic_format_width),
     case("user32_wsprintf_reads_all_variadic_arguments", test_user32_wsprintf_reads_all_variadic_arguments),
     case("binary_floating_point_codecs", test_binary_floating_point_codecs),
@@ -2407,4 +2451,6 @@ TEST_SUITE = suite("stdlib/internal", [
     case("registration_ui_object_handles", test_registration_ui_object_handles),
     case("lz32_copies_memory_backed_files", test_lz32_copies_memory_backed_files),
     case("kernel_dos_file_time_round_trip", test_kernel_dos_file_time_round_trip),
+    case("netapi_reports_join_information_with_owned_buffer", test_netapi_reports_join_information_with_owned_buffer),
+    case("kernel_file_information_reports_memory_backed_size", test_kernel_file_information_reports_memory_backed_size),
 ])

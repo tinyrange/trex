@@ -10,11 +10,14 @@ import (
 )
 
 const (
-	minidumpThreadList = 3
-	minidumpModuleList = 4
-	minidumpSystemInfo = 7
-	minidumpMaxEntries = 1 << 20
-	minidumpMaxStack   = 16 << 20
+	minidumpThreadList   = 3
+	minidumpModuleList   = 4
+	minidumpMemoryList   = 5
+	minidumpException    = 6
+	minidumpSystemInfo   = 7
+	minidumpMemory64List = 9
+	minidumpMaxEntries   = 1 << 20
+	minidumpMaxStack     = 16 << 20
 )
 
 type minidumpLocation struct {
@@ -78,12 +81,128 @@ func parseMinidump(file starfile.File) (starlark.Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	exception, err := minidumpExceptionRecord(file, streams[minidumpException])
+	if err != nil {
+		return nil, err
+	}
+	memory, err := minidumpMemoryRanges(file, streams)
+	if err != nil {
+		return nil, err
+	}
 	return starfile.NewRecord(starlark.StringDict{
 		"architecture": starlark.String(minidumpArchitectureName(architecture)),
+		"exception":    exception,
 		"flags":        starlark.MakeUint64(binary.LittleEndian.Uint64(header[24:32])),
+		"memory":       starlark.NewList(memory),
 		"modules":      starlark.NewList(modules),
 		"threads":      starlark.NewList(threads),
 		"time":         starlark.MakeUint64(uint64(binary.LittleEndian.Uint32(header[20:24]))),
+	}), nil
+}
+
+func minidumpMemoryRanges(file starfile.File, streams map[uint32]minidumpLocation) ([]starlark.Value, error) {
+	if location := streams[minidumpMemory64List]; location.size != 0 {
+		if location.size < 16 {
+			return nil, fmt.Errorf("minidump: truncated memory64 list")
+		}
+		header, err := minidumpRead(file, uint64(location.rva), 16)
+		if err != nil {
+			return nil, fmt.Errorf("minidump: read memory64 header: %w", err)
+		}
+		count := binary.LittleEndian.Uint64(header[0:8])
+		dataOffset := binary.LittleEndian.Uint64(header[8:16])
+		if count > minidumpMaxEntries || count > (uint64(location.size)-16)/16 {
+			return nil, fmt.Errorf("minidump: invalid memory64 range count %d", count)
+		}
+		descriptors, err := minidumpRead(file, uint64(location.rva)+16, count*16)
+		if err != nil {
+			return nil, fmt.Errorf("minidump: read memory64 descriptors: %w", err)
+		}
+		output := make([]starlark.Value, 0, count)
+		for index := uint64(0); index < count; index++ {
+			raw := descriptors[index*16 : (index+1)*16]
+			start := binary.LittleEndian.Uint64(raw[0:8])
+			size := binary.LittleEndian.Uint64(raw[8:16])
+			value, err := minidumpMemoryRange(file, start, dataOffset, size)
+			if err != nil {
+				return nil, fmt.Errorf("minidump: memory64 range %d: %w", index, err)
+			}
+			output = append(output, value)
+			if size > ^uint64(0)-dataOffset {
+				return nil, fmt.Errorf("minidump: memory64 data offset overflow")
+			}
+			dataOffset += size
+		}
+		return output, nil
+	}
+	location := streams[minidumpMemoryList]
+	if location.size == 0 {
+		return nil, nil
+	}
+	if location.size < 4 {
+		return nil, fmt.Errorf("minidump: truncated memory list")
+	}
+	header, err := minidumpRead(file, uint64(location.rva), 4)
+	if err != nil {
+		return nil, fmt.Errorf("minidump: read memory count: %w", err)
+	}
+	count := uint64(binary.LittleEndian.Uint32(header))
+	if count > minidumpMaxEntries || count > (uint64(location.size)-4)/16 {
+		return nil, fmt.Errorf("minidump: invalid memory range count %d", count)
+	}
+	descriptors, err := minidumpRead(file, uint64(location.rva)+4, count*16)
+	if err != nil {
+		return nil, fmt.Errorf("minidump: read memory descriptors: %w", err)
+	}
+	output := make([]starlark.Value, 0, count)
+	for index := uint64(0); index < count; index++ {
+		raw := descriptors[index*16 : (index+1)*16]
+		value, err := minidumpMemoryRange(file, binary.LittleEndian.Uint64(raw[0:8]), uint64(binary.LittleEndian.Uint32(raw[12:16])), uint64(binary.LittleEndian.Uint32(raw[8:12])))
+		if err != nil {
+			return nil, fmt.Errorf("minidump: memory range %d: %w", index, err)
+		}
+		output = append(output, value)
+	}
+	return output, nil
+}
+
+func minidumpMemoryRange(file starfile.File, start, offset, size uint64) (starlark.Value, error) {
+	if offset > uint64(file.Size()) || size > uint64(file.Size())-offset || offset > uint64(^uint64(0)>>1) || size > uint64(^uint64(0)>>1) {
+		return nil, fmt.Errorf("range %#x+%#x is outside the dump", offset, size)
+	}
+	return starfile.NewRecord(starlark.StringDict{
+		"address": starlark.MakeUint64(start),
+		"file":    &starfile.Slice{Name: file.String(), Base: file, Offset: int64(offset), Length: int64(size)},
+		"size":    starlark.MakeUint64(size),
+	}), nil
+}
+
+func minidumpExceptionRecord(file starfile.File, location minidumpLocation) (starlark.Value, error) {
+	if location.size == 0 {
+		return starlark.None, nil
+	}
+	if location.size < 168 {
+		return nil, fmt.Errorf("minidump: truncated exception stream")
+	}
+	raw, err := minidumpRead(file, uint64(location.rva), 168)
+	if err != nil {
+		return nil, fmt.Errorf("minidump: read exception stream: %w", err)
+	}
+	parameterCount := binary.LittleEndian.Uint32(raw[32:36])
+	if parameterCount > 15 {
+		return nil, fmt.Errorf("minidump: invalid exception parameter count %d", parameterCount)
+	}
+	parameters := make([]starlark.Value, parameterCount)
+	for index := range parameters {
+		parameters[index] = starlark.MakeUint64(binary.LittleEndian.Uint64(raw[40+index*8 : 48+index*8]))
+	}
+	return starfile.NewRecord(starlark.StringDict{
+		"address":     starlark.MakeUint64(binary.LittleEndian.Uint64(raw[24:32])),
+		"code":        starlark.MakeUint64(uint64(binary.LittleEndian.Uint32(raw[8:12]))),
+		"flags":       starlark.MakeUint64(uint64(binary.LittleEndian.Uint32(raw[12:16]))),
+		"information": starlark.NewList(parameters),
+		"record":      starlark.MakeUint64(binary.LittleEndian.Uint64(raw[16:24])),
+		"thread_id":   starlark.MakeUint64(uint64(binary.LittleEndian.Uint32(raw[0:4]))),
 	}), nil
 }
 

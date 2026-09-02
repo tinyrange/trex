@@ -103,9 +103,6 @@ func (s *kdSessionValue) contextBuiltin(_ *starlark.Thread, _ *starlark.Builtin,
 	if err := starlark.UnpackArgs("context", args, kwargs, "timeout?", &timeout); err != nil {
 		return nil, err
 	}
-	if s.architecture != "" && s.architecture != "i386" {
-		return nil, fmt.Errorf("context: architecture %q is not implemented", s.architecture)
-	}
 	s.stateMu.Lock()
 	processor := s.processor
 	s.stateMu.Unlock()
@@ -122,10 +119,34 @@ func (s *kdSessionValue) contextBuiltin(_ *starlark.Thread, _ *starlark.Builtin,
 		return nil, fmt.Errorf("context: target status %#x", status)
 	}
 	_, manipulateSize := s.manipulateLayout()
-	if len(packet.Payload) < manipulateSize+204 {
+	if s.architecture == "amd64" {
+		const contextSize = 1232
+		if len(packet.Payload) < manipulateSize+contextSize {
+			return nil, fmt.Errorf("context: short amd64 context (%d bytes)", len(packet.Payload)-manipulateSize)
+		}
+		data := packet.Payload[manipulateSize : manipulateSize+contextSize]
+		return starvalue.NewRecord(starlark.StringDict{
+			"rax": starlark.MakeUint64(kdU64(data, 120)), "rcx": starlark.MakeUint64(kdU64(data, 128)),
+			"rdx": starlark.MakeUint64(kdU64(data, 136)), "rbx": starlark.MakeUint64(kdU64(data, 144)),
+			"rsp": starlark.MakeUint64(kdU64(data, 152)), "rbp": starlark.MakeUint64(kdU64(data, 160)),
+			"rsi": starlark.MakeUint64(kdU64(data, 168)), "rdi": starlark.MakeUint64(kdU64(data, 176)),
+			"r8": starlark.MakeUint64(kdU64(data, 184)), "r9": starlark.MakeUint64(kdU64(data, 192)),
+			"r10": starlark.MakeUint64(kdU64(data, 200)), "r11": starlark.MakeUint64(kdU64(data, 208)),
+			"r12": starlark.MakeUint64(kdU64(data, 216)), "r13": starlark.MakeUint64(kdU64(data, 224)),
+			"r14": starlark.MakeUint64(kdU64(data, 232)), "r15": starlark.MakeUint64(kdU64(data, 240)),
+			"rip":    starlark.MakeUint64(kdU64(data, 248)),
+			"eflags": starlark.MakeUint64(uint64(kdU32(data, 68))),
+			"raw":    starlark.Bytes(data),
+		}), nil
+	}
+	if s.architecture != "" && s.architecture != "i386" {
+		return nil, fmt.Errorf("context: architecture %q is not implemented", s.architecture)
+	}
+	const contextSize = 204
+	if len(packet.Payload) < manipulateSize+contextSize {
 		return nil, fmt.Errorf("context: short x86 context (%d bytes)", len(packet.Payload)-manipulateSize)
 	}
-	data := packet.Payload[manipulateSize : manipulateSize+204]
+	data := packet.Payload[manipulateSize : manipulateSize+contextSize]
 	return starvalue.NewRecord(starlark.StringDict{
 		"edi": starlark.MakeUint64(uint64(kdU32(data, 156))), "esi": starlark.MakeUint64(uint64(kdU32(data, 160))),
 		"ebx": starlark.MakeUint64(uint64(kdU32(data, 164))), "edx": starlark.MakeUint64(uint64(kdU32(data, 168))),
@@ -141,15 +162,61 @@ func (s *kdSessionValue) setContextBuiltin(_ *starlark.Thread, _ *starlark.Built
 	edi, esi, ebx, edx := starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None)
 	ecx, eax, ebp, eip := starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None)
 	eflags, esp := starlark.Value(starlark.None), starlark.Value(starlark.None)
+	rax, rcx, rdx, rbx := starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None)
+	rsp, rbp, rsi, rdi := starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None)
+	r8, r9, r10, r11 := starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None)
+	r12, r13, r14, r15, rip := starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None), starlark.Value(starlark.None)
 	timeout := starvalue.Number(30)
 	if err := starlark.UnpackArgs("set_context", args, kwargs,
 		"raw", &rawValue,
 		"edi?", &edi, "esi?", &esi, "ebx?", &ebx, "edx?", &edx,
 		"ecx?", &ecx, "eax?", &eax, "ebp?", &ebp, "eip?", &eip,
 		"eflags?", &eflags, "esp?", &esp,
+		"rax?", &rax, "rcx?", &rcx, "rdx?", &rdx, "rbx?", &rbx,
+		"rsp?", &rsp, "rbp?", &rbp, "rsi?", &rsi, "rdi?", &rdi,
+		"r8?", &r8, "r9?", &r9, "r10?", &r10, "r11?", &r11,
+		"r12?", &r12, "r13?", &r13, "r14?", &r14, "r15?", &r15, "rip?", &rip,
 		"timeout?", &timeout,
 	); err != nil {
 		return nil, err
+	}
+	if s.architecture == "amd64" {
+		const contextSize = 1232
+		data, err := starfile.BytesForValue(rawValue, contextSize)
+		if err != nil || len(data) != contextSize {
+			return nil, fmt.Errorf("set_context: raw must be exactly %d bytes", contextSize)
+		}
+		data = append([]byte(nil), data...)
+		offsets := map[string]int{
+			"rax": 120, "rcx": 128, "rdx": 136, "rbx": 144,
+			"rsp": 152, "rbp": 160, "rsi": 168, "rdi": 176,
+			"r8": 184, "r9": 192, "r10": 200, "r11": 208,
+			"r12": 216, "r13": 224, "r14": 232, "r15": 240, "rip": 248,
+		}
+		registerValues := map[string]starlark.Value{
+			"rax": rax, "rcx": rcx, "rdx": rdx, "rbx": rbx,
+			"rsp": rsp, "rbp": rbp, "rsi": rsi, "rdi": rdi,
+			"r8": r8, "r9": r9, "r10": r10, "r11": r11,
+			"r12": r12, "r13": r13, "r14": r14, "r15": r15, "rip": rip,
+		}
+		for name, value := range registerValues {
+			if value == starlark.None {
+				continue
+			}
+			var number uint64
+			if err := starlark.AsInt(value, &number); err != nil {
+				return nil, fmt.Errorf("set_context: %s must fit in uint64", name)
+			}
+			binary.LittleEndian.PutUint64(data[offsets[name]:], number)
+		}
+		if eflags != starlark.None {
+			var number uint64
+			if err := starlark.AsInt(eflags, &number); err != nil || number > math.MaxUint32 {
+				return nil, fmt.Errorf("set_context: eflags must fit in uint32")
+			}
+			binary.LittleEndian.PutUint32(data[68:], uint32(number))
+		}
+		return s.setContext(data, float64(timeout))
 	}
 	if s.architecture != "" && s.architecture != "i386" {
 		return nil, fmt.Errorf("set_context: architecture %q is not implemented", s.architecture)
@@ -177,7 +244,11 @@ func (s *kdSessionValue) setContextBuiltin(_ *starlark.Thread, _ *starlark.Built
 		}
 		binary.LittleEndian.PutUint32(data[offsets[name]:], uint32(number))
 	}
-	ctx, cancel, err := kdOperationContext(float64(timeout))
+	return s.setContext(data, float64(timeout))
+}
+
+func (s *kdSessionValue) setContext(data []byte, timeout float64) (starlark.Value, error) {
+	ctx, cancel, err := kdOperationContext(timeout)
 	if err != nil {
 		return nil, err
 	}

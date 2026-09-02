@@ -630,6 +630,10 @@ Waits for a kernel exception state change.
 
 Offset-driven Windows process and PEB traversal for debugger scripts.
 
+### `amd64_physical_address`
+
+Translates one canonical amd64 address through target page tables.
+
 ### `eprocesses`
 
 Reads EPROCESS facts through KD or GDB using supplied offsets.
@@ -642,9 +646,17 @@ Finds one process by image name or PID in a bounded EPROCESS walk.
 
 Finds one case-insensitive module name in a process PEB loader list.
 
+### `find_process_module_amd64`
+
+Finds one case-insensitive module in an amd64 process loader list.
+
 ### `i386_physical_address`
 
 Translates one bounded i386 virtual address through target page tables.
+
+### `install_amd64_process_breakpoint`
+
+Installs one debugger-owned INT3 in a selected amd64 process.
 
 ### `install_process_breakpoint`
 
@@ -691,6 +703,18 @@ Derives PsActiveProcessHead using the boot kernel's actual PE exports.
 
 Reads one process's bounded PEB loader list through KD physical memory.
 
+### `process_modules_amd64`
+
+Reads one amd64 process's bounded PEB loader list through page tables.
+
+### `read_amd64_process_virtual`
+
+Reads one amd64 process using an EPROCESS-derived page-map base.
+
+### `read_amd64_virtual`
+
+Reads one amd64 process address space through KD physical memory.
+
 ### `read_i386_virtual`
 
 Reads one i386 process address space through KD physical memory.
@@ -723,6 +747,14 @@ Waits until a newly inserted EPROCESS receives a non-NULL PEB.
 
 Walks a bounded circular LIST_ENTRY and returns containing addresses.
 
+### `write_amd64_process_virtual`
+
+Writes one amd64 process using an EPROCESS-derived page-map base.
+
+### `write_amd64_virtual`
+
+Writes one amd64 address space through KD physical-memory operations.
+
 ### `write_i386_virtual`
 
 Writes one i386 address space through KD physical-memory operations.
@@ -750,6 +782,10 @@ Expands seven key bytes into a DES key with odd parity.
 ### `legacy_lsa_secret_crypt`
 
 Applies the legacy LSA rolling-DES transform to whole blocks.
+
+### `mandatory_label_ace`
+
+Returns a SYSTEM_MANDATORY_LABEL_ACE for an integrity-level SID.
 
 ### `registry_boot_key`
 
@@ -2548,7 +2584,7 @@ Methods and attributes: `end() -> elapsed seconds`.
 
 ### `directory` value
 
-Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `write(name, value)`.
+Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_security(name, descriptor)`, `write(name, value)`.
 
 ### `emulator.execution` value
 
@@ -2608,7 +2644,7 @@ Methods and attributes: `name`, `properties`.
 
 ### `runtime.stage_cache` value
 
-Methods and attributes: `compute(name, source, options, function, args=(), kwargs={})`, `stats`.
+Methods and attributes: `clear() -> int`, `compute(name, source, options, function, args=(), kwargs={})`, `stats`.
 
 ### `sfp` value
 

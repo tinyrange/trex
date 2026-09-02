@@ -31,6 +31,34 @@ func TestDecodeEVTXTemplateValues(t *testing.T) {
 	}
 }
 
+func TestDecodeEVTXDirectTemplateToken(t *testing.T) {
+	data := make([]byte, 64)
+	data[0] = 0x0c
+	data[1] = 1
+	binary.LittleEndian.PutUint32(data[10:14], 2)
+	binary.LittleEndian.PutUint16(data[14:16], 6)
+	data[16] = 0x01
+	binary.LittleEndian.PutUint16(data[18:20], 4)
+	data[20] = 0x08
+	copy(data[22:], []byte{'g', 0, 'o', 0, 0, 0})
+	binary.LittleEndian.PutUint32(data[28:32], 42)
+
+	value, err := decodeEVTXValue(data, 0, 32, 0x21, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, ok := value.([]evtxValue)
+	if !ok || len(values) != 2 {
+		t.Fatalf("direct template value = %#v, want two values", value)
+	}
+	if got := values[0].value; got != "go" {
+		t.Fatalf("string value = %#v, want go", got)
+	}
+	if got, ok := evtxUnsigned(values[1].value); !ok || got != 42 {
+		t.Fatalf("integer value = %#v, want 42", values[1].value)
+	}
+}
+
 func TestEVTXSID(t *testing.T) {
 	raw := []byte{1, 2, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0, 32, 2, 0, 0}
 	got, err := evtxSID(raw)
