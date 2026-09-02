@@ -129,6 +129,8 @@ func (v *vmmSessionValue) Attr(name string) (starlark.Value, error) {
 		return starlark.Bool(state.Running), nil
 	case "resume", "pause", "reset", "powerdown", "stop":
 		return starlark.NewBuiltin(name, v.controlBuiltin(name)), nil
+	case "close":
+		return starlark.NewBuiltin("close", v.closeBuiltin), nil
 	case "wait":
 		return starlark.NewBuiltin("wait", v.waitBuiltin), nil
 	case "shutdown":
@@ -165,7 +167,7 @@ func (v *vmmSessionValue) Attr(name string) (starlark.Value, error) {
 
 func (v *vmmSessionValue) AttrNames() []string {
 	return []string{
-		"backend_id", "capabilities", "channel", "chord", "debugger", "detach", "extension",
+		"backend_id", "capabilities", "channel", "chord", "close", "debugger", "detach", "extension",
 		"has_capability", "key", "next_event", "pause", "pointer", "powerdown", "reset", "result", "resume",
 		"running", "screenshot", "send_keys", "send_text", "shutdown", "status", "stop", "tap", "type_and_enter", "wait",
 	}
@@ -175,9 +177,14 @@ func (v *vmmSessionValue) Close() error {
 	v.closeOnce.Do(func() {
 		v.mu.Lock()
 		detached := v.detached
+		unregister := v.unregister
+		v.unregister = nil
 		v.mu.Unlock()
 		if detached {
 			return
+		}
+		if unregister != nil {
+			unregister()
 		}
 		v.cancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -185,6 +192,16 @@ func (v *vmmSessionValue) Close() error {
 		v.closeErr = v.driver.Close(ctx)
 	})
 	return v.closeErr
+}
+
+func (v *vmmSessionValue) closeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackArgs("close", args, kwargs); err != nil {
+		return nil, err
+	}
+	if err := v.Close(); err != nil {
+		return nil, normalizeVMMError(VMMErrorBackend, "close VM", err)
+	}
+	return starlark.None, nil
 }
 
 func (v *vmmSessionValue) controlBuiltin(operation string) func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {

@@ -28,6 +28,14 @@ Reusable GDB inspection helpers built on the native session primitives.
 
 Installs a temporary breakpoint at the current stack return address.
 
+### `breakpoints_all`
+
+Installs corresponding points on every advertised remote thread.
+
+### `continue_to`
+
+Continues to one installed point and returns its self-consistent stop.
+
 ### `follow_caller_return`
 
 Continues to the return address in the current frame-pointer chain.
@@ -69,9 +77,17 @@ Calls a stopped inferior function and restores its registers and stack.
 
 Runs an inspection callback under a temporary CR3 value.
 
+### `kernel_address_space`
+
+Returns a checked kernel address-space handle.
+
 ### `pointer_chain`
 
 Follows a pointer through a sequence of signed offsets.
+
+### `process_address_space`
+
+Returns a checked user address-space handle for a process record.
 
 ### `read_c_string`
 
@@ -80,6 +96,10 @@ Reads a bounded NUL-terminated target string.
 ### `read_int`
 
 Reads one bounded integer from target memory.
+
+### `read_process_memory`
+
+Reads memory through a checked process directory-table base.
 
 ### `read_u16`
 
@@ -108,6 +128,10 @@ Reads a bounded NUL-terminated UTF-16LE target string.
 ### `read_utf16_string`
 
 Reads a bounded UTF-16LE string with an explicit byte length.
+
+### `remove_points_all`
+
+Removes per-thread points and restores the selected remote thread.
 
 ### `run_to`
 
@@ -144,6 +168,14 @@ Waits for one of several exact PCs while ignoring unrelated stops.
 ### `watch_from_argument`
 
 Installs a watchpoint relative to a pointer-valued entry argument.
+
+### `watchpoints_all`
+
+Installs a distinct per-thread watchpoint and restores selection.
+
+    QEMU models hardware debug registers per vCPU. Adjacent byte addresses keep
+    each remote thread's point distinct while still detecting a write to the
+    watched field covered by the first `size` bytes.
 
 ### `with_address_space`
 
@@ -222,6 +254,22 @@ Builds an SSDT that assigns _CID on an absolute ACPI device path.
 
 Builds a checksummed ACPI table around a caller-supplied binary body.
 
+## `inspect/snapshot.star`
+
+Bounded filesystem and registry snapshots for focused comparisons.
+
+### `file_snapshot`
+
+Returns path and size facts for files below selected volume prefixes.
+
+### `registry_snapshot`
+
+Returns bounded raw registry state below selected roots in one hive.
+
+### `snapshot_delta`
+
+Returns sorted added, changed, and removed values from keyed snapshots.
+
 ## `predeclared.star`
 
 Declares optional embedded extensions to predeclared Go namespaces.
@@ -291,6 +339,10 @@ Dispatches VM/debugger events until a predicate accepts one.
     `until`, when supplied, receives the same pair after dispatch. The returned
     record preserves the selected source, event, and total dispatch count.
 
+### `release_modifiers`
+
+Idempotently releases every modifier used by the automation helpers.
+
 ### `repeat_ui`
 
 Runs a guest UI procedure repeatedly and returns framebuffer checkpoints.
@@ -307,6 +359,30 @@ Returns the first event whose kind is in kinds before timeout.
 
 Evaluates predicate after each VM event until it returns a value.
 
+## `vmm/lab.star`
+
+Small helpers for focused VM work in a Starlark REPL.
+
+The values returned here are ordinary block devices, machines, VMs, and files.
+This module deliberately does not track experiment history or hide lifecycle
+operations from the caller.
+
+### `capture_after`
+
+Drains VM events for a bounded duration and returns an in-memory PNG.
+
+### `start`
+
+Starts one explicit single-disk machine for focused investigation.
+
+### `stop`
+
+Stops a VM if needed and returns its final backend result.
+
+### `working_copy`
+
+Returns a bounded in-memory copy-on-write block device.
+
 ## `vmm/profiles.star`
 
 Portable machine-profile helpers shared by VMM backends.
@@ -319,9 +395,21 @@ Builds a portable PC request without selecting a VMM backend.
 
 Framebuffer-based guest smoke automation for unmodified disk recipes.
 
+### `case`
+
+Returns validated, ordinary case data for a smoke suite.
+
+### `check`
+
+Returns one portable smoke assertion and optional evidence reference.
+
 ### `close_and_verify`
 
 Closes the active guest window and verifies continued UI responsiveness.
+
+### `encode_suite`
+
+Encodes the authoritative suite model as deterministic indented JSON.
 
 ### `enter_command`
 
@@ -334,6 +422,34 @@ Returns bounded pixel-difference metrics for two framebuffer captures.
 ### `launch_and_capture`
 
 Launches one guest command and captures its settled visual result.
+
+### `media`
+
+Declares one caller-supplied smoke input without opening it.
+
+### `parse_suite_options`
+
+Parses one shared name=value surface and validates selected case inputs.
+
+### `phase`
+
+Returns one measured phase using the caller's portable clock values.
+
+### `render_suite`
+
+Renders the authoritative suite value as a self-contained HTML report.
+
+### `result`
+
+Returns one complete case result in the authoritative schema.
+
+### `run`
+
+Runs selected case functions and incrementally writes JSON and HTML.
+
+### `suite`
+
+Validates and returns one authoritative multi-case smoke result.
 
 ### `wait_for_command_surface`
 
@@ -2180,12 +2296,6 @@ Native `qemu` operation. Limits and timeout arguments are validated before work 
 
 Native `regexp` operation. Limits and timeout arguments are validated before work begins.
 
-### `runtime.stage_cache`
-
-`runtime.stage_cache() -> runtime.stage_cache`
-
-Native `runtime` operation. Limits and timeout arguments are validated before work begins.
-
 ### `runtime.stats`
 
 `runtime.stats() -> record`
@@ -2596,11 +2706,15 @@ Methods and attributes: `accelerate_loop(address, pattern=None, size=0, digest=N
 
 ### `gdb` value
 
-Methods and attributes: `architecture`, `breakpoint(address, kind='hardware', size=1, timeout=30)`, `close()`, `continue(timeout=30)`, `features`, `interrupt(timeout=30)`, `monitor(command, timeout=30)`, `packet(payload, timeout=30)`, `read_memory(address, size, timeout=30)`, `read_register(name, timeout=30)`, `registers(timeout=30)`, `running`, `search_memory(address, size, pattern, limit=256, timeout=30)`, `step(timeout=30)`, `wait(timeout=30)`, `watchpoint(address, size, access='write', timeout=30)`, `with_register(name, value, callback)`, `with_state(registers, memory, callback, timeout=30)`, `write_memory(address, data, timeout=30)`, `write_register(name, value, timeout=30)`.
+Methods and attributes: `address_space(page_table, kind='user')`, `architecture`, `breakpoint(address, kind='hardware', size=1, timeout=30)`, `close()`, `continue(timeout=30)`, `current_thread(timeout=30)`, `features`, `generation`, `interrupt(timeout=30)`, `monitor(command, timeout=30)`, `packet(payload, timeout=30)`, `read_memory(address, size, timeout=30)`, `read_register(name, timeout=30)`, `registers(timeout=30)`, `running`, `search_memory(address, size, pattern, limit=256, timeout=30)`, `select_thread(thread, general=True, execution=True, timeout=30)`, `step(timeout=30)`, `threads(timeout=30)`, `wait(timeout=30)`, `watchpoint(address, size, access='write', timeout=30)`, `with_register(name, value, callback)`, `with_state(registers, memory, callback, timeout=30)`, `write_memory(address, data, timeout=30)`, `write_register(name, value, timeout=30)`.
+
+### `gdb_address_space` value
+
+Methods and attributes: `generation`, `kind`, `page_table`, `read_memory(address, size, timeout=30)`.
 
 ### `gdb_point` value
 
-Methods and attributes: `address`, `remove(timeout=30)`, `removed`, `size`.
+Methods and attributes: `address`, `kind`, `remove(timeout=30)`, `removed`, `size`, `with_disabled(callback, timeout=30)`.
 
 ### `installer` value
 
@@ -2641,10 +2755,6 @@ Methods and attributes: `name`, `properties`.
 ### `qemu_option` value
 
 Methods and attributes: `name`, `properties`.
-
-### `runtime.stage_cache` value
-
-Methods and attributes: `clear() -> int`, `compute(name, source, options, function, args=(), kwargs={})`, `stats`.
 
 ### `sfp` value
 

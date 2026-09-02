@@ -20,6 +20,13 @@ KEYS = {
     "UP": "up",
 }
 
+_MODIFIERS = ["alt", "control", "meta_l", "meta_r", "shift"]
+
+def release_modifiers(vm):
+    """Idempotently releases every modifier used by the automation helpers."""
+    for key in _MODIFIERS:
+        vm.key(key, down = False)
+
 def wait_for_event(vm, kinds, timeout = 30):
     """Returns the first event whose kind is in kinds before timeout."""
     deadline = clock.monotonic() + timeout
@@ -82,6 +89,7 @@ def paced_chord(vm, keys, interval = 0.1, hold = 0.1):
         vm.key(key, down = False)
         if len(pressed) > 1:
             wait_duration(vm, interval)
+    release_modifiers(vm)
 
 def pump_events(sources, handlers = {}, until = None, timeout = 30, max_events = 4096):
     """Dispatches VM/debugger events until a predicate accepts one.

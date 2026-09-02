@@ -62,10 +62,10 @@ helpers rather than polling wall time. Long-lived channels and protocol
 sessions are registered with the current runtime and close in reverse creation
 order when that runtime exits.
 
-`runtime.stage_cache()` owns immutable stage records for one Starlark runtime.
-Its keys combine a source object's identity, a stage name, and explicit
-hashable options. A cache hit returns the same frozen result without rerunning
-the callable. No cache directory or host intermediate file is involved.
+`runtime.stats()` reports source reads, decompression, streamed output, NBD
+traffic, bounded decompression-cache use, and Go runtime memory counters. Image
+recipes do not cache derived stages; use these counters and profiler spans to
+make cold operations faster instead of hiding them behind retained results.
 
 ## VMM values
 

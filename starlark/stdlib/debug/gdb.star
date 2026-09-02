@@ -145,6 +145,96 @@ def wait_for_pc(gdb, address, timeout = 30, max_stops = 4096, resume = False):
         resume = resume,
     )["stop"]
 
+def continue_to(gdb, points, timeout = 30, max_stops = 4096):
+    """Continues to one installed point and returns its self-consistent stop."""
+    addresses = [point.address for point in points]
+    return wait_for_pcs(
+        gdb,
+        addresses,
+        timeout = timeout,
+        max_stops = max_stops,
+        resume = True,
+    )["stop"]
+
+def read_process_memory(gdb, process, address, size):
+    """Reads memory through a checked process directory-table base."""
+    if size < 0:
+        fail("process-memory read size must be non-negative")
+    if type(process) == "gdb_address_space":
+        if process.kind != "user":
+            fail("read_process_memory requires a user address space")
+        return process.read_memory(address, size)
+    return gdb.with_register(
+        "cr3",
+        process["directory_table_base"],
+        lambda: gdb.read_memory(address, size),
+    )
+
+def process_address_space(gdb, process):
+    """Returns a checked user address-space handle for a process record."""
+    return gdb.address_space(process["directory_table_base"], kind = "user")
+
+def kernel_address_space(gdb, page_table):
+    """Returns a checked kernel address-space handle."""
+    return gdb.address_space(page_table, kind = "kernel")
+
+def breakpoints_all(gdb, addresses, kind = "hardware"):
+    """Installs corresponding points on every advertised remote thread."""
+    if not addresses:
+        fail("breakpoints_all requires at least one address")
+    threads = gdb.threads()
+    if not threads:
+        fail("GDB target advertises no remote threads")
+    current = gdb.current_thread()
+    if len(addresses) < len(threads):
+        fail("breakpoints_all requires one distinct address per remote thread")
+    points = []
+    for index in range(len(threads)):
+        thread = threads[index]
+        address = addresses[index]
+        gdb.select_thread(thread)
+        points.append({
+            "address": address,
+            "point": gdb.breakpoint(address, kind = kind),
+            "thread": thread,
+        })
+    gdb.select_thread(current)
+    return points
+
+def watchpoints_all(gdb, address, size = 1, access = "write"):
+    """Installs a distinct per-thread watchpoint and restores selection.
+
+    QEMU models hardware debug registers per vCPU. Adjacent byte addresses keep
+    each remote thread's point distinct while still detecting a write to the
+    watched field covered by the first `size` bytes.
+    """
+    if size < 1:
+        fail("watchpoints_all requires a positive size")
+    threads = gdb.threads()
+    if not threads:
+        fail("GDB target advertises no remote threads")
+    current = gdb.current_thread()
+    points = []
+    for index in range(len(threads)):
+        thread = threads[index]
+        site = address + index
+        gdb.select_thread(thread)
+        points.append({
+            "address": site,
+            "point": gdb.watchpoint(site, size if len(threads) == 1 else 1, access = access),
+            "thread": thread,
+        })
+    gdb.select_thread(current)
+    return points
+
+def remove_points_all(gdb, points):
+    """Removes per-thread points and restores the selected remote thread."""
+    current = gdb.current_thread()
+    for item in points:
+        gdb.select_thread(item["thread"])
+        item["point"].remove()
+    gdb.select_thread(current)
+
 def run_to(gdb, address, kind = "hardware", timeout = 30, max_stops = 4096):
     """Continues to one temporary breakpoint, ignoring unrelated stops."""
     point = gdb.breakpoint(address, kind = kind)
@@ -206,25 +296,34 @@ def frame_backtrace(gdb, stop, depth = 16, pointer_size = 4):
         index += 1
     return frames
 
-def step_over(gdb, stop = None, into_call_targets = [], timeout = 30):
+def step_over(gdb, stop = None, into_call_targets = [], timeout = 30, point = None):
     """Steps one instruction, running over calls except selected direct targets."""
-    registers = stop.registers if stop != None else gdb.registers(timeout = timeout)
-    pc_name = "rip" if "rip" in registers else "eip"
-    pc = registers[pc_name]
-    instruction = debug.disassemble(
-        gdb.read_memory(pc, 15, timeout = timeout),
-        address = pc,
-        architecture = gdb.architecture,
-        count = 1,
-    )[0]
-    if instruction.flow == "call" and instruction.target not in into_call_targets:
-        point = gdb.breakpoint(pc + instruction.length, kind = "hardware", timeout = timeout)
-        getattr(gdb, "continue")(timeout = timeout)
-        result = gdb.wait(timeout = timeout)
-        point.remove(timeout = timeout)
-        return result
-    gdb.step(timeout = timeout)
-    return gdb.wait(timeout = timeout)
+    if stop != None and hasattr(stop, "generation"):
+        if stop.generation != gdb.generation or not stop.resumable or gdb.running:
+            fail("step_over requires the current resumable GDB stop")
+        if stop.thread and hasattr(gdb, "select_thread"):
+            gdb.select_thread(stop.thread)
+    def execute_step():
+        registers = stop.registers if stop != None else gdb.registers(timeout = timeout)
+        pc_name = "rip" if "rip" in registers else "eip"
+        pc = registers[pc_name]
+        instruction = debug.disassemble(
+            gdb.read_memory(pc, 15, timeout = timeout),
+            address = pc,
+            architecture = gdb.architecture,
+            count = 1,
+        )[0]
+        if instruction.flow == "call" and instruction.target not in into_call_targets:
+            return_point = gdb.breakpoint(pc + instruction.length, kind = "hardware", timeout = timeout)
+            getattr(gdb, "continue")(timeout = timeout)
+            result = gdb.wait(timeout = timeout)
+            return_point.remove(timeout = timeout)
+            return result
+        gdb.step(timeout = timeout)
+        return gdb.wait(timeout = timeout)
+    if point != None:
+        return point.with_disabled(execute_step, timeout = timeout)
+    return execute_step()
 
 def step_over_many(gdb, stop, count, into_call_targets = [], predicate = None, timeout = 30):
     """Selectively steps over instructions and returns accepted stop records."""

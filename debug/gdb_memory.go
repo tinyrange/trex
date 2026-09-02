@@ -14,6 +14,99 @@ import (
 	"go.starlark.net/starlark"
 )
 
+type gdbAddressSpaceValue struct {
+	session    *gdbSessionValue
+	pageTable  uint64
+	kind       string
+	generation uint64
+}
+
+func (v *gdbAddressSpaceValue) String() string {
+	return fmt.Sprintf("<gdb_address_space kind=%q page_table=%#x>", v.kind, v.pageTable)
+}
+func (v *gdbAddressSpaceValue) Type() string         { return "gdb_address_space" }
+func (v *gdbAddressSpaceValue) Freeze()              {}
+func (v *gdbAddressSpaceValue) Truth() starlark.Bool { return starlark.True }
+func (v *gdbAddressSpaceValue) Hash() (uint32, error) {
+	return 0, fmt.Errorf("unhashable: %s", v.Type())
+}
+func (v *gdbAddressSpaceValue) Attr(name string) (starlark.Value, error) {
+	switch name {
+	case "generation":
+		return starlark.MakeUint64(v.generation), nil
+	case "kind":
+		return starlark.String(v.kind), nil
+	case "page_table":
+		return starlark.MakeUint64(v.pageTable), nil
+	case "read_memory":
+		return starlark.NewBuiltin("address_space.read_memory", v.readMemoryBuiltin), nil
+	}
+	return nil, nil
+}
+func (v *gdbAddressSpaceValue) AttrNames() []string {
+	return []string{"generation", "kind", "page_table", "read_memory"}
+}
+
+func (s *gdbSessionValue) addressSpaceBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var pageTable uint64
+	kind := "user"
+	if err := starlark.UnpackArgs("address_space", args, kwargs, "page_table", &pageTable, "kind?", &kind); err != nil {
+		return nil, err
+	}
+	if pageTable == 0 || kind != "user" && kind != "kernel" {
+		return nil, fmt.Errorf("address_space: invalid page table or kind")
+	}
+	if _, ok := s.registerMap["cr3"]; !ok {
+		return nil, fmt.Errorf("address_space: target does not advertise cr3")
+	}
+	return &gdbAddressSpaceValue{session: s, pageTable: pageTable, kind: kind, generation: s.generation.Load()}, nil
+}
+
+func (v *gdbAddressSpaceValue) readMemoryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var address uint64
+	var size int
+	timeout, err := unpackGDBTimeout("address_space.read_memory", args, kwargs, "address", &address, "size", &size)
+	if err != nil {
+		return nil, err
+	}
+	if size < 0 || size > v.session.memoryLimit || address > ^uint64(0)-uint64(size) {
+		return nil, fmt.Errorf("address_space.read_memory: invalid or oversized range")
+	}
+	if v.session.closed.Load() {
+		return nil, fmt.Errorf("address_space.read_memory: owning GDB session is closed")
+	}
+	if generation := v.session.generation.Load(); generation != v.generation {
+		return nil, fmt.Errorf("address_space.read_memory: stale generation %d (session is %d)", v.generation, generation)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout*float64(time.Second)))
+	defer cancel()
+	register := v.session.registerMap["cr3"]
+	encoded, err := encodeGDBRegister(new(big.Int).SetUint64(v.pageTable), register.Bits)
+	if err != nil {
+		return nil, err
+	}
+	v.session.scope.Lock()
+	defer v.session.scope.Unlock()
+	old, err := v.session.readRegisterInternal(ctx, register)
+	if err != nil {
+		return nil, err
+	}
+	if err := v.session.writeRegisterInternal(ctx, register, encoded); err != nil {
+		return nil, err
+	}
+	data, readErr := v.session.readMemory(ctx, address, size)
+	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	restoreErr := v.session.writeRegisterInternal(restoreCtx, register, old)
+	restoreCancel()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if restoreErr != nil {
+		return nil, fmt.Errorf("address_space.read_memory: restore cr3: %w", restoreErr)
+	}
+	return starlark.Bytes(data), nil
+}
+
 func (s *gdbSessionValue) registersBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	timeout, err := unpackGDBTimeout("registers", args, kwargs)
 	if err != nil {
@@ -457,10 +550,69 @@ func (p *gdbPointValue) Attr(name string) (starlark.Value, error) {
 		return starlark.Bool(p.removed.Load()), nil
 	case "remove":
 		return starlark.NewBuiltin("remove", p.removeBuiltin), nil
+	case "with_disabled":
+		return starlark.NewBuiltin("with_disabled", p.withDisabledBuiltin), nil
+	case "kind":
+		return starlark.MakeInt(p.kind), nil
 	}
 	return nil, nil
 }
-func (p *gdbPointValue) AttrNames() []string { return []string{"address", "remove", "removed", "size"} }
+func (p *gdbPointValue) AttrNames() []string {
+	return []string{"address", "kind", "remove", "removed", "size", "with_disabled"}
+}
+
+func (p *gdbPointValue) withDisabledBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (result starlark.Value, err error) {
+	var callback starlark.Callable
+	timeout := starvalue.Number(30)
+	if err := starlark.UnpackArgs("with_disabled", args, kwargs, "callback", &callback, "timeout?", &timeout); err != nil {
+		return nil, err
+	}
+	if p.removed.Load() {
+		return nil, fmt.Errorf("with_disabled: GDB point is already removed")
+	}
+	key := fmt.Sprintf("trex.gdb.scope.%p", p.session)
+	p.session.scope.Lock()
+	defer p.session.scope.Unlock()
+	previous := thread.Local(key)
+	thread.SetLocal(key, p.session)
+	defer thread.SetLocal(key, previous)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(float64(timeout)*float64(time.Second)))
+	defer cancel()
+	change := func(prefix byte, operation string) error {
+		value, exchangeErr := p.session.execute(ctx, func(wire *gdbWire) (any, bool, error) {
+			reply, wireErr := wire.exchange([]byte(fmt.Sprintf("%c%d,%x,%x", prefix, p.kind, p.address, p.size)))
+			return reply, false, wireErr
+		})
+		if exchangeErr != nil {
+			return exchangeErr
+		}
+		if string(value.([]byte)) != "OK" {
+			return fmt.Errorf("%s GDB point: target returned %q", operation, value)
+		}
+		return nil
+	}
+	if err := change('z', "temporarily remove"); err != nil {
+		return nil, err
+	}
+	p.removed.Store(true)
+	defer func() {
+		restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer restoreCancel()
+		value, restoreErr := p.session.execute(restoreCtx, func(wire *gdbWire) (any, bool, error) {
+			reply, wireErr := wire.exchange([]byte(fmt.Sprintf("Z%d,%x,%x", p.kind, p.address, p.size)))
+			return reply, false, wireErr
+		})
+		if restoreErr == nil && string(value.([]byte)) != "OK" {
+			restoreErr = fmt.Errorf("target returned %q", value)
+		}
+		if restoreErr == nil {
+			p.removed.Store(false)
+		} else if err == nil {
+			err = fmt.Errorf("with_disabled: restore GDB point: %w", restoreErr)
+		}
+	}()
+	return starlark.Call(thread, callback, nil, nil)
+}
 
 func (s *gdbSessionValue) breakpointBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var address uint64

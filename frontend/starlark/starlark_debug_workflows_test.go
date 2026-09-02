@@ -3,7 +3,9 @@ package starlarkfrontend
 import (
 	"encoding/binary"
 	"fmt"
+	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	starfile "github.com/tinyrange/trex/storage/star"
@@ -380,6 +382,7 @@ func (k *workflowKD) DebugReady() <-chan struct{} { return k.value.DebugReady() 
 
 type workflowVM struct {
 	value       *workflowObject
+	keyOps      []string
 	pointerOps  int
 	screenshots int
 }
@@ -392,11 +395,35 @@ func newWorkflowVM() *workflowVM {
 		vm.pointerOps++
 		return starlark.None, nil
 	})
+	vm.value.attrs["key"] = workflowBuiltin("key", func(_ *starlark.Thread, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		down := true
+		for _, item := range kwargs {
+			if item[0] == starlark.String("down") {
+				down = bool(item[1].(starlark.Bool))
+			}
+		}
+		vm.keyOps = append(vm.keyOps, fmt.Sprintf("%s:%t", args[0], down))
+		return starlark.None, nil
+	})
 	vm.value.attrs["screenshot"] = workflowBuiltin("screenshot", func(_ *starlark.Thread, _ starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
 		vm.screenshots++
 		return &starfile.Bytes{Name: "checkpoint.png", Data: []byte("png")}, nil
 	})
 	return vm
+}
+
+func TestAutomationModifierRecoveryReleasesEveryModifier(t *testing.T) {
+	thread, _, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := workflowModule(t, thread, "@stdlib//vmm:automation.star")
+	vm := newWorkflowVM()
+	workflowCall(t, thread, module, "release_modifiers", vm)
+	want := []string{`"alt":false`, `"control":false`, `"meta_l":false`, `"meta_r":false`, `"shift":false`}
+	if !reflect.DeepEqual(vm.keyOps, want) {
+		t.Fatalf("modifier recovery = %v, want %v", vm.keyOps, want)
+	}
 }
 
 func (v *workflowVM) String() string        { return v.value.String() }
@@ -757,6 +784,39 @@ func TestPortableEventPumpDispatchesUntilPredicate(t *testing.T) {
 	count, _, _ := result.Get(starlark.String("count"))
 	if count.String() != "2" || handled != 1 {
 		t.Fatalf("event pump result=%s handled=%d", result, handled)
+	}
+}
+
+func TestSmokeSuiteSchemaAndRendererComposeInStarlark(t *testing.T) {
+	thread, _, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := workflowModule(t, thread, "@stdlib//vmm:smoke.star")
+	media := workflowCall(t, thread, module, "media", starlark.String("source"), starlark.String("iso"))
+	caseValue := workflowCall(t, thread, module, "case",
+		starlark.String("example-x86"), starlark.String("Example x86"), starlark.NewList([]starlark.Value{media}),
+	)
+	check := workflowCall(t, thread, module, "check",
+		starlark.String("Boot"), starlark.True, starlark.String("desktop ready"), starlark.String("example.png"),
+	)
+	phase := workflowCall(t, thread, module, "phase",
+		starlark.String("build"), starlark.Float(1.25), starlark.Float(2.75),
+	)
+	result := workflowCall(t, thread, module, "result", caseValue,
+		starlark.NewList([]starlark.Value{check}), starlark.NewList([]starlark.Value{phase}),
+	)
+	suite := workflowCall(t, thread, module, "suite",
+		starlark.String("run-1"), starlark.NewList([]starlark.Value{caseValue}),
+		starlark.NewList([]starlark.Value{result}), starlark.Float(1), starlark.Float(3),
+	)
+	encoded := workflowCall(t, thread, module, "encode_suite", suite)
+	if text := encoded.(starlark.String).GoString(); !strings.Contains(text, `"schema": "trex.smoke.v1"`) || !strings.Contains(text, `"id": "example-x86"`) {
+		t.Fatalf("encoded smoke suite = %s", text)
+	}
+	rendered := workflowCall(t, thread, module, "render_suite", suite)
+	if text := rendered.(starlark.String).GoString(); !strings.Contains(text, "1 of 1 cases passed") || !strings.Contains(text, "example.png") {
+		t.Fatalf("rendered smoke suite = %s", text)
 	}
 }
 

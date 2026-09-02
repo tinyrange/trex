@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -40,14 +41,17 @@ type gdbCommandResult struct {
 type gdbActorFailure struct{ err error }
 
 type gdbStop struct {
-	raw       string
-	kind      string
-	signal    int
-	thread    string
-	watch     *big.Int
-	fields    map[string]string
-	registers map[string]starlark.Value
-	pc        starlark.Value
+	raw        string
+	kind       string
+	reason     string
+	signal     int
+	thread     string
+	generation uint64
+	resumable  bool
+	watch      *big.Int
+	fields     map[string]string
+	registers  map[string]starlark.Value
+	pc         starlark.Value
 }
 
 type gdbSessionValue struct {
@@ -67,6 +71,7 @@ type gdbSessionValue struct {
 	actorErr   atomic.Value
 	running    atomic.Bool
 	closed     atomic.Bool
+	generation atomic.Uint64
 	writeMu    sync.Mutex
 	scope      sync.RWMutex
 	close      sync.Once
@@ -200,6 +205,7 @@ func (s *gdbSessionValue) actor() {
 			return
 		}
 		stop := parseGDBStop(packet)
+		stop.generation = s.generation.Add(1)
 		select {
 		case s.stops <- stop:
 			select {
@@ -247,9 +253,10 @@ func (s *gdbSessionValue) execute(ctx context.Context, run func(*gdbWire) (any, 
 
 func (s *gdbSessionValue) err() error {
 	if value := s.actorErr.Load(); value != nil {
-		return value.(*gdbActorFailure).err
+		failure := value.(*gdbActorFailure).err
+		return &vmmapi.Error{Code: vmmapi.ErrorBackend, Message: "GDB transport failed", Detail: failure.Error(), Err: failure}
 	}
-	return io.EOF
+	return &vmmapi.Error{Code: vmmapi.ErrorBackend, Message: "GDB transport closed", Err: io.EOF}
 }
 
 func (s *gdbSessionValue) Close() error {
@@ -274,11 +281,12 @@ func (s *gdbSessionValue) Truth() starlark.Bool        { return starlark.True }
 func (s *gdbSessionValue) Hash() (uint32, error)       { return 0, fmt.Errorf("unhashable: %s", s.Type()) }
 func (s *gdbSessionValue) Attr(name string) (starlark.Value, error) {
 	methods := map[string]func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error){
-		"breakpoint": s.breakpointBuiltin, "close": s.closeBuiltin, "continue": s.continueBuiltin,
-		"interrupt": s.interruptBuiltin, "monitor": s.monitorBuiltin, "packet": s.packetBuiltin,
+		"address_space": s.addressSpaceBuiltin, "breakpoint": s.breakpointBuiltin, "close": s.closeBuiltin, "continue": s.continueBuiltin,
+		"current_thread": s.currentThreadBuiltin, "interrupt": s.interruptBuiltin, "monitor": s.monitorBuiltin, "packet": s.packetBuiltin,
 		"read_memory": s.readMemoryBuiltin, "read_register": s.readRegisterBuiltin,
-		"registers": s.registersBuiltin, "search_memory": s.searchMemoryBuiltin,
+		"registers": s.registersBuiltin, "search_memory": s.searchMemoryBuiltin, "select_thread": s.selectThreadBuiltin,
 		"step": s.stepBuiltin, "wait": s.waitBuiltin, "watchpoint": s.watchpointBuiltin,
+		"threads":       s.threadsBuiltin,
 		"with_register": s.withRegisterBuiltin, "with_state": s.withStateBuiltin, "write_memory": s.writeMemoryBuiltin,
 		"write_register": s.writeRegisterBuiltin,
 	}
@@ -294,13 +302,15 @@ func (s *gdbSessionValue) Attr(name string) (starlark.Value, error) {
 			_ = dict.SetKey(starlark.String(name), starlark.String(value))
 		}
 		return dict, nil
+	case "generation":
+		return starlark.MakeUint64(s.generation.Load()), nil
 	case "running":
 		return starlark.Bool(s.running.Load()), nil
 	}
 	return nil, nil
 }
 func (s *gdbSessionValue) AttrNames() []string {
-	return []string{"architecture", "breakpoint", "close", "continue", "features", "interrupt", "monitor", "packet", "read_memory", "read_register", "registers", "running", "search_memory", "step", "wait", "watchpoint", "with_register", "with_state", "write_memory", "write_register"}
+	return []string{"address_space", "architecture", "breakpoint", "close", "continue", "current_thread", "features", "generation", "interrupt", "monitor", "packet", "read_memory", "read_register", "registers", "running", "search_memory", "select_thread", "step", "threads", "wait", "watchpoint", "with_register", "with_state", "write_memory", "write_register"}
 }
 
 func (s *gdbSessionValue) operation(thread *starlark.Thread, timeout float64, run func(context.Context) (starlark.Value, error)) (starlark.Value, error) {
@@ -316,7 +326,11 @@ func (s *gdbSessionValue) operation(thread *starlark.Thread, timeout float64, ru
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout*float64(time.Second)))
 	}
 	defer cancel()
-	return run(ctx)
+	value, err := run(ctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, &vmmapi.Error{Code: vmmapi.ErrorTimeout, Message: "GDB operation timed out", Err: err}
+	}
+	return value, err
 }
 
 func unpackGDBTimeout(name string, args starlark.Tuple, kwargs []starlark.Tuple, fields ...any) (float64, error) {
@@ -364,6 +378,9 @@ func (s *gdbSessionValue) executionBuiltin(thread *starlark.Thread, name, packet
 	if s.running.Load() {
 		return nil, &vmmapi.Error{Code: vmmapi.ErrorState, Message: "GDB target is already running"}
 	}
+	if len(s.stops) != 0 {
+		return nil, &vmmapi.Error{Code: vmmapi.ErrorState, Message: "GDB stop must be consumed before resuming the target"}
+	}
 	return s.operation(thread, timeout, func(ctx context.Context) (starlark.Value, error) {
 		_, err := s.execute(ctx, func(wire *gdbWire) (any, bool, error) { return nil, true, wire.send([]byte(packet)) })
 		return starlark.None, err
@@ -406,20 +423,7 @@ func (s *gdbSessionValue) waitBuiltin(thread *starlark.Thread, _ *starlark.Built
 		default:
 		}
 		if stop.fields != nil {
-			if err := s.selectStoppedThread(ctx, stop.thread); err != nil {
-				return nil, err
-			}
-			registers, err := s.readAllRegisters(ctx)
-			if err == nil {
-				stop.registers = registers
-				for _, name := range []string{"pc", "eip", "rip"} {
-					if value, ok := registers[name]; ok {
-						stop.pc = value
-						break
-					}
-				}
-			}
-			return gdbStopValue(stop), nil
+			return s.finishStop(ctx, stop)
 		}
 		select {
 		case value, ok := <-s.stops:
@@ -434,21 +438,29 @@ func (s *gdbSessionValue) waitBuiltin(thread *starlark.Thread, _ *starlark.Built
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		if err := s.selectStoppedThread(ctx, stop.thread); err != nil {
-			return nil, err
-		}
-		registers, err := s.readAllRegisters(ctx)
-		if err == nil {
-			stop.registers = registers
-			for _, name := range []string{"pc", "eip", "rip"} {
-				if value, ok := registers[name]; ok {
-					stop.pc = value
-					break
-				}
-			}
-		}
-		return gdbStopValue(stop), nil
+		return s.finishStop(ctx, stop)
 	})
+}
+
+func (s *gdbSessionValue) finishStop(ctx context.Context, stop gdbStop) (starlark.Value, error) {
+	if !stop.resumable {
+		return gdbStopValue(stop), nil
+	}
+	if err := s.selectStoppedThread(ctx, stop.thread); err != nil {
+		return nil, err
+	}
+	registers, err := s.readAllRegisters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read registers for GDB stop generation %d: %w", stop.generation, err)
+	}
+	stop.registers = registers
+	for _, name := range []string{"pc", "eip", "rip"} {
+		if value, ok := registers[name]; ok {
+			stop.pc = value
+			break
+		}
+	}
+	return gdbStopValue(stop), nil
 }
 
 func (s *gdbSessionValue) selectStoppedThread(ctx context.Context, thread string) error {
@@ -468,6 +480,107 @@ func (s *gdbSessionValue) selectStoppedThread(ctx context.Context, thread string
 	return nil
 }
 
+func (s *gdbSessionValue) threadCommand(ctx context.Context, command, thread string) error {
+	if thread == "" || strings.IndexAny(thread, "#$}*;") >= 0 {
+		return fmt.Errorf("invalid GDB thread identifier %q", thread)
+	}
+	value, err := s.execute(ctx, func(wire *gdbWire) (any, bool, error) {
+		reply, err := wire.exchange([]byte(command + thread))
+		return reply, false, err
+	})
+	if err != nil {
+		return err
+	}
+	if reply := string(value.([]byte)); reply != "OK" {
+		return fmt.Errorf("select GDB thread %s with %s: target returned %q", thread, command, reply)
+	}
+	return nil
+}
+
+func (s *gdbSessionValue) selectThreadBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var identifier string
+	general, execution := true, true
+	timeout, err := unpackGDBTimeout("select_thread", args, kwargs, "thread", &identifier, "general?", &general, "execution?", &execution)
+	if err != nil {
+		return nil, err
+	}
+	if !general && !execution {
+		return nil, fmt.Errorf("select_thread: general or execution selection must be enabled")
+	}
+	return s.operation(thread, timeout, func(ctx context.Context) (starlark.Value, error) {
+		if general {
+			if err := s.threadCommand(ctx, "Hg", identifier); err != nil {
+				return nil, err
+			}
+		}
+		if execution {
+			if err := s.threadCommand(ctx, "Hc", identifier); err != nil {
+				return nil, err
+			}
+		}
+		return starlark.None, nil
+	})
+}
+
+func (s *gdbSessionValue) currentThreadBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	timeout, err := unpackGDBTimeout("current_thread", args, kwargs)
+	if err != nil {
+		return nil, err
+	}
+	return s.operation(thread, timeout, func(ctx context.Context) (starlark.Value, error) {
+		value, err := s.execute(ctx, func(wire *gdbWire) (any, bool, error) {
+			reply, err := wire.exchange([]byte("qC"))
+			return reply, false, err
+		})
+		if err != nil {
+			return nil, err
+		}
+		reply := string(value.([]byte))
+		if !strings.HasPrefix(reply, "QC") || len(reply) == 2 {
+			return nil, fmt.Errorf("current_thread: target returned %q", reply)
+		}
+		return starlark.String(reply[2:]), nil
+	})
+}
+
+func (s *gdbSessionValue) threadsBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	timeout, err := unpackGDBTimeout("threads", args, kwargs)
+	if err != nil {
+		return nil, err
+	}
+	return s.operation(thread, timeout, func(ctx context.Context) (starlark.Value, error) {
+		identifiers := make([]starlark.Value, 0, 16)
+		command := "qfThreadInfo"
+		for len(identifiers) <= 65536 {
+			value, err := s.execute(ctx, func(wire *gdbWire) (any, bool, error) {
+				reply, err := wire.exchange([]byte(command))
+				return reply, false, err
+			})
+			if err != nil {
+				return nil, err
+			}
+			reply := string(value.([]byte))
+			if reply == "l" {
+				return starlark.NewList(identifiers), nil
+			}
+			if !strings.HasPrefix(reply, "m") || len(reply) == 1 {
+				return nil, fmt.Errorf("threads: target returned %q", reply)
+			}
+			for _, identifier := range strings.Split(reply[1:], ",") {
+				if identifier == "" || strings.IndexAny(identifier, "#$}*;") >= 0 {
+					return nil, fmt.Errorf("threads: invalid target thread identifier %q", identifier)
+				}
+				identifiers = append(identifiers, starlark.String(identifier))
+				if len(identifiers) > 65536 {
+					return nil, fmt.Errorf("threads: target exceeds 65536 thread limit")
+				}
+			}
+			command = "qsThreadInfo"
+		}
+		return nil, fmt.Errorf("threads: target exceeds 65536 thread limit")
+	})
+}
+
 func parseGDBStop(packet []byte) gdbStop {
 	stop := gdbStop{raw: string(packet), fields: make(map[string]string), pc: starlark.None}
 	if len(packet) < 3 {
@@ -477,6 +590,8 @@ func parseGDBStop(packet []byte) gdbStop {
 	switch packet[0] {
 	case 'S', 'T':
 		stop.kind = "signal"
+		stop.reason = "signal"
+		stop.resumable = true
 		signal, _ := strconv.ParseUint(string(packet[1:3]), 16, 8)
 		stop.signal = int(signal)
 		if packet[0] == 'T' {
@@ -497,12 +612,20 @@ func parseGDBStop(packet []byte) gdbStop {
 				}
 			}
 		}
+		if stop.watch != nil {
+			stop.reason = "watchpoint"
+		} else if stop.signal == 5 {
+			stop.reason = "breakpoint"
+		}
 	case 'W':
 		stop.kind = "exited"
+		stop.reason = "exited"
 	case 'X':
 		stop.kind = "terminated"
+		stop.reason = "terminated"
 	default:
 		stop.kind = "unknown"
+		stop.reason = "unknown"
 	}
 	return stop
 }
@@ -520,9 +643,15 @@ func gdbStopValue(stop gdbStop) starlark.Value {
 	if stop.watch != nil {
 		watch = starlark.MakeBigInt(stop.watch)
 	}
+	addressSpace := starlark.Value(starlark.None)
+	if value, ok := stop.registers["cr3"]; ok {
+		addressSpace = value
+	}
 	return starvalue.NewRecord(starlark.StringDict{
-		"fields": fields, "kind": starlark.String(stop.kind), "pc": stop.pc,
-		"raw": starlark.Bytes(stop.raw), "registers": registers,
+		"address_space": addressSpace, "fields": fields, "kind": starlark.String(stop.kind), "pc": stop.pc,
+		"generation": starlark.MakeUint64(stop.generation), "reason": starlark.String(stop.reason), "resumable": starlark.Bool(stop.resumable),
+		"resumption_token": starlark.MakeUint64(stop.generation),
+		"raw":              starlark.Bytes(stop.raw), "registers": registers,
 		"signal": starlark.MakeInt(stop.signal), "thread": starlark.String(stop.thread), "watch_address": watch,
 	})
 }

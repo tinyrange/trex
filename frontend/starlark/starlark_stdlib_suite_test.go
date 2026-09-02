@@ -97,7 +97,7 @@ func TestStandardLibraryDocumentation(t *testing.T) {
 	if !bytes.Equal(committed, documentation) {
 		t.Fatal("generated Starlark reference is stale; run trex -stdlib-docs")
 	}
-	for _, required := range []string{"### `help`", "help(value=None) -> None", "### `repl`", "repl() -> None", "### `block.nbd`", "### `binary.xml`", "### `binary.read_u32le`", "binary.read_u32le(source, offset=0) -> int", "### `binary.u32le`", "### `binary.builder` value", "patch_u32le(offset, value)", "### `binary.xml_node` value", "### `runtime.stage_cache`", "runtime.stage_cache() -> runtime.stage_cache", "### `runtime.stage_cache` value", "report(minimum_coverage=0.95)", "### `vmm.start`", "### `debug.gdb`", "### `windows.kd`", "### `gdb` value", "with_register", "### `vm` value", "### `vmm_machine` value", "### `qemu_device` value", "write_u32le(address, value)"} {
+	for _, required := range []string{"### `help`", "help(value=None) -> None", "### `repl`", "repl() -> None", "### `block.nbd`", "### `binary.xml`", "### `binary.read_u32le`", "binary.read_u32le(source, offset=0) -> int", "### `binary.u32le`", "### `binary.builder` value", "patch_u32le(offset, value)", "### `binary.xml_node` value", "### `runtime.stats`", "runtime.stats() -> record", "report(minimum_coverage=0.95)", "### `vmm.start`", "### `debug.gdb`", "### `windows.kd`", "### `gdb` value", "with_register", "### `vm` value", "### `vmm_machine` value", "### `qemu_device` value", "write_u32le(address, value)"} {
 		if !strings.Contains(string(documentation), required) {
 			t.Errorf("generated reference omits %q", required)
 		}
