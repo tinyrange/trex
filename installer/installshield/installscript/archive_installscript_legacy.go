@@ -11,7 +11,7 @@ import (
 )
 
 // This decoder is a clean-room implementation derived from observing the
-// legacy compiler's byte records through TinyRangeX's own binary REPL. It does
+// legacy compiler's byte records through trex's own binary REPL. It does
 // not incorporate legacy decompiler source code.
 
 type legacyInstallScript struct {

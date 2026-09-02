@@ -176,6 +176,90 @@ func TestGDBWithStateRestoresRegistersAndMemoryAfterCallbackFailure(t *testing.T
 	}
 }
 
+func TestGDBWaitSelectsStoppedThreadBeforeReadingRegisters(t *testing.T) {
+	client, target := net.Pipe()
+	defer target.Close()
+	targetErr := make(chan error, 1)
+	go func() {
+		targetXML := `<target><architecture>i386</architecture><feature name="core"><reg name="eax" bitsize="32" regnum="0"/><reg name="eip" bitsize="32" regnum="1"/></feature></target>`
+		transcript := []struct{ request, response string }{
+			{"qSupported:multiprocess+;xmlRegisters=i386", "PacketSize=1000;QStartNoAckMode-"},
+			{"qXfer:features:read:target.xml:0,f80", "l" + targetXML},
+		}
+		for _, exchange := range transcript {
+			request, err := readGDBTestPacket(target)
+			if err != nil {
+				targetErr <- err
+				return
+			}
+			if string(request) != exchange.request {
+				targetErr <- fmt.Errorf("request = %q, want %q", request, exchange.request)
+				return
+			}
+			if err := writeGDBTestPacket(target, []byte(exchange.response)); err != nil {
+				targetErr <- err
+				return
+			}
+		}
+		request, err := readGDBTestPacket(target)
+		if err != nil {
+			targetErr <- err
+			return
+		}
+		if string(request) != "c" {
+			targetErr <- fmt.Errorf("request = %q, want continue", request)
+			return
+		}
+		if err := writeGDBTestPacket(target, []byte("T05thread:p01.02;")); err != nil {
+			targetErr <- err
+			return
+		}
+		for _, exchange := range []struct{ request, response string }{
+			{"Hgp01.02", "OK"},
+			{"g", "78563412efcdab90"},
+		} {
+			request, err := readGDBTestPacket(target)
+			if err != nil {
+				targetErr <- err
+				return
+			}
+			if string(request) != exchange.request {
+				targetErr <- fmt.Errorf("request = %q, want %q", request, exchange.request)
+				return
+			}
+			if err := writeGDBTestPacket(target, []byte(exchange.response)); err != nil {
+				targetErr <- err
+				return
+			}
+		}
+		targetErr <- nil
+	}()
+
+	thread := newTestThread(t)
+	value, err := GDBBuiltin(thread, nil, starlark.Tuple{channelstar.New("gdb-wait-test", client)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gdb := value.(*gdbSessionValue)
+	defer gdb.Close()
+	resume, _ := gdb.Attr("continue")
+	if _, err := starlark.Call(thread, resume.(starlark.Callable), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	wait, _ := gdb.Attr("wait")
+	if _, err := starlark.Call(thread, wait.(starlark.Callable), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-targetErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GDB wait transcript did not complete")
+	}
+}
+
 func readGDBTestPacket(channel io.ReadWriter) ([]byte, error) {
 	leader := []byte{0}
 	if _, err := io.ReadFull(channel, leader); err != nil {

@@ -86,13 +86,12 @@ func TestParseWIMSecurityAndEntryMetadata(t *testing.T) {
 	shortName := utf16Bytes("LONGNA~1.TXT")
 	length := wimMetadataEntryBaseLen + len(name) + len(shortName)
 	binary.LittleEndian.PutUint64(metadata[offset:offset+8], uint64(length))
-	binary.LittleEndian.PutUint32(metadata[offset+8:offset+12], 0x2021)
+	binary.LittleEndian.PutUint32(metadata[offset+8:offset+12], 0x2421)
 	binary.LittleEndian.PutUint32(metadata[offset+12:offset+16], 7)
 	binary.LittleEndian.PutUint64(metadata[offset+40:offset+48], 11)
 	binary.LittleEndian.PutUint64(metadata[offset+48:offset+56], 12)
 	binary.LittleEndian.PutUint64(metadata[offset+56:offset+64], 13)
-	binary.LittleEndian.PutUint32(metadata[offset+84:offset+88], 0xa000000c)
-	binary.LittleEndian.PutUint64(metadata[offset+88:offset+96], 42)
+	binary.LittleEndian.PutUint32(metadata[offset+88:offset+92], 0xa000000c)
 	binary.LittleEndian.PutUint16(metadata[offset+96:offset+98], 2)
 	binary.LittleEndian.PutUint16(metadata[offset+98:offset+100], uint16(len(shortName)))
 	binary.LittleEndian.PutUint16(metadata[offset+100:offset+102], uint16(len(name)))
@@ -102,7 +101,7 @@ func TestParseWIMSecurityAndEntryMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entry.name != "Long Name.txt" || entry.shortName != "LONGNA~1.TXT" || entry.attrs != 0x2021 || entry.securityID != 7 || entry.creationTime != 11 || entry.lastAccessTime != 12 || entry.lastWriteTime != 13 || entry.reparseTag != 0xa000000c || entry.hardLink != 42 || entry.streamCount != 2 {
+	if entry.name != "Long Name.txt" || entry.shortName != "LONGNA~1.TXT" || entry.attrs != 0x2421 || entry.securityID != 7 || entry.creationTime != 11 || entry.lastAccessTime != 12 || entry.lastWriteTime != 13 || entry.reparseTag != 0xa000000c || entry.hardLink != 0 || entry.streamCount != 2 {
 		t.Fatalf("entry metadata = %+v", entry)
 	}
 
@@ -114,8 +113,8 @@ func TestParseWIMSecurityAndEntryMetadata(t *testing.T) {
 	record := value.(*starfile.Record)
 	for name, want := range map[string]string{
 		"creation_time":    "11",
-		"file_attributes":  "8225",
-		"hard_link_id":     "42",
+		"file_attributes":  "9249",
+		"hard_link_id":     "0",
 		"last_access_time": "12",
 		"last_write_time":  "13",
 		"name":             `"Long Name.txt"`,

@@ -240,6 +240,8 @@ func (w *Archive) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "apply":
 		return starlark.NewBuiltin("apply", w.applyBuiltin), nil
+	case "entry":
+		return starlark.NewBuiltin("entry", w.entryBuiltin), nil
 	case "files":
 		values := []starlark.Value{starlark.String("/$metadata")}
 		for _, image := range w.images {
@@ -249,7 +251,38 @@ func (w *Archive) Attr(name string) (starlark.Value, error) {
 	}
 	return nil, nil
 }
-func (w *Archive) AttrNames() []string { return []string{"apply", "files"} }
+func (w *Archive) AttrNames() []string { return []string{"apply", "entry", "files"} }
+
+func (w *Archive) entryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs("entry", args, kwargs, "path", &name); err != nil {
+		return nil, err
+	}
+	entry, err := w.lookupPath(name)
+	if err != nil {
+		return nil, err
+	}
+	data := starlark.Value(starlark.None)
+	if entry.hash != ([20]byte{}) {
+		data = w.newFile(entry)
+	}
+	return starfile.NewRecord(starlark.StringDict{
+		"creation_time":    starlark.MakeUint64(entry.creationTime),
+		"data":             data,
+		"directory":        starlark.Bool(entry.isDir),
+		"file_attributes":  starlark.MakeUint(uint(entry.attrs)),
+		"hard_link_id":     starlark.MakeUint64(entry.hardLink),
+		"last_access_time": starlark.MakeUint64(entry.lastAccessTime),
+		"last_write_time":  starlark.MakeUint64(entry.lastWriteTime),
+		"name":             starlark.String(entry.name),
+		"path":             starlark.String(entry.path),
+		"reparse_tag":      starlark.MakeUint(uint(entry.reparseTag)),
+		"security_id":      starlark.MakeUint(uint(entry.securityID)),
+		"sha1":             starlark.Bytes(entry.hash[:]),
+		"short_name":       starlark.String(entry.shortName),
+		"stream_count":     starlark.MakeUint(uint(entry.streamCount)),
+	}), nil
+}
 
 func parseWIMResource(data []byte) wimResource {
 	size := int64(0)
@@ -386,18 +419,26 @@ func parseWIMEntry(data []byte, off int, base string) (entry, error) {
 		return entry{}, fmt.Errorf("wim: invalid directory entry name")
 	}
 	name := utf16LEString(data[nameStart:nameEnd])
+	attrs := binary.LittleEndian.Uint32(data[off+8 : off+12])
+	reparseTag := uint32(0)
+	hardLink := uint64(0)
+	if attrs&0x400 != 0 {
+		reparseTag = binary.LittleEndian.Uint32(data[off+88 : off+92])
+	} else {
+		hardLink = binary.LittleEndian.Uint64(data[off+88 : off+96])
+	}
 	entry := entry{
 		name:           name,
 		path:           path.Join(base, name),
 		shortName:      utf16LEString(data[nameEnd : nameEnd+shortLen]),
-		attrs:          binary.LittleEndian.Uint32(data[off+8 : off+12]),
+		attrs:          attrs,
 		securityID:     binary.LittleEndian.Uint32(data[off+12 : off+16]),
 		subdirOff:      binary.LittleEndian.Uint64(data[off+16 : off+24]),
 		creationTime:   binary.LittleEndian.Uint64(data[off+40 : off+48]),
 		lastAccessTime: binary.LittleEndian.Uint64(data[off+48 : off+56]),
 		lastWriteTime:  binary.LittleEndian.Uint64(data[off+56 : off+64]),
-		reparseTag:     binary.LittleEndian.Uint32(data[off+84 : off+88]),
-		hardLink:       binary.LittleEndian.Uint64(data[off+88 : off+96]),
+		reparseTag:     reparseTag,
+		hardLink:       hardLink,
 		streamCount:    binary.LittleEndian.Uint16(data[off+96 : off+98]),
 		isDir:          binary.LittleEndian.Uint64(data[off+16:off+24]) != 0 || binary.LittleEndian.Uint32(data[off+8:off+12])&0x10 != 0,
 	}
@@ -411,12 +452,14 @@ func (w *Archive) applyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 	source := "/"
 	destination := "/"
 	preserveHardLinks := true
+	preserveReparsePoints := true
 	if err := starlark.UnpackArgs("apply", args, kwargs,
 		"target", &targetValue,
 		"image?", &imageIndex,
 		"source?", &source,
 		"destination?", &destination,
 		"hardlinks?", &preserveHardLinks,
+		"reparse_points?", &preserveReparsePoints,
 	); err != nil {
 		return nil, err
 	}
@@ -445,12 +488,31 @@ func (w *Archive) applyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 	}
 	destination = storage.CleanPath(destination)
 	if !root.isDir {
-		target.PutFile(destination, virtualfs.FileRecord{File: w.newFile(root), Size: root.size})
-		target.SetMetadata(destination, image.virtualMetadata(root, preserveHardLinks))
+		metadata := image.virtualMetadata(root, preserveHardLinks)
+		if root.reparseTag != 0 && preserveReparsePoints {
+			metadata.ReparseTag = root.reparseTag
+			metadata.ReparseData = w.newFile(root)
+			target.PutFile(destination, virtualfs.FileRecord{})
+		} else {
+			metadata.FileAttributes &^= 0x400
+			if root.reparseTag != 0 {
+				target.PutFile(destination, virtualfs.FileRecord{})
+			} else {
+				target.PutFile(destination, virtualfs.FileRecord{File: w.newFile(root), Size: root.size})
+			}
+		}
+		target.SetMetadata(destination, metadata)
 		return starlark.None, nil
 	}
 	target.Mkdir(destination)
-	target.SetMetadata(destination, image.virtualMetadata(root, preserveHardLinks))
+	rootMetadata := image.virtualMetadata(root, preserveHardLinks)
+	if root.reparseTag != 0 && preserveReparsePoints {
+		rootMetadata.ReparseTag = root.reparseTag
+		rootMetadata.ReparseData = w.newFile(root)
+	} else if root.reparseTag != 0 {
+		rootMetadata.FileAttributes &^= 0x400
+	}
+	target.SetMetadata(destination, rootMetadata)
 	type pendingDirectory struct {
 		entry       entry
 		destination string
@@ -465,13 +527,22 @@ func (w *Archive) applyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 		}
 		for _, child := range children {
 			childDestination := path.Join(current.destination, child.name)
+			metadata := image.virtualMetadata(child, preserveHardLinks)
+			if child.reparseTag != 0 && preserveReparsePoints {
+				metadata.ReparseTag = child.reparseTag
+				metadata.ReparseData = w.newFile(child)
+			} else if child.reparseTag != 0 {
+				metadata.FileAttributes &^= 0x400
+			}
 			if child.isDir {
 				target.Mkdir(childDestination)
 				pending = append(pending, pendingDirectory{entry: child, destination: childDestination})
+			} else if child.reparseTag != 0 {
+				target.PutFile(childDestination, virtualfs.FileRecord{})
 			} else {
 				target.PutFile(childDestination, virtualfs.FileRecord{File: w.newFile(child), Size: child.size})
 			}
-			target.SetMetadata(childDestination, image.virtualMetadata(child, preserveHardLinks))
+			target.SetMetadata(childDestination, metadata)
 		}
 	}
 	return starlark.None, nil
@@ -592,10 +663,8 @@ func (w *Archive) readWIMDir(image *image, dir entry) ([]entry, error) {
 		if !validWIMName(entry.name) {
 			break
 		}
-		if !entry.isDir {
-			if resource, ok := w.byHash[string(entry.hash[:])]; ok {
-				entry.size = resource.originalSize
-			}
+		if resource, ok := w.byHash[string(entry.hash[:])]; ok {
+			entry.size = resource.originalSize
 		}
 		entries = append(entries, entry)
 		image.byPath[strings.ToLower(entry.path)] = entry

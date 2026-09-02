@@ -104,8 +104,18 @@ func decodeEVTXTemplateInstance(chunk []byte, start, end, depth int) ([]evtxValu
 	if start < 0 || end > len(chunk) || start+14 > end || chunk[start] != 0x0f || chunk[start+1] != 1 || chunk[start+4] != 0x0c {
 		return nil, "", fmt.Errorf("invalid BinXML template instance at %#x", start)
 	}
-	templateOffset := int(binary.LittleEndian.Uint32(chunk[start+10 : start+14]))
-	valuesOffset := start + 14
+	return decodeEVTXTemplateToken(chunk, start+4, end, depth)
+}
+
+func decodeEVTXTemplateToken(chunk []byte, start, end, depth int) ([]evtxValue, string, error) {
+	if depth > 16 {
+		return nil, "", fmt.Errorf("BinXML template nesting exceeds 16 levels")
+	}
+	if start < 0 || end > len(chunk) || start+10 > end || chunk[start] != 0x0c {
+		return nil, "", fmt.Errorf("invalid BinXML template token at %#x", start)
+	}
+	templateOffset := int(binary.LittleEndian.Uint32(chunk[start+6 : start+10]))
+	valuesOffset := start + 10
 	templateID := ""
 	if templateOffset > 0 && templateOffset+24 <= len(chunk) {
 		templateID = formatPDBGUID(chunk[templateOffset+4 : templateOffset+20])
@@ -220,6 +230,12 @@ func decodeEVTXValue(chunk []byte, offset, length int, typ byte, depth int) (any
 	case 0x21:
 		if length >= 5 && raw[0] == 0x0f && raw[4] == 0x0c {
 			values, _, err := decodeEVTXTemplateInstance(chunk, offset, offset+length, depth+1)
+			if err == nil {
+				return values, nil
+			}
+		}
+		if length >= 10 && raw[0] == 0x0c {
+			values, _, err := decodeEVTXTemplateToken(chunk, offset, offset+length, depth+1)
 			if err == nil {
 				return values, nil
 			}

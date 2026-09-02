@@ -406,6 +406,9 @@ func (s *gdbSessionValue) waitBuiltin(thread *starlark.Thread, _ *starlark.Built
 		default:
 		}
 		if stop.fields != nil {
+			if err := s.selectStoppedThread(ctx, stop.thread); err != nil {
+				return nil, err
+			}
 			registers, err := s.readAllRegisters(ctx)
 			if err == nil {
 				stop.registers = registers
@@ -431,6 +434,9 @@ func (s *gdbSessionValue) waitBuiltin(thread *starlark.Thread, _ *starlark.Built
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+		if err := s.selectStoppedThread(ctx, stop.thread); err != nil {
+			return nil, err
+		}
 		registers, err := s.readAllRegisters(ctx)
 		if err == nil {
 			stop.registers = registers
@@ -443,6 +449,23 @@ func (s *gdbSessionValue) waitBuiltin(thread *starlark.Thread, _ *starlark.Built
 		}
 		return gdbStopValue(stop), nil
 	})
+}
+
+func (s *gdbSessionValue) selectStoppedThread(ctx context.Context, thread string) error {
+	if thread == "" {
+		return nil
+	}
+	value, err := s.execute(ctx, func(wire *gdbWire) (any, bool, error) {
+		reply, err := wire.exchange([]byte("Hg" + thread))
+		return reply, false, err
+	})
+	if err != nil {
+		return err
+	}
+	if reply := string(value.([]byte)); reply != "OK" {
+		return fmt.Errorf("select stopped GDB thread %s: target returned %q", thread, reply)
+	}
+	return nil
 }
 
 func parseGDBStop(packet []byte) gdbStop {

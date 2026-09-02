@@ -99,6 +99,16 @@ def access_allowed_ace(principal, mask, flags = 0):
     output.append(principal)
     return output.bytes()
 
+def mandatory_label_ace(principal, mask, flags = 0):
+    """Returns a SYSTEM_MANDATORY_LABEL_ACE for an integrity-level SID."""
+    output = binary.builder(capacity = 8 + len(principal))
+    output.u8(0x11)
+    output.u8(flags)
+    output.u16le(8 + len(principal))
+    output.u32le(mask)
+    output.append(principal)
+    return output.bytes()
+
 def acl(aces, revision = 2, size = None):
     """Returns an ACL containing aces."""
     content_size = 8
@@ -120,7 +130,7 @@ def acl(aces, revision = 2, size = None):
     output.reserve(size - content_size)
     return output.bytes()
 
-def security_descriptor(owner = None, group = None, dacl = None, sacl = None, control = 0):
+def security_descriptor(owner = None, group = None, dacl = None, sacl = None, control = 0, sacl_first = False):
     """Returns a revision-1 self-relative security descriptor."""
     control |= 0x8000
     if dacl != None:
@@ -131,8 +141,11 @@ def security_descriptor(owner = None, group = None, dacl = None, sacl = None, co
     components = []
     offset = 20
     offsets = {"owner": 0, "group": 0, "sacl": 0, "dacl": 0}
-    # NT5 namespace descriptors place ACLs before owner and group SIDs.
-    for name, value in [("dacl", dacl), ("sacl", sacl), ("owner", owner), ("group", group)]:
+    # NT5 namespace descriptors place ACLs before owner and group SIDs. Some
+    # native filesystem descriptors place the SACL before the DACL, while
+    # registry descriptors commonly use the reverse order.
+    acls = [("sacl", sacl), ("dacl", dacl)] if sacl_first else [("dacl", dacl), ("sacl", sacl)]
+    for name, value in acls + [("owner", owner), ("group", group)]:
         if value != None:
             offsets[name] = offset
             components.append(value)

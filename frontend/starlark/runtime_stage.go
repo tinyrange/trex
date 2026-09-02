@@ -72,6 +72,8 @@ func (c *starlarkStageCache) Hash() (uint32, error) {
 }
 func (c *starlarkStageCache) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "clear":
+		return starlark.NewBuiltin("stage_cache.clear", c.clearBuiltin), nil
 	case "compute":
 		return starlark.NewBuiltin("stage_cache.compute", c.computeBuiltin), nil
 	case "stats":
@@ -85,7 +87,18 @@ func (c *starlarkStageCache) Attr(name string) (starlark.Value, error) {
 	}
 	return nil, nil
 }
-func (c *starlarkStageCache) AttrNames() []string { return []string{"compute", "stats"} }
+func (c *starlarkStageCache) AttrNames() []string { return []string{"clear", "compute", "stats"} }
+
+func (c *starlarkStageCache) clearBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackArgs("stage_cache.clear", args, kwargs); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	count := len(c.entries)
+	c.entries = make(map[stageCacheKey]starlark.Value)
+	c.mu.Unlock()
+	return starlark.MakeInt(count), nil
+}
 
 func stageSourceID(source starlark.Value) (uintptr, error) {
 	value := reflect.ValueOf(source)

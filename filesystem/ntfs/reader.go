@@ -3,6 +3,7 @@ package ntfs
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/tinyrange/trex/compression/lznt1"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"io"
 	"path"
@@ -20,13 +21,15 @@ type ntfsDataRun struct {
 }
 
 type ntfsReadFile struct {
-	name        string
-	volume      starfile.File
-	clusterSize int64
-	size        int64
-	runs        []ntfsDataRun
-	resident    []byte
-	streams     map[string]*ntfsReadFile
+	name                    string
+	volume                  starfile.File
+	clusterSize             int64
+	size                    int64
+	firstVCN                int64
+	runs                    []ntfsDataRun
+	resident                []byte
+	streams                 map[string]*ntfsReadFile
+	compressionUnitClusters int64
 }
 
 func (f *ntfsReadFile) ReadAt(buffer []byte, offset int64) (int, error) {
@@ -46,6 +49,9 @@ func (f *ntfsReadFile) ReadAt(buffer []byte, offset int64) (int, error) {
 			return n, io.EOF
 		}
 		return n, nil
+	}
+	if f.compressionUnitClusters != 0 {
+		return f.readCompressedAt(buffer, offset, wanted)
 	}
 	read := int64(0)
 	logical := int64(0)
@@ -85,6 +91,82 @@ func (f *ntfsReadFile) ReadAt(buffer []byte, offset int64) (int, error) {
 		return int(read), io.EOF
 	}
 	return int(read), nil
+}
+
+func (f *ntfsReadFile) readCompressedAt(buffer []byte, offset, wanted int64) (int, error) {
+	unitSize := f.compressionUnitClusters * f.clusterSize
+	read := int64(0)
+	for read < wanted {
+		position := offset + read
+		unitIndex := position / unitSize
+		unit, err := f.readCompressionUnit(unitIndex)
+		if err != nil {
+			return int(read), err
+		}
+		within := position % unitSize
+		amount := min(wanted-read, int64(len(unit))-within)
+		if amount <= 0 {
+			return int(read), io.ErrUnexpectedEOF
+		}
+		copy(buffer[read:read+amount], unit[within:within+amount])
+		read += amount
+	}
+	if int64(len(buffer)) > wanted {
+		return int(read), io.EOF
+	}
+	return int(read), nil
+}
+
+func (f *ntfsReadFile) readCompressionUnit(index int64) ([]byte, error) {
+	unitClusters := f.compressionUnitClusters
+	unitSize := unitClusters * f.clusterSize
+	unitStart := index * unitClusters
+	expected := min(unitSize, f.size-index*unitSize)
+	if expected <= 0 {
+		return nil, io.EOF
+	}
+	encoded := make([]byte, 0, unitSize)
+	logicalCluster := int64(0)
+	physicalClusters := int64(0)
+	sawSparse := false
+	for _, run := range f.runs {
+		runStart, runEnd := logicalCluster, logicalCluster+run.length
+		logicalCluster = runEnd
+		overlapStart := max(runStart, unitStart)
+		overlapEnd := min(runEnd, unitStart+unitClusters)
+		if overlapStart >= overlapEnd {
+			continue
+		}
+		clusters := overlapEnd - overlapStart
+		if run.sparse {
+			sawSparse = true
+			continue
+		}
+		if sawSparse {
+			return nil, fmt.Errorf("ntfs: compressed unit %d has allocated data after sparse padding", index)
+		}
+		data := make([]byte, clusters*f.clusterSize)
+		volumeOffset := (run.start + overlapStart - runStart) * f.clusterSize
+		if _, err := starfile.ReadFullAt(f.volume, data, volumeOffset); err != nil {
+			return nil, fmt.Errorf("ntfs: read compressed unit %d: %w", index, err)
+		}
+		encoded = append(encoded, data...)
+		physicalClusters += clusters
+	}
+	if physicalClusters == 0 {
+		return make([]byte, expected), nil
+	}
+	if physicalClusters == unitClusters && !sawSparse {
+		return encoded[:expected], nil
+	}
+	if physicalClusters >= unitClusters || !sawSparse {
+		return nil, fmt.Errorf("ntfs: invalid compressed unit %d allocation (%d of %d clusters)", index, physicalClusters, unitClusters)
+	}
+	decoded, err := lznt1.Decode(encoded, int(expected))
+	if err != nil {
+		return nil, fmt.Errorf("ntfs: decompress unit %d: %w", index, err)
+	}
+	return decoded, nil
 }
 
 func (f *ntfsReadFile) WriteAt([]byte, int64) (int, error) {
@@ -143,15 +225,16 @@ func (f *ntfsReadFile) AttrNames() []string {
 }
 
 type ntfsReadNode struct {
-	id       uint64
-	parent   uint64
-	name     string
-	path     string
-	dir      bool
-	file     *ntfsReadFile
-	streams  map[string]*ntfsReadFile
-	links    []ntfsReadLink
-	children []*ntfsReadLink
+	id         uint64
+	parent     uint64
+	name       string
+	path       string
+	dir        bool
+	securityID uint32
+	file       *ntfsReadFile
+	streams    map[string]*ntfsReadFile
+	links      []ntfsReadLink
+	children   []*ntfsReadLink
 }
 
 type ntfsReadLink struct {
@@ -163,12 +246,13 @@ type ntfsReadLink struct {
 }
 
 type ntfsVolume struct {
-	file        starfile.File
-	clusterSize int64
-	recordSize  int64
-	nodes       map[uint64]*ntfsReadNode
-	paths       map[string]*ntfsReadNode
-	files       *starlark.List
+	file                starfile.File
+	clusterSize         int64
+	recordSize          int64
+	nodes               map[uint64]*ntfsReadNode
+	paths               map[string]*ntfsReadNode
+	securityDescriptors map[uint32][]byte
+	files               *starlark.List
 }
 
 func newNTFSVolume(file starfile.File) (*ntfsVolume, error) {
@@ -218,7 +302,14 @@ func newNTFSVolume(file starfile.File) (*ntfsVolume, error) {
 		return nil, fmt.Errorf("ntfs: MFT data attribute not found")
 	}
 	mftFile := &ntfsReadFile{name: "$MFT", volume: file, clusterSize: clusterSize, size: mft.size, runs: mft.runs}
-	volume := &ntfsVolume{file: file, clusterSize: clusterSize, recordSize: recordSize, nodes: make(map[uint64]*ntfsReadNode), paths: make(map[string]*ntfsReadNode)}
+	volume := &ntfsVolume{
+		file:                file,
+		clusterSize:         clusterSize,
+		recordSize:          recordSize,
+		nodes:               make(map[uint64]*ntfsReadNode),
+		paths:               make(map[string]*ntfsReadNode),
+		securityDescriptors: make(map[uint32][]byte),
+	}
 	if err := volume.scanMFT(mftFile, sectorSize); err != nil {
 		return nil, err
 	}
@@ -226,12 +317,15 @@ func newNTFSVolume(file starfile.File) (*ntfsVolume, error) {
 }
 
 type ntfsReadAttribute struct {
-	typ         uint32
-	name        string
-	nonresident bool
-	value       []byte
-	runs        []ntfsDataRun
-	size        int64
+	typ             uint32
+	name            string
+	nonresident     bool
+	value           []byte
+	runs            []ntfsDataRun
+	size            int64
+	firstVCN        int64
+	flags           uint16
+	compressionUnit uint16
 }
 
 func applyNTFSReadFixup(data []byte, sectorSize int64, description string) error {
@@ -283,7 +377,7 @@ func parseNTFSReadAttributes(record []byte, clusterSize int64) ([]ntfsReadAttrib
 		if err != nil {
 			return nil, err
 		}
-		attribute := ntfsReadAttribute{typ: typ, name: name, nonresident: raw[8] != 0}
+		attribute := ntfsReadAttribute{typ: typ, name: name, nonresident: raw[8] != 0, flags: binary.LittleEndian.Uint16(raw[12:14])}
 		if !attribute.nonresident {
 			valueLength := int(binary.LittleEndian.Uint32(raw[16:20]))
 			valueOffset := int(binary.LittleEndian.Uint16(raw[20:22]))
@@ -300,7 +394,16 @@ func parseNTFSReadAttributes(record []byte, clusterSize int64) ([]ntfsReadAttrib
 			if runOffset < 0 || runOffset >= len(raw) {
 				return nil, fmt.Errorf("invalid data-run offset")
 			}
+			firstVCN := binary.LittleEndian.Uint64(raw[16:24])
+			if firstVCN > 1<<63-1 {
+				return nil, fmt.Errorf("invalid nonresident starting VCN")
+			}
+			attribute.firstVCN = int64(firstVCN)
 			attribute.size = int64(binary.LittleEndian.Uint64(raw[48:56]))
+			attribute.compressionUnit = binary.LittleEndian.Uint16(raw[34:36])
+			if attribute.flags&0x0001 != 0 && (attribute.compressionUnit == 0 || attribute.compressionUnit > 16) {
+				return nil, fmt.Errorf("invalid NTFS compression-unit shift %d", attribute.compressionUnit)
+			}
 			attribute.runs, err = decodeNTFSDataRuns(raw[runOffset:], clusterSize)
 			if err != nil {
 				return nil, err
@@ -405,6 +508,12 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 		node := &ntfsReadNode{id: uint64(id), dir: binary.LittleEndian.Uint16(record[22:24])&ntfsFileDir != 0}
 		for _, attribute := range attributes {
 			switch attribute.typ {
+			case ntfsAttrStandardInformation:
+				// NTFS 3.0 and later store the $Secure descriptor ID at
+				// offset 52 in the extended $STANDARD_INFORMATION value.
+				if len(attribute.value) >= 56 {
+					node.securityID = binary.LittleEndian.Uint32(attribute.value[52:56])
+				}
 			case ntfsAttrFileName:
 				if len(attribute.value) < 66 {
 					continue
@@ -431,14 +540,23 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 					node.links = append(node.links, ntfsReadLink{node: node, parent: parent, name: name, namespace: namespace})
 				}
 			case ntfsAttrData:
-				file := &ntfsReadFile{name: node.name, volume: v.file, clusterSize: v.clusterSize, size: attribute.size, resident: attribute.value, runs: attribute.runs}
+				file := &ntfsReadFile{name: node.name, volume: v.file, clusterSize: v.clusterSize, size: attribute.size, firstVCN: attribute.firstVCN, resident: attribute.value, runs: attribute.runs}
+				if attribute.flags&0x0001 != 0 {
+					file.compressionUnitClusters = int64(1) << attribute.compressionUnit
+				}
 				if attribute.name == "" {
-					node.file = file
+					node.file, err = mergeNTFSReadFileExtents(node.file, file)
+					if err != nil {
+						return fmt.Errorf("ntfs: merge data extents for record %d: %w", id, err)
+					}
 				} else {
 					if node.streams == nil {
 						node.streams = make(map[string]*ntfsReadFile)
 					}
-					node.streams[attribute.name] = file
+					node.streams[attribute.name], err = mergeNTFSReadFileExtents(node.streams[attribute.name], file)
+					if err != nil {
+						return fmt.Errorf("ntfs: merge %s extents for record %d: %w", attribute.name, id, err)
+					}
 				}
 			}
 		}
@@ -465,16 +583,31 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 				link.node = base
 				mergeNTFSReadLink(base, link)
 			}
-			if base.file == nil && extension.file != nil {
-				base.file = extension.file
+			if extension.file != nil {
+				var err error
+				base.file, err = mergeNTFSReadFileExtents(base.file, extension.file)
+				if err != nil {
+					return fmt.Errorf("ntfs: merge extension record for %d: %w", baseID, err)
+				}
 			}
 			if len(extension.streams) != 0 {
 				if base.streams == nil {
 					base.streams = make(map[string]*ntfsReadFile)
 				}
 				for name, stream := range extension.streams {
-					base.streams[name] = stream
+					var err error
+					base.streams[name], err = mergeNTFSReadFileExtents(base.streams[name], stream)
+					if err != nil {
+						return fmt.Errorf("ntfs: merge extension stream %s for %d: %w", name, baseID, err)
+					}
 				}
+			}
+		}
+	}
+	if secure := v.nodes[9]; secure != nil {
+		if stream := secure.streams["$SDS"]; stream != nil {
+			if err := v.readSecurityDescriptors(stream); err != nil {
+				return fmt.Errorf("ntfs: read $Secure:$SDS: %w", err)
 			}
 		}
 	}
@@ -526,6 +659,103 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 	return nil
 }
 
+func mergeNTFSReadFileExtents(existing, added *ntfsReadFile) (*ntfsReadFile, error) {
+	if existing == nil {
+		return added, nil
+	}
+	if added == nil {
+		return existing, nil
+	}
+	if existing.resident != nil || added.resident != nil {
+		return nil, fmt.Errorf("resident data has multiple extents")
+	}
+	if existing.clusterSize != added.clusterSize || existing.volume != added.volume || existing.compressionUnitClusters != added.compressionUnitClusters {
+		return nil, fmt.Errorf("incompatible nonresident extents")
+	}
+	existingClusters := ntfsReadRunClusters(existing.runs)
+	addedClusters := ntfsReadRunClusters(added.runs)
+	existingEnd := existing.firstVCN + existingClusters
+	addedEnd := added.firstVCN + addedClusters
+	combined := existing
+	switch {
+	case added.firstVCN >= existingEnd:
+		if gap := added.firstVCN - existingEnd; gap != 0 {
+			combined.runs = append(combined.runs, ntfsDataRun{length: gap, sparse: true})
+		}
+		combined.runs = append(combined.runs, added.runs...)
+	case existing.firstVCN >= addedEnd:
+		runs := append([]ntfsDataRun(nil), added.runs...)
+		if gap := existing.firstVCN - addedEnd; gap != 0 {
+			runs = append(runs, ntfsDataRun{length: gap, sparse: true})
+		}
+		combined.runs = append(runs, existing.runs...)
+		combined.firstVCN = added.firstVCN
+	default:
+		return nil, fmt.Errorf("overlapping VCN ranges %#x-%#x and %#x-%#x", existing.firstVCN, existingEnd, added.firstVCN, addedEnd)
+	}
+	if added.size > combined.size {
+		combined.size = added.size
+	}
+	return combined, nil
+}
+
+func ntfsReadRunClusters(runs []ntfsDataRun) int64 {
+	var clusters int64
+	for _, run := range runs {
+		clusters += run.length
+	}
+	return clusters
+}
+
+func (v *ntfsVolume) readSecurityDescriptors(stream *ntfsReadFile) error {
+	const headerSize = int64(20)
+	for pairBase := int64(0); pairBase < stream.Size(); pairBase += 2 * ntfsSecureMirrorBase {
+		segmentEnd := min(pairBase+ntfsSecureMirrorBase, stream.Size())
+		for offset := pairBase; offset+headerSize <= segmentEnd; {
+			header := make([]byte, headerSize)
+			if _, err := starfile.ReadFullAt(stream, header, offset); err != nil {
+				return err
+			}
+			if bytesAllZero(header) {
+				break
+			}
+			securityID := binary.LittleEndian.Uint32(header[4:8])
+			storedOffset := binary.LittleEndian.Uint64(header[8:16])
+			entryLength := int64(binary.LittleEndian.Uint32(header[16:20]))
+			if storedOffset != uint64(offset) || securityID == 0 || entryLength < headerSize || offset+entryLength > segmentEnd {
+				// Entries are contiguous within each primary segment. Windows
+				// does not necessarily clear the remainder when a security-store
+				// transaction shortens it, so stale nonzero tail bytes terminate
+				// the live sequence just like an all-zero header.
+				break
+			}
+			descriptor := make([]byte, entryLength-headerSize)
+			if _, err := starfile.ReadFullAt(stream, descriptor, offset+headerSize); err != nil {
+				return err
+			}
+			if !isSelfRelativeSecurityDescriptor(descriptor) {
+				return fmt.Errorf("invalid security descriptor %#x at %#x", securityID, offset)
+			}
+			v.securityDescriptors[securityID] = descriptor
+			offset += (entryLength + 15) &^ 15
+		}
+	}
+	return nil
+}
+
+func bytesAllZero(value []byte) bool {
+	for _, b := range value {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func isSelfRelativeSecurityDescriptor(descriptor []byte) bool {
+	return len(descriptor) >= 20 && descriptor[0] == 1 && binary.LittleEndian.Uint16(descriptor[2:4])&0x8000 != 0
+}
+
 func mergeNTFSReadLink(node *ntfsReadNode, link ntfsReadLink) {
 	for index := range node.links {
 		if node.links[index].parent != link.parent {
@@ -557,7 +787,7 @@ func (v *ntfsVolume) Type() string          { return "ntfs" }
 func (v *ntfsVolume) Freeze()               {}
 func (v *ntfsVolume) Truth() starlark.Bool  { return starlark.True }
 func (v *ntfsVolume) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: %s", v.Type()) }
-func (v *ntfsVolume) AttrNames() []string   { return []string{"files", "find"} }
+func (v *ntfsVolume) AttrNames() []string   { return []string{"files", "find", "metadata"} }
 func (v *ntfsVolume) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "files":
@@ -574,8 +804,33 @@ func (v *ntfsVolume) Attr(name string) (starlark.Value, error) {
 			}
 			return value, nil
 		}), nil
+	case "metadata":
+		return starlark.NewBuiltin("metadata", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var name string
+			if err := starlark.UnpackArgs("metadata", args, kwargs, "path", &name); err != nil {
+				return nil, err
+			}
+			node := v.lookup(name)
+			if node == nil {
+				return starlark.None, nil
+			}
+			descriptor := starlark.Value(starlark.None)
+			if raw, ok := v.securityDescriptors[node.securityID]; ok {
+				descriptor = starlark.Bytes(raw)
+			}
+			return starfile.NewRecord(starlark.StringDict{
+				"directory":           starlark.Bool(node.dir),
+				"path":                starlark.String(node.path),
+				"security_descriptor": descriptor,
+				"security_id":         starlark.MakeUint64(uint64(node.securityID)),
+			}), nil
+		}), nil
 	}
 	return nil, nil
+}
+
+func (v *ntfsVolume) lookup(name string) *ntfsReadNode {
+	return v.paths[strings.ToLower(path.Clean("/"+strings.TrimPrefix(strings.ReplaceAll(name, "\\", "/"), "/")))]
 }
 
 func (v *ntfsVolume) Get(key starlark.Value) (starlark.Value, bool, error) {
@@ -583,7 +838,7 @@ func (v *ntfsVolume) Get(key starlark.Value) (starlark.Value, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
-	node := v.paths[strings.ToLower(path.Clean("/"+strings.TrimPrefix(strings.ReplaceAll(name, "\\", "/"), "/")))]
+	node := v.lookup(name)
 	if node == nil {
 		return nil, false, nil
 	}

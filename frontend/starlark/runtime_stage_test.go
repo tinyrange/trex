@@ -51,6 +51,13 @@ func TestStageCacheReusesAndFreezesResults(t *testing.T) {
 	if stats.Values["hits"].String() != "1" || stats.Values["misses"].String() != "2" {
 		t.Fatalf("stage cache stats = %s", stats)
 	}
+	cleared, err := cache.clearBuiltin(thread, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.String() != "2" || len(cache.entries) != 0 {
+		t.Fatalf("stage cache clear returned %s with %d retained entries", cleared, len(cache.entries))
+	}
 }
 
 func TestRuntimeStatsReportsBoundedCacheMetrics(t *testing.T) {

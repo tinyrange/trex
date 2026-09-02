@@ -115,6 +115,7 @@ _KERNEL_SIGNATURES = {
     "getfileattributesw": 1,
     "getfileattributesexa": 3,
     "getfileattributesexw": 3,
+    "getfileinformationbyhandle": 2,
     "getfilesize": 2,
     "getfilesizeex": 2,
     "getfiletime": 4,
@@ -226,6 +227,7 @@ _KERNEL_SIGNATURES = {
     "initializecriticalsectionandspincount": 2,
     "initializecriticalsectionex": 3,
     "initializeconditionvariable": 1,
+    "initializesrwlock": 1,
     "isdbcsleadbyte": 1,
     "isbadcodeptr": 1,
     "isbadreadptr": 2,
@@ -2756,6 +2758,27 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write(args[1], encoded.bytes())
             state["last_error"] = 0
             return 1
+        if name == "getfileinformationbyhandle":
+            opened = file_handle(args[0])
+            if opened == None or not args[1]:
+                state["last_error"] = 6 if opened == None else 87
+                return 0
+            size = len(file_data(opened["path"]))
+            drive = opened["path"][:2].upper() if len(opened["path"]) >= 2 and opened["path"][1] == ":" else ""
+            serial = int(volume_facts.get(drive, {}).get("serial", 0))
+            information = binary.builder(capacity = 52)
+            information.u32le(0x80)  # FILE_ATTRIBUTE_NORMAL
+            information.reserve(24)  # creation, access, and write FILETIMEs
+            information.u32le(serial)
+            information.u32le((size >> 32) & 0xffffffff)
+            information.u32le(size & 0xffffffff)
+            information.u32le(1)  # link count
+            information.u32le(0)
+            information.u32le(0)
+            machine.write(args[1], information.bytes())
+            state["file_queries"].append({"api": name, "path": opened["path"], "size": size})
+            state["last_error"] = 0
+            return 1
         if name in ["getdrivetypea", "getdrivetypew"]:
             target = file_path(machine, args[0], name.endswith("w")) if args[0] else ""
             if target.startswith("\\\\"):
@@ -4124,6 +4147,10 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         if name == "initializeconditionvariable":
             machine.write_u32le(args[0], 0)
             state["condition_variables"][args[0]] = 0
+            return None
+        if name == "initializesrwlock":
+            machine.write_u32le(args[0], 0)
+            state["critical_sections"][args[0]] = {"owner": None, "depth": 0}
             return None
         if name in ["wakeconditionvariable", "wakeallconditionvariable"]:
             state["condition_variables"][args[0]] = state["condition_variables"].get(args[0], 0) + 1
@@ -7481,6 +7508,7 @@ def netapi_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], pr
         "dsrolefreememory": 1,
         "dsrolegetprimarydomaininformation": 3,
         "netapibufferfree": 1,
+        "netgetjoininformation": 3,
         "netlocalgroupadd": 4,
         "netlocalgroupgetmembers": 8,
     }
@@ -7516,6 +7544,18 @@ def netapi_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], pr
             machine.write_u32le(args[2], address)
             if len(state["actions"]) < 256:
                 state["actions"].append({"api": name, "level": args[1], "role": role, "domain": domain})
+            return 0
+        if name == "netgetjoininformation":
+            if not args[1] or not args[2]:
+                return 87  # ERROR_INVALID_PARAMETER
+            joined_name = domain if domain else "WORKGROUP"
+            value = binary.encode(joined_name, encoding = "utf16le", nul = True)
+            address = machine.allocate(value = value, name = "NetGetJoinInformation name")
+            state["allocations"][address] = len(value)
+            machine.write_u32le(args[1], address)
+            machine.write_u32le(args[2], 3 if domain else 2)  # NetSetupDomainName / NetSetupWorkgroupName
+            if len(state["actions"]) < 256:
+                state["actions"].append({"api": name, "name": joined_name, "status": 3 if domain else 2})
             return 0
         if name == "netlocalgroupadd":
             if args[1] not in [0, 1] or not args[2]:
@@ -7690,7 +7730,7 @@ def winsock_plugin():
             # scope inspect this fixed WinSock 1.1 prefix only.
             event.machine.write_u16le(event.args[1], requested)
             event.machine.write_u16le(event.args[1] + 2, 0x0101)
-            event.machine.write(event.args[1] + 4, b"TinyRangeX WinSock 1.1\x00")
+            event.machine.write(event.args[1] + 4, b"trex WinSock 1.1\x00")
             state["started"] = True
             state["last_error"] = 0
             return 0

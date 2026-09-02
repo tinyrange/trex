@@ -5756,6 +5756,10 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		m.direction = false
 	case x86asm.STD:
 		m.direction = true
+	case x86asm.LFENCE, x86asm.MFENCE, x86asm.SFENCE:
+		// The execution engine is single-threaded and completes each memory
+		// access before advancing EIP, so all three architectural fences are
+		// already satisfied by its ordering model.
 	case x86asm.STOSB, x86asm.STOSW, x86asm.STOSD:
 		width := 1
 		if instruction.Op == x86asm.STOSW {

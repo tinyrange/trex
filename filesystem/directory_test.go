@@ -1,10 +1,11 @@
 package filesystem
 
 import (
-	starfile "github.com/tinyrange/trex/storage/star"
+	"bytes"
 	"io"
 	"testing"
 
+	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
 
@@ -34,6 +35,25 @@ func TestVirtualDirectoryFind(t *testing.T) {
 	}
 	if missing != starlark.None {
 		t.Fatalf("find(missing) = %v, want None", missing)
+	}
+}
+
+func TestVirtualDirectorySetSecurity(t *testing.T) {
+	dir := New()
+	dir.Mkdir("/secured")
+	descriptor := make([]byte, 20)
+	descriptor[0] = 1
+	descriptor[2] = 0x00
+	descriptor[3] = 0x80
+	if err := dir.SetSecurity("/secured", descriptor); err != nil {
+		t.Fatal(err)
+	}
+	descriptor[0] = 2
+	if got := dir.Snapshot().Metadata["/secured"].SecurityDescriptor; !bytes.Equal(got, append([]byte{1}, descriptor[1:]...)) {
+		t.Fatalf("security descriptor = %x", got)
+	}
+	if err := dir.SetSecurity("/missing", descriptor); err == nil {
+		t.Fatal("SetSecurity accepted a missing path")
 	}
 }
 

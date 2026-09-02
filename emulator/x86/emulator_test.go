@@ -160,6 +160,22 @@ func TestEmulatorX86PrefetchIsNonFaultingHint(t *testing.T) {
 	}
 }
 
+func TestEmulatorX86MemoryFencesPreserveSequentialExecution(t *testing.T) {
+	// mov eax,42; lfence; mfence; sfence; ret
+	machine := newRawX86TestMachine(t, starlark.Bytes("\xb8\x2a\x00\x00\x00\x0f\xae\xe8\x0f\xae\xf0\x0f\xae\xf8\xc3"), nil)
+	resultValue, err := machine.run(&starlark.Thread{Name: "emulator-memory-fence-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := resultValue.(*starlarkRecord)
+	if got := recordString(t, result, "reason"); got != "return" {
+		t.Fatalf("reason = %q, detail = %s", got, recordString(t, result, "detail"))
+	}
+	if got := recordUint32(t, result, "value"); got != 42 {
+		t.Fatalf("value = %d, want 42", got)
+	}
+}
+
 func TestEmulatorX86PackedDwordEquality(t *testing.T) {
 	// pcmpeqd xmm0,xmm0; movd eax,xmm0; ret
 	machine := newRawX86TestMachine(t, starlark.Bytes("\x66\x0f\x76\xc0\x66\x0f\x7e\xc0\xc3"), nil)

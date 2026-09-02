@@ -160,6 +160,7 @@ type ntfsNode struct {
 	children           []*ntfsDirectoryLink
 	attrs              filesystemapi.Attributes
 	metadata           filesystemapi.Metadata
+	reparseData        []byte
 	securityID         uint32
 	systemKind         string
 	linkCount          uint16
@@ -243,6 +244,8 @@ type ntfsBuild struct {
 	secureHashIndex ntfsSecurityIndex
 	secureIDLCN     int64
 	secureHashLCN   int64
+	reparseIndex    ntfsSecurityIndex
+	reparseLCN      int64
 	rootSecurity    []byte
 	rootSecurityLCN int64
 }
@@ -299,6 +302,9 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 	}
 	if b.modern() {
 		if err := b.prepareSecurity(); err != nil {
+			return nil, err
+		}
+		if err := b.prepareReparseIndex(); err != nil {
 			return nil, err
 		}
 	}
@@ -365,6 +371,9 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 		if len(b.secureHashIndex.blocks) > 0 {
 			b.secureHashLCN = b.allocate(fsinternal.CeilDiv(int64(len(b.secureHashIndex.blocks)), ntfsCluster))
 		}
+		if len(b.reparseIndex.blocks) > 0 {
+			b.reparseLCN = b.allocate(fsinternal.CeilDiv(int64(len(b.reparseIndex.blocks)), ntfsCluster))
+		}
 	}
 	b.bitmapSize = fsinternal.CeilDiv(size/ntfsCluster, 8)
 	b.nodes[0].size = b.mftRecords * ntfsRecordSize
@@ -418,6 +427,9 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 		}
 		if len(b.secureHashIndex.blocks) > 0 {
 			extents = append(extents, filesystemapi.ExtentSpec{Start: b.secureHashLCN * ntfsCluster, Size: int64(len(b.secureHashIndex.blocks)), Data: b.secureHashIndex.blocks})
+		}
+		if len(b.reparseIndex.blocks) > 0 {
+			extents = append(extents, filesystemapi.ExtentSpec{Start: b.reparseLCN * ntfsCluster, Size: int64(len(b.reparseIndex.blocks)), Data: b.reparseIndex.blocks})
 		}
 	}
 	for _, node := range b.nodes {
@@ -655,6 +667,19 @@ func (b *ntfsBuild) importDirectory(dir *filesystemapi.Directory) error {
 		name = storage.CleanPath(name)
 		if node := byPath[strings.ToLower(name)]; node != nil {
 			node.metadata = metadata
+			if metadata.ReparseTag != 0 {
+				if metadata.ReparseData == nil {
+					return fmt.Errorf("ntfs: reparse point %q has no data", name)
+				}
+				data, err := starfile.ReadAll(metadata.ReparseData)
+				if err != nil {
+					return fmt.Errorf("ntfs: read reparse point %q: %w", name, err)
+				}
+				if len(data) > 0x3ff8 {
+					return fmt.Errorf("ntfs: reparse point %q data exceeds 16376 bytes", name)
+				}
+				node.reparseData = data
+			}
 			if node.parent != nil {
 				for _, link := range node.parent.children {
 					if link.node == node {
@@ -1170,6 +1195,62 @@ func ntfsEmptyIndexRoot(collation uint32) []byte {
 	return ntfsMetadataIndexRoot(collation)
 }
 
+func (b *ntfsBuild) prepareReparseIndex() error {
+	nodes := make([]*ntfsNode, 0)
+	for _, node := range b.nodes {
+		if node.metadata.ReparseTag != 0 {
+			nodes = append(nodes, node)
+		}
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].metadata.ReparseTag != nodes[j].metadata.ReparseTag {
+			return nodes[i].metadata.ReparseTag < nodes[j].metadata.ReparseTag
+		}
+		return nodes[i].id < nodes[j].id
+	})
+	entries := make([][]byte, len(nodes))
+	for index, node := range nodes {
+		entries[index] = ntfsReparseIndexEntry(node)
+	}
+	if len(entries) == 0 {
+		b.reparseIndex.rootValue = ntfsEmptyIndexRoot(0x13)
+		return nil
+	}
+	const blockEntryCapacity = int(ntfsIndexSize) - 0x58
+	entryBytes := joinBytes(append(entries, ntfsMetadataIndexEndEntry()))
+	if len(entryBytes) > blockEntryCapacity {
+		return fmt.Errorf("ntfs: %d reparse points exceed one $R index block", len(entries))
+	}
+	b.reparseIndex.rootValue = ntfsMetadataAllocatedIndexRoot(0x13, 0)
+	b.reparseIndex.blocks = ntfsIndexBlock(0, append(entries, ntfsMetadataIndexEndEntry()), false)
+	b.reparseIndex.bitmap = make([]byte, 8)
+	b.reparseIndex.bitmap[0] = 1
+	return nil
+}
+
+func ntfsReparseIndexEntry(node *ntfsNode) []byte {
+	entry := make([]byte, 32)
+	binary.LittleEndian.PutUint16(entry[8:10], uint16(len(entry)))
+	binary.LittleEndian.PutUint16(entry[10:12], 12)
+	binary.LittleEndian.PutUint32(entry[16:20], node.metadata.ReparseTag)
+	binary.LittleEndian.PutUint64(entry[20:28], ntfsFileReference(node.id))
+	return entry
+}
+
+func ntfsMetadataAllocatedIndexRoot(collation uint32, childVCN uint64) []byte {
+	end := ntfsIndexEndEntry(true, childVCN)
+	value := make([]byte, 32+len(end))
+	binary.LittleEndian.PutUint32(value[4:8], collation)
+	binary.LittleEndian.PutUint32(value[8:12], uint32(ntfsIndexSize))
+	value[12] = byte(ntfsIndexSize / ntfsCluster)
+	binary.LittleEndian.PutUint32(value[16:20], 16)
+	binary.LittleEndian.PutUint32(value[20:24], uint32(16+len(end)))
+	binary.LittleEndian.PutUint32(value[24:28], uint32(16+len(end)))
+	value[28] = ntfsIndexNode
+	copy(value[32:], end)
+	return value
+}
+
 func ntfsSecurityHashIndexRoot(hash, securityID uint32, offset uint64, length uint32) []byte {
 	entry := make([]byte, 48)
 	binary.LittleEndian.PutUint16(entry[0:2], 24)
@@ -1383,8 +1464,25 @@ func (b *ntfsBuild) mftRecord(node *ntfsNode) ([]byte, error) {
 	case "object_id":
 		attrs = append(attrs, ntfsResidentAttr(ntfsAttrIndexRoot, "$O", ntfsEmptyIndexRoot(0x13)))
 	case "reparse":
-		attrs = append(attrs, ntfsResidentAttr(ntfsAttrIndexRoot, "$R", ntfsEmptyIndexRoot(0x13)))
+		root := b.reparseIndex.rootValue
+		if len(root) == 0 {
+			root = ntfsEmptyIndexRoot(0x13)
+		}
+		attrs = append(attrs, ntfsResidentAttr(ntfsAttrIndexRoot, "$R", root))
+		if len(b.reparseIndex.blocks) > 0 {
+			attrs = append(attrs,
+				ntfsNonResidentAttr(ntfsAttrIndexAllocation, "$R", b.reparseLCN, int64(len(b.reparseIndex.blocks))),
+				ntfsResidentAttr(ntfsAttrBitmap, "$R", b.reparseIndex.bitmap),
+			)
+		}
 	default:
+		if node.metadata.ReparseTag != 0 {
+			value := make([]byte, 8+len(node.reparseData))
+			binary.LittleEndian.PutUint32(value[0:4], node.metadata.ReparseTag)
+			binary.LittleEndian.PutUint16(value[4:6], uint16(len(node.reparseData)))
+			copy(value[8:], node.reparseData)
+			attrs = append(attrs, ntfsResidentAttr(ntfsAttrReparsePoint, "", value))
+		}
 		switch node.id {
 		case 0:
 			attrs = append(attrs, ntfsNonResidentAttr(ntfsAttrData, "", b.mftLCN, b.mftRecords*ntfsRecordSize))
