@@ -9638,10 +9638,12 @@ def shell_plugin(module_path, kernel = None):
             value = _format_win32(machine, format, args[3:], False)[:max(0, args[1] - 1)]
             _write_string(machine, args[0], value, False)
             return len(value)
-        if function == "strcatbuffa":
-            left = machine.read_cstring(args[0], encoding = "ascii")
-            right = machine.read_cstring(args[1], encoding = "ascii")
-            _write_string(machine, args[0], (left + right)[:max(0, args[2] - 1)], False)
+        if function in ["strcatbuffa", "strncata", "strncatw"]:
+            wide = function.endswith("w")
+            encoding = "utf16le" if wide else "ascii"
+            left = machine.read_cstring(args[0], encoding = encoding)
+            right = machine.read_cstring(args[1], encoding = encoding)
+            _write_string(machine, args[0], (left + right)[:max(0, args[2] - 1)], wide)
             return args[0]
         if function in ["shreggetboolusvaluea", "shreggetboolusvaluew"]:
             return args[3]
@@ -10207,6 +10209,31 @@ def shell_plugin(module_path, kernel = None):
             wide = function.endswith("w")
             value = machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
             return 1 if value.startswith("\\\\") else 0
+        if function in ["pathisurla", "pathisurlw"]:
+            if not args[0]:
+                return 0
+            wide = function.endswith("w")
+            value = machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
+            colon = value.find(":")
+            if colon <= 0:
+                return 0
+            # A drive-qualified DOS path is not a URL. Without this check,
+            # the single-letter drive name also satisfies the URI scheme
+            # grammar below.
+            if colon == 1 and value[colon + 1:colon + 2] in ["\\", "/"]:
+                return 0
+            scheme = value[:colon]
+            first = scheme[0:1].lower()
+            if first < "a" or first > "z":
+                return 0
+            index = 1
+            while index < len(scheme):
+                character = scheme[index:index + 1]
+                lower = character.lower()
+                if not ((lower >= "a" and lower <= "z") or (character >= "0" and character <= "9") or character in ["+", "-", "."]):
+                    return 0
+                index += 1
+            return 1
         if function in ["pathisuncservera", "pathisuncserverw"]:
             wide = function.endswith("w")
             value = machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii").replace("/", "\\")
@@ -10233,6 +10260,17 @@ def shell_plugin(module_path, kernel = None):
             if kernel != None:
                 kernel.state["local_allocations"][address] = len(data)
             return address
+        if function in ["shstrdupa", "shstrdupw"]:
+            if not args[0] or not args[1]:
+                return 0x80070057  # E_INVALIDARG
+            wide = function.endswith("w")
+            value = machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
+            data = binary.encode(value, encoding = "utf16le" if wide else "ascii", nul = True)
+            address = machine.allocate(value = data, name = function)
+            machine.write_u32le(args[1], address)
+            if kernel != None:
+                kernel.state["local_allocations"][address] = len(data)
+            return 0
         if function in ["strrettobufa", "strrettobufw"]:
             wide = function.endswith("w")
             if not args[0] or not args[2] or args[3] <= 0:
@@ -10250,13 +10288,14 @@ def shell_plugin(module_path, kernel = None):
                 return 0x80070057
             _write_string(machine, args[2], value[:args[3] - 1], wide, args[3])
             return 0
-        if function in ["strcmpia", "strcmpnia", "strcmpiw", "strcmpniw"]:
+        if function in ["strcmpa", "strcmpw", "strcmpia", "strcmpnia", "strcmpiw", "strcmpniw"]:
             encoding = "utf16le" if function.endswith("w") else "ascii"
             left = machine.read_cstring(args[0], encoding = encoding)
             right = machine.read_cstring(args[1], encoding = encoding)
             if function in ["strcmpnia", "strcmpniw"]:
                 left, right = left[:args[2]], right[:args[2]]
-            left, right = left.lower(), right.lower()
+            if function in ["strcmpia", "strcmpnia", "strcmpiw", "strcmpniw"]:
+                left, right = left.lower(), right.lower()
             return -1 if left < right else (1 if left > right else 0)
         if function == "strchrw":
             value = machine.read_cstring(args[0], encoding = "utf16le")
@@ -10333,6 +10372,45 @@ def shell_plugin(module_path, kernel = None):
             # Registration only uses this private query to select optional
             # machine-specific tuning. Report no special machine flags.
             return 0
+        if function == 2:  # ParseURLW
+            if not args[0] or not args[1] or machine.read_u32le(args[1]) != 24:
+                return 0x80070057  # E_INVALIDARG
+            value = machine.read_cstring(args[0], encoding = "utf16le")
+            colon = value.find(":")
+            if colon <= 0:
+                return 0x80041001
+            scheme_name = value[:colon].lower()
+            schemes = {
+                "ftp": 1,
+                "http": 2,
+                "gopher": 3,
+                "mailto": 4,
+                "news": 5,
+                "nntp": 6,
+                "telnet": 7,
+                "wais": 8,
+                "file": 9,
+                "mk": 10,
+                "https": 11,
+                "shell": 12,
+                "snews": 13,
+                "local": 14,
+                "javascript": 15,
+                "vbscript": 16,
+                "about": 17,
+                "res": 18,
+            }
+            suffix_index = colon + 1
+            if scheme_name == "file" and value[suffix_index:suffix_index + 2] == "//":
+                suffix_index += 2
+                if value[suffix_index:suffix_index + 1] == "/":
+                    suffix_index += 1
+            machine.write_u32le(args[1] + 4, args[0])
+            machine.write_u32le(args[1] + 8, colon)
+            machine.write_u32le(args[1] + 12, args[0] + suffix_index * 2)
+            machine.write_u32le(args[1] + 16, len(value) - suffix_index)
+            machine.write_u32le(args[1] + 20, schemes.get(scheme_name, 0))
+            return 0
         if function == 169:  # SHReleaseThreadRef
             # Win98's implementation accepts an IUnknown **, releases the
             # referenced object, and clears the caller's slot. Registration
@@ -10342,14 +10420,51 @@ def shell_plugin(module_path, kernel = None):
             if args[0]:
                 machine.write_u32le(args[0], 0)
             return 0
+        if function == 199:  # IUnknown_Set
+            # The native helper releases the old interface, AddRefs the new
+            # interface, and stores it. Registration COM objects are modeled
+            # values rather than executable vtables, so only the observable
+            # pointer replacement is required here.
+            if args[1]:
+                machine.write_u32le(args[1], args[0])
+            return None
         if function == 476:  # SHGetObjectCompatFlags
             # Setup's registry has no per-CLSID ShellCompatibility overrides.
             # The native API therefore reports an empty compatibility mask.
             return 0
+        if function == 458:  # GetLongPathNameA compatibility wrapper
+            # Windows ME's SHLWAPI resolves GetLongPathNameA dynamically and
+            # otherwise supplies its own implementation. The registration
+            # environment does not synthesize 8.3 aliases, so an existing
+            # pathname is already its long form.
+            if not args[0]:
+                if kernel != None:
+                    kernel.state["last_error"] = 87  # ERROR_INVALID_PARAMETER
+                return 0
+            value = machine.read_cstring(args[0], encoding = "ascii")
+            required = len(value) + 1
+            if not args[1] or args[2] < required:
+                if kernel != None:
+                    kernel.state["last_error"] = 122  # ERROR_INSUFFICIENT_BUFFER
+                return required
+            _write_string(machine, args[1], value, False, args[2])
+            if kernel != None:
+                kernel.state["last_error"] = 0
+            return len(value)
         return 0
 
     def install(machine):
+        machine.provide_export(lambda event: callback(event, 2), module = "shlwapi.dll", ordinal = 2, argc = 2)
+        machine.provide_export(lambda event: callback(event, 199), module = "shlwapi.dll", ordinal = 199, argc = 2)
         machine.provide_export(lambda event: callback(event, "pathisunca"), module = "shlwapi.dll", name = "PathIsUNCA", argc = 1)
+        machine.provide_export(lambda event: callback(event, "pathisurla"), module = "shlwapi.dll", name = "PathIsURLA", argc = 1)
+        machine.provide_export(lambda event: callback(event, "pathisurlw"), module = "shlwapi.dll", name = "PathIsURLW", argc = 1)
+        machine.provide_export(lambda event: callback(event, "strcmpa"), module = "shlwapi.dll", name = "StrCmpA", argc = 2)
+        machine.provide_export(lambda event: callback(event, "strcmpw"), module = "shlwapi.dll", name = "StrCmpW", argc = 2)
+        machine.provide_export(lambda event: callback(event, "shstrdupa"), module = "shlwapi.dll", name = "SHStrDupA", argc = 2)
+        machine.provide_export(lambda event: callback(event, "shstrdupw"), module = "shlwapi.dll", name = "SHStrDupW", argc = 2)
+        machine.provide_export(lambda event: callback(event, "strncata"), module = "shlwapi.dll", name = "StrNCatA", argc = 3)
+        machine.provide_export(lambda event: callback(event, "strncatw"), module = "shlwapi.dll", name = "StrNCatW", argc = 3)
         machine.provide_export(lambda event: callback(event, "pathgetdrivenumbera"), module = "shlwapi.dll", name = "PathGetDriveNumberA", argc = 1)
         machine.provide_export(lambda event: callback(event, "pathgetdrivenumberw"), module = "shlwapi.dll", name = "PathGetDriveNumberW", argc = 1)
         machine.provide_export(lambda event: callback(event, "pathisrelativea"), module = "shlwapi.dll", name = "PathIsRelativeA", argc = 1)
@@ -10359,7 +10474,7 @@ def shell_plugin(module_path, kernel = None):
         machine.provide_export(lambda event: callback(event, "shcreatestreamonfilew"), module = "shlwapi.dll", name = "SHCreateStreamOnFileW", argc = 3)
         machine.provide_export(lambda event: callback(event, "strrettobufa"), module = "shlwapi.dll", name = "StrRetToBufA", argc = 4)
         machine.provide_export(lambda event: callback(event, "strrettobufw"), module = "shlwapi.dll", name = "StrRetToBufW", argc = 4)
-        signatures = {23: 3, 24: 3, 38: 1, 52: 7, 80: 3, 83: 1, 85: 4, 97: 2, 107: 4, 112: 3, 132: 1, 133: 1, 151: 3, 152: 3, 153: 3, 154: 3, 155: 2, 156: 2, 157: 2, 158: 2, 169: 1, 193: 0, 215: 3, 217: 3, 219: 4, 222: 1, 223: 1, 224: 1, 236: 1, 241: 0, 266: 4, 267: 4, 269: 2, 270: 2, 276: 0, 294: 5, 295: 4, 296: 3, 308: 2, 309: 1, 312: 6, 342: 3, 345: 3, 346: 3, 356: 3, 364: 3, 365: 3, 376: 0, 377: 3, 378: 3, 394: 4, 413: 1, 418: 1, 419: 0, 424: 1, 437: 1, 441: 3, 447: 1, 448: 1, 455: 2, 456: 2, 459: 3, 460: 3, 461: 1, 476: 2}
+        signatures = {23: 3, 24: 3, 38: 1, 52: 7, 80: 3, 83: 1, 85: 4, 97: 2, 107: 4, 112: 3, 132: 1, 133: 1, 151: 3, 152: 3, 153: 3, 154: 3, 155: 2, 156: 2, 157: 2, 158: 2, 169: 1, 193: 0, 215: 3, 217: 3, 219: 4, 222: 1, 223: 1, 224: 1, 236: 1, 241: 0, 266: 4, 267: 4, 269: 2, 270: 2, 276: 0, 294: 5, 295: 4, 296: 3, 308: 2, 309: 1, 312: 6, 342: 3, 345: 3, 346: 3, 356: 3, 364: 3, 365: 3, 376: 0, 377: 3, 378: 3, 394: 4, 413: 1, 418: 1, 419: 0, 424: 1, 437: 1, 441: 3, 447: 1, 448: 1, 455: 2, 456: 2, 458: 3, 459: 3, 460: 3, 461: 1, 476: 2}
         named_signatures = {"assoccreate": 3, "pathaddbackslasha": 1, "pathaddbackslashw": 1, "pathappenda": 2, "pathappendw": 2, "pathbuildroota": 2, "pathbuildrootw": 2, "pathcanonicalizea": 2, "pathcanonicalizew": 2, "pathcombinea": 3, "pathcombinew": 3, "pathcommonprefixa": 3, "pathcommonprefixw": 3, "pathfileexistsa": 1, "pathfileexistsw": 1, "pathfindextensiona": 1, "pathfindextensionw": 1, "pathfindfilenamea": 1, "pathfindfilenamew": 1, "pathgetargsa": 1, "pathgetargsw": 1, "pathisfilespeca": 1, "pathisfilespecw": 1, "pathisrelativew": 1, "pathisuncw": 1, "pathisuncservera": 1, "pathisuncserverw": 1, "pathisuncserversharea": 1, "pathisuncserversharew": 1, "pathmakeprettya": 1, "pathmakeprettyw": 1, "pathmakesystemfoldera": 1, "pathmakesystemfolderw": 1, "pathparseiconlocationa": 1, "pathparseiconlocationw": 1, "pathquotespacesa": 1, "pathquotespacesw": 1, "pathremoveargsa": 1, "pathremoveargsw": 1, "pathremovebackslasha": 1, "pathremovebackslashw": 1, "pathremoveblanksa": 1, "pathremoveblanksw": 1, "pathremoveextensiona": 1, "pathremoveextensionw": 1, "pathremovefilespeca": 1, "pathremovefilespecw": 1, "pathrenameextensiona": 2, "pathrenameextensionw": 2, "pathstrippatha": 1, "pathstrippathw": 1, "pathunexpandenvstringsw": 3, "pathunquotespacesa": 1, "pathunquotespacesw": 1, "shcreateshellpalette": 1, "shgetinversecmap": 2, "shreggetboolusvaluea": 4, "shreggetboolusvaluew": 4, "strcatbuffa": 3, "strcatbuffw": 3, "strcatw": 2, "strchra": 2, "strchrw": 2, "strcspna": 2, "strcmpia": 2, "strcmpiw": 2, "strcmpnia": 3, "strcmpniw": 3, "strcpynw": 3, "strcpyw": 2, "strdupa": 1, "strdupw": 1, "strrchra": 3, "strspnw": 2, "strstra": 2, "strstria": 2, "strstrw": 2, "strstriw": 2, "strtointa": 1, "strtointw": 1, "urlcanonicalizea": 4, "urlcanonicalizew": 4, "wnsprintfa": 16, "wnsprintfw": 16, "wvnsprintfw": 4}
         for ordinal, argc in signatures.items():
             def bound_ordinal(event, function = ordinal):

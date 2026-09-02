@@ -976,12 +976,12 @@ func TestNTFS31UsesCanonicalSystemRecordNumbers(t *testing.T) {
 }
 
 func TestNTFSVersionValidation(t *testing.T) {
-	for _, version := range []string{"1.1", "3.1"} {
+	for _, version := range []string{"1.1", "3.0", "3.1"} {
 		if _, _, err := parseNTFSVersion(version); err != nil {
 			t.Errorf("parseNTFSVersion(%q): %v", version, err)
 		}
 	}
-	if _, _, err := parseNTFSVersion("3.0"); err == nil {
+	if _, _, err := parseNTFSVersion("2.0"); err == nil {
 		t.Fatal("unsupported NTFS version was accepted")
 	}
 }
