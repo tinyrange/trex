@@ -118,7 +118,7 @@ def main():
     help("binary.i16be")
     builder = binary.builder()
     help(builder.patch_u64le)
-    help(runtime.stage_cache)
+    help(runtime.stats)
 `, environment)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ def main():
 		"binary.read_u32le(source, offset=0) -> int",
 		"binary.i16be(value) -> bytes",
 		"binary.builder.patch_u64le(offset, value) -> binary.builder",
-		"runtime.stage_cache() -> runtime.stage_cache",
+		"runtime.stats() -> record",
 	} {
 		if !strings.Contains(console.output.String(), expected) {
 			t.Errorf("help output omits %q:\n%s", expected, console.output.String())

@@ -430,6 +430,28 @@ func TestVMMDetachTransfersRuntimeOwnership(t *testing.T) {
 	}
 }
 
+func TestVMMCloseReleasesRuntimeOwnershipImmediately(t *testing.T) {
+	thread, _, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := newFakeVMMDriver(fullFakeCapabilities())
+	backend := &fakeVMMBackend{capabilities: fullFakeCapabilities(), driver: driver}
+	value, err := vmmStartBuiltin(thread, nil, starlark.Tuple{&vmmMachineValue{machine: testVMMMachine(t)}}, []starlark.Tuple{{starlark.String("backend"), &fakeVMMBackendValue{backend: backend}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm := value.(*vmmSessionValue)
+	callVMMethod(t, thread, vm, "close", nil, nil)
+	resources, _ := lifecycle.ForThread(thread)
+	if err := resources.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if driver.closed != 1 {
+		t.Fatalf("driver close count = %d, want exactly one", driver.closed)
+	}
+}
+
 func TestTwoIndependentVMGraphs(t *testing.T) {
 	var wait sync.WaitGroup
 	results := make(chan error, 2)

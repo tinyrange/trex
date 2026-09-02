@@ -9,57 +9,6 @@ import (
 	"go.starlark.net/starlark"
 )
 
-type stageTestSource struct{ starlark.Value }
-
-func TestStageCacheReusesAndFreezesResults(t *testing.T) {
-	thread := &starlark.Thread{Name: "stage-cache-test"}
-	cache := &starlarkStageCache{entries: make(map[stageCacheKey]starlark.Value)}
-	source := &starfile.Bytes{Name: "source", Data: []byte("input")}
-	calls := 0
-	function := starlark.NewBuiltin("stage", func(_ *starlark.Thread, _ *starlark.Builtin, _ starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
-		calls++
-		out := starlark.NewDict(1)
-		_ = out.SetKey(starlark.String("calls"), starlark.MakeInt(calls))
-		return out, nil
-	})
-	compute := func(options string) starlark.Value {
-		value, err := cache.computeBuiltin(thread, nil, starlark.Tuple{
-			starlark.String("media"), source, starlark.String(options), function,
-		}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return value
-	}
-	first := compute("same")
-	second := compute("same")
-	if first != second || calls != 1 {
-		t.Fatalf("stage cache returned %p and %p after %d calls", first, second, calls)
-	}
-	if err := first.(*starlark.Dict).SetKey(starlark.String("changed"), starlark.True); err == nil {
-		t.Fatal("cached stage result remained mutable")
-	}
-	_ = compute("changed")
-	if calls != 2 {
-		t.Fatalf("option change left calls = %d, want 2", calls)
-	}
-	statsValue, err := cache.Attr("stats")
-	if err != nil {
-		t.Fatal(err)
-	}
-	stats := statsValue.(*starlarkRecord)
-	if stats.Values["hits"].String() != "1" || stats.Values["misses"].String() != "2" {
-		t.Fatalf("stage cache stats = %s", stats)
-	}
-	cleared, err := cache.clearBuiltin(thread, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cleared.String() != "2" || len(cache.entries) != 0 {
-		t.Fatalf("stage cache clear returned %s with %d retained entries", cleared, len(cache.entries))
-	}
-}
-
 func TestRuntimeStatsReportsBoundedCacheMetrics(t *testing.T) {
 	thread := &starlark.Thread{Name: "runtime-stats-test"}
 	resources := installRuntimeResources(thread)

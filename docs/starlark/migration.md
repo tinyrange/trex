@@ -39,9 +39,10 @@ Image functions now return lazy disks. Move final `write()` calls to a CLI
 `main(args)` wrapper. Pass a returned file directly to `vmm.disk()` or wrap it
 with `block.cache()` and `block.overlay()`.
 
-For repeated builds in one runtime, construct one `runtime.stage_cache()` and
-pass it as `stages=`. Cached results are frozen; make option-dependent changes
-inside a separate later stage instead of mutating an earlier result.
+Profile complete cold builds with `clock.profiler()` and inspect
+`runtime.stats()` for I/O, decompression, and memory costs. Do not retain
+derived image stages between builds; optimise the operation that dominates the
+cold profile.
 
 Replace `overlay.commit()` during an active VM with `overlay.snapshot()`.
 Commit still seals an inactive overlay and remains useful for an explicit final

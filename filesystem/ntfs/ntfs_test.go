@@ -55,6 +55,17 @@ func TestNTFSIndexBlockVCNsUseClusterUnits(t *testing.T) {
 	}
 }
 
+func TestNTFSFileNameLengthUsesUTF16CodeUnits(t *testing.T) {
+	node := &ntfsNode{id: 16, name: "A😀", size: 1}
+	attribute := ntfsFileNameAttribute(node, newNTFSName(node.name, 1, nil))
+	if got := attribute[64]; got != 3 {
+		t.Fatalf("UTF-16 file-name length = %d, want 3 code units", got)
+	}
+	if got := len(attribute[66:]); got != 6 {
+		t.Fatalf("UTF-16 file-name byte length = %d, want 6", got)
+	}
+}
+
 func TestNTFSLargeDirectoryIndexRootHasSeparatorKeys(t *testing.T) {
 	root := &ntfsNode{
 		id:       16,

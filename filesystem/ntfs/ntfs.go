@@ -179,6 +179,7 @@ type ntfsDirectoryLink struct {
 	name      string
 	shortName string
 	names     []ntfsName
+	sortKey   []uint16
 }
 
 type ntfsDirectoryIndex struct {
@@ -205,11 +206,13 @@ type ntfsName struct {
 	namespace byte
 	parent    *ntfsNode
 	attrID    uint16
+	encoded   []byte
 }
 
 type ntfsIndexKey struct {
-	node *ntfsNode
-	name ntfsName
+	node    *ntfsNode
+	name    ntfsName
+	sortKey []uint16
 }
 
 var errNTFSIndexRootCapacity = errors.New("NTFS index root cannot hold a child separator")
@@ -693,9 +696,15 @@ func (b *ntfsBuild) importDirectory(dir *filesystemapi.Directory) error {
 		}
 	}
 	for _, node := range b.nodes {
+		for _, link := range node.children {
+			link.sortKey = ntfsNameSortKey(link.name, b.upCase)
+		}
 		sort.Slice(node.children, func(i, j int) bool {
-			return ntfsCompareNameWithUpCase(node.children[i].name, node.children[j].name, b.upCase) < 0
+			return ntfsCompareNameSortKeys(node.children[i].sortKey, node.children[j].sortKey) < 0
 		})
+		for _, link := range node.children {
+			link.sortKey = nil
+		}
 	}
 	return b.assignFileNames()
 }
@@ -744,7 +753,7 @@ func (b *ntfsBuild) assignFileNames() error {
 		for _, link := range parent.children {
 			child := link.node
 			if child.id < 16 {
-				link.names = []ntfsName{{value: link.name, namespace: 3, parent: parent}}
+				link.names = []ntfsName{newNTFSName(link.name, 3, parent)}
 				child.names = append(child.names, link.names...)
 				continue
 			}
@@ -753,7 +762,7 @@ func (b *ntfsBuild) assignFileNames() error {
 				upper, exact = imported, false
 			}
 			if exact {
-				link.names = []ntfsName{{value: link.name, namespace: 3, parent: parent}}
+				link.names = []ntfsName{newNTFSName(link.name, 3, parent)}
 				child.names = append(child.names, link.names...)
 				continue
 			}
@@ -763,8 +772,8 @@ func (b *ntfsBuild) assignFileNames() error {
 			}
 			used[alias] = child
 			link.names = []ntfsName{
-				{value: alias, namespace: 2, parent: parent},
-				{value: link.name, namespace: 1, parent: parent},
+				newNTFSName(alias, 2, parent),
+				newNTFSName(link.name, 1, parent),
 			}
 			child.names = append(child.names, link.names...)
 		}
@@ -933,11 +942,15 @@ func buildNTFSDirectoryIndexWithUpCase(node *ntfsNode, modern bool, upCase []byt
 	var items []*ntfsIndexKey
 	for _, link := range node.children {
 		for _, name := range link.names {
-			items = append(items, &ntfsIndexKey{node: link.node, name: name})
+			items = append(items, &ntfsIndexKey{
+				node:    link.node,
+				name:    name,
+				sortKey: ntfsNameSortKey(name.value, upCase),
+			})
 		}
 	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return ntfsCompareNameWithUpCase(items[i].name.value, items[j].name.value, upCase) < 0
+		return ntfsCompareNameSortKeys(items[i].sortKey, items[j].sortKey) < 0
 	})
 	if ntfsIndexEntriesSize(items, false)+32 <= ntfsIndexRootLimit(node, false, 0, modern) {
 		entries := make([][]byte, 0, len(items)+1)
@@ -1773,7 +1786,10 @@ func ntfsStandardInformation(node *ntfsNode, modern bool) []byte {
 }
 
 func ntfsFileNameAttribute(node *ntfsNode, name ntfsName) []byte {
-	nameBytes := utf16Bytes(name.value)
+	nameBytes := name.encoded
+	if nameBytes == nil {
+		nameBytes = utf16Bytes(name.value)
+	}
 	data := make([]byte, 66+len(nameBytes))
 	parent := uint64(5)
 	if name.parent != nil {
@@ -1794,10 +1810,19 @@ func ntfsFileNameAttribute(node *ntfsNode, name ntfsName) []byte {
 	binary.LittleEndian.PutUint64(data[40:48], uint64(alloc))
 	binary.LittleEndian.PutUint64(data[48:56], uint64(node.size))
 	binary.LittleEndian.PutUint32(data[56:60], ntfsFileFlags(node))
-	data[64] = byte(len([]rune(name.value)))
+	data[64] = byte(len(nameBytes) / 2)
 	data[65] = name.namespace
 	copy(data[66:], nameBytes)
 	return data
+}
+
+func newNTFSName(value string, namespace byte, parent *ntfsNode) ntfsName {
+	return ntfsName{
+		value:     value,
+		namespace: namespace,
+		parent:    parent,
+		encoded:   utf16Bytes(value),
+	}
 }
 
 func ntfsFileFlags(node *ntfsNode) uint32 {
@@ -2582,15 +2607,23 @@ func ntfsCompareName(a, b string) int {
 }
 
 func ntfsCompareNameWithUpCase(a, b string, upCase []byte) int {
-	left := utf16.Encode([]rune(a))
-	right := utf16.Encode([]rune(b))
+	return ntfsCompareNameSortKeys(ntfsNameSortKey(a, upCase), ntfsNameSortKey(b, upCase))
+}
+
+func ntfsNameSortKey(name string, upCase []byte) []uint16 {
+	key := utf16.Encode([]rune(name))
+	for index, value := range key {
+		key[index] = ntfsUpperCase(value, upCase)
+	}
+	return key
+}
+
+func ntfsCompareNameSortKeys(left, right []uint16) int {
 	for index := 0; index < min(len(left), len(right)); index++ {
-		l := ntfsUpperCase(left[index], upCase)
-		r := ntfsUpperCase(right[index], upCase)
-		if l < r {
+		if left[index] < right[index] {
 			return -1
 		}
-		if l > r {
+		if left[index] > right[index] {
 			return 1
 		}
 	}

@@ -59,13 +59,32 @@ Open debugger transports through the VM session:
 channel = vm.debugger("gdb", create = True, paused = True)
 gdb = debug.gdb(channel)
 stop = gdb.wait(timeout = 30)
-print(stop.registers)
+print(stop.thread, stop.reason, stop.generation, stop.resumable)
+
+process = gdb.address_space(stop.address_space, kind = "user")
+header = process.read_memory(0x400000, 64)
 ```
+
+Stops are generation-qualified and carry the selected remote thread,
+registers, reason, resumability, address-space identity, and a resumption token.
+The session refuses a second resume while a prior stop is still queued. A
+checked address-space handle serializes CR3 switching, restores the original
+page table, and becomes unusable after its session closes or the target reaches
+a newer stop generation.
+
+Breakpoint and watchpoint values expose their kind and support
+`point.with_disabled(callback)`. `step_over(stop, point=point)` uses that scope
+to cross a software breakpoint and restore it even if the callback fails.
 
 Windows KD uses `windows.kd(channel)` and the policy helpers in
 `@stdlib//windows:kd.star`. Keep packet manipulation in Go and target-specific
 symbol, process, and stop policy in Starlark. Both GDB and KD sessions are
 runtime resources and close in reverse creation order.
+
+KD state events similarly carry generation, reason, and resumability. A target
+reset advances the generation and publishes a non-resumable `rebooted` event;
+transport faults and deadlines remain typed errors rather than generic process
+timeouts.
 
 ## Shutdown and postmortem state
 
@@ -77,3 +96,5 @@ ownership out of automatic runtime cleanup.
 
 Capture a framebuffer with `vm.screenshot()` and disk state with
 `working.snapshot()`. Neither requires stopping the VM or writing a raw disk.
+Call `vm.close()` after the final wait to release runtime ownership immediately;
+automatic reverse-order cleanup remains the fallback.

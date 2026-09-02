@@ -218,6 +218,16 @@ func (s *kdSessionValue) readLoop() {
 			kind := "control"
 			if packet.Type == kdPacketReset {
 				kind = "reset"
+				s.stateMu.Lock()
+				s.stopped = false
+				s.protocolKnown = false
+				s.stopGeneration++
+				generation := s.stopGeneration
+				s.stateMu.Unlock()
+				s.publish(kdEvent{kind: kind, value: starvalue.NewRecord(starlark.StringDict{
+					"generation": starlark.MakeUint64(generation), "kind": starlark.String(kind), "reason": starlark.String("rebooted"), "resumable": starlark.False,
+				})})
+				continue
 			}
 			s.publish(kdEvent{kind: kind, value: kdPacketValue(packet, kind)})
 		case kdPacketLeader:
@@ -292,18 +302,21 @@ func (s *kdSessionValue) stateChangeEvent(packet kdPacket) (kdEvent, error) {
 	s.stateMu.Lock()
 	s.processorLevel, s.processor, s.stopped, s.protocolKnown, s.target64 = kdU16(packet.Payload, 4), kdU16(packet.Payload, 6), true, true, true
 	s.stopGeneration++
+	generation := s.stopGeneration
 	s.stateMu.Unlock()
 	fields := starlark.StringDict{
 		"kind": starlark.String("state"), "state": starlark.MakeUint64(uint64(state)),
 		"processor": starlark.MakeInt(int(kdU16(packet.Payload, 6))), "processor_level": starlark.MakeInt(int(kdU16(packet.Payload, 4))),
 		"program_counter": starlark.MakeUint64(kdU64(packet.Payload, 24)), "packet_id": starlark.MakeUint64(uint64(packet.ID)),
 		"packet_size": starlark.MakeInt(len(packet.Payload)), "raw": starlark.Bytes(packet.Payload),
+		"generation": starlark.MakeUint64(generation), "reason": starlark.String("state"), "resumable": starlark.True,
 	}
 	kind := "state"
 	switch state {
 	case kdStateException:
 		kind = "exception"
 		fields["kind"] = starlark.String(kind)
+		fields["reason"] = starlark.String("exception")
 		fields["code"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 32)))
 		fields["address"] = starlark.MakeUint64(kdU64(packet.Payload, 48))
 		fields["first_chance"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 184)))
@@ -316,6 +329,7 @@ func (s *kdSessionValue) stateChangeEvent(packet kdPacket) (kdEvent, error) {
 	case kdStateLoadSymbols:
 		kind = "load_symbols"
 		fields["kind"] = starlark.String(kind)
+		fields["reason"] = starlark.String("load-symbols")
 		length := min(int(kdU32(packet.Payload, 32)), len(packet.Payload)-kdStateChangeSize)
 		// The control report and processor context make the fixed state-change
 		// prefix target-dependent. KD appends the counted image path at the end.
@@ -342,12 +356,14 @@ func (s *kdSessionValue) stateChange32Event(packet kdPacket) (kdEvent, error) {
 	s.stateMu.Lock()
 	s.processorLevel, s.processor, s.stopped, s.protocolKnown, s.target64 = kdU16(packet.Payload, 4), kdU16(packet.Payload, 6), true, true, false
 	s.stopGeneration++
+	generation := s.stopGeneration
 	s.stateMu.Unlock()
 	fields := starlark.StringDict{
 		"kind": starlark.String("state"), "state": starlark.MakeUint64(uint64(state)),
 		"processor": starlark.MakeInt(int(kdU16(packet.Payload, 6))), "processor_level": starlark.MakeInt(int(kdU16(packet.Payload, 4))),
 		"program_counter": starlark.MakeUint64(uint64(kdU32(packet.Payload, 16))), "packet_id": starlark.MakeUint64(uint64(packet.ID)),
 		"packet_size": starlark.MakeInt(len(packet.Payload)), "raw": starlark.Bytes(packet.Payload),
+		"generation": starlark.MakeUint64(generation), "reason": starlark.String("state"), "resumable": starlark.True,
 	}
 	kind := "state"
 	switch state {
@@ -357,6 +373,7 @@ func (s *kdSessionValue) stateChange32Event(packet kdPacket) (kdEvent, error) {
 		}
 		kind = "exception"
 		fields["kind"] = starlark.String(kind)
+		fields["reason"] = starlark.String("exception")
 		fields["code"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 20)))
 		fields["address"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 32)))
 		fields["first_chance"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 100)))
@@ -376,6 +393,7 @@ func (s *kdSessionValue) stateChange32Event(packet kdPacket) (kdEvent, error) {
 		}
 		kind = "load_symbols"
 		fields["kind"] = starlark.String(kind)
+		fields["reason"] = starlark.String("load-symbols")
 		fields["path"] = starlark.String(strings.TrimRight(string(packet.Payload[len(packet.Payload)-length:]), "\x00"))
 		fields["base"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 24)))
 		fields["size"] = starlark.MakeUint64(uint64(kdU32(packet.Payload, 36)))
@@ -540,7 +558,7 @@ func (s *kdSessionValue) nextEventBuiltin(thread *starlark.Thread, _ *starlark.B
 	case event := <-s.events:
 		return s.consumeEvent(thread, event)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, &vmmapi.Error{Code: vmmapi.ErrorTimeout, Message: "KD event wait timed out", Err: ctx.Err()}
 	case <-s.done:
 		return nil, s.readerError()
 	}
@@ -611,7 +629,7 @@ func (s *kdSessionValue) continueBuiltin(_ *starlark.Thread, _ *starlark.Builtin
 		s.markContinued(generation)
 		return starlark.None, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, &vmmapi.Error{Code: vmmapi.ErrorTimeout, Message: "KD continue timed out", Err: ctx.Err()}
 	case <-s.done:
 		return nil, s.readerError()
 	}
