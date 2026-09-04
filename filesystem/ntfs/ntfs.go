@@ -263,6 +263,8 @@ func buildNTFSImageWithLabel(dir *filesystemapi.Directory, size int64, bootCode 
 
 func parseNTFSVersion(version string) (byte, byte, error) {
 	switch version {
+	case "1.0":
+		return 1, 0, nil
 	case "1.1":
 		return 1, 1, nil
 	case "3.0":
@@ -270,7 +272,7 @@ func parseNTFSVersion(version string) (byte, byte, error) {
 	case "3.1":
 		return 3, 1, nil
 	default:
-		return 0, 0, fmt.Errorf("ntfs: unsupported version %q (want \"1.1\", \"3.0\", or \"3.1\")", version)
+		return 0, 0, fmt.Errorf("ntfs: unsupported version %q (want \"1.0\", \"1.1\", \"3.0\", or \"3.1\")", version)
 	}
 }
 
@@ -282,7 +284,7 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 	if size < 64*1024*1024 {
 		return nil, fmt.Errorf("ntfs: size must be at least 64 MiB")
 	}
-	if versionMajor == 1 && versionMinor != 1 || versionMajor == 3 && versionMinor > 1 || versionMajor != 1 && versionMajor != 3 {
+	if versionMajor == 1 && versionMinor > 1 || versionMajor == 3 && versionMinor > 1 || versionMajor != 1 && versionMajor != 3 {
 		return nil, fmt.Errorf("ntfs: unsupported version %d.%d", versionMajor, versionMinor)
 	}
 	if err := validateNTFSVolumeName(volumeName); err != nil {
@@ -1518,7 +1520,7 @@ func (b *ntfsBuild) mftRecord(node *ntfsNode) ([]byte, error) {
 			attrs = append(attrs, ntfsNonResidentAttr(ntfsAttrData, "", 0, b.bootFileSize()))
 		case 8:
 			attrs = append(attrs, ntfsResidentAttr(ntfsAttrData, "", nil))
-			attrs = append(attrs, ntfsBadClustersAttr(b.size))
+			attrs = append(attrs, ntfsBadClustersAttr(b.size, b.versionMinor >= 1))
 		case 10:
 			attrs = append(attrs, ntfsNonResidentAttr(ntfsAttrData, "", b.upCaseLCN, int64(len(b.upCase))))
 		default:
@@ -1691,8 +1693,11 @@ func ntfsNonResidentAttr(typ uint32, name string, lcn, size int64) []byte {
 	return attr
 }
 
-func ntfsBadClustersAttr(size int64) []byte {
+func ntfsBadClustersAttr(size int64, sparse bool) []byte {
 	const name = "$Bad"
+	if !sparse {
+		return ntfsNonResidentAttr(ntfsAttrData, name, 0, 0)
+	}
 	nameBytes := utf16Bytes(name)
 	const nameOff = 64
 	runOff := align8(nameOff + len(nameBytes))

@@ -344,7 +344,7 @@ func TestNTFSRunListZeroExtendsHighBitRunLengths(t *testing.T) {
 
 func TestNTFSBadClustersUsesSparseVolumeRun(t *testing.T) {
 	const volumeSize = int64(64 << 20)
-	attr := ntfsBadClustersAttr(volumeSize)
+	attr := ntfsBadClustersAttr(volumeSize, true)
 	runOffset := int(binary.LittleEndian.Uint16(attr[32:34]))
 	wantRun := []byte{0x03, 0xff, 0xff, 0x01, 0x00}
 	if got := attr[runOffset : runOffset+len(wantRun)]; !bytes.Equal(got, wantRun) {
@@ -359,6 +359,26 @@ func TestNTFSBadClustersUsesSparseVolumeRun(t *testing.T) {
 	}
 	if got := binary.LittleEndian.Uint64(attr[56:64]); got != 0 {
 		t.Fatalf("$Bad initialized size = %d, want 0", got)
+	}
+}
+
+func TestNTFS10BadClustersUsesEmptyNonResidentStream(t *testing.T) {
+	attr := ntfsBadClustersAttr(64<<20, false)
+	if got := attr[8]; got != 1 {
+		t.Fatalf("$Bad non-resident flag = %d, want non-resident", got)
+	}
+	for _, offset := range []int{16, 24, 40, 48, 56} {
+		if got := binary.LittleEndian.Uint64(attr[offset : offset+8]); got != 0 {
+			t.Fatalf("$Bad field at %#x = %d, want 0", offset, got)
+		}
+	}
+	nameOffset := int(binary.LittleEndian.Uint16(attr[10:12]))
+	if got, want := attr[nameOffset:nameOffset+8], utf16Bytes("$Bad"); !bytes.Equal(got, want) {
+		t.Fatalf("$Bad name = %x, want %x", got, want)
+	}
+	runOffset := int(binary.LittleEndian.Uint16(attr[32:34]))
+	if got := attr[runOffset]; got != 0 {
+		t.Fatalf("$Bad mapping-pairs terminator = %#x, want 0", got)
 	}
 }
 
@@ -987,10 +1007,13 @@ func TestNTFS31UsesCanonicalSystemRecordNumbers(t *testing.T) {
 }
 
 func TestNTFSVersionValidation(t *testing.T) {
-	for _, version := range []string{"1.1", "3.0", "3.1"} {
+	for _, version := range []string{"1.0", "1.1", "3.0", "3.1"} {
 		if _, _, err := parseNTFSVersion(version); err != nil {
 			t.Errorf("parseNTFSVersion(%q): %v", version, err)
 		}
+	}
+	if major, minor, err := parseNTFSVersion("1.0"); err != nil || major != 1 || minor != 0 {
+		t.Fatalf("parseNTFSVersion(1.0) = %d.%d, %v; want 1.0", major, minor, err)
 	}
 	if _, _, err := parseNTFSVersion("2.0"); err == nil {
 		t.Fatal("unsupported NTFS version was accepted")
