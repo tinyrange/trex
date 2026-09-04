@@ -48,9 +48,13 @@ func decodeSZDD(file File, maximum int64) ([]byte, error) {
 	if !bytes.Equal(data[:8], szddSignature) {
 		return nil, fmt.Errorf("szdd: invalid signature")
 	}
-	if data[8] != 'A' || data[9] != 0 {
-		return nil, fmt.Errorf("szdd: unsupported mode %#x or reserved byte %#x", data[8], data[9])
+	if data[8] != 'A' {
+		return nil, fmt.Errorf("szdd: unsupported mode %#x", data[8])
 	}
+	// Byte 9 is the final character replaced by the underscore in the
+	// compressed filename. Some producers leave it zero, while original NT
+	// setup media records values such as 'f' for LAYOUT.IN_. It does not alter
+	// the mode-A payload coding.
 	expected := int64(binary.LittleEndian.Uint32(data[10:14]))
 	if expected > maximum {
 		return nil, fmt.Errorf("szdd: decoded size %d exceeds maximum %d", expected, maximum)
