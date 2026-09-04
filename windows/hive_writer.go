@@ -36,6 +36,7 @@ var errRegistryFreeCell = errors.New("registry free cell")
 const (
 	registrySubkeyLeafEntries  = (hiveBaseBlockSize - 0x20 - 8) / 8
 	registrySubkeyIndexEntries = (hiveBaseBlockSize - 0x20 - 8) / 4
+	registryLegacyLeafEntries  = (hiveBaseBlockSize - 0x20 - 12) / 4
 
 	regNone                     = 0
 	regSZ                       = 1
@@ -83,6 +84,7 @@ type hiveWriter struct {
 	binStart      int
 	binEnd        int
 	cellOffset    int
+	previousCell  int
 }
 
 type registryHiveFormat struct {
@@ -111,7 +113,7 @@ func registryHiveFormatFromValue(operation string, value starlark.Value) (regist
 		major: binary.LittleEndian.Uint32(data[0x14:0x18]),
 		minor: binary.LittleEndian.Uint32(data[0x18:0x1c]),
 	}
-	if format.major != 1 || format.minor < 2 || format.minor > 5 {
+	if format.major != 1 || format.minor < 1 || format.minor > 5 {
 		return registryHiveFormat{}, fmt.Errorf("%s: unsupported registry hive format %d.%d", operation, format.major, format.minor)
 	}
 	return format, nil
@@ -722,7 +724,8 @@ func unpackINFAddRegList(name string, value starlark.Value) ([]infAddRegSection,
 func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	var patches *starlark.List
-	if err := starlark.UnpackArgs("patch_hive", args, kwargs, "file", &value, "patches", &patches); err != nil {
+	rootName := ""
+	if err := starlark.UnpackArgs("patch_hive", args, kwargs, "file", &value, "patches", &patches, "root_name?", &rootName); err != nil {
 		return nil, err
 	}
 	file, ok := value.(starfile.File)
@@ -740,7 +743,15 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if hiveSize < 0 || hiveBaseBlockSize+hiveSize > len(data) {
 		return nil, fmt.Errorf("patch_hive: invalid hive bins size")
 	}
-	hive := mutableHive{data: data[:hiveBaseBlockSize+hiveSize]}
+	hive := mutableHive{
+		data:             data[:hiveBaseBlockSize+hiveSize],
+		legacyCellPrefix: binary.LittleEndian.Uint32(data[0x14:0x18]) == 1 && binary.LittleEndian.Uint32(data[0x18:0x1c]) == 1,
+	}
+	if rootName != "" {
+		if err := hive.renameRoot(rootName); err != nil {
+			return nil, err
+		}
+	}
 	for i := 0; i < patches.Len(); i++ {
 		patch, ok := patches.Index(i).(*starlark.Dict)
 		if !ok {
@@ -780,6 +791,37 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	return &starfile.Bytes{Name: "patched.hiv", Data: hive.data}, nil
 }
 
+func (h *mutableHive) renameRoot(name string) error {
+	body, err := h.cellBody(h.rootCell())
+	if err != nil {
+		return fmt.Errorf("patch_hive: root: %w", err)
+	}
+	if len(body) < 0x4c || string(body[0:2]) != "nk" {
+		return fmt.Errorf("patch_hive: root cell is not a key")
+	}
+	flags := binary.LittleEndian.Uint16(body[0x02:0x04])
+	var encoded []byte
+	if flags&0x20 != 0 {
+		if !utf8.ValidString(name) || len(name) != len([]byte(name)) {
+			return fmt.Errorf("patch_hive: root name %q cannot use the source hive's compressed encoding", name)
+		}
+		encoded = []byte(name)
+	} else {
+		encoded = utf16Bytes(name)
+	}
+	oldLength := int(binary.LittleEndian.Uint16(body[0x48:0x4a]))
+	if oldLength > len(body)-0x4c {
+		return fmt.Errorf("patch_hive: invalid root name length")
+	}
+	if len(encoded) > oldLength {
+		return fmt.Errorf("patch_hive: root name needs %d bytes, source cell has %d", len(encoded), oldLength)
+	}
+	clear(body[0x4c : 0x4c+oldLength])
+	copy(body[0x4c:], encoded)
+	binary.LittleEndian.PutUint16(body[0x48:0x4a], uint16(len(encoded)))
+	return nil
+}
+
 func hiveLogBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	if err := starlark.UnpackArgs("hive_log", args, kwargs, "file", &value); err != nil {
@@ -807,7 +849,22 @@ func hiveLogBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 }
 
 type mutableHive struct {
-	data []byte
+	data             []byte
+	legacyCellPrefix bool
+}
+
+func (h *mutableHive) cellBodyOffset() int {
+	if h.legacyCellPrefix {
+		return 8
+	}
+	return 4
+}
+
+func (h *mutableHive) minimumFreeCellSize() int {
+	if h.legacyCellPrefix {
+		return 16
+	}
+	return 8
 }
 
 func requiredPatchString(patch *starlark.Dict, key string) (string, error) {
@@ -1077,7 +1134,10 @@ func (h *mutableHive) patchValue(keyPath, valueName string, value registryData) 
 	}
 	oldLengthRaw := binary.LittleEndian.Uint32(body[0x04:0x08])
 	oldDataCell := binary.LittleEndian.Uint32(body[0x08:0x0c])
-	if len(value.data) <= 4 {
+	// Preserve an external REGF 1.1 value's source representation when
+	// replacing it. NT 3.1 does use the high-bit inline representation for
+	// newly-created values, but Setup leaves existing external DWORDs external.
+	if len(value.data) <= 4 && (!h.legacyCellPrefix || oldLengthRaw&0x80000000 != 0) {
 		var inline [4]byte
 		copy(inline[:], value.data)
 		binary.LittleEndian.PutUint32(body[0x04:0x08], uint32(len(value.data))|0x80000000)
@@ -1262,19 +1322,32 @@ func (h *mutableHive) deleteValue(keyPath, valueName string) error {
 	if len(remaining) == 0 {
 		binary.LittleEndian.PutUint32(key[0x24:0x28], 0)
 		binary.LittleEndian.PutUint32(key[0x28:0x2c], 0xffffffff)
-		return nil
+	} else {
+		newList, err := h.writeValueList(remaining)
+		if err != nil {
+			return err
+		}
+		key, err = h.cellBody(keyCell)
+		if err != nil {
+			return err
+		}
+		binary.LittleEndian.PutUint32(key[0x24:0x28], uint32(len(remaining)))
+		binary.LittleEndian.PutUint32(key[0x28:0x2c], newList)
 	}
-	newList, err := h.writeValueList(remaining)
+	value, err := h.cellBody(valueCell)
 	if err != nil {
 		return err
 	}
-	key, err = h.cellBody(keyCell)
-	if err != nil {
+	lengthRaw := binary.LittleEndian.Uint32(value[0x04:0x08])
+	if lengthRaw&0x80000000 == 0 && lengthRaw != 0 {
+		if err := h.freeCell(binary.LittleEndian.Uint32(value[0x08:0x0c])); err != nil {
+			return err
+		}
+	}
+	if err := h.freeCell(valueCell); err != nil {
 		return err
 	}
-	binary.LittleEndian.PutUint32(key[0x24:0x28], uint32(len(remaining)))
-	binary.LittleEndian.PutUint32(key[0x28:0x2c], newList)
-	return nil
+	return h.freeCell(listCell)
 }
 
 func (h *mutableHive) ensureKey(keyPath string) (uint32, error) {
@@ -1379,6 +1452,11 @@ func (h *mutableHive) addSubkeyCell(parentCell, childCell uint32) error {
 	binary.LittleEndian.PutUint32(parent[0x14:0x18], uint32(len(cells)))
 	binary.LittleEndian.PutUint32(parent[0x1c:0x20], newList)
 	updateKeyMaxSubkeyName(parent, child)
+	if count > 0 && listCell != 0xffffffff {
+		if err := h.freeCell(listCell); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1412,6 +1490,11 @@ func (h *mutableHive) addValueCell(keyCell, valueCell uint32) error {
 	binary.LittleEndian.PutUint32(key[0x24:0x28], uint32(len(cells)))
 	binary.LittleEndian.PutUint32(key[0x28:0x2c], newList)
 	updateKeyMaxValue(key, value)
+	if count > 0 && listCell != 0xffffffff {
+		if err := h.freeCell(listCell); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1580,16 +1663,28 @@ func (h *mutableHive) appendLiveSubkeyCell(out []uint32, cell uint32) ([]uint32,
 
 func (h *mutableHive) writeKey(name string, parent uint32) (uint32, error) {
 	nameBytes := []byte(name)
+	flags := uint16(0x20)
+	if h.legacyCellPrefix {
+		nameBytes = utf16Bytes(name)
+		flags = 0
+	}
 	body := make([]byte, 0x4c+len(nameBytes))
 	copy(body[0:2], "nk")
-	binary.LittleEndian.PutUint16(body[2:4], 0x20)
+	binary.LittleEndian.PutUint16(body[2:4], flags)
 	binary.LittleEndian.PutUint64(body[4:12], uint64(windowsFiletime(time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC))))
 	binary.LittleEndian.PutUint32(body[0x10:0x14], parent)
 	binary.LittleEndian.PutUint32(body[0x1c:0x20], 0xffffffff)
 	binary.LittleEndian.PutUint32(body[0x20:0x24], 0xffffffff)
 	binary.LittleEndian.PutUint32(body[0x28:0x2c], 0xffffffff)
-	binary.LittleEndian.PutUint32(body[0x2c:0x30], h.inheritedSecurity(parent))
+	security := h.inheritedSecurity(parent)
+	if err := h.incrementSecurityReference(security); err != nil {
+		return 0, err
+	}
+	binary.LittleEndian.PutUint32(body[0x2c:0x30], security)
 	binary.LittleEndian.PutUint32(body[0x30:0x34], 0xffffffff)
+	if h.legacyCellPrefix {
+		binary.LittleEndian.PutUint32(body[0x44:0x48], 0xb2b2b2b2)
+	}
 	binary.LittleEndian.PutUint16(body[0x48:0x4a], uint16(len(nameBytes)))
 	copy(body[0x4c:], nameBytes)
 	return h.allocateCell(body)
@@ -1601,6 +1696,11 @@ func (h *mutableHive) writeValue(name string, value registryData) (uint32, error
 		hiveName = ""
 	}
 	nameBytes := []byte(hiveName)
+	flags := uint16(1)
+	if h.legacyCellPrefix {
+		nameBytes = utf16Bytes(hiveName)
+		flags = 0
+	}
 	dataLength := uint32(len(value.data))
 	dataCell := uint32(0)
 	if len(value.data) <= 4 {
@@ -1621,7 +1721,7 @@ func (h *mutableHive) writeValue(name string, value registryData) (uint32, error
 	binary.LittleEndian.PutUint32(body[4:8], dataLength)
 	binary.LittleEndian.PutUint32(body[8:12], dataCell)
 	binary.LittleEndian.PutUint32(body[12:16], value.typ)
-	binary.LittleEndian.PutUint16(body[16:18], 1)
+	binary.LittleEndian.PutUint16(body[16:18], flags)
 	copy(body[0x14:], nameBytes)
 	return h.allocateCell(body)
 }
@@ -1701,10 +1801,36 @@ func (h *mutableHive) inheritedSecurity(parent uint32) uint32 {
 	return binary.LittleEndian.Uint32(body[0x2c:0x30])
 }
 
+func (h *mutableHive) incrementSecurityReference(cell uint32) error {
+	if cell == 0xffffffff {
+		return nil
+	}
+	body, err := h.cellBody(cell)
+	if err != nil {
+		return err
+	}
+	if len(body) < 0x14 || string(body[:2]) != "sk" {
+		return fmt.Errorf("patch_hive: cell 0x%x is not security", cell)
+	}
+	count := binary.LittleEndian.Uint32(body[0x0c:0x10])
+	if count == ^uint32(0) {
+		return fmt.Errorf("patch_hive: security cell 0x%x reference count overflow", cell)
+	}
+	binary.LittleEndian.PutUint32(body[0x0c:0x10], count+1)
+	return nil
+}
+
 func (h *mutableHive) allocateCell(body []byte) (uint32, error) {
-	needed := align8(len(body) + 4)
+	bodyOffset := h.cellBodyOffset()
+	needed := align8(len(body) + bodyOffset)
+	if h.legacyCellPrefix {
+		needed = int(alignInt64(int64(len(body)+bodyOffset), 16))
+	}
 	if len(h.data) < hiveBaseBlockSize+0x20 || string(h.data[hiveBaseBlockSize:hiveBaseBlockSize+4]) != "hbin" {
 		return 0, fmt.Errorf("patch_hive: missing hbin")
+	}
+	if cell, ok := h.allocateExistingCell(body, needed); ok {
+		return cell, nil
 	}
 	hbinSize := int(alignInt64(int64(needed+0x20), hiveBaseBlockSize))
 	oldSize := int(binary.LittleEndian.Uint32(h.data[0x28:0x2c]))
@@ -1712,10 +1838,28 @@ func (h *mutableHive) allocateCell(body []byte) (uint32, error) {
 	copy(newHbin[0:4], "hbin")
 	binary.LittleEndian.PutUint32(newHbin[4:8], uint32(oldSize))
 	binary.LittleEndian.PutUint32(newHbin[8:12], uint32(hbinSize))
-	binary.LittleEndian.PutUint32(newHbin[0x20:0x24], uint32(int32(-needed)))
-	copy(newHbin[0x24:0x24+len(body)], body)
-	if remaining := hbinSize - 0x20 - needed; remaining >= 8 {
-		binary.LittleEndian.PutUint32(newHbin[0x20+needed:0x24+needed], uint32(remaining))
+	if h.legacyCellPrefix {
+		binary.LittleEndian.PutUint32(newHbin[0x1c:0x20], uint32(hbinSize))
+	}
+	used := needed
+	if hbinSize-0x20-needed < h.minimumFreeCellSize() {
+		used = hbinSize - 0x20
+	}
+	binary.LittleEndian.PutUint32(newHbin[0x20:0x24], uint32(int32(-used)))
+	if h.legacyCellPrefix {
+		binary.LittleEndian.PutUint32(newHbin[0x24:0x28], 0xffffffff)
+	}
+	copy(newHbin[0x20+bodyOffset:0x20+bodyOffset+len(body)], body)
+	if h.legacyCellPrefix {
+		for offset := 0x20 + bodyOffset + len(body); offset < 0x20+used; offset++ {
+			newHbin[offset] = 0xb2
+		}
+	}
+	if remaining := hbinSize - 0x20 - used; remaining >= h.minimumFreeCellSize() {
+		binary.LittleEndian.PutUint32(newHbin[0x20+used:0x24+used], uint32(remaining))
+		if h.legacyCellPrefix {
+			binary.LittleEndian.PutUint32(newHbin[0x24+used:0x28+used], 0x20)
+		}
 	}
 	h.data = append(h.data, newHbin...)
 	binary.LittleEndian.PutUint32(h.data[0x28:0x2c], uint32(oldSize+hbinSize))
@@ -1747,7 +1891,7 @@ func (h *mutableHive) allocateExistingCell(body []byte, needed int) (uint32, boo
 				break
 			}
 			if rawSize > 0 && cellSize >= needed {
-				h.writeAllocatedCell(cellOff, cellSize, body, needed)
+				h.writeAllocatedCell(binOff, cellOff, cellSize, body, needed)
 				return uint32(cellOff - hiveBaseBlockSize), true
 			}
 			cellOff += cellSize
@@ -1757,18 +1901,34 @@ func (h *mutableHive) allocateExistingCell(body []byte, needed int) (uint32, boo
 	return 0, false
 }
 
-func (h *mutableHive) writeAllocatedCell(cellOff, cellSize int, body []byte, needed int) {
+func (h *mutableHive) writeAllocatedCell(binOff, cellOff, cellSize int, body []byte, needed int) {
 	used := needed
-	if cellSize-needed < 8 {
+	if cellSize-needed < h.minimumFreeCellSize() {
 		used = cellSize
 	}
 	binary.LittleEndian.PutUint32(h.data[cellOff:cellOff+4], uint32(int32(-used)))
-	clear(h.data[cellOff+4 : cellOff+used])
-	copy(h.data[cellOff+4:cellOff+4+len(body)], body)
-	if remaining := cellSize - used; remaining >= 8 {
+	bodyOffset := h.cellBodyOffset()
+	// A format-1.1 free cell already carries the backward link associated
+	// with its offset. Preserve it when allocating that cell.
+	clear(h.data[cellOff+bodyOffset : cellOff+used])
+	copy(h.data[cellOff+bodyOffset:cellOff+bodyOffset+len(body)], body)
+	if h.legacyCellPrefix {
+		for offset := cellOff + bodyOffset + len(body); offset < cellOff+used; offset++ {
+			h.data[offset] = 0xb2
+		}
+	}
+	if remaining := cellSize - used; remaining >= h.minimumFreeCellSize() {
 		restOff := cellOff + used
 		binary.LittleEndian.PutUint32(h.data[restOff:restOff+4], uint32(remaining))
 		clear(h.data[restOff+4 : cellOff+cellSize])
+		if h.legacyCellPrefix {
+			binary.LittleEndian.PutUint32(h.data[restOff+4:restOff+8], uint32(cellOff-binOff))
+			nextOff := cellOff + cellSize
+			binEnd := binOff + int(binary.LittleEndian.Uint32(h.data[binOff+8:binOff+12]))
+			if nextOff < binEnd {
+				binary.LittleEndian.PutUint32(h.data[nextOff+4:nextOff+8], uint32(restOff-binOff))
+			}
+		}
 	}
 }
 
@@ -1797,10 +1957,24 @@ func (h *mutableHive) cellBody(cell uint32) ([]byte, error) {
 		size = -size
 	}
 	end := offset + int(size)
-	if int(size) < 4 || end > len(h.data) {
+	bodyOffset := h.cellBodyOffset()
+	if int(size) < bodyOffset || end > len(h.data) {
 		return nil, fmt.Errorf("patch_hive: invalid cell 0x%x size", cell)
 	}
-	return h.data[offset+4 : end], nil
+	return h.data[offset+bodyOffset : end], nil
+}
+
+func (h *mutableHive) freeCell(cell uint32) error {
+	offset := hiveBaseBlockSize + int(cell)
+	if offset < hiveBaseBlockSize || offset+4 > len(h.data) {
+		return fmt.Errorf("patch_hive: cell 0x%x outside hive", cell)
+	}
+	rawSize := int32(binary.LittleEndian.Uint32(h.data[offset : offset+4]))
+	if rawSize >= 0 {
+		return fmt.Errorf("patch_hive: cell 0x%x is not allocated", cell)
+	}
+	binary.LittleEndian.PutUint32(h.data[offset:offset+4], uint32(-rawSize))
+	return nil
 }
 
 func buildWindowsHivesFromINF(inf *infFile, txtsetup *infFile, extra []infAddRegSection, patches []hiveBuildPatch, format registryHiveFormat) (map[string]starlark.Value, error) {
@@ -2729,9 +2903,14 @@ func (w *hiveWriter) writeValue(name string, value registryData) (uint32, error)
 		hiveName = ""
 	}
 	nameBytes := []byte(hiveName)
+	flags := uint16(1)
+	if w.format.minor == 1 {
+		nameBytes = utf16Bytes(hiveName)
+		flags = 0
+	}
 	dataLength := uint32(len(value.data))
 	dataCell := uint32(0)
-	if len(value.data) <= 4 {
+	if len(value.data) <= 4 && w.format.minor != 1 {
 		dataLength |= 0x80000000
 		var inline [4]byte
 		copy(inline[:], value.data)
@@ -2745,7 +2924,7 @@ func (w *hiveWriter) writeValue(name string, value registryData) (uint32, error)
 	binary.LittleEndian.PutUint32(body[4:8], dataLength)
 	binary.LittleEndian.PutUint32(body[8:12], dataCell)
 	binary.LittleEndian.PutUint32(body[12:16], value.typ)
-	binary.LittleEndian.PutUint16(body[16:18], 1)
+	binary.LittleEndian.PutUint16(body[16:18], flags)
 	copy(body[0x14:], nameBytes)
 	return w.writeCell(body), nil
 }
@@ -2760,7 +2939,9 @@ func (w *hiveWriter) writeValueList(cells []uint32) uint32 {
 
 func (w *hiveWriter) writeSubkeyList(children []*registryTree) uint32 {
 	leafEntries := registrySubkeyLeafEntries
-	if w.format.minor == 2 {
+	if w.format.minor == 1 {
+		leafEntries = registryLegacyLeafEntries
+	} else if w.format.minor == 2 {
 		leafEntries = registrySubkeyIndexEntries
 	}
 	if len(children) <= leafEntries {
@@ -2782,11 +2963,11 @@ func (w *hiveWriter) writeSubkeyList(children []*registryTree) uint32 {
 
 func (w *hiveWriter) writeSubkeyLeaf(children []*registryTree) uint32 {
 	entrySize := 8
-	if w.format.minor == 2 {
+	if w.format.minor <= 2 {
 		entrySize = 4
 	}
 	body := make([]byte, 4+len(children)*entrySize)
-	if w.format.minor == 2 {
+	if w.format.minor <= 2 {
 		copy(body[0:2], "li")
 	} else if w.format.minor >= 5 {
 		copy(body[0:2], "lh")
@@ -2797,7 +2978,7 @@ func (w *hiveWriter) writeSubkeyLeaf(children []*registryTree) uint32 {
 	for i, child := range children {
 		offset := 4 + i*entrySize
 		binary.LittleEndian.PutUint32(body[offset:offset+4], child.cell)
-		if w.format.minor == 2 {
+		if w.format.minor <= 2 {
 			continue
 		} else if w.format.minor >= 5 {
 			binary.LittleEndian.PutUint32(body[offset+4:offset+8], registryNameHash(child.name))
@@ -2826,6 +3007,9 @@ func (w *hiveWriter) writeKey(node *registryTree, subkeys, values int) uint32 {
 	flags := node.flags
 	if !node.flagsSet {
 		flags = 0x20
+		if w.format.minor == 1 {
+			flags = 0
+		}
 		if node.name == "SYSTEM" || node.name == "SOFTWARE" || node.name == "DEFAULT" || node.name == "SAM" || node.name == "SECURITY" {
 			flags |= 0x000c
 		}
@@ -2851,6 +3035,9 @@ func (w *hiveWriter) writeKey(node *registryTree, subkeys, values int) uint32 {
 	binary.LittleEndian.PutUint32(body[0x38:0x3c], uint32(maxRegistrySubkeyClassLen(node)))
 	binary.LittleEndian.PutUint32(body[0x3c:0x40], uint32(maxRegistryValueNameLen(node)))
 	binary.LittleEndian.PutUint32(body[0x40:0x44], uint32(maxRegistryValueDataLen(node)))
+	if w.format.minor == 1 {
+		binary.LittleEndian.PutUint32(body[0x44:0x48], 0xb2b2b2b2)
+	}
 	binary.LittleEndian.PutUint16(body[0x48:0x4a], uint16(len(nameBytes)))
 	copy(body[0x4c:], nameBytes)
 	return w.writeCell(body)
@@ -2869,7 +3056,7 @@ func (w *hiveWriter) writeSecurity(descriptor []byte, refcount int) uint32 {
 }
 
 func (w *hiveWriter) patchKeyReferences(cell, subkeyList, valueList, securityCell, classCell uint32, classLen int) {
-	offset := int(cell) + 4
+	offset := int(cell) + w.cellBodyOffset()
 	binary.LittleEndian.PutUint32(w.data[offset+0x1c:offset+0x20], subkeyList)
 	binary.LittleEndian.PutUint32(w.data[offset+0x28:offset+0x2c], valueList)
 	binary.LittleEndian.PutUint32(w.data[offset+0x2c:offset+0x30], securityCell)
@@ -2882,21 +3069,49 @@ func (w *hiveWriter) writeRawCell(data []byte) uint32 {
 }
 
 func (w *hiveWriter) writeCell(body []byte) uint32 {
-	size := align8(len(body) + 4)
+	bodyOffset := w.cellBodyOffset()
+	size := w.alignedCellSize(len(body) + bodyOffset)
 	cell := w.nextCell(len(body))
 	binary.LittleEndian.PutUint32(w.data[w.cellOffset:w.cellOffset+4], uint32(int32(-size)))
-	copy(w.data[w.cellOffset+4:w.cellOffset+size], body)
+	if w.format.minor == 1 {
+		previous := uint32(0xffffffff)
+		if w.previousCell >= w.binStart {
+			previous = uint32(w.previousCell - w.binStart)
+		}
+		binary.LittleEndian.PutUint32(w.data[w.cellOffset+4:w.cellOffset+8], previous)
+	}
+	copy(w.data[w.cellOffset+bodyOffset:w.cellOffset+size], body)
+	if w.format.minor == 1 {
+		for offset := w.cellOffset + bodyOffset + len(body); offset < w.cellOffset+size; offset++ {
+			w.data[offset] = 0xb2
+		}
+	}
+	w.previousCell = w.cellOffset
 	w.cellOffset += size
 	return cell
 }
 
 func (w *hiveWriter) nextCell(bodySize int) uint32 {
-	needed := align8(bodySize + 4)
+	needed := w.alignedCellSize(bodySize + w.cellBodyOffset())
 	if w.cellOffset == 0 || w.cellOffset+needed > w.binEnd {
 		w.finishBin()
 		w.startBin(needed)
 	}
 	return uint32(w.cellOffset)
+}
+
+func (w *hiveWriter) alignedCellSize(size int) int {
+	if w.format.minor == 1 {
+		return int(alignInt64(int64(size), 16))
+	}
+	return align8(size)
+}
+
+func (w *hiveWriter) cellBodyOffset() int {
+	if w.format.minor == 1 {
+		return 8
+	}
+	return 4
 }
 
 func (w *hiveWriter) startBin(needed int) {
@@ -2910,7 +3125,13 @@ func (w *hiveWriter) startBin(needed int) {
 	copy(w.data[w.binStart:w.binStart+4], "hbin")
 	binary.LittleEndian.PutUint32(w.data[w.binStart+4:w.binStart+8], uint32(w.binStart))
 	binary.LittleEndian.PutUint32(w.data[w.binStart+8:w.binStart+12], uint32(binSize))
+	if w.format.minor == 1 {
+		// NT 3.1 and 3.5 repeat the bin's mapped size in the legacy spare
+		// field. Their loader validates this before accepting a boot hive.
+		binary.LittleEndian.PutUint32(w.data[w.binStart+0x1c:w.binStart+0x20], uint32(binSize))
+	}
 	w.cellOffset = w.binStart + 0x20
+	w.previousCell = -1
 }
 
 func (w *hiveWriter) appendEmptyBin() {
@@ -2919,7 +3140,13 @@ func (w *hiveWriter) appendEmptyBin() {
 	copy(w.data[start:start+4], "hbin")
 	binary.LittleEndian.PutUint32(w.data[start+4:start+8], uint32(start))
 	binary.LittleEndian.PutUint32(w.data[start+8:start+12], hiveBaseBlockSize)
+	if w.format.minor == 1 {
+		binary.LittleEndian.PutUint32(w.data[start+0x1c:start+0x20], hiveBaseBlockSize)
+	}
 	binary.LittleEndian.PutUint32(w.data[start+0x20:start+0x24], hiveBaseBlockSize-0x20)
+	if w.format.minor == 1 {
+		binary.LittleEndian.PutUint32(w.data[start+0x24:start+0x28], 0xffffffff)
+	}
 }
 
 func (w *hiveWriter) finishBin() {
@@ -2927,12 +3154,29 @@ func (w *hiveWriter) finishBin() {
 		return
 	}
 	remaining := w.binEnd - w.cellOffset
-	if remaining >= 8 {
+	minimumFree := 8
+	if w.format.minor == 1 {
+		minimumFree = 16
+	}
+	if remaining < minimumFree && w.previousCell >= w.binStart {
+		rawSize := int32(binary.LittleEndian.Uint32(w.data[w.previousCell : w.previousCell+4]))
+		if rawSize < 0 {
+			binary.LittleEndian.PutUint32(w.data[w.previousCell:w.previousCell+4], uint32(rawSize-int32(remaining)))
+		}
+	} else if remaining >= minimumFree {
 		binary.LittleEndian.PutUint32(w.data[w.cellOffset:w.cellOffset+4], uint32(remaining))
+		if w.format.minor == 1 {
+			previous := uint32(0xffffffff)
+			if w.previousCell >= w.binStart {
+				previous = uint32(w.previousCell - w.binStart)
+			}
+			binary.LittleEndian.PutUint32(w.data[w.cellOffset+4:w.cellOffset+8], previous)
+		}
 	}
 	w.cellOffset = 0
 	w.binStart = 0
 	w.binEnd = 0
+	w.previousCell = -1
 }
 
 func sortedRegistryChildren(node *registryTree) []*registryTree {
@@ -3047,7 +3291,7 @@ func (w *hiveWriter) writeSecurityCells(root *registryTree) error {
 	for index, cell := range cells {
 		previous := cells[(index+len(cells)-1)%len(cells)]
 		next := cells[(index+1)%len(cells)]
-		body := int(cell) + 4
+		body := int(cell) + w.cellBodyOffset()
 		binary.LittleEndian.PutUint32(w.data[body+0x04:body+0x08], next)
 		binary.LittleEndian.PutUint32(w.data[body+0x08:body+0x0c], previous)
 	}

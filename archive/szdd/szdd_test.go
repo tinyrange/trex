@@ -28,6 +28,18 @@ func TestSZDDDecodesLiteralsAndMatches(t *testing.T) {
 	}
 }
 
+func TestSZDDAcceptsFilenameReplacementCharacter(t *testing.T) {
+	file := szddTestFile(1, []byte{1, 'x'})
+	file.Data[9] = 'f'
+	got, err := decodeSZDD(file, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, []byte("x")) {
+		t.Fatalf("decoded = %q, want x", got)
+	}
+}
+
 func TestSZDDRejectsInvalidAndBoundedStreams(t *testing.T) {
 	if _, err := decodeSZDD(&starfile.Bytes{Name: "short", Data: []byte("SZDD")}, 1024); err == nil {
 		t.Fatal("truncated header was accepted")

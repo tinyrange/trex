@@ -136,6 +136,84 @@ func TestBuildRegistryHiveSupportsNT351Format(t *testing.T) {
 	}
 }
 
+func TestBuildRegistryHiveSupportsNT31Format(t *testing.T) {
+	root := newRegistryTree("SYSTEM")
+	setRegistryValue(root, "/ControlSet001/Services/Atdisk", "ImagePath", registryString(regExpandSZ, "system32\\drivers\\atdisk.sys"))
+	data, err := buildRegistryHiveWithFormat(root, registryHiveFormat{major: 1, minor: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.LittleEndian.Uint32(data[0x18:0x1c]); got != 1 {
+		t.Fatalf("minor version = %d, want 1", got)
+	}
+	rootCell := binary.LittleEndian.Uint32(data[0x24:0x28])
+	if got := binary.LittleEndian.Uint32(data[hiveBaseBlockSize+int(rootCell)+4:]); got != 0xffffffff {
+		t.Fatalf("legacy cell prefix = %#x, want %#x", got, uint32(0xffffffff))
+	}
+	if got := string(data[hiveBaseBlockSize+int(rootCell)+8 : hiveBaseBlockSize+int(rootCell)+10]); got != "nk" {
+		t.Fatalf("root signature = %q, want nk after legacy prefix", got)
+	}
+	rootBody := data[hiveBaseBlockSize+int(rootCell)+8:]
+	if flags := binary.LittleEndian.Uint16(rootBody[2:4]); flags&0x20 != 0 {
+		t.Fatalf("legacy root uses compressed-name flag %#x", flags)
+	}
+	nameLength := int(binary.LittleEndian.Uint16(rootBody[0x48:0x4a]))
+	if got, want := nameLength, len(utf16Bytes("SYSTEM")); got != want {
+		t.Fatalf("legacy root name length = %d, want UTF-16 byte length %d", got, want)
+	}
+	for offset := hiveBaseBlockSize; offset < len(data); {
+		binSize := binary.LittleEndian.Uint32(data[offset+8 : offset+12])
+		if got := binary.LittleEndian.Uint32(data[offset+0x1c : offset+0x20]); got != binSize {
+			t.Fatalf("legacy hbin mapped size = %#x, want %#x", got, binSize)
+		}
+		offset += int(binSize)
+	}
+	assertNT31CellLinks(t, data)
+	hive, err := newRegistryHive(testHiveFile(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := hive.lookup("/ControlSet001/Services/Atdisk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := hive.readValues(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, found, err := values.Get(starlark.String("ImagePath"))
+	if err != nil || !found {
+		t.Fatalf("ImagePath lookup: found=%v err=%v", found, err)
+	}
+	if got, want := value.String(), `"system32\\drivers\\atdisk.sys"`; got != want {
+		t.Fatalf("ImagePath = %s, want %s", got, want)
+	}
+}
+
+func TestMutableNT31HiveRenamesRootInPlace(t *testing.T) {
+	root := newRegistryTree(".Default")
+	data, err := buildRegistryHiveWithFormat(root, registryHiveFormat{major: 1, minor: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hive := &mutableHive{data: data, legacyCellPrefix: true}
+	if err := hive.renameRoot("SAM"); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := newRegistryHive(testHiveFile(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := parsed.readKey(parsed.rootCell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key.name != "SAM" {
+		t.Fatalf("root name = %q, want SAM", key.name)
+	}
+	assertNT31CellLinks(t, data)
+}
+
 func TestBuildRegistryHiveUsesBoundedBins(t *testing.T) {
 	root := newRegistryTree("SYSTEM")
 	for i := 0; i < 300; i++ {
@@ -400,6 +478,301 @@ func TestMutableHiveAppliesMultiStringAppend(t *testing.T) {
 	if got, want := strings.Join(registryMultiStringValues(value), ","), "BITS,CryptSvc"; got != want {
 		t.Fatalf("patched MULTI_SZ = %q, want %q", got, want)
 	}
+}
+
+func TestMutableHivePatchesNT31CellsInPlace(t *testing.T) {
+	root := newRegistryTree("SYSTEM")
+	setRegistryValue(root, "/ControlSet001/Services/Atdisk", "Start", registryDWORD(3))
+	data, err := buildRegistryHiveWithFormat(root, registryHiveFormat{major: 1, minor: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSize := len(data)
+	hive := &mutableHive{data: data, legacyCellPrefix: true}
+	atdiskCell, err := hive.lookupKey("/ControlSet001/Services/Atdisk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startCell, err := hive.findValueCell(atdiskCell, "Start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startBody, err := hive.cellBody(startCell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.LittleEndian.Uint32(startBody[0x04:0x08]); got != 4 {
+		t.Fatalf("legacy DWORD length = %#x, want external length 4", got)
+	}
+	startDataCell := binary.LittleEndian.Uint32(startBody[0x08:0x0c])
+	rootBody, err := hive.cellBody(hive.rootCell())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSubkeyList := binary.LittleEndian.Uint32(rootBody[0x1c:0x20])
+	rootSecurity := binary.LittleEndian.Uint32(rootBody[0x2c:0x30])
+	securityBody, err := hive.cellBody(rootSecurity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSecurityReferences := binary.LittleEndian.Uint32(securityBody[0x0c:0x10])
+	if err := hive.applyValue("/ControlSet001/Services/Atdisk", "Start", registryDWORD(0), 0); err != nil {
+		t.Fatal(err)
+	}
+	startBody, err = hive.cellBody(startCell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.LittleEndian.Uint32(startBody[0x04:0x08]); got != 4 {
+		t.Fatalf("patched legacy DWORD length = %#x, want external length 4", got)
+	}
+	if got := binary.LittleEndian.Uint32(startBody[0x08:0x0c]); got != startDataCell {
+		t.Fatalf("patched legacy DWORD data cell = %#x, want preserved %#x", got, startDataCell)
+	}
+	startData, err := hive.cellBody(startDataCell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.LittleEndian.Uint32(startData[:4]); got != 0 {
+		t.Fatalf("patched legacy DWORD = %d, want 0", got)
+	}
+	if err := hive.applyValue("/ControlSet001/Services/Atdisk", "SetupCreated", registryDWORD(7), 0); err != nil {
+		t.Fatal(err)
+	}
+	createdCell, err := hive.findValueCell(atdiskCell, "SetupCreated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdBody, err := hive.cellBody(createdCell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.LittleEndian.Uint32(createdBody[0x04:0x08]); got != 0x80000004 {
+		t.Fatalf("new legacy DWORD length = %#x, want inline length %#x", got, uint32(0x80000004))
+	}
+	if got := binary.LittleEndian.Uint32(createdBody[0x08:0x0c]); got != 7 {
+		t.Fatalf("new inline legacy DWORD = %d, want 7", got)
+	}
+	controlSet2, err := hive.writeKey("ControlSet002", hive.rootCell())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hive.addSubkeyCell(hive.rootCell(), controlSet2); err != nil {
+		t.Fatal(err)
+	}
+	controlSet2Body, err := hive.cellBody(controlSet2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.LittleEndian.Uint32(controlSet2Body[0x44:0x48]); got != 0xb2b2b2b2 {
+		t.Fatalf("legacy key work marker = %#x", got)
+	}
+	securityBody, err = hive.cellBody(rootSecurity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.LittleEndian.Uint32(securityBody[0x0c:0x10]); got != oldSecurityReferences+1 {
+		t.Fatalf("inherited security references = %d, want %d", got, oldSecurityReferences+1)
+	}
+	oldListOffset := hiveBaseBlockSize + int(oldSubkeyList)
+	if got := int32(binary.LittleEndian.Uint32(hive.data[oldListOffset : oldListOffset+4])); got <= 0 {
+		t.Fatalf("replaced subkey list remains allocated with size %d", got)
+	}
+	if err := hive.applyValue("/ControlSet002/Services/Atdisk", "ImagePath", registryString(regExpandSZ, `system32\drivers\atdisk.sys`), 0); err != nil {
+		t.Fatal(err)
+	}
+	value, err := hive.readValue("/ControlSet002/Services/Atdisk", "ImagePath")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimRight(decodeUTF16LE(value.data), "\x00"); got != `system32\drivers\atdisk.sys` {
+		t.Fatalf("ImagePath = %q", got)
+	}
+	keyCell, err := hive.lookupKey("/ControlSet002/Services/Atdisk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	valueCell, err := hive.findValueCell(keyCell, "ImagePath")
+	if err != nil {
+		t.Fatal(err)
+	}
+	valueBody, err := hive.cellBody(valueCell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags := binary.LittleEndian.Uint16(valueBody[0x10:0x12]); flags != 0 {
+		t.Fatalf("legacy value-name flags = %#x, want Unicode", flags)
+	}
+	if got, want := int(binary.LittleEndian.Uint16(valueBody[2:4])), len(utf16Bytes("ImagePath")); got != want {
+		t.Fatalf("legacy value name length = %d, want %d", got, want)
+	}
+	for offset := hiveBaseBlockSize; offset < len(hive.data); {
+		binSize := int(binary.LittleEndian.Uint32(hive.data[offset+8 : offset+12]))
+		if got := int(binary.LittleEndian.Uint32(hive.data[offset+0x1c : offset+0x20])); got != binSize {
+			t.Fatalf("legacy hbin mapped size = %#x, want %#x", got, binSize)
+		}
+		offset += binSize
+	}
+	assertNT31CellLinks(t, hive.data)
+	parsed, err := newRegistryHive(testHiveFile(hive.data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parsed.lookup("/ControlSet002/Services/Atdisk"); err != nil {
+		t.Fatal(err)
+	}
+	if growth := len(hive.data) - originalSize; growth > 2*hiveBaseBlockSize {
+		t.Fatalf("legacy patch grew hive by %#x bytes, want at most %#x", growth, 2*hiveBaseBlockSize)
+	}
+}
+
+func TestMutableNT31HiveGrowsValueListsWithLegacyAlignment(t *testing.T) {
+	root := newRegistryTree("SYSTEM")
+	const keyPath = "/ControlSet001/Control/Setup"
+	ensureRegistryKey(root, keyPath)
+	data, err := buildRegistryHiveWithFormat(root, registryHiveFormat{major: 1, minor: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hive := &mutableHive{data: data, legacyCellPrefix: true}
+	for name, value := range map[string]string{
+		"pointer":  "msps2",
+		"video":    "VGA",
+		"keyboard": "STANDARD",
+	} {
+		if err := hive.applyValue(keyPath, name, registryString(regSZ, value), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keyCell, err := hive.lookupKey(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := hive.cellBody(keyCell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.LittleEndian.Uint32(key[0x24:0x28]); got != 3 {
+		t.Fatalf("value count = %d, want 3", got)
+	}
+	listCell := binary.LittleEndian.Uint32(key[0x28:0x2c])
+	listOffset := hiveBaseBlockSize + int(listCell)
+	if got := -int32(binary.LittleEndian.Uint32(hive.data[listOffset : listOffset+4])); got != 32 {
+		t.Fatalf("legacy three-value list cell size = %d, want 32", got)
+	}
+	for offset, value := range hive.data[listOffset+8+3*4 : listOffset+32] {
+		if value != 0xb2 {
+			t.Fatalf("legacy value-list padding byte %d = %#x, want 0xb2", offset, value)
+		}
+	}
+	assertNT31CellLinks(t, hive.data)
+}
+
+func assertNT31CellLinks(t *testing.T, data []byte) {
+	t.Helper()
+	for binOff := hiveBaseBlockSize; binOff < len(data); {
+		binSize := int(binary.LittleEndian.Uint32(data[binOff+8 : binOff+12]))
+		previous := uint32(0xffffffff)
+		for cellOff := binOff + 0x20; cellOff < binOff+binSize; {
+			if got := binary.LittleEndian.Uint32(data[cellOff+4 : cellOff+8]); got != previous {
+				t.Fatalf("format-1.1 cell at %#x links %#x, want previous cell %#x", cellOff, got, previous)
+			}
+			rawSize := int32(binary.LittleEndian.Uint32(data[cellOff : cellOff+4]))
+			cellSize := int(rawSize)
+			if cellSize < 0 {
+				cellSize = -cellSize
+			}
+			if cellSize < 16 || cellOff+cellSize > binOff+binSize {
+				t.Fatalf("invalid format-1.1 cell size %#x at %#x", cellSize, cellOff)
+			}
+			if cellSize%16 != 0 {
+				t.Fatalf("format-1.1 cell size %#x at %#x is not 16-byte aligned", cellSize, cellOff)
+			}
+			previous = uint32(cellOff - binOff)
+			cellOff += cellSize
+		}
+		binOff += binSize
+	}
+}
+
+func TestMutableHiveAbsorbsUndersizedNT31BinTail(t *testing.T) {
+	root := newRegistryTree("SYSTEM")
+	data, err := buildRegistryHiveWithFormat(root, registryHiveFormat{major: 1, minor: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hive := &mutableHive{data: data, legacyCellPrefix: true}
+	cell, err := hive.allocateCell(make([]byte, hiveBaseBlockSize-0x30))
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset := hiveBaseBlockSize + int(cell)
+	if got, want := -int(int32(binary.LittleEndian.Uint32(hive.data[offset:offset+4]))), hiveBaseBlockSize-0x20; got != want {
+		t.Fatalf("allocated cell size = %#x, want absorbed bin payload %#x", got, want)
+	}
+	assertNT31CellLinks(t, hive.data)
+}
+
+func TestMutableHiveRelinksNT31CellAfterSplitFreeCell(t *testing.T) {
+	data := make([]byte, 2*hiveBaseBlockSize)
+	binary.LittleEndian.PutUint32(data[0x14:0x18], 1)
+	binary.LittleEndian.PutUint32(data[0x18:0x1c], 1)
+	binary.LittleEndian.PutUint32(data[0x28:0x2c], hiveBaseBlockSize)
+	binOff := hiveBaseBlockSize
+	copy(data[binOff:binOff+4], "hbin")
+	binary.LittleEndian.PutUint32(data[binOff+8:binOff+12], hiveBaseBlockSize)
+	binary.LittleEndian.PutUint32(data[binOff+0x1c:binOff+0x20], hiveBaseBlockSize)
+	cellA := binOff + 0x20
+	binary.LittleEndian.PutUint32(data[cellA:cellA+4], ^uint32(15))
+	binary.LittleEndian.PutUint32(data[cellA+4:cellA+8], 0xffffffff)
+	freeCell := cellA + 16
+	binary.LittleEndian.PutUint32(data[freeCell:freeCell+4], 32)
+	binary.LittleEndian.PutUint32(data[freeCell+4:freeCell+8], 0x20)
+	cellC := freeCell + 32
+	binary.LittleEndian.PutUint32(data[cellC:cellC+4], ^uint32(15))
+	binary.LittleEndian.PutUint32(data[cellC+4:cellC+8], uint32(freeCell-binOff))
+	finalFree := cellC + 16
+	binary.LittleEndian.PutUint32(data[finalFree:finalFree+4], uint32(binOff+hiveBaseBlockSize-finalFree))
+	binary.LittleEndian.PutUint32(data[finalFree+4:finalFree+8], uint32(cellC-binOff))
+
+	hive := &mutableHive{data: data, legacyCellPrefix: true}
+	if _, err := hive.allocateCell([]byte{1, 2, 3, 4}); err != nil {
+		t.Fatal(err)
+	}
+	assertNT31CellLinks(t, hive.data)
+}
+
+func TestMutableHiveDoesNotCreateEightByteNT31FreeCell(t *testing.T) {
+	data := make([]byte, 2*hiveBaseBlockSize)
+	binary.LittleEndian.PutUint32(data[0x14:0x18], 1)
+	binary.LittleEndian.PutUint32(data[0x18:0x1c], 1)
+	binary.LittleEndian.PutUint32(data[0x28:0x2c], hiveBaseBlockSize)
+	binOff := hiveBaseBlockSize
+	copy(data[binOff:binOff+4], "hbin")
+	binary.LittleEndian.PutUint32(data[binOff+8:binOff+12], hiveBaseBlockSize)
+	binary.LittleEndian.PutUint32(data[binOff+0x1c:binOff+0x20], hiveBaseBlockSize)
+	freeCell := binOff + 0x20
+	binary.LittleEndian.PutUint32(data[freeCell:freeCell+4], 32)
+	binary.LittleEndian.PutUint32(data[freeCell+4:freeCell+8], 0xffffffff)
+	nextCell := freeCell + 32
+	binary.LittleEndian.PutUint32(data[nextCell:nextCell+4], ^uint32(15))
+	binary.LittleEndian.PutUint32(data[nextCell+4:nextCell+8], uint32(freeCell-binOff))
+	finalFree := nextCell + 16
+	binary.LittleEndian.PutUint32(data[finalFree:finalFree+4], uint32(binOff+hiveBaseBlockSize-finalFree))
+	binary.LittleEndian.PutUint32(data[finalFree+4:finalFree+8], uint32(nextCell-binOff))
+
+	hive := &mutableHive{data: data, legacyCellPrefix: true}
+	cell, err := hive.allocateCell(make([]byte, 12))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := int(-int32(binary.LittleEndian.Uint32(hive.data[hiveBaseBlockSize+int(cell) : hiveBaseBlockSize+int(cell)+4]))); got != 32 {
+		t.Fatalf("allocated cell size = %d, want entire 32-byte free cell", got)
+	}
+	if got, want := binary.LittleEndian.Uint32(hive.data[nextCell+4:nextCell+8]), uint32(freeCell-binOff); got != want {
+		t.Fatalf("following cell link = %#x, want %#x", got, want)
+	}
+	assertNT31CellLinks(t, hive.data)
 }
 
 func TestMutableHiveSortsInsertedSubkeys(t *testing.T) {
