@@ -7,4 +7,7 @@ require (
 	go.starlark.net v0.0.0-20260630144053-529d8e869a14
 	golang.org/x/arch v0.29.0
 	golang.org/x/sys v0.42.0
+	renvo.dev v0.0.0
 )
+
+replace renvo.dev => ./renvo
