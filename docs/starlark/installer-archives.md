@@ -15,11 +15,22 @@ errors, while parser and source-read errors remain useful data for choosing the
 next decoder to implement.
 
 The supported bootstrap format is a DOS or PE launcher containing an embedded
-Microsoft Cabinet. When that Cabinet contains an InstallShield 5 or 6 package,
-trex also parses `data1.hdr` and reads the compressed application files
-directly from the numbered `data*.cab` volumes. `container` retains the outer
-Microsoft Cabinet and `payload` is the deepest recognized archive. Scanning is
-bounded to 256 MiB by default and can be reduced with `maximum_scan`.
+Microsoft Cabinet. When that Cabinet contains an InstallShield package, trex
+also reads its application files directly. InstallShield 4 keeps the metadata
+and compressed data together in `data1.cab`, `_sys1.cab`, and `_user1.cab`;
+versions 5 and later can separate the metadata into `data1.hdr` and data into
+numbered `data*.cab` volumes. `container` retains the outer Microsoft Cabinet
+and `payload` is the deepest primary archive. Scanning is bounded to 256 MiB by
+default and can be reduced with `maximum_scan`.
+
+The legacy combined format starts with the little-endian `ISc(` signature and
+the marker `0x01000004`. Its 20-byte common header names a bounded cabinet
+descriptor containing directory and file counts, a relative-offset file table,
+and hash buckets for file groups and components. Each valid pre-v6 file record
+provides a name, directory, flags, expanded and stored sizes, and an absolute
+data offset. Compressed payloads are a sequence of little-endian 16-bit chunk
+sizes followed by raw Deflate streams. Descriptor slots carrying the invalid
+flag are retained for numeric references but are not exposed as archive files.
 
 InstallShield 5 split files are joined directly from the fragment records in
 each volume header before deobfuscation and decompression. External payloads
@@ -59,8 +70,8 @@ package = archive.installshield(
 ```
 
 A self-extractor can contain more than one nested InstallShield package.
-`installer.packages` lists records with `root`, `format`, `payload`, `script`,
-and `script_path`, and prevents a
+`installer.packages` lists records with `root`, `header_path`, `format`,
+`payload`, `script`, and `script_path`, and prevents a
 nested package's `data1.hdr` from replacing the primary package merely because
 the basenames match. `installer.payload` remains the shallowest primary package
 for compatibility. Install plans include files and artifacts from every
