@@ -180,7 +180,13 @@ func Open(header starfile.File, volumes map[uint16]starfile.File, external map[s
 	}
 	rawVersion := binary.LittleEndian.Uint32(data[4:8])
 	version := 0
-	if rawVersion>>24 == 1 {
+	legacyV4 := rawVersion == 0x01000004
+	if legacyV4 {
+		// InstallShield 3/4 single-file cabinets use the otherwise ambiguous
+		// legacy marker 0x01000004. Their descriptor/file records are the
+		// pre-v6 layout, without the v5 MD5 tail.
+		version = 4
+	} else if rawVersion>>24 == 1 {
 		version = int((rawVersion >> 12) & 0xf)
 	} else if rawVersion>>24 == 2 || rawVersion>>24 == 4 {
 		version = int(rawVersion & 0xffff)
@@ -188,7 +194,7 @@ func Open(header starfile.File, volumes map[uint16]starfile.File, external map[s
 			version /= 100
 		}
 	}
-	if version < 5 || version > 16 {
+	if (version < 5 && !legacyV4) || version > 16 {
 		return nil, &UnsupportedVersionError{version: version, raw: rawVersion}
 	}
 	descriptor := uint64(binary.LittleEndian.Uint32(data[12:16]))
@@ -274,20 +280,29 @@ func Open(header starfile.File, volumes map[uint16]starfile.File, external map[s
 		if version <= 5 {
 			relative := binary.LittleEndian.Uint32(data[table+(uint64(directoryCount)+uint64(index))*4:])
 			offset := table + uint64(relative)
-			if offset > uint64(len(data)) || 0x3a > uint64(len(data))-offset {
+			recordSize := uint64(0x3a)
+			if version == 4 {
+				recordSize = 0x2a
+			}
+			if offset > uint64(len(data)) || recordSize > uint64(len(data))-offset {
 				return nil, fmt.Errorf("installshield: file descriptor %d is out of bounds", index)
 			}
-			record := data[offset : offset+0x3a]
+			record := data[offset : offset+recordSize]
 			nameOffset = binary.LittleEndian.Uint32(record[0:4])
 			directoryIndex = binary.LittleEndian.Uint16(record[4:6])
 			file.flags = binary.LittleEndian.Uint16(record[8:10])
 			file.expandedSize = uint64(binary.LittleEndian.Uint32(record[10:14]))
 			file.compressedSize = uint64(binary.LittleEndian.Uint32(record[14:18]))
 			file.dataOffset = uint64(binary.LittleEndian.Uint32(record[0x26:0x2a]))
-			copy(file.digest[:], record[0x2a:0x3a])
-			file.volume, err = installShieldV5VolumeForFile(volumes, index)
-			if err != nil {
-				return nil, err
+			if version == 5 {
+				copy(file.digest[:], record[0x2a:0x3a])
+			}
+			file.volume = 1
+			if version == 5 {
+				file.volume, err = installShieldV5VolumeForFile(volumes, index)
+				if err != nil {
+					return nil, err
+				}
 			}
 		} else {
 			offset := table + uint64(fileDescriptorOffset) + uint64(index)*0x57
@@ -305,6 +320,13 @@ func Open(header starfile.File, volumes map[uint16]starfile.File, external map[s
 			file.linkPrevious = binary.LittleEndian.Uint32(record[0x4c:0x50])
 			file.linkFlags = record[0x54]
 			file.volume = binary.LittleEndian.Uint16(record[0x55:0x57])
+		}
+		// Legacy cabinets can retain unused descriptor slots containing
+		// arbitrary offsets. Preserve their numeric positions for group and
+		// link references, but do not interpret or expose them as files.
+		if file.flags&installShieldFileInvalid != 0 {
+			files[index] = file
+			continue
 		}
 		if uint32(directoryIndex) >= directoryCount {
 			return nil, fmt.Errorf("installshield: file %d has invalid directory %d", index, directoryIndex)
@@ -666,15 +688,19 @@ func (a *Archive) Attr(name string) (starlark.Value, error) {
 	case "version":
 		return starlark.MakeInt(a.version), nil
 	case "files":
-		values := make([]starlark.Value, len(a.files))
-		for i, file := range a.files {
-			values[i] = starlark.String(file.path)
+		values := make([]starlark.Value, 0, len(a.files))
+		for _, file := range a.files {
+			if file.path != "" {
+				values = append(values, starlark.String(file.path))
+			}
 		}
 		return starlark.NewList(values), nil
 	case "entries":
-		values := make([]starlark.Value, len(a.files))
-		for i, file := range a.files {
-			values[i] = installShieldFileValue(file)
+		values := make([]starlark.Value, 0, len(a.files))
+		for _, file := range a.files {
+			if file.path != "" {
+				values = append(values, installShieldFileValue(file))
+			}
 		}
 		return starlark.NewList(values), nil
 	case "groups":
@@ -702,7 +728,7 @@ func (a *Archive) Attr(name string) (starlark.Value, error) {
 	case "unresolved":
 		values := make([]starlark.Value, 0)
 		for _, file := range a.files {
-			if file.dataOffset != 0 || file.expandedSize == 0 {
+			if file.path == "" || file.dataOffset != 0 || file.expandedSize == 0 {
 				continue
 			}
 			external, err := a.externalFile(file)

@@ -3,6 +3,7 @@ package installshield
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"strings"
 	"testing"
 
@@ -65,6 +66,33 @@ func TestInstallerFindsAndExtractsEmbeddedCabinet(t *testing.T) {
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("payload = %q, want %q", got, payload)
+	}
+}
+
+func TestInstallerFindsLegacyCombinedInstallShieldCabinet(t *testing.T) {
+	inner := installShieldV4Fixture(t)
+	cabinet := uncompressedTestCabinet("data1.cab", inner)
+	source := &starfile.Bytes{Name: "setup.exe", Data: append([]byte("MZ launcher data"), cabinet...)}
+	installer, err := OpenInstaller(source, int64(len(source.Data)), false, bytecache.New(bytecache.DefaultBytes), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installer.format != "installshield4" || len(installer.packages) != 1 {
+		t.Fatalf("installer = format %q, %d packages", installer.format, len(installer.packages))
+	}
+	if installer.packages[0].headerPath != "/data1.cab" {
+		t.Fatalf("header path = %q", installer.packages[0].headerPath)
+	}
+	value, found, err := installer.Get(starlark.String("legacy.bin"))
+	if err != nil || !found {
+		t.Fatalf("legacy lookup = %v, %v", found, err)
+	}
+	got, err := io.ReadAll(io.NewSectionReader(value.(starfile.File), 0, value.(starfile.File).Size()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "legacy compressed payload" {
+		t.Fatalf("legacy payload = %q", got)
 	}
 }
 
