@@ -28,6 +28,73 @@ func rawDeflate(t *testing.T, data []byte) []byte {
 	return output.Bytes()
 }
 
+func installShieldV4Fixture(t *testing.T) []byte {
+	t.Helper()
+	payload := []byte("legacy compressed payload")
+	compressed := rawDeflate(t, payload)
+	encoded := append([]byte{byte(len(compressed)), byte(len(compressed) >> 8)}, compressed...)
+	const descriptor = 0x200
+	const table = 0x800
+	const dataOffset = 0xc00
+	cabinet := make([]byte, dataOffset+len(encoded))
+	binary.LittleEndian.PutUint32(cabinet[0:4], installShieldSignature)
+	binary.LittleEndian.PutUint32(cabinet[4:8], 0x01000004)
+	binary.LittleEndian.PutUint32(cabinet[12:16], descriptor)
+	binary.LittleEndian.PutUint32(cabinet[16:20], uint32(len(cabinet)-descriptor))
+	binary.LittleEndian.PutUint32(cabinet[descriptor+0x0c:], table-descriptor)
+	binary.LittleEndian.PutUint32(cabinet[descriptor+0x14:], 0x400)
+	binary.LittleEndian.PutUint32(cabinet[descriptor+0x18:], 0x400)
+	binary.LittleEndian.PutUint32(cabinet[descriptor+0x1c:], 1)
+	binary.LittleEndian.PutUint32(cabinet[descriptor+0x28:], 2)
+	binary.LittleEndian.PutUint32(cabinet[table:], 0x300)
+	binary.LittleEndian.PutUint32(cabinet[table+4:], 0x100)
+	binary.LittleEndian.PutUint32(cabinet[table+8:], 0x13a)
+	copy(cabinet[table+0x300:], "Bin\x00")
+	copy(cabinet[table+0x310:], "legacy.bin\x00")
+	record := cabinet[table+0x100:]
+	binary.LittleEndian.PutUint32(record[0:4], 0x310)
+	binary.LittleEndian.PutUint16(record[4:6], 0)
+	binary.LittleEndian.PutUint16(record[8:10], installShieldFileCompressed)
+	binary.LittleEndian.PutUint32(record[10:14], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(record[14:18], uint32(len(encoded)))
+	binary.LittleEndian.PutUint32(record[0x26:0x2a], dataOffset)
+	// Old media can contain invalid descriptor slots whose other fields are
+	// uninitialized and must not be treated as strings or files.
+	invalid := cabinet[table+0x13a:]
+	binary.LittleEndian.PutUint32(invalid[0:4], 0xfffffff0)
+	binary.LittleEndian.PutUint16(invalid[4:6], 0xffff)
+	binary.LittleEndian.PutUint16(invalid[8:10], installShieldFileInvalid)
+	copy(cabinet[dataOffset:], encoded)
+	return cabinet
+}
+
+func TestInstallShieldV4CombinedCabinet(t *testing.T) {
+	data := installShieldV4Fixture(t)
+	combined := &starfile.Bytes{Name: "data1.cab", Data: data}
+	archive, err := Open(combined, map[uint16]starfile.File{1: combined}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archive.version != 4 || len(archive.files) != 2 {
+		t.Fatalf("metadata = version %d, %d descriptor slots", archive.version, len(archive.files))
+	}
+	files, err := archive.Attr("files")
+	if err != nil || files.(*starlark.List).Len() != 1 {
+		t.Fatalf("visible files = %v, %v", files, err)
+	}
+	value, found, err := archive.Get(starlark.String("legacy.bin"))
+	if err != nil || !found {
+		t.Fatalf("legacy lookup = %v, %v", found, err)
+	}
+	got, err := io.ReadAll(io.NewSectionReader(value.(starfile.File), 0, value.(starfile.File).Size()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "legacy compressed payload" {
+		t.Fatalf("legacy payload = %q", got)
+	}
+}
+
 func installShieldV6Fixture(t *testing.T) (starfile.File, map[uint16]starfile.File, map[string][]starfile.File) {
 	t.Helper()
 	internal := []byte("compressed application payload")

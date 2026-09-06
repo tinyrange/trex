@@ -39,6 +39,7 @@ type Installer struct {
 
 type installerPackage struct {
 	root       string
+	headerPath string
 	payload    *Archive
 	scriptPath string
 	script     starfile.File
@@ -261,6 +262,8 @@ func installerNestedPayload(container *cabarchive.Archive) (installerPayload, []
 		memberFile
 		directory string
 		root      string
+		inline    bool
+		primary   bool
 	}
 	containerFiles := container.Files()
 	members := make([]memberFile, 0, len(containerFiles))
@@ -273,19 +276,32 @@ func installerNestedPayload(container *cabarchive.Archive) (installerPayload, []
 		name := path.Clean("/" + strings.TrimPrefix(member.Name, "/"))
 		entry := memberFile{name: name, lower: strings.ToLower(name), file: value}
 		members = append(members, entry)
-		if strings.EqualFold(path.Base(name), "data1.hdr") {
+		base := strings.ToLower(path.Base(name))
+		if base == "data1.hdr" {
 			directory := strings.ToLower(path.Dir(name))
 			root := directory
 			if strings.EqualFold(path.Base(directory), "disk1") {
 				root = strings.ToLower(path.Dir(directory))
 			}
-			headers = append(headers, headerFile{memberFile: entry, directory: directory, root: root})
+			headers = append(headers, headerFile{memberFile: entry, directory: directory, root: root, primary: true})
+		} else if strings.HasSuffix(base, "1.cab") && value.Size() >= 8 {
+			common := make([]byte, 8)
+			if _, err := io.ReadFull(io.NewSectionReader(value, 0, 8), common); err != nil {
+				return nil, nil, "", fmt.Errorf("installer: read nested cabinet header %q: %w", name, err)
+			}
+			if binary.LittleEndian.Uint32(common[:4]) == installShieldSignature && binary.LittleEndian.Uint32(common[4:]) == 0x01000004 {
+				directory := strings.ToLower(path.Dir(name))
+				headers = append(headers, headerFile{memberFile: entry, directory: directory, root: directory, inline: true, primary: base == "data1.cab"})
+			}
 		}
 	}
 	if len(headers) == 0 {
 		return container, nil, "embedded_cab", nil
 	}
 	sort.Slice(headers, func(i, j int) bool {
+		if headers[i].primary != headers[j].primary {
+			return headers[i].primary
+		}
 		if len(headers[i].root) != len(headers[j].root) {
 			return len(headers[i].root) < len(headers[j].root)
 		}
@@ -313,20 +329,30 @@ func installerNestedPayload(container *cabarchive.Archive) (installerPayload, []
 			continue
 		}
 		volumes := make(map[uint16]starfile.File)
+		if header.inline {
+			volumes[1] = header.file
+		}
 		external := make(map[string][]starfile.File)
 		var script starfile.File
 		scriptPath := ""
 		for _, member := range members {
-			if owner(member.lower) != headerIndex {
+			belongs := owner(member.lower) == headerIndex
+			if header.inline {
+				belongs = member.lower == header.root || strings.HasPrefix(member.lower, strings.TrimSuffix(header.root, "/")+"/")
+			}
+			if !belongs {
 				continue
 			}
 			addInstallShieldExternal(external, member.name, member.file)
 			base := strings.ToLower(path.Base(member.name))
-			if base == "setup.ins" || base == "setup.inx" {
+			if header.primary && (base == "setup.ins" || base == "setup.inx") {
 				directory := strings.ToLower(path.Dir(member.name))
 				if script == nil || directory == header.directory {
 					script, scriptPath = member.file, member.name
 				}
+			}
+			if header.inline {
+				continue
 			}
 			var volume int
 			if _, err := fmt.Sscanf(base, "data%d.cab", &volume); err != nil || volume <= 0 || volume > 0xffff {
@@ -346,7 +372,7 @@ func installerNestedPayload(container *cabarchive.Archive) (installerPayload, []
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("installer: nested payload %q: %w", header.name, err)
 		}
-		packages = append(packages, installerPackage{root: header.root, payload: payload, scriptPath: scriptPath, script: script})
+		packages = append(packages, installerPackage{root: header.root, headerPath: header.name, payload: payload, scriptPath: scriptPath, script: script})
 	}
 	if len(packages) == 0 {
 		return container, nil, "embedded_cab", nil
@@ -419,6 +445,7 @@ func (i *Installer) Attr(name string) (starlark.Value, error) {
 			}
 			values[index] = starlarkStringDict(map[string]starlark.Value{
 				"format":      starlark.String(fmt.Sprintf("installshield%d", pkg.payload.version)),
+				"header_path": starlark.String(pkg.headerPath),
 				"payload":     pkg.payload,
 				"root":        starlark.String(pkg.root),
 				"script":      script,
