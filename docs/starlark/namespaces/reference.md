@@ -2296,6 +2296,24 @@ Native `qemu` operation. Limits and timeout arguments are validated before work 
 
 Native `regexp` operation. Limits and timeout arguments are validated before work begins.
 
+### `renvo.cc`
+
+`renvo.cc(source, input, target, flags=[], arena_size=32MiB) -> compiledModule; input is a virtual source path or list of paths`
+
+Native `renvo` operation. Limits and timeout arguments are validated before work begins.
+
+### `renvo.go`
+
+`renvo.go(source, input, target, arena_size=32MiB) -> compiledModule`
+
+Native `renvo` operation. Limits and timeout arguments are validated before work begins.
+
+### `renvo.make`
+
+`renvo.make(source, target, input='Makefile', targets=[], output='', arena_size=32MiB) -> compiledModule; rebuilds Renvo recipes in memory; output selects the binary by virtual path relative to the Makefile`
+
+Native `renvo` operation. Limits and timeout arguments are validated before work begins.
+
 ### `runtime.stats`
 
 `runtime.stats() -> record`
@@ -2691,6 +2709,10 @@ Methods and attributes: `counter(name, amount=1)`, `measure(name, function, *arg
 ### `clock.span` value
 
 Methods and attributes: `end() -> elapsed seconds`.
+
+### `compiledModule` value
+
+Methods and attributes: `binary`, `diagnostic`, `ok`, `outputs (immutable dict of virtual output names to bytes)`.
 
 ### `directory` value
 

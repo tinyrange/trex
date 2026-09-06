@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/tinyrange/trex/filesystem"
+	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 
 	"renvo.dev/driver"
@@ -14,7 +15,9 @@ import (
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
-		"go": starlark.NewBuiltin("go", renvoGoBuiltin),
+		"go":   starlark.NewBuiltin("go", renvoGoBuiltin),
+		"cc":   starlark.NewBuiltin("cc", renvoCCBuiltin),
+		"make": starlark.NewBuiltin("make", renvoMakeBuiltin),
 	}
 }
 
@@ -49,15 +52,17 @@ func renvoGoBuiltin(
 }
 
 type sourceFs struct {
-	dir filesystem.Snapshot
+	dir  filesystem.Snapshot
+	err  error
+	base string
 }
 
 func (s *sourceFs) resolvePath(path string) string {
-	// if path is relative, resolve it against the root of the snapshot which is /
+	// Relative paths use the build's virtual working directory.
 	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+		path = gopath.Join("/", s.base, path)
 	}
-	return path
+	return gopath.Clean(path)
 }
 
 // PathExists implements [driver.SourceFS].
@@ -84,16 +89,17 @@ func (s *sourceFs) ReadDir(path string) ([]driver.DirEntry, bool) {
 	// collect all entries in the directory
 	entries := []driver.DirEntry{}
 	for _, dir := range s.dir.Directories {
-		if strings.HasPrefix(dir, path) {
+		if dir != path && gopath.Dir(dir) == path {
 			entries = append(entries, driver.DirEntry{Name: gopath.Base(dir), IsDir: true})
 		}
 	}
 	for file := range s.dir.Files {
-		if strings.HasPrefix(file, path) {
+		if gopath.Dir(file) == path {
 			entries = append(entries, driver.DirEntry{Name: gopath.Base(file), IsDir: false})
 		}
 	}
 
+	slices.SortFunc(entries, func(a, b driver.DirEntry) int { return strings.Compare(a.Name, b.Name) })
 	return entries, true
 }
 
@@ -106,6 +112,18 @@ func (s *sourceFs) ReadFile(path string) ([]byte, bool) {
 		return nil, false
 	}
 
+	if f.File != nil {
+		data, err := starfile.ReadAll(f.File)
+		if err != nil {
+			if s.err == nil {
+				s.err = fmt.Errorf("read %s: %w", path, err)
+			}
+			return nil, false
+		}
+		f.Data, f.File = data, nil
+		s.dir.Files[path] = f
+		return data, true
+	}
 	return f.Data, true
 }
 
@@ -115,15 +133,19 @@ var (
 
 func compileModule(source *filesystem.Directory, input string, target string, arenaSize uint64) (*compiledModule, error) {
 	snapshot := source.Snapshot()
+	fs := &sourceFs{dir: snapshot}
 
 	result, err := driver.Compile(&driver.Request{
 		Input:      []string{input},
-		Filesystem: &sourceFs{dir: snapshot},
+		Filesystem: fs,
 		Target:     target,
 		ArenaSize:  arenaSize,
 	})
 	if err != nil {
 		return nil, err
+	}
+	if fs.err != nil {
+		return nil, fs.err
 	}
 
 	return &compiledModule{
@@ -132,11 +154,26 @@ func compileModule(source *filesystem.Directory, input string, target string, ar
 }
 
 type compiledModule struct {
-	result *driver.Result
+	result  *driver.Result
+	outputs map[string][]byte
 }
 
 func (m *compiledModule) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "outputs":
+		dict := starlark.NewDict(len(m.outputs))
+		names := make([]string, 0, len(m.outputs))
+		for name := range m.outputs {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			if err := dict.SetKey(starlark.String(name), starlark.Bytes(m.outputs[name])); err != nil {
+				return nil, err
+			}
+		}
+		dict.Freeze()
+		return dict, nil
 	case "ok":
 		return starlark.Bool(m.result.Ok), nil
 	case "diagnostic":
@@ -149,7 +186,7 @@ func (m *compiledModule) Attr(name string) (starlark.Value, error) {
 }
 
 func (m *compiledModule) AttrNames() []string {
-	return []string{"ok", "diagnostic", "binary"}
+	return []string{"ok", "diagnostic", "binary", "outputs"}
 }
 
 func (m *compiledModule) String() string       { return "compiledModule" }
