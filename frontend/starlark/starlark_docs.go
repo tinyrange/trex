@@ -79,6 +79,7 @@ func standardLibraryDocumentation() ([]byte, error) {
 }
 
 var nativeStarlarkTypes = map[string][]string{
+	"compiledModule":        {"ok", "diagnostic", "binary", "outputs (immutable dict of virtual output names to bytes)"},
 	"ar":                    {"entries", "files", "find(name, occurrence=0)"},
 	"ar_entry":              {"binary", "bytes", "gid", "hex", "mode", "mtime", "name", "read", "size", "slice", "uid"},
 	"block_device":          {"capabilities", "commit()", "extents(offset, length)", "flush()", "geometry", "read(offset, size)", "size", "snapshot()", "stats", "trim(offset, length)", "write(offset, value)", "zero(offset, length)"},
@@ -158,6 +159,9 @@ var nativeStarlarkSignatures = map[string]string{
 	"archive.xz":                        "archive.xz(file, max_dictionary=64MiB) -> file",
 	"clock.monotonic":                   "clock.monotonic() -> elapsed seconds",
 	"clock.profiler":                    "clock.profiler() -> clock.profiler",
+	"renvo.go":                          "renvo.go(source, input, target, arena_size=32MiB) -> compiledModule",
+	"renvo.cc":                          "renvo.cc(source, input, target, flags=[], arena_size=32MiB) -> compiledModule; input is a virtual source path or list of paths",
+	"renvo.make":                        "renvo.make(source, target, input='Makefile', targets=[], output='', arena_size=32MiB) -> compiledModule; rebuilds Renvo recipes in memory; output selects the binary by virtual path relative to the Makefile",
 	"binary.base64":                     "binary.base64(value, url=False, padding=True, maximum=512MiB)",
 	"binary.hex":                        "binary.hex(value, maximum=512MiB)",
 	"binary.xml":                        "binary.xml(value, maximum=16MiB, max_depth=256, max_nodes=1M)",

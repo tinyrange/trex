@@ -41,6 +41,7 @@ import (
 	"github.com/tinyrange/trex/installer/installshield"
 	"github.com/tinyrange/trex/installer/installshield/installscript"
 	imagestar "github.com/tinyrange/trex/media/image/star"
+	"github.com/tinyrange/trex/renvostar"
 	starcrypto "github.com/tinyrange/trex/script/crypto"
 	starjson "github.com/tinyrange/trex/script/json"
 	storagenative "github.com/tinyrange/trex/storage/native"
@@ -59,46 +60,29 @@ func predeclared() starlark.StringDict {
 	}
 	windowsBuiltins := windowsapi.Builtins()
 	windowsBuiltins["kd"] = starlark.NewBuiltin("kd", kd.Builtin)
-	archiveModule := namespace{
-		name: "archive",
-		attrs: starlark.StringDict{
-			"ar":              starlark.NewBuiltin("ar", ararchive.Builtin),
-			"cab":             starlark.NewBuiltin("cab", cabarchive.Builtin),
-			"cab_set":         starlark.NewBuiltin("cab_set", cabarchive.SetBuiltin),
-			"installer":       starlark.NewBuiltin("installer", installshield.InstallerBuiltin),
-			"installer_probe": starlark.NewBuiltin("installer_probe", installshield.ProbeBuiltin),
-			"installscript":   starlark.NewBuiltin("installscript", installscript.Builtin),
-			"installshield":   starlark.NewBuiltin("installshield", installshield.Builtin),
-			"kwaj":            starlark.NewBuiltin("kwaj", kwaj.Builtin),
-			"kwaj_info":       starlark.NewBuiltin("kwaj_info", kwaj.InfoBuiltin),
-			"sevenzip":        starlark.NewBuiltin("sevenzip", sevenzip.Builtin),
-			"sfp":             starlark.NewBuiltin("sfp", sfp.Builtin),
-			"szdd":            starlark.NewBuiltin("szdd", szdd.Builtin),
-			"tar":             starlark.NewBuiltin("tar", filesystemapi.TarBuiltin),
-			"wim":             starlark.NewBuiltin("wim", wim.Builtin),
-			"xz":              starlark.NewBuiltin("xz", xz.Builtin),
-			"zip":             starlark.NewBuiltin("zip", ziparchive.Builtin),
-		},
-	}
-	filesystemModule := namespace{
-		name: "filesystem",
-		attrs: starlark.StringDict{
-			"fat":     starlark.NewBuiltin("fat", filesystemfat.FATBuiltin),
-			"fat12":   starlark.NewBuiltin("fat12", filesystemfat.FAT12Builtin),
-			"fat16":   starlark.NewBuiltin("fat16", filesystemfat.FAT16Builtin),
-			"fat32":   starlark.NewBuiltin("fat32", filesystemfat.FAT32Builtin),
-			"gpt":     starlark.NewBuiltin("gpt", filesystemgpt.GPTBuiltin),
-			"host":    starlark.NewBuiltin("host", filesystemnative.HostBuiltin),
-			"iso9660": starlark.NewBuiltin("iso9660", filesystemiso9660.ISO9660Builtin),
-			"mbr":     starlark.NewBuiltin("mbr", filesystemmbr.MBRBuiltin),
-			"ntfs":    starlark.NewBuiltin("ntfs", filesystemntfs.NTFSBuiltin),
-			"udf":     starlark.NewBuiltin("udf", filesystemudf.UDFBuiltin),
-			"vhdx":    starlark.NewBuiltin("vhdx", filesystemvhdx.VHDXBuiltin),
-		},
-	}
 	return starlark.StringDict{
-		"archive": archiveModule,
-		"binary":  namespace{name: "binary", attrs: binarystar.Builtins()},
+		"archive": namespace{
+			name: "archive",
+			attrs: starlark.StringDict{
+				"ar":              starlark.NewBuiltin("ar", ararchive.Builtin),
+				"cab":             starlark.NewBuiltin("cab", cabarchive.Builtin),
+				"cab_set":         starlark.NewBuiltin("cab_set", cabarchive.SetBuiltin),
+				"installer":       starlark.NewBuiltin("installer", installshield.InstallerBuiltin),
+				"installer_probe": starlark.NewBuiltin("installer_probe", installshield.ProbeBuiltin),
+				"installscript":   starlark.NewBuiltin("installscript", installscript.Builtin),
+				"installshield":   starlark.NewBuiltin("installshield", installshield.Builtin),
+				"kwaj":            starlark.NewBuiltin("kwaj", kwaj.Builtin),
+				"kwaj_info":       starlark.NewBuiltin("kwaj_info", kwaj.InfoBuiltin),
+				"sevenzip":        starlark.NewBuiltin("sevenzip", sevenzip.Builtin),
+				"sfp":             starlark.NewBuiltin("sfp", sfp.Builtin),
+				"szdd":            starlark.NewBuiltin("szdd", szdd.Builtin),
+				"tar":             starlark.NewBuiltin("tar", filesystemapi.TarBuiltin),
+				"wim":             starlark.NewBuiltin("wim", wim.Builtin),
+				"xz":              starlark.NewBuiltin("xz", xz.Builtin),
+				"zip":             starlark.NewBuiltin("zip", ziparchive.Builtin),
+			},
+		},
+		"binary": namespace{name: "binary", attrs: binarystar.Builtins()},
 		"database": namespace{name: "database", attrs: starlark.StringDict{
 			"ese":          starlark.NewBuiltin("ese", databaseese.Builtin),
 			"ese_build":    starlark.NewBuiltin("ese_build", databaseese.BuildBuiltin),
@@ -115,16 +99,31 @@ func predeclared() starlark.StringDict {
 				"utc":       starlark.NewBuiltin("utc", clockUTCBuiltin),
 			},
 		},
-		"filesystem": filesystemModule,
-		"firmware":   namespace{name: "firmware", attrs: acpistar.Builtins()},
-		"image":      namespace{name: "image", attrs: imagestar.Builtins()},
-		"qemu":       namespace{name: "qemu", attrs: qemuapi.Builtins()},
-		"runtime":    runtimeNamespace(),
-		"vmm":        namespace{name: "vmm", attrs: vmmstar.Builtins()},
-		"crypto":     namespace{name: "crypto", attrs: starcrypto.Builtins()},
-		"debug":      namespace{name: "debug", attrs: debugapi.Builtins()},
-		"emulator":   namespace{name: "emulator", attrs: x86api.Builtins()},
-		"json":       namespace{name: "json", attrs: starjson.Builtins()},
+		"filesystem": namespace{
+			name: "filesystem",
+			attrs: starlark.StringDict{
+				"fat":     starlark.NewBuiltin("fat", filesystemfat.FATBuiltin),
+				"fat12":   starlark.NewBuiltin("fat12", filesystemfat.FAT12Builtin),
+				"fat16":   starlark.NewBuiltin("fat16", filesystemfat.FAT16Builtin),
+				"fat32":   starlark.NewBuiltin("fat32", filesystemfat.FAT32Builtin),
+				"gpt":     starlark.NewBuiltin("gpt", filesystemgpt.GPTBuiltin),
+				"host":    starlark.NewBuiltin("host", filesystemnative.HostBuiltin),
+				"iso9660": starlark.NewBuiltin("iso9660", filesystemiso9660.ISO9660Builtin),
+				"mbr":     starlark.NewBuiltin("mbr", filesystemmbr.MBRBuiltin),
+				"ntfs":    starlark.NewBuiltin("ntfs", filesystemntfs.NTFSBuiltin),
+				"udf":     starlark.NewBuiltin("udf", filesystemudf.UDFBuiltin),
+				"vhdx":    starlark.NewBuiltin("vhdx", filesystemvhdx.VHDXBuiltin),
+			},
+		},
+		"firmware": namespace{name: "firmware", attrs: acpistar.Builtins()},
+		"image":    namespace{name: "image", attrs: imagestar.Builtins()},
+		"qemu":     namespace{name: "qemu", attrs: qemuapi.Builtins()},
+		"runtime":  runtimeNamespace(),
+		"vmm":      namespace{name: "vmm", attrs: vmmstar.Builtins()},
+		"crypto":   namespace{name: "crypto", attrs: starcrypto.Builtins()},
+		"debug":    namespace{name: "debug", attrs: debugapi.Builtins()},
+		"emulator": namespace{name: "emulator", attrs: x86api.Builtins()},
+		"json":     namespace{name: "json", attrs: starjson.Builtins()},
 		"html": namespace{
 			name: "html",
 			attrs: starlark.StringDict{
@@ -145,7 +144,10 @@ func predeclared() starlark.StringDict {
 				"path_unescape": starlark.NewBuiltin("path_unescape", urlPathUnescapeBuiltin),
 			},
 		},
-		"web": namespace{name: "web", attrs: webstar.Builtins()},
+		"web": namespace{
+			name:  "web",
+			attrs: webstar.Builtins(),
+		},
 		"path": namespace{
 			name: "path",
 			attrs: starlark.StringDict{
@@ -156,6 +158,10 @@ func predeclared() starlark.StringDict {
 				"from_windows": starlark.NewBuiltin("from_windows", filesystemapi.PathFromWindowsBuiltin),
 				"join":         starlark.NewBuiltin("join", filesystemapi.PathJoinBuiltin),
 			},
+		},
+		"renvo": namespace{
+			name:  "renvo",
+			attrs: renvostar.Builtins(),
 		},
 		"testing": testingNamespace(),
 		"windows": namespace{

@@ -5103,6 +5103,38 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		if err := m.setOperand(instruction.Args[0], 4, address); err != nil {
 			return "", "", err
 		}
+	case x86asm.ENTER:
+		frameSize, ok := instruction.Args[0].(x86asm.Imm)
+		if !ok {
+			return "unsupported", "ENTER frame size is not immediate", nil
+		}
+
+		nesting, ok := instruction.Args[1].(x86asm.Imm)
+		if !ok {
+			return "unsupported", "ENTER nesting level is not immediate", nil
+		}
+
+		level := uint32(nesting) & 0x1f
+
+		if level != 0 {
+			return "unsupported", fmt.Sprintf(
+				"ENTER nesting level %d is unsupported",
+				level,
+			), nil
+		}
+
+		// Equivalent to:
+		//
+		//     push ebp
+		//     mov  ebp, esp
+		//     sub  esp, frameSize
+		//
+		if err := m.push(m.registers[x86asm.EBP]); err != nil {
+			return "", "", err
+		}
+
+		m.registers[x86asm.EBP] = m.registers[x86asm.ESP]
+		m.registers[x86asm.ESP] -= uint32(frameSize)
 	case x86asm.PUSH:
 		v, err := m.operandValueWidth(instruction.Args[0], next, instruction.MemBytes)
 		if err != nil {
