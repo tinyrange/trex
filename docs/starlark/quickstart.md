@@ -15,6 +15,32 @@ Run it with:
 trex script.star input.iso
 ```
 
+Run `trex -h` for usage and flags. Runtime flags go before the script; every
+argument after it is passed unchanged to `main(args)`, including flags such as
+`--repl` owned by a script. `-h` exits successfully; missing input or invalid
+arguments exit with an error. In script mode, `print` writes diagnostics to
+stderr and `stdout(value)` writes payload bytes to stdout.
+
+Try the media-free [public examples](../../scripts/README.md) first.
+
+## Command-line REPL
+
+```console
+trex -repl
+>>> 6 * 7
+42
+>>> help(binary)
+```
+
+No script is required. `load`, `open`, and the same native and embedded APIs
+are available. Local loads resolve from the current working directory. Finish
+multiline blocks with a blank line and exit with EOF (Ctrl-D). Errors return
+to the prompt; EOF closes runtime-owned resources. This mode cannot be combined
+with a script, script arguments, `-web`, `-serve`, or `-stdlib-docs`.
+
+For example, `load("@stdlib//windows/emulation:conformance.star", "session",
+"call")` exposes the bounded [emulation API](emulation.md) interactively.
+
 Use `-` as the script name to read one complete script from standard input.
 This mode is intended for reproducible one-off programs:
 
@@ -99,3 +125,5 @@ def main(args):
 
 Use `scripts/inspect/debian_package.star` to list package members, list the
 control or data archive, or inspect one path and preview its first 64 bytes.
+Add `--repl` after the package filename to retain the package, control, and
+data values for exploration. No intermediate archives are extracted.

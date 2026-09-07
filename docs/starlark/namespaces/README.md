@@ -11,4 +11,4 @@ embedded module, requires module and public-function docstrings, and verifies
 representative native signatures and capability-bearing value methods.
 
 Task-oriented contracts and ownership rules live in the adjacent quickstart,
-binary, type, archive, debugging, web, and migration guides.
+binary, type, archive, [emulation](../emulation.md), debugging, web, and migration guides.

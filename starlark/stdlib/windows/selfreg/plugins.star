@@ -23,6 +23,19 @@ def import_plugin(name, bindings, state = None):
             )
     return emulator.plugin(install, name = name, state = state)
 
+def override_plugin(name, bindings, state = None):
+    """Replaces or wraps installed semantic methods without repeating their ABI.
+
+    Install after the base plugins. Each binding supplies callback, module,
+    exactly one name/ordinal, and optional wrap. Wrappers receive
+    (event, previous), where previous(event) calls the preceding callback.
+    Put mutable callback state in state for checkpoint/restore.
+    """
+    def install(machine):
+        for binding in bindings:
+            machine.override(**binding)
+    return emulator.plugin(install, name = name, state = state)
+
 def _success(event):
     return 0
 
