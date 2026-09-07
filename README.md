@@ -30,6 +30,13 @@ complete installed disk from caller-supplied ISO/ZIP/7z media, with declarative
 accounts and security policy, native pre-boot registration, and fresh-image
 desktop/application smokes.
 
+The in-process emulator selects x86 or AMD64 from a PE image's header for
+bounded execution and build-time Windows self-registration. Native AMD64
+[Renvo smokes](docs/renvo.md) compile and execute C, Go, and Make projects
+entirely in memory, checking exit codes and Go's exact output. See
+[emulator values and architecture limits](docs/starlark/types.md#emulator-values)
+for the supported APIs; this is not a full-system Windows emulator.
+
 The tables below describe the implemented behavior, not merely formats that
 trex can identify. In particular:
 
@@ -119,9 +126,10 @@ encrypted variant is supported.
 | --- | --- | --- |
 | x86 disassembly | i8086/x86-16, i386/x86, and amd64/x86-64 decoding with addresses, bytes, operands, direct-call targets, and instruction-count/byte bounds. | Disassembly only; architecture must be selected explicitly. |
 | In-process x86 emulator | Bounded 32-bit x86 execution of raw code and PE32 modules; relocations, imports/exports, mapped memory, hooks, deterministic instruction clock, tracing/profiling, checked runtime transformations, checkpoints, and independent snapshots. | Not an x86-64 or full-system emulator. Memory, instructions, call depth, trace, and plugin execution are explicitly bounded. |
+| In-process AMD64 emulator | Bounded raw-code and PE32+ execution with 64-bit addresses, relocations, static TLS, module placement, Windows x64 integer/pointer calls, semantic hooks, explicit stops, continuation transfer, CPU/memory snapshots, and bounded traces/profiles. Includes ENTER/LEAVE stack frames and local C scope unwinding. | Not a full-system emulator or complete x86 API parity. General exception dispatch, full floating-point/aggregate calls, and the complete Renvo self-hosting suite are not supported or established. Snapshots retain callback bindings rather than independently cloning mutable plugin state. Unsupported instructions stop explicitly. |
 | GDB remote protocol | Packet/checksum/no-ack negotiation, XML target descriptions, arbitrary described registers, memory access, resume/step/interrupt, breakpoints/watchpoints, generation-qualified stop events, explicit remote-thread selection, checked user/kernel address spaces, atomic point disable/restore, temporary register/memory state, and bounded async queues over a byte channel. | Implements the debugger operations exposed by trex rather than every optional GDB remote packet. Address-space handles are scoped to a live session and serialized register switching. |
 | Windows KD | i386 and amd64 KD framing, acknowledgement/resend, generation-qualified state-change/reset events, processor/register context, virtual and physical memory reads/writes, breakpoints, continue, raw manipulate requests, and file-transfer callbacks. | Requires a KD-capable target/channel; target-specific structure interpretation remains in Starlark policy. Reset stops are explicitly non-resumable and target-specific offsets stay in Starlark. |
-| Registration analysis | Static resource facts first, then bounded PE32/x86 calls such as `DllRegisterServer` with composable semantic models for COM, registry, services, SetupAPI, type libraries, shell/ADVPack, user profiles and environment blocks, crypto, RPC, event log, performance counters, and related Win32 APIs. Effects are returned as data. | Not a Windows VM and not proof that every DLL path is modeled. Unsupported imports/calls and incomplete registration are reported; no target executable is launched on the host. |
+| Registration analysis | Static resource facts first, then bounded PE32/x86 or PE32+/AMD64 calls such as `DllRegisterServer` with architecture-aware layouts and composable semantic models for COM, registry, services, SetupAPI, type libraries, shell/ADVPack, user profiles and environment blocks, crypto, RPC, event log, performance counters, and related Win32 APIs. Effects are returned as data. | Not a Windows VM and not proof that every DLL path or API is modeled on both architectures. Unsupported imports/calls and incomplete registration are reported; no target executable is launched on the host. |
 | VM contract | Backend-neutral machine, disk, network, display, channel, lifecycle, input, event, screenshot, debugger-channel, and capability-validation APIs; explicit `close()` releases runtime ownership immediately. | Recipes must test capabilities instead of assuming backend behavior. Runtime cleanup remains a fallback rather than a reason to retain completed sessions. |
 | QEMU backend | Starts QEMU with opaque disks exported directly over in-process NBD; supports structured disks/media/CHS, snapshots, display input and screenshots, QMP events, debugger/serial channels, concurrent sessions, and deterministic cleanup. | QEMU is the only production external process. Image parsing, construction, conversion, and debugging protocols remain in trex. |
 | Starlark frontend | CLI execution, module loader, scoped resources, REPL, tests, runtime/memory statistics, clocks and nested phase profiling, URL/HTML/JSON/crypto helpers, resumable verified mirror files backed by a configured local cache, and embeddable program execution. | Derived image stages are deliberately not cached: profiles measure the cold path. Host files, HTTP clients, listeners, sockets, and processes are native frontend/backends rather than stable core APIs. |
@@ -187,7 +195,9 @@ The stable packages are divided by responsibility:
 | `filesystem/mbr`, `filesystem/gpt`, `filesystem/vhdx` | Partition-table and virtual-disk formats. The host adapter lives separately in `filesystem/native`. |
 | `installer/installshield` | InstallShield containers, InstallScript, and installer plans. |
 | `binary`, `database/*`, `windows`, `windows/nls`, `firmware/acpi` | Binary, ESE and SQLite database, locale, and platform formats with optional Starlark adapters. |
-| `debug`, `emulator/x86`, `vmm` | Debug protocols, CPU emulation, and backend-neutral VM contracts; QEMU lives in `vmm/qemu`. |
+| `emulator`, `emulator/cpu`, `emulator/x86`, `emulator/amd64`, `emulator/machine` | Architecture selection, portable CPU/memory contracts, instruction backends, and bounded execution with semantic hooks. |
+| `emulator/peimage`, `emulator/windowsabi` | PE loading, relocation/TLS/unwind metadata, and native Windows call conventions. |
+| `debug`, `vmm` | Debug protocols and backend-neutral VM contracts; QEMU lives in `vmm/qemu`. |
 | `web/star` | Generic Starlark HTTP responses, redirects, files, and streaming ZIP support. |
 | `frontend/starlark`, `frontend/archiveweb` | CLI/REPL assembly, module loading, listeners, and archive browsing. |
 
