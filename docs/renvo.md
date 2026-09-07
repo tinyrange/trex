@@ -65,3 +65,10 @@ The runnable examples also verify execution using Trex's x86 emulator:
 Run them with `go run ./cmd/trex scripts/examples/renvo_cc.star` and
 `go run ./cmd/trex scripts/examples/renvo_make.star`. Neither example writes
 its generated binary to the host.
+
+Windows AMD64 execution is covered by `TestRenvoAMD64Execute`: recursive C
+and an in-memory Make build must exit with 42; a Go `fmt.Println` program
+must emit exactly `PASS\n` and exit with 0. Run these and the existing x86
+examples with `go test ./frontend/starlark -run 'TestRenvo.*Execute'`.
+Compilation and PE execution stay in memory. These are bounded execution
+smokes, not a claim that the full Renvo self-hosting suite is supported.

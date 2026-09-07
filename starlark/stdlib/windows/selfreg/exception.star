@@ -1,4 +1,4 @@
-"""Structured-exception dispatch for bounded 32-bit registration execution."""
+"""Compiler exception and local-unwind semantics for bounded execution."""
 
 def _signed(value):
     return value - (1 << 32) if value & 0x80000000 else value
@@ -17,8 +17,9 @@ def _mapped(machine, address, size):
 def exception_plugin(kernel = None):
     """Dispatches RaiseException through active compiler SEH3 scope tables.
 
-    The plugin deliberately supports the explicit x86 registration-chain
-    contract only. Unknown frame layouts and unhandled exceptions fail closed.
+    x86 uses the registration-chain contract. AMD64 supports same-frame local
+    C-scope unwinds, including native termination calls; general exception
+    dispatch and unsupported frame layouts fail closed.
     """
     state = {"exceptions": [], "generic_handlers": {}}
 
@@ -230,6 +231,8 @@ def exception_plugin(kernel = None):
         ))
 
     def raise_exception(event):
+        if event.machine.architecture != "x86":
+            fail("RaiseException: AMD64 table-based exception dispatch is not implemented")
         code, flags, count, values_address = event.args
         if count > 15:
             fail("RaiseException has invalid argument count {} for code {} at {}".format(count, hex(code), hex(values_address)))
@@ -246,7 +249,13 @@ def exception_plugin(kernel = None):
         return dispatch(event.machine, event.code, 0, list(event.information), event.address)
 
     def install(machine):
-        machine.on_exception(hardware_exception)
+        if machine.architecture == "amd64":
+            def local_unwind(event):
+                event.machine.local_unwind(frame=event.args[0],target=event.args[1])
+            for module in ["kernel32.dll","msvcrt.dll"]:
+                machine.provide_export(local_unwind,module=module,name="_local_unwind",argc=2)
+        if machine.architecture == "x86":
+            machine.on_exception(hardware_exception)
         for imported in machine.imports:
             if imported.module.lower() == "kernel32.dll" and imported.name.lower() == "raiseexception":
                 machine.hook(raise_exception, address = imported.address, argc = 4)

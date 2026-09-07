@@ -1,11 +1,43 @@
 package crypto
 
 import (
+	"bytes"
+	"crypto/sha1"
+	"encoding/binary"
 	"encoding/hex"
 	"testing"
 
 	"go.starlark.net/starlark"
 )
+
+func TestSHA1BlocksAgainstStandardLibrary(t *testing.T) {
+	initial, _ := hex.DecodeString("67452301efcdab8998badcfe10325476c3d2e1f0")
+	for _, size := range []int{0, 1, 3, 55, 56, 63, 64, 65, 127, 128, 10000} {
+		input := make([]byte, size)
+		for i := range input {
+			input[i] = byte(i * 37)
+		}
+		padding := 64 - (len(input)+9)%64
+		if padding == 64 {
+			padding = 0
+		}
+		blocks := append(bytes.Clone(input), 0x80)
+		blocks = append(blocks, make([]byte, padding+8)...)
+		binary.BigEndian.PutUint64(blocks[len(blocks)-8:], uint64(size)*8)
+		state := starlark.Value(starlark.Bytes(initial))
+		for offset := 0; offset < len(blocks); offset += 64 {
+			var err error
+			state, err = cryptoHashBlocksBuiltin(nil, nil, starlark.Tuple{starlark.String("sha1"), state, starlark.Bytes(blocks[offset : offset+64])}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		want := sha1.Sum(input)
+		if !bytes.Equal([]byte(state.(starlark.Bytes)), want[:]) {
+			t.Fatalf("size %d: digest=%x want %x", size, state, want)
+		}
+	}
+}
 
 func TestCryptoHashKnownAnswers(t *testing.T) {
 	tests := []struct {

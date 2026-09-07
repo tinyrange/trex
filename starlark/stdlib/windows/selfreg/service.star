@@ -203,7 +203,7 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
             if service == None:
                 return 0
             if args[1] == 1 and args[2]:
-                description = machine.read_u32le(args[2])
+                description = machine.read_pointer(args[2])
                 if description:
                     set_value(service, "Description", "REG_SZ", _cstring(machine, description, wide))
             elif args[1] == 3 and args[2]:
@@ -224,13 +224,13 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
             if args[1] == 1:  # SERVICE_CONFIG_DESCRIPTION
                 description = registry.get_value("SYSTEM", service_key(service), "Description", "")
                 encoded = binary.encode(description, encoding = "utf16le" if wide else "ascii", nul = True) if description else b""
-                required = 4 + len(encoded)
+                required = machine.pointer_size + len(encoded)
                 machine.write_u32le(args[4], required)
                 if not args[2] or args[3] < required:
                     return 0
-                machine.write_u32le(args[2], args[2] + 4 if description else 0)
+                machine.write_pointer(args[2], args[2] + machine.pointer_size if description else 0)
                 if description:
-                    machine.write(args[2] + 4, encoded)
+                    machine.write(args[2] + machine.pointer_size, encoded)
                 return 1
             if args[1] == 3:  # SERVICE_CONFIG_DELAYED_AUTO_START_INFO
                 machine.write_u32le(args[4], 4)

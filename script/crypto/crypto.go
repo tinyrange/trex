@@ -237,36 +237,81 @@ func cryptoHashBlocksBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starl
 	if err := starlark.UnpackArgs("hash_blocks", args, kwargs, "algorithm", &algorithm, "state", &stateValue, "blocks", &blocksValue); err != nil {
 		return nil, err
 	}
-	if strings.ToLower(strings.ReplaceAll(algorithm, "-", "")) != "sha256" {
+	algorithm = strings.ToLower(strings.ReplaceAll(algorithm, "-", ""))
+	stateSize := sha256.Size
+	if algorithm == "sha1" {
+		stateSize = sha1.Size
+	}
+	if algorithm != "sha256" && algorithm != "sha1" {
 		return nil, fmt.Errorf("hash_blocks: unsupported algorithm %q", algorithm)
 	}
 	stateBytes, err := bytesForBinaryValue(stateValue)
 	if err != nil {
 		return nil, fmt.Errorf("hash_blocks: state: %w", err)
 	}
-	if len(stateBytes) != sha256.Size {
-		return nil, fmt.Errorf("hash_blocks: SHA-256 state must contain exactly %d bytes", sha256.Size)
+	if len(stateBytes) != stateSize {
+		return nil, fmt.Errorf("hash_blocks: %s state must contain exactly %d bytes", algorithm, stateSize)
 	}
 	blocks, err := bytesForBinaryValue(blocksValue)
 	if err != nil {
 		return nil, fmt.Errorf("hash_blocks: blocks: %w", err)
 	}
 	if len(blocks)%64 != 0 {
-		return nil, fmt.Errorf("hash_blocks: SHA-256 input size must be a multiple of 64")
+		return nil, fmt.Errorf("hash_blocks: %s input size must be a multiple of 64", algorithm)
 	}
 	if len(blocks) > defaultBinaryBuilderLimit {
 		return nil, fmt.Errorf("hash_blocks: input exceeds the %d-byte limit", defaultBinaryBuilderLimit)
 	}
 	var state [8]uint32
-	for index := range state {
+	for index := range stateSize / 4 {
 		state[index] = binary.BigEndian.Uint32(stateBytes[index*4:])
 	}
-	sha256Compress(&state, blocks)
-	output := make([]byte, sha256.Size)
-	for index, word := range state {
-		binary.BigEndian.PutUint32(output[index*4:], word)
+	if algorithm == "sha1" {
+		sha1Compress(state[:5], blocks)
+	} else {
+		sha256Compress(&state, blocks)
+	}
+	output := make([]byte, stateSize)
+	for index := range stateSize / 4 {
+		binary.BigEndian.PutUint32(output[index*4:], state[index])
 	}
 	return starlark.Bytes(output), nil
+}
+
+// sha1Compress implements the SHA-1 message schedule and 80-round transform
+// from FIPS 180-4, with explicit chaining state and no implicit finalization.
+func sha1Compress(state []uint32, blocks []byte) {
+	var words [80]uint32
+	for len(blocks) != 0 {
+		for i := 0; i < 16; i++ {
+			words[i] = binary.BigEndian.Uint32(blocks[i*4:])
+		}
+		for i := 16; i < 80; i++ {
+			words[i] = bits.RotateLeft32(words[i-3]^words[i-8]^words[i-14]^words[i-16], 1)
+		}
+		a, b, c, d, e := state[0], state[1], state[2], state[3], state[4]
+		for i, w := range words {
+			var f, k uint32
+			switch {
+			case i < 20:
+				f, k = b&c|^b&d, 0x5a827999
+			case i < 40:
+				f, k = b^c^d, 0x6ed9eba1
+			case i < 60:
+				f, k = b&c|b&d|c&d, 0x8f1bbcdc
+			default:
+				f, k = b^c^d, 0xca62c1d6
+			}
+			temporary := bits.RotateLeft32(a, 5) + f + e + k + w
+			e, d, c, b, a = d, c, bits.RotateLeft32(b, 30), a, temporary
+		}
+		state[0] += a
+		state[1] += b
+		state[2] += c
+		state[3] += d
+		state[4] += e
+		blocks = blocks[64:]
+	}
 }
 
 // cryptoAESBuiltin applies AES without padding. Framing and padding belong to

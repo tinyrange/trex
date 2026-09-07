@@ -1291,6 +1291,14 @@ def test_shell32_known_folder_path_uses_process_environment():
     legacy_result = machine.call(machine.resolve_export("shell32.dll", name = "SHGetFolderPathW"), args = [0, 0x23, 0, 0, legacy_output])
     equal((legacy_result.reason, legacy_result.value), ("return", 0))
     equal(machine.read_cstring(legacy_output, encoding = "utf16le"), "D:\\SharedData")
+    legacy_machine = emulator.x86(code = b"\xc3")
+    legacy_machine.use(module["shell32_plugin"](environment = {
+        "ALLUSERSPROFILE": "C:\\Documents and Settings\\All Users",
+    }))
+    legacy_buffer = legacy_machine.allocate(size = 260 * 2)
+    legacy_folder = legacy_machine.call(legacy_machine.resolve_export("shell32.dll", name = "SHGetFolderPathW"), args = [0, 0x23, 0, 0, legacy_buffer])
+    equal((legacy_folder.reason, legacy_folder.value), ("return", 0))
+    equal(legacy_machine.read_cstring(legacy_buffer, encoding = "utf16le"), "C:\\Documents and Settings\\All Users\\Application Data")
 
 def test_userenv_profile_and_environment_block_contracts():
     module = testing.module("@stdlib//windows/selfreg:win32.star")

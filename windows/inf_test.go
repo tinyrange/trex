@@ -6,6 +6,38 @@ import (
 	"go.starlark.net/starlark"
 )
 
+// INF section names are case-insensitive and repeated sections are merged:
+// https://learn.microsoft.com/en-us/windows-hardware/drivers/install/general-syntax-rules-for-inf-files
+func TestINFCaseInsensitiveRepeatedSections(t *testing.T) {
+	parsed, err := parseINF("[Files.AMD64]\nfirst.dll=1\n[Other]\nunused=0\n[files.amd64]\nsecond.dll=55\n[FILES.AMD64]\nthird.dll=100\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Len() != 2 {
+		t.Fatalf("got %d sections, want 2", parsed.Len())
+	}
+	inf := &infFile{json: parsed}
+	for _, name := range []string{"Files.AMD64", "files.amd64", "FILES.AMD64"} {
+		value, found, err := inf.Get(starlark.String(name))
+		if err != nil || !found {
+			t.Fatalf("%s: found=%t error=%v", name, found, err)
+		}
+		section := value.(*starlark.Dict)
+		if section.Len() != 3 {
+			t.Fatalf("%s has %d rows, want 3", name, section.Len())
+		}
+		for i, key := range section.Keys() {
+			want := []string{"first.dll", "second.dll", "third.dll"}[i]
+			if key != starlark.String(want) {
+				t.Fatalf("row %d: %s, want %s", i, key, want)
+			}
+		}
+	}
+	if _, found, err := inf.Get(starlark.String("missing")); found || err != nil {
+		t.Fatalf("missing: found=%t error=%v", found, err)
+	}
+}
+
 func TestExpandINFStringPreservesEscapedPercent(t *testing.T) {
 	got := expandINFString(`%%SystemRoot%%\System32\%Module%`, map[string]string{
 		"MODULE": "example.dll",

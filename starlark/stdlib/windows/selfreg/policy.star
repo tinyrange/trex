@@ -135,7 +135,7 @@ def _unregistered_classes(patches, classes):
 def registration_patches(file, module, mmc_snapins = [], replacements = {}, execute = True, execute_with_static = False, executable = False, command_line = "", plugins = [], registry_values = [], registry_keys = [], prepared_registry_state = None, environment = {}, version = {}, modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, instruction_limit = 250000, memory_limit = 32 << 20, profile = False, profile_interval = 256, profile_limit = 16384):
     """Returns registry patches for one PE without loading system DLL images.
 
-    Structured resources and static PE facts are preferred. The bounded x86
+    Structured resources and static PE facts are preferred. The bounded native-architecture
     runner is used only as a fallback. Its writes require success, except for
     completed HKCR writes guarded by static class metadata when a registrar
     reports the aggregate SELFREG_E_CLASS result.
@@ -156,6 +156,7 @@ def registration_patches(file, module, mmc_snapins = [], replacements = {}, exec
 
     executions = []
     generated_files = {}
+    generated_entries = {}
     performance_actions = []
     keys = []
     # Static resources and executable registration are usually alternative
@@ -210,6 +211,7 @@ def registration_patches(file, module, mmc_snapins = [], replacements = {}, exec
                     patches = _expand_patches(patches, replacements)
                     if succeeded:
                         generated_files = execution["generated_files"]
+                        generated_entries = execution["generated_entries"]
                         performance_actions = execution["performance_actions"]
                         keys = execution["registry_keys"]
                     output = _merge_execution_patches(output, patches)
@@ -226,5 +228,6 @@ def registration_patches(file, module, mmc_snapins = [], replacements = {}, exec
         "execution": executions[0] if executions else None,
         "executions": executions,
         "generated_files": generated_files,
+        "generated_entries": generated_entries,
         "performance_actions": performance_actions,
     }

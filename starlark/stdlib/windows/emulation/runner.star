@@ -1,6 +1,7 @@
 """Composable execution of Windows PE modules with semantic system APIs."""
 
 load(":rpc.star", "rpc_plugin")
+load(":abi.star", "teb_layout")
 load("@stdlib//windows/selfreg:registry.star", "registry_plugin")
 load("@stdlib//windows/selfreg:cabinet.star", "cabinet_plugin")
 load("@stdlib//windows/selfreg:exception.star", "exception_plugin")
@@ -35,6 +36,10 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     runtime plugins are constructed and receives a record containing `crt` and
     `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
+    `generated_entries` retains newly created or changed files and directories
+    as path-keyed records with `directory`, file `data`, and optional DOS
+    `attributes` and owned self-relative `security` bytes. `generated_files`
+    is the content-only compatibility view; use entries to preserve metadata.
     """
     if target_instruction_limit < 0 or target_instruction_limit > instruction_limit:
         fail("target_instruction_limit must not exceed instruction_limit")
@@ -46,7 +51,10 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         fail("rpc_continuation_limit must be between 0 and 4096")
     if service_continuation_limit < 0 or service_continuation_limit > 1024:
         fail("service_continuation_limit must be between 0 and 1024")
-    machine = emulator.x86(
+    amd64 = windows.pe(file).info["machine"] == 0x8664
+    teb = 0x7fffffdde000 if amd64 else 0x7ffde000
+    segment = {"gs_base": teb} if amd64 else {"fs_base": teb}
+    machine = emulator.machine(
         image = file,
         image_name = module,
         instruction_limit = instruction_limit,
@@ -56,16 +64,15 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         profile = profile,
         profile_interval = profile_interval,
         profile_limit = profile_limit,
-        fs_base = 0x7ffde000,
+        **segment
     )
     # Programs compiled against the Win32 TLS ABI may access the TEB's slot
     # array directly instead of calling TlsGetValue. Keep that conventional
     # view backed by the same storage used by the semantic kernel APIs.
-    tls_slots = machine.allocate(size = 64 * 4, name = "thread local storage slots")
-    machine.write_u32le(0x7ffde000 + 0x18, 0x7ffde000)
-    machine.write_u32le(0x7ffde000 + 0x20, 4)
-    machine.write_u32le(0x7ffde000 + 0x24, 8)
-    machine.write_u32le(0x7ffde000 + 0x2c, tls_slots)
+    tls_slots = machine.allocate(size = 64 * machine.pointer_size, name = "thread local storage slots")
+    fields = teb_layout(machine.pointer_size)["fields"]
+    for field, value in [("Self", teb), ("ProcessId", 4), ("ThreadId", 8), ("ThreadLocalStoragePointer", tls_slots)]:
+        machine.write_pointer(teb + fields[field], value)
     loaded_target_modules = []
     for name, image in modules.items():
         loaded_target_modules.append(machine.load_module(image = image, name = name))
@@ -226,6 +233,19 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         for path, entry in kernel.state["paths"].items():
             if not entry.get("directory", False) and (not entry.get("initial", False) or entry.get("dirty", False)):
                 output[path] = entry.get("data", b"")
+        return output
+    def generated_entries():
+        output = {}
+        for path, entry in kernel.state["paths"].items():
+            if entry.get("initial", False) and not entry.get("dirty", False):
+                continue
+            value = {"directory": entry.get("directory", False)}
+            if not value["directory"]:
+                value["data"] = entry.get("data", b"")
+            for key in ["security", "attributes"]:
+                if key in entry:
+                    value[key] = entry[key]
+            output[path] = value
         return output
     available_type_libraries = dict(type_libraries)
     registered_type_libraries = []
@@ -413,6 +433,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                     "threads": kernel.state["threads"],
                     "timer_callbacks": kernel.state["timer_callbacks"],
                     "generated_files": generated_files(),
+                    "generated_entries": generated_entries(),
                     "performance_actions": performance.state["actions"],
                     "resource_queries": resources.state["queries"],
                     "type_library_actions": automation.state["actions"],
@@ -465,6 +486,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 "threads": kernel.state["threads"],
                 "timer_callbacks": kernel.state["timer_callbacks"],
                 "generated_files": generated_files(),
+                "generated_entries": generated_entries(),
                 "performance_actions": performance.state["actions"],
                 "resource_queries": resources.state["queries"],
                 "type_library_actions": automation.state["actions"],
@@ -524,6 +546,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "threads": kernel.state["threads"],
         "timer_callbacks": kernel.state["timer_callbacks"],
         "generated_files": generated_files(),
+        "generated_entries": generated_entries(),
         "performance_actions": performance.state["actions"],
         "resource_queries": resources.state["queries"],
         "type_library_actions": automation.state["actions"],

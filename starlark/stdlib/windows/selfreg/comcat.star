@@ -18,7 +18,7 @@ def component_categories_provider(registry):
         requested = activation["interface"]
         if not output:
             return 0x80004003  # E_POINTER
-        machine.write_u32le(output, 0)
+        machine.write_pointer(output, 0)
         if requested not in [_IUNKNOWN, _ICAT_REGISTER]:
             return 0x80004002  # E_NOINTERFACE
         identifier = state["next_object"]
@@ -28,10 +28,10 @@ def component_categories_provider(registry):
         def query_interface(current):
             if not current.args[2]:
                 return 0x80004003
-            current.machine.write_u32le(current.args[2], 0)
+            current.machine.write_pointer(current.args[2], 0)
             if _guid(current.machine, current.args[1]) not in [_IUNKNOWN, _ICAT_REGISTER]:
                 return 0x80004002
-            current.machine.write_u32le(current.args[2], current.args[0])
+            current.machine.write_pointer(current.args[2], current.args[0])
             references[0] += 1
             return 0
 
@@ -44,7 +44,7 @@ def component_categories_provider(registry):
             return references[0]
 
         def register_categories(current):
-            count, information = current.args[1], current.args[2]
+            count, information = current.args[1] & 0xffffffff, current.args[2]
             if count and not information:
                 return 0x80070057
             for index in range(count):
@@ -58,7 +58,7 @@ def component_categories_provider(registry):
             return 0
 
         def unregister_categories(current):
-            count, categories = current.args[1], current.args[2]
+            count, categories = current.args[1] & 0xffffffff, current.args[2]
             if count and not categories:
                 return 0x80070057
             for index in range(count):
@@ -68,7 +68,7 @@ def component_categories_provider(registry):
             return 0
 
         def class_categories(current, operation, branch, delete):
-            class_id, count, categories = current.args[1], current.args[2], current.args[3]
+            class_id, count, categories = current.args[1], current.args[2] & 0xffffffff, current.args[3]
             if not class_id or (count and not categories):
                 return 0x80070057
             class_name = _guid(current.machine, class_id)
@@ -104,14 +104,13 @@ def component_categories_provider(registry):
             ("RegisterClassReqCategories", register_required, 4),
             ("UnRegisterClassReqCategories", unregister_required, 4),
         ]
-        table = binary.builder(capacity = len(methods) * 4)
-        for name, callback, argc in methods:
-            table.u32le(machine.provide_export(callback, module = "trex.comcat", name = name + str(identifier), argc = argc))
-        vtable = machine.allocate(value = table.bytes(), name = "ICatRegister.vtable")
-        value = binary.builder(capacity = 4)
-        value.u32le(vtable)
-        interface = machine.allocate(value = value.bytes(), name = "ICatRegister")
-        machine.write_u32le(output, interface)
+        vtable = machine.allocate(size = len(methods) * machine.pointer_size, name = "ICatRegister.vtable")
+        for slot, method in enumerate(methods):
+            name, callback, argc = method
+            machine.write_pointer(vtable + slot * machine.pointer_size, machine.provide_export(callback, module = "trex.comcat", name = name + str(identifier), argc = argc))
+        interface = machine.allocate(size = machine.pointer_size, name = "ICatRegister")
+        machine.write_pointer(interface, vtable)
+        machine.write_pointer(output, interface)
         return 0
 
     return {"classes": [_CLASS], "activate": activate, "state": state}

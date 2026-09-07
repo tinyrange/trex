@@ -27,7 +27,7 @@ import (
 	databaseese "github.com/tinyrange/trex/database/ese"
 	databasesqlite "github.com/tinyrange/trex/database/sqlite"
 	debugapi "github.com/tinyrange/trex/debug"
-	x86api "github.com/tinyrange/trex/emulator/x86"
+	emulatorapi "github.com/tinyrange/trex/emulator"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	filesystemfat "github.com/tinyrange/trex/filesystem/fat"
 	filesystemgpt "github.com/tinyrange/trex/filesystem/gpt"
@@ -122,7 +122,7 @@ func predeclared() starlark.StringDict {
 		"vmm":      namespace{name: "vmm", attrs: vmmstar.Builtins()},
 		"crypto":   namespace{name: "crypto", attrs: starcrypto.Builtins()},
 		"debug":    namespace{name: "debug", attrs: debugapi.Builtins()},
-		"emulator": namespace{name: "emulator", attrs: x86api.Builtins()},
+		"emulator": namespace{name: "emulator", attrs: emulatorapi.Builtins()},
 		"json":     namespace{name: "json", attrs: starjson.Builtins()},
 		"html": namespace{
 			name: "html",

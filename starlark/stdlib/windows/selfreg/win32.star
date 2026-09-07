@@ -3,9 +3,13 @@
 load(":facts.star", "guid_bytes")
 load(":common.star", "expand_environment")
 load("@stdlib//windows:command_line.star", "command_line_arguments")
+load("@stdlib//windows/emulation:abi.star", "counted_string_layout", "object_attributes_layout", "pointer_array", "process_layout", "security_descriptor_layout", "system_info_layout", "teb_layout")
 load("@stdlib//windows:security.star", "legacy_lsa_secret_crypt", "sddl_security_descriptor")
 
+_PSAPI_SIGNATURES = {"getmodulebasenamea": 4, "getmodulebasenamew": 4}
+
 _KERNEL_SIGNATURES = {
+    "__chkstk": 0,
     "addrefactctx": 1,
     "createactctxw": 1,
     "activateactctx": 2,
@@ -264,6 +268,8 @@ _KERNEL_SIGNATURES = {
     "ntcreateport": 5,
     "ntcreateevent": 5,
     "ntclose": 1,
+    "ntcreatefile": 11,
+    "ntopenfile": 6,
     "ntallocatelocallyuniqueid": 1,
     "ntopenevent": 3,
     "ntqueryinformationprocess": 5,
@@ -378,6 +384,9 @@ _KERNEL_SIGNATURES = {
     "rtlappendunicodetostring": 2,
     "rtlfreeansistring": 1,
     "rtlfreeunicodestring": 1,
+    "rtldospathnametorelativentpathname_u": 4,
+    "rtldospathnametontpathname_u": 4,
+    "rtlreleaserelativename": 1,
     "rtlinitansistring": 2,
     "rtlinitunicodestring": 2,
     "rtlunicodestringtoansistring": 3,
@@ -970,10 +979,10 @@ def environment_plugin(values = {}, system_time = 946684800):
         return expand_environment(value, {entry[0]: entry[1] for entry in state["values"].values()})
 
     def unicode_string(machine, address):
-        record = binary.cursor(machine.read(address, 8))
-        length = record.u16le()
-        maximum = record.u16le()
-        buffer = record.u32le()
+        layout = counted_string_layout(machine.pointer_size)
+        length = machine.read_u16le(address + layout["Length"])
+        maximum = machine.read_u16le(address + layout["MaximumLength"])
+        buffer = machine.read_pointer(address + layout["Buffer"])
         value = binary.text(machine.read(buffer, length), encoding = "utf16le") if buffer and length else ""
         return value, maximum, buffer
 
@@ -1075,12 +1084,14 @@ def environment_plugin(values = {}, system_time = 946684800):
         machine.write_u32le(shared_data + 0x18, system_time_ticks >> 32)
         machine.write_u32le(shared_data + 0x1c, system_time_ticks >> 32)
         machine.protect(address = shared_data, size = 0x1000, readable = True, writable = False, executable = False)
-        machine.write_u32le(parameters + 0x48, environment)
-        machine.write_u32le(peb + 0x10, parameters)
-        machine.write_u32le(peb + 0x18, 1)
-        teb = machine.segment_base("fs")
+        process = process_layout(machine.pointer_size)
+        machine.write_pointer(parameters + process["parameters"]["Environment"], environment)
+        machine.write_pointer(peb + process["peb"]["ProcessParameters"], parameters)
+        machine.write_pointer(peb + process["peb"]["ProcessHeap"], 1)
+        layout = teb_layout(machine.pointer_size)
+        teb = machine.segment_base(layout["segment"])
         if teb:
-            machine.write_u32le(teb + 0x30, peb)
+            machine.write_pointer(teb + layout["fields"]["ProcessEnvironmentBlock"], peb)
         signatures = {
             "getenvironmentvariablea": 3, "getenvironmentvariablew": 3,
             "setenvironmentvariablea": 2, "setenvironmentvariablew": 2,
@@ -1107,6 +1118,53 @@ def _normalize_virtual_path(path):
     while "\\\\" in body:
         body = body.replace("\\\\", "\\")
     return (("\\\\" if unc else "") + body).rstrip("\\").lower()
+
+def _dos_nt_path(path, current_directory):
+    path = path.replace("/", "\\")
+    if not path:
+        return None
+    if path.startswith("\\??\\"):
+        return path
+    if path.startswith("\\\\?\\") or path.startswith("\\\\.\\"):
+        return "\\??\\" + path[4:]
+    if not path.startswith("\\\\"):
+        drive = current_directory[:2] if len(current_directory) > 1 and current_directory[1] == ":" else "C:"
+        if len(path) > 1 and path[1] == ":":
+            if len(path) == 2 or path[2] != "\\":
+                directory = current_directory if path[:2].lower() == drive.lower() else path[:2] + "\\"
+                path = directory.rstrip("\\") + "\\" + path[2:]
+        elif path.startswith("\\"):
+            path = drive + path
+        else:
+            path = current_directory.rstrip("\\") + "\\" + path
+    unc = path.startswith("\\\\")
+    components = []
+    root_count = 2 if unc else 1
+    for component in path.split("\\"):
+        if component == "" or component == ".":
+            continue
+        if component == "..":
+            if len(components) > root_count:
+                components.pop()
+        else:
+            components.append(component)
+    if len(components) < root_count:
+        return None
+    result = "\\??\\" + ("UNC\\" if unc else "") + "\\".join(components)
+    if path.endswith("\\") or not unc and len(components) == 1:
+        result += "\\"
+    return result
+
+def _free_counted_string(machine, descriptor, allocations):
+    if descriptor:
+        layout = counted_string_layout(machine.pointer_size)
+        address = machine.read_pointer(descriptor + layout["Buffer"])
+        if address in allocations:
+            allocations.pop(address)
+            machine.free(address)
+        machine.write_u16le(descriptor + layout["Length"], 0)
+        machine.write_u16le(descriptor + layout["MaximumLength"], 0)
+        machine.write_pointer(descriptor + layout["Buffer"], 0)
 
 def _virtual_path_access(paths, path, mode):
     """Checks CRT read/write access against a guest-backed path table."""
@@ -1142,6 +1200,56 @@ def _wildcard_match(pattern, value):
                 following[index] = current[index - 1] and (token == "?" or token == value[index - 1])
         current = following
     return current[-1]
+
+def _capture_security_descriptor(machine, address):
+    """Copies a guest descriptor to owned, fixed-width self-relative bytes."""
+    control = machine.read_u16le(address + 2)
+    if machine.read_u8(address) != 1:
+        return None
+    relative = bool(control & 0x8000)
+    layout = security_descriptor_layout(machine.pointer_size, relative = relative)
+    parts = []
+    offsets = []
+    end = 20
+    for field in ["Owner", "Group", "Sacl", "Dacl"]:
+        pointer = machine.read_u32le(address + layout[field]) if relative else machine.read_pointer(address + layout[field])
+        if pointer and relative:
+            pointer += address
+        if field == "Sacl" and not control & 0x10 or field == "Dacl" and not control & 0x4:
+            pointer = 0
+        if not pointer:
+            offsets.append(0)
+            continue
+        if field in ["Owner", "Group"]:
+            count = machine.read_u8(pointer + 1)
+            if machine.read_u8(pointer) != 1 or count > 15:
+                return None
+            size = 8 + count * 4
+        else:
+            size = machine.read_u16le(pointer + 2)
+            if machine.read_u8(pointer) not in [2, 4] or size < 8:
+                return None
+            # Keep unknown ACE payloads opaque, but validate their boundaries.
+            ace_offset = 8
+            for unused in range(machine.read_u16le(pointer + 4)):
+                if ace_offset + 4 > size:
+                    return None
+                ace_size = machine.read_u16le(pointer + ace_offset + 2)
+                if ace_size < 4 or ace_size % 4 or ace_offset + ace_size > size:
+                    return None
+                ace_offset += ace_size
+        offsets.append(end)
+        parts.append(machine.read(pointer, size))
+        end += size
+    output = binary.builder(capacity = end)
+    output.u8(1)
+    output.u8(machine.read_u8(address + 1))
+    output.u16le(control | 0x8000)
+    for offset in offsets:
+        output.u32le(offset)
+    for part in parts:
+        output.append(part)
+    return output.bytes()
 
 def _virtual_file_entries(files, maximum_source_file_size, directories = []):
     entries = {}
@@ -1409,13 +1517,13 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     def write_io_status(machine, address, status, information):
         if address:
             machine.write_u32le(address, status)
-            machine.write_u32le(address + 4, information)
+            machine.write_pointer(address + machine.pointer_size, information)
 
     def complete_overlapped(machine, address, transferred):
         if not address:
             return
         write_io_status(machine, address, 0, transferred)
-        completion = state["handles"].get(machine.read_u32le(address + 16))
+        completion = state["handles"].get(machine.read_pointer(address + 2 * machine.pointer_size + 8))
         if type(completion) == "dict" and completion.get("kind") == "event":
             completion["value"]["signaled"] = True
 
@@ -1616,7 +1724,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         return entry["value"]["id"]
 
     def current_process_handle(handle):
-        if handle == 0xffffffff:
+        if handle in [0xffffffff, 0xffffffffffffffff]:
             return True
         entry = state["handles"].get(handle)
         return type(entry) == "dict" and entry.get("kind") == "process_reference" and entry["value"].get("id") == 4
@@ -1890,20 +1998,50 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1
         if name in ["addatoma", "addatomw", "globaladdatoma", "globaladdatomw"]:
             return 0xc000
+        if name in ["rtldospathnametorelativentpathname_u", "rtldospathnametontpathname_u"]:
+            if not args[0] or not args[1]:
+                return 0
+            path = _dos_nt_path(machine.read_cstring(args[0], encoding = "utf16le"), state["current_directory"])
+            if path == None:
+                return 0
+            data = binary.encode(path + "\x00", encoding = "utf16le")
+            if len(data) > 65534:
+                return 0
+            address = machine.allocate(value = data, name = "RtlDosPathNameToNtPathName")
+            state["local_allocations"][address] = len(data)
+            layout = counted_string_layout(machine.pointer_size)
+            machine.write_u16le(args[1] + layout["Length"], len(data) - 2)
+            machine.write_u16le(args[1] + layout["MaximumLength"], len(data))
+            machine.write_pointer(args[1] + layout["Buffer"], address)
+            if args[2]:
+                prefix = path.rsplit("\\", 1)[0] + "\\"
+                part = address + len(binary.encode(prefix, encoding = "utf16le")) if not path.endswith("\\") else 0
+                machine.write_pointer(args[2], part)
+            if args[3]:
+                # Absolute output needs neither a containing-directory handle
+                # nor a current-directory reference. RelativeName consists of
+                # UNICODE_STRING followed by those two pointer fields.
+                machine.write(args[3], b"\x00" * (layout["Size"] + 2 * machine.pointer_size))
+            return 1
+        if name == "rtlreleaserelativename":
+            if args[0]:
+                size = counted_string_layout(machine.pointer_size)["Size"]
+                reference = machine.read_pointer(args[0] + size + machine.pointer_size)
+                if reference:
+                    fail("RtlReleaseRelativeName: unknown directory reference")
+            return None
         if name in ["rtlinitansistring", "rtlinitstring", "rtlinitunicodestring"]:
             wide = name == "rtlinitunicodestring"
             if not args[0]:
                 return None
-            if not args[1]:
-                machine.write(args[0], b"\x00" * 8)
-                return None
-            text = machine.read_cstring(args[1], encoding = "utf16le" if wide else "ascii")
-            length = len(text) * (2 if wide else 1)
-            descriptor = binary.builder(capacity = 8)
-            descriptor.u16le(length)
-            descriptor.u16le(length + (2 if wide else 1))
-            descriptor.u32le(args[1])
-            machine.write(args[0], descriptor.bytes())
+            layout = counted_string_layout(machine.pointer_size)
+            encoding = "utf16le" if wide else "ascii"
+            text = machine.read_cstring(args[1], encoding = encoding) if args[1] else ""
+            length = len(binary.encode(text, encoding = encoding))
+            maximum = length + (2 if wide else 1) if args[1] else 0
+            machine.write_u16le(args[0] + layout["Length"], length)
+            machine.write_u16le(args[0] + layout["MaximumLength"], maximum)
+            machine.write_pointer(args[0] + layout["Buffer"], args[1])
             return None
         if name == "dbgprint":
             value = machine.read_cstring(args[0], encoding = "ascii") if args[0] else ""
@@ -2194,15 +2332,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write_u16le(args[0], destination_length)
             return 0
         if name in ["rtlfreeansistring", "rtlfreeunicodestring"]:
-            if args[0]:
-                descriptor = binary.cursor(machine.read(args[0], 8))
-                descriptor.u16le()
-                descriptor.u16le()
-                address = descriptor.u32le()
-                if address in state["local_allocations"]:
-                    state["local_allocations"].pop(address)
-                    machine.free(address)
-                machine.write(args[0], b"\x00" * 8)
+            _free_counted_string(machine, args[0], state["local_allocations"])
             return None
         if name == "getprocessheap":
             return 1
@@ -2369,8 +2499,24 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 0 if name == "rtldestroyheap" else 1
         if name == "getcurrentprocessid":
             return 4
+        if name == "__chkstk":
+            if machine.architecture != "amd64":
+                fail("__chkstk requires the AMD64 stack-probe ABI")
+            size = machine.get_register("rax")
+            caller_stack = machine.get_register("rsp") + machine.pointer_size
+            if size > caller_stack - machine.stack.low:
+                fail("__chkstk exceeds the emulated stack budget")
+            # The Win64 helper probes but does not allocate the caller's frame.
+            # RAX and the argument/nonvolatile registers must remain unchanged.
+            remaining = size
+            while remaining:
+                amount = min(remaining, 4096)
+                caller_stack -= amount
+                machine.read(caller_stack, 1)
+                remaining -= amount
+            return None
         if name == "getcurrentprocess":
-            return 0xffffffff
+            return (1 << (machine.pointer_size * 8)) - 1
         if name == "getcurrentthreadid":
             return state["current_thread"]["id"] if state["current_thread"] != None else 8
         if name == "getcurrentthread":
@@ -2990,6 +3136,98 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             state["paths"][target] = {"directory": True}
             state["last_error"] = 0
             return 1
+        if name in ["ntcreatefile", "ntopenfile"]:
+            query = {"api": name}
+            state["file_queries"].append(query)
+            def complete(status, information = 0):
+                query.update({"status": status, "information": information})
+                write_io_status(machine, args[3], status, information)
+                return status
+
+            if not args[0] or not args[2] or not args[3]:
+                return complete(0xc000000d)  # STATUS_INVALID_PARAMETER
+            layout = object_attributes_layout(machine.pointer_size)
+            if machine.read_u32le(args[2] + layout["Length"]) != layout["Size"]:
+                return complete(0xc000000d)
+            descriptor = machine.read_pointer(args[2] + layout["ObjectName"])
+            root = machine.read_pointer(args[2] + layout["RootDirectory"])
+            if not descriptor:
+                return complete(0xc0000033)  # STATUS_OBJECT_NAME_INVALID
+            string_layout = counted_string_layout(machine.pointer_size)
+            length = machine.read_u16le(descriptor + string_layout["Length"])
+            buffer = machine.read_pointer(descriptor + string_layout["Buffer"])
+            if length % 2 or not length or not buffer:
+                return complete(0xc0000033)
+            supplied = binary.text(machine.read(buffer, length), encoding = "utf16le")
+            if supplied.lower().startswith("\\??\\unc\\"):
+                target = "\\\\" + supplied[8:]
+            elif supplied.startswith("\\??\\"):
+                target = supplied[4:]
+            elif root and not supplied.startswith("\\"):
+                parent_handle = file_handle(root)
+                if parent_handle == None:
+                    return complete(0xc0000008)  # STATUS_INVALID_HANDLE
+                if not state["paths"].get(parent_handle["path"], {}).get("directory", False):
+                    return complete(0xc0000103)  # STATUS_NOT_A_DIRECTORY
+                target = parent_handle["path"] + "\\" + supplied
+            else:
+                return complete(0xc000003b)  # STATUS_OBJECT_PATH_SYNTAX_BAD
+            target = _normalize_virtual_path(target)
+            access = args[1] & 0xffffffff
+            if name == "ntopenfile":
+                share, disposition, options, attributes = args[4] & 0xffffffff, 1, args[5] & 0xffffffff, 0
+                allocation = 0
+            else:
+                attributes, share, disposition, options = [args[index] & 0xffffffff for index in [5, 6, 7, 8]]
+                if args[10] & 0xffffffff:
+                    return complete(0xc00000bb)  # extended attributes not modeled
+                allocation = machine.read_u64le(args[4]) if args[4] else 0
+            directory = bool(options & 1)  # FILE_DIRECTORY_FILE
+            if disposition > 5 or share & ~7 or options & 0x30 == 0x30 or directory and (options & 0x40 or disposition not in [1, 2, 3]):
+                return complete(0xc000000d)
+            if allocation > maximum_file_size:
+                return complete(0xc000007f)  # STATUS_DISK_FULL
+            descriptor = machine.read_pointer(args[2] + layout["SecurityDescriptor"])
+            existing = state["paths"].get(target)
+            query.update({"path": target, "found": existing != None, "disposition": disposition, "flags": options, "security_descriptor": descriptor != 0})
+            security = _capture_security_descriptor(machine, descriptor) if descriptor else None
+            if descriptor and security == None:
+                return complete(0xc0000079)  # STATUS_INVALID_SECURITY_DESCR
+            if existing != None:
+                if directory and not existing.get("directory", False):
+                    return complete(0xc0000103)
+                if options & 0x40 and existing.get("directory", False):
+                    return complete(0xc00000ba)  # STATUS_FILE_IS_A_DIRECTORY
+                if disposition == 2:
+                    return complete(0xc0000035, 4)  # collision, FILE_EXISTS
+                if not existing.get("writable", True) and access & 0x50000006:
+                    return complete(0xc0000022)  # STATUS_ACCESS_DENIED
+            else:
+                parent = target.rsplit("\\", 1)[0]
+                if not state["paths"].get(parent, {}).get("directory", False):
+                    return complete(0xc000003a, 5)  # path missing, FILE_DOES_NOT_EXIST
+                if disposition in [1, 4]:
+                    return complete(0xc0000034, 5)  # name missing, FILE_DOES_NOT_EXIST
+            requested = (1 if access & 0x90000001 else 0) | (2 if access & 0x50000006 else 0) | (4 if access & 0x10010000 else 0)
+            for entry in state["handles"].values():
+                if type(entry) == "dict" and entry.get("kind") == "file" and entry["value"]["path"] == target:
+                    opened = entry["value"]
+                    if requested & ~opened.get("share", 7) or opened.get("shared_access", 0) & ~share:
+                        return complete(0xc0000043)  # STATUS_SHARING_VIOLATION
+            information = 1  # FILE_OPENED
+            if existing == None:
+                state["paths"][target] = {"directory": directory, "data": b"", "size": 0, "allocation_size": allocation, "attributes": attributes, "dirty": True}
+                if security != None:
+                    state["paths"][target]["security"] = security
+                information = 2  # FILE_CREATED
+            elif disposition in [0, 4, 5]:
+                if existing.get("directory", False):
+                    return complete(0xc00000ba)
+                existing.update({"data": b"", "size": 0, "allocation_size": allocation, "attributes": attributes, "dirty": True})
+                information = 0 if disposition == 0 else 3  # FILE_SUPERSEDED / FILE_OVERWRITTEN
+            handle = create_handle("file", {"path": target, "offset": 0, "overlapped": not bool(options & 0x30), "share": share, "shared_access": requested})
+            machine.write_pointer(args[0], handle)
+            return complete(0, information)
         if name in ["removedirectorya", "removedirectoryw"]:
             target = file_path(machine, args[0], name.endswith("w"))
             existing = state["paths"].get(target)
@@ -3614,19 +3852,25 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write(args[1], output.bytes())
             return 1
         if name in ["getsysteminfo", "getnativesysteminfo"]:
-            info = binary.builder(capacity = 36)
-            info.u16le(0)  # PROCESSOR_ARCHITECTURE_INTEL
-            info.u16le(0)
-            info.u32le(4096)
-            info.u32le(0x10000)
-            info.u32le(0x7ffeffff)
-            info.u32le(1)
-            info.u32le(1)
-            info.u32le(586)
-            info.u32le(0x10000)
-            info.u16le(6)
-            info.u16le(0)
-            machine.write(args[0], info.bytes())
+            layout = system_info_layout(machine.pointer_size)
+            amd64 = machine.pointer_size == 8
+            machine.write(args[0], b"\x00" * layout["Size"])
+            for field, value in {
+                "ProcessorArchitecture": 9 if amd64 else 0,
+                "ProcessorLevel": 6,
+            }.items():
+                machine.write_u16le(args[0] + layout[field], value)
+            for field, value in {
+                "PageSize": 4096, "NumberOfProcessors": 1,
+                "ProcessorType": 8664 if amd64 else 586, "AllocationGranularity": 0x10000,
+            }.items():
+                machine.write_u32le(args[0] + layout[field], value)
+            for field, value in {
+                "MinimumApplicationAddress": 0x10000,
+                "MaximumApplicationAddress": 0x7ffffffeffff if amd64 else 0x7ffeffff,
+                "ActiveProcessorMask": 1,
+            }.items():
+                machine.write_pointer(args[0] + layout[field], value)
             return None
         if name == "isdebuggerpresent":
             return 0
@@ -4191,21 +4435,21 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             state["next_tls"] = index + 1
             state["tls"][index] = 0
             if state["tls_slots"] and index < 64:
-                machine.write_u32le(state["tls_slots"] + index * 4, 0)
+                machine.write_pointer(state["tls_slots"] + index * machine.pointer_size, 0)
             return index
         if name == "tlsfree":
             state["tls"][args[0]] = None
             if state["tls_slots"] and args[0] < 64:
-                machine.write_u32le(state["tls_slots"] + args[0] * 4, 0)
+                machine.write_pointer(state["tls_slots"] + args[0] * machine.pointer_size, 0)
             return 1
         if name == "tlsgetvalue":
             if state["tls_slots"] and args[0] < 64:
-                return machine.read_u32le(state["tls_slots"] + args[0] * 4)
+                return machine.read_pointer(state["tls_slots"] + args[0] * machine.pointer_size)
             return state["tls"].get(args[0], 0) or 0
         if name == "tlssetvalue":
             state["tls"][args[0]] = args[1]
             if state["tls_slots"] and args[0] < 64:
-                machine.write_u32le(state["tls_slots"] + args[0] * 4, args[1])
+                machine.write_pointer(state["tls_slots"] + args[0] * machine.pointer_size, args[1])
             return 1
         if name in ["closehandle", "ntclose"]:
             state["handles"].pop(args[0], None)
@@ -4677,6 +4921,20 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 28
         if name in ["getmodulefilenamea", "getmodulefilenamew"]:
             return _write_string(machine, args[1], module_path, name.endswith("w"), args[2])
+        if name in _PSAPI_SIGNATURES:
+            if not current_process_handle(args[0]):
+                state["last_error"] = 6  # ERROR_INVALID_HANDLE
+                return 0
+            selected = state["handles"].get(args[1]) if args[1] else module_path
+            if type(selected) != "string":
+                state["last_error"] = 6
+                return 0
+            if not args[2] or not args[3]:
+                state["last_error"] = 87  # ERROR_INVALID_PARAMETER
+                return 0
+            basename = selected.replace("\\", "/").split("/")[-1]
+            state["last_error"] = 0
+            return _write_string(machine, args[2], basename, name.endswith("w"), args[3])
         if name in ["lstrlena", "lstrlenw"]:
             if name == "lstrlena":
                 return len(terminated_data(machine, args[0], 1)) - 1
@@ -4813,15 +5071,22 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         return 0
 
     def install(machine):
-        fs = machine.segment_base("fs")
-        if fs:
-            machine.write_u32le(fs, 0xffffffff)
-            machine.write_u32le(fs + 4, machine.stack.high)
-            machine.write_u32le(fs + 8, machine.stack.low)
-            machine.write_u32le(fs + 0x18, fs)
+        layout = teb_layout(machine.pointer_size)
+        teb = machine.segment_base(layout["segment"])
+        if teb:
+            fields = layout["fields"]
+            for name, value in {
+                "ExceptionList": (1 << (machine.pointer_size * 8)) - 1,
+                "StackBase": machine.stack.high,
+                "StackLimit": machine.stack.low,
+                "Self": teb,
+                "ProcessId": 4,
+                "ThreadId": 8,
+            }.items():
+                machine.write_pointer(teb + fields[name], value)
             if not state["tls_slots"]:
-                state["tls_slots"] = machine.allocate(size = 64 * 4, name = "TEB.ThreadLocalStoragePointer")
-            machine.write_u32le(fs + 0x2c, state["tls_slots"])
+                state["tls_slots"] = machine.allocate(size = 64 * machine.pointer_size, name = "TEB.ThreadLocalStoragePointer")
+            machine.write_pointer(teb + fields["ThreadLocalStoragePointer"], state["tls_slots"])
         main_name = module_name(module_path)
         for module in machine.modules:
             state["modules"][module.name] = module.base
@@ -4845,6 +5110,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 machine.provide_export(callback, module = provider, name = function, argc = argc, convention = "cdecl" if function == "vdbgprintexwithprefix" else "stdcall")
         for function, argc in _MULTIMEDIA_SIGNATURES.items():
             machine.provide_export(callback, module = "winmm.dll", name = function, argc = argc)
+        for function, argc in _PSAPI_SIGNATURES.items():
+            machine.provide_export(callback, module = "psapi.dll", name = function, argc = argc)
         machine.provide_export(get_process_dword, module = "kernel32.dll", ordinal = 18, argc = 2)
         for imported in machine.imports:
             function = imported.name.lower()
@@ -4852,6 +5119,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 machine.hook(callback, address = imported.address, argc = _KERNEL_SIGNATURES[function], convention = "cdecl" if function == "vdbgprintexwithprefix" else "stdcall")
             elif imported.module.lower() == "winmm.dll" and function in _MULTIMEDIA_SIGNATURES:
                 machine.hook(callback, address = imported.address, argc = _MULTIMEDIA_SIGNATURES[function])
+            elif imported.module.lower() == "psapi.dll" and function in _PSAPI_SIGNATURES:
+                machine.hook(callback, address = imported.address, argc = _PSAPI_SIGNATURES[function])
             elif imported.module.lower() == "kernel32.dll" and imported.ordinal == 18:
                 machine.hook(get_process_dword, address = imported.address, argc = 2)
     return emulator.plugin(install, name = "windows.kernel32", state = state)
@@ -4982,7 +5251,7 @@ def version_plugin(file, module_path = "", module_files = {}):
             state["queries"].append({"api": name, "query": query, "found": node != None})
             if node == None:
                 return 0
-            machine.write_u32le(args[2], args[0] + node["value_offset"])
+            machine.write_pointer(args[2], args[0] + node["value_offset"])
             machine.write_u32le(args[3], node["value_length"])
             return 1
         return 0
@@ -5384,10 +5653,10 @@ def ole32_plugin(on_class_registration = None, on_class_activation = None, on_se
             "class": class_name,
             "context": context,
             "interface": _guid_text(machine, interface_address),
-            "return": machine.get_register("eip"),
+            "return": machine.get_register("rip" if machine.pointer_size == 8 else "eip"),
         }
         state["activations"].append(activation)
-        machine.write_u32le(output, 0)
+        machine.write_pointer(output, 0)
         if class_name == "{00000323-0000-0000-C000-000000000046}":
             result = global_interface_table(machine, interface_address, output)
             activation["server"] = "ole32.dll"
@@ -5402,7 +5671,7 @@ def ole32_plugin(on_class_registration = None, on_class_activation = None, on_se
             result = activator(event, activation, output)
             activation["server"] = "semantic class activator"
             activation["result"] = result
-            activation["interface_pointer"] = machine.read_u32le(output)
+            activation["interface_pointer"] = machine.read_pointer(output)
             return result, activation
         result = activate_loaded_server(machine, class_address, class_name, outer, interface_address, output, activation)
         if result >= 0x80000000 and on_class_activation != None:
@@ -5517,7 +5786,7 @@ def ole32_plugin(on_class_registration = None, on_class_activation = None, on_se
             event.machine.write_u32le(args[1], stream["global"])
             return 0
         if name == "cogetmalloc":
-            event.machine.write_u32le(args[1], state["malloc"])
+            event.machine.write_pointer(args[1], state["malloc"])
             return 0
         if name == "cocreateinstanceex":
             class_address, outer, context, server_info, count, results = args
@@ -5710,7 +5979,7 @@ def ole32_plugin(on_class_registration = None, on_class_activation = None, on_se
 
     def install(machine):
         def query_interface(event):
-            event.machine.write_u32le(event.args[2], state["malloc"])
+            event.machine.write_pointer(event.args[2], state["malloc"])
             return 0
 
         def add_ref(event):
@@ -5732,7 +6001,7 @@ def ole32_plugin(on_class_registration = None, on_class_activation = None, on_se
             return None
 
         def get_size(event):
-            return state["allocations"].get(event.args[1], 0xffffffff)
+            return state["allocations"].get(event.args[1], (1 << (event.machine.pointer_size * 8)) - 1)
 
         def did_alloc(event):
             return 1
@@ -5745,14 +6014,12 @@ def ole32_plugin(on_class_registration = None, on_class_activation = None, on_se
             ("Alloc", allocate, 2), ("Realloc", reallocate, 3), ("Free", free, 2),
             ("GetSize", get_size, 2), ("DidAlloc", did_alloc, 2), ("HeapMinimize", heap_minimize, 1),
         ]
-        vtable = binary.builder(capacity = len(methods) * 4)
+        pointers = []
         for name, method, argc in methods:
             address = machine.provide_export(method, module = "trex.imalloc", name = name, argc = argc)
-            vtable.u32le(address)
-        vtable_address = machine.allocate(value = vtable.bytes(), name = "IMalloc.vtable")
-        object = binary.builder(capacity = 4)
-        object.u32le(vtable_address)
-        state["malloc"] = machine.allocate(value = object.bytes(), name = "IMalloc")
+            pointers.append(address)
+        vtable_address = pointer_array(machine, pointers, "IMalloc.vtable")
+        state["malloc"] = pointer_array(machine, [vtable_address], "IMalloc")
         for module in ["ole32.dll", "api-ms-win-core-com-l1-1-1.dll"]:
             for name, argc in _OLE_SIGNATURES.items():
                 machine.provide_export(callback, module = module, name = name, argc = argc)
@@ -6462,9 +6729,7 @@ def _crt_command_line_imports(machine, command_line):
             value = binary.encode(command_line, encoding = encoding, nul = True),
             name = "msvcrt." + name + ".value",
         )
-        pointer = binary.builder(capacity = 4)
-        pointer.u32le(value)
-        output[name] = pointer.bytes()
+        output[name] = binary.u64le(value) if machine.pointer_size == 8 else binary.u32le(value)
     return output
 
 def _crt_compare_strings(machine, left, right, wide, count = None, ignore_case = False):
@@ -6526,6 +6791,8 @@ def msvcrt_plugin(kernel = None):
     signatures = {
         "??2@yapaxi@z": 1,
         "??3@yaxpax@z": 1,
+        "??2@yapeax_k@z": 1,
+        "??3@yaxpeax@z": 1,
         "malloc": 1,
         "free": 1,
         "calloc": 2,
@@ -6700,6 +6967,7 @@ def msvcrt_plugin(kernel = None):
         "_except_handler3": 4,
         "_local_unwind2": 2,
         "?_set_new_handler@@yap6ahi@zp6ahi@z@z": 1,
+        "?_set_new_handler@@yap6ah_k@zp6ah0@z@z": 1,
         "?_set_new_mode@@yahh@z": 1,
     }
     for name in _MSVCRT_LOCALE_COUNTERS:
@@ -6883,7 +7151,7 @@ def msvcrt_plugin(kernel = None):
                 state["locale"] = event.machine.read_cstring(args[1], encoding = "ascii")
             value = state.get("locale", "C")
             return event.machine.allocate(value = binary.encode(value, encoding = "ascii", nul = True), name = "msvcrt.locale")
-        if name in ["free", "??3@yaxpax@z"]:
+        if name in ["free", "??3@yaxpax@z", "??3@yaxpeax@z"]:
             if args[0] in state["allocations"]:
                 state["allocations"].pop(args[0])
                 event.machine.free(args[0])
@@ -7122,7 +7390,11 @@ def msvcrt_plugin(kernel = None):
         if name == "rand":
             state["random"] = (state.get("random", 1) * 214013 + 2531011) & 0xffffffff
             return (state["random"] >> 16) & 0x7fff
-        if name in ["?_set_new_handler@@yap6ahi@zp6ahi@z@z", "?_set_new_mode@@yahh@z"]:
+        if name in ["?_set_new_handler@@yap6ahi@zp6ahi@z@z", "?_set_new_handler@@yap6ah_k@zp6ah0@z@z"]:
+            previous = state.get("new_handler",0)
+            state["new_handler"] = args[0]
+            return previous
+        if name == "?_set_new_mode@@yahh@z":
             return 0
         if name in _MSVCRT_CXX_CONSTRUCTORS:
             return event.machine.get_register("ecx")
@@ -7137,8 +7409,8 @@ def msvcrt_plugin(kernel = None):
         if name in ["_initterm", "_initterm_e"]:
             address = args[0]
             while address < args[1]:
-                target = event.machine.read_u32le(address)
-                address += 4
+                target = event.machine.read_pointer(address)
+                address += event.machine.pointer_size
                 if target == 0:
                     continue
                 # CRT constructors execute inside the startup routine's SEH
@@ -7162,7 +7434,7 @@ def msvcrt_plugin(kernel = None):
             return args[0]
         if name in ["_lock", "_unlock"]:
             return None
-        if name in ["malloc", "??2@yapaxi@z"]:
+        if name in ["malloc", "??2@yapaxi@z", "??2@yapeax_k@z"]:
             return _tracked_allocate(event.machine, state["allocations"], args[0], "msvcrt.alloc")
         if name == "calloc":
             return _tracked_allocate(event.machine, state["allocations"], args[0] * args[1], "msvcrt.calloc")
@@ -7424,7 +7696,7 @@ def msvcrt_plugin(kernel = None):
             if len(state["actions"]) < 256:
                 state["actions"].append({"api": name, "args": list(args), "return": event.return_address})
             format = event.machine.read_cstring(args[2], encoding = "ascii")
-            values = [event.machine.read_u32le(args[3] + index * 4) for index in range(16)]
+            values = _va_format_arguments(event.machine,args[3],format)
             value = _format_win32(event.machine, format, values, False)
             written = value[:args[1]]
             if args[1]:
@@ -7438,7 +7710,7 @@ def msvcrt_plugin(kernel = None):
             format_index = 1 if name == "vswprintf" else 2
             values_index = 2 if name == "vswprintf" else 3
             format = event.machine.read_cstring(args[format_index], encoding = "utf16le")
-            values = [event.machine.read_u32le(args[values_index] + index * 4) for index in range(16)]
+            values = _va_format_arguments(event.machine,args[values_index],format)
             value = _format_win32(event.machine, format, values, True)
             if name == "_vsnwprintf":
                 written = value[:args[1]]
@@ -8071,34 +8343,39 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         set_last_error(0)
         return 1
 
-    def set_descriptor_pointer(machine, address, offset, pointer, present, defaulted):
+    def set_descriptor_pointer(machine, address, field, pointer, present, defaulted):
         control = machine.read_u16le(address + 2)
-        present_mask = 0x10 if offset == 12 else (0x4 if offset == 16 else 0)
-        defaulted_mask = {4: 0x1, 8: 0x2, 12: 0x20, 16: 0x8}.get(offset, 0)
+        if control & 0x8000:
+            fail("Cannot set absolute pointers in a self-relative security descriptor")
+        layout = security_descriptor_layout(machine.pointer_size)
+        present_mask = {"Sacl": 0x10, "Dacl": 0x4}.get(field, 0)
+        defaulted_mask = {"Owner": 0x1, "Group": 0x2, "Sacl": 0x20, "Dacl": 0x8}[field]
         control = (control | present_mask) if present else (control & ~present_mask)
         control = (control | defaulted_mask) if defaulted else (control & ~defaulted_mask)
         machine.write_u16le(address + 2, control)
-        machine.write_u32le(address + offset, pointer if present else 0)
+        machine.write_pointer(address + layout[field], pointer if present else 0)
 
-    def descriptor_pointer(machine, address, offset):
+    def descriptor_pointer(machine, address, field):
         control = machine.read_u16le(address + 2)
-        value = machine.read_u32le(address + offset)
-        return address + value if value and control & 0x8000 else value
+        relative = bool(control & 0x8000)
+        layout = security_descriptor_layout(machine.pointer_size, relative = relative)
+        value = machine.read_u32le(address + layout[field]) if relative else machine.read_pointer(address + layout[field])
+        return address + value if value and relative else value
 
     def descriptor_length(machine, address):
         control = machine.read_u16le(address + 2)
         relative = bool(control & 0x8000)
-        total = 20
-        for offset in [4, 8, 12, 16]:
-            raw = machine.read_u32le(address + offset)
-            if not raw:
+        layout = security_descriptor_layout(machine.pointer_size, relative = relative)
+        total = layout["Size"]
+        for field in ["Owner", "Group", "Sacl", "Dacl"]:
+            pointer = descriptor_pointer(machine, address, field)
+            if not pointer:
                 continue
-            pointer = address + raw if relative else raw
-            if offset in [4, 8]:
+            if field in ["Owner", "Group"]:
                 size = sid_length(machine, pointer)
             else:
                 size = machine.read_u16le(pointer + 2)
-            total = max(total, raw + size) if relative else total + size
+            total = max(total, pointer - address + size) if relative else total + size
         return total
 
     def relative_descriptor(machine, security_information, owner, group, dacl, sacl, default_owner = b"", default_group = b""):
@@ -8170,7 +8447,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         full_access = (mapping[3] | 0x001f0000) & 0xffffffff
         if not control & 0x0004:
             return [True, (requested | (full_access if maximum_allowed else 0)) & 0xffffffff]
-        acl = descriptor_pointer(machine, descriptor, 16)
+        acl = descriptor_pointer(machine, descriptor, "Dacl")
         if not acl:
             return [True, (requested | (full_access if maximum_allowed else 0)) & 0xffffffff]
 
@@ -8404,10 +8681,10 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             descriptor = relative_descriptor(
                 machine,
                 args[1],
-                descriptor_pointer(machine, args[2], 4),
-                descriptor_pointer(machine, args[2], 8),
-                descriptor_pointer(machine, args[2], 16),
-                descriptor_pointer(machine, args[2], 12),
+                descriptor_pointer(machine, args[2], "Owner"),
+                descriptor_pointer(machine, args[2], "Group"),
+                descriptor_pointer(machine, args[2], "Dacl"),
+                descriptor_pointer(machine, args[2], "Sacl"),
             )
             action["security_information"] = args[1]
             action["descriptor"] = descriptor
@@ -8462,10 +8739,10 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             descriptor = relative_descriptor(
                 machine,
                 0x0f,
-                descriptor_pointer(machine, source, 4),
-                descriptor_pointer(machine, source, 8),
-                descriptor_pointer(machine, source, 16),
-                descriptor_pointer(machine, source, 12),
+                descriptor_pointer(machine, source, "Owner"),
+                descriptor_pointer(machine, source, "Group"),
+                descriptor_pointer(machine, source, "Dacl"),
+                descriptor_pointer(machine, source, "Sacl"),
             )
             address = machine.allocate(value = descriptor, name = "RtlNewSecurityObject")
             machine.write_u32le(args[2], address)
@@ -8568,9 +8845,9 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         if name in ["allocateandinitializesid", "rtlallocateandinitializesid"]:
             authority_cursor = binary.cursor(machine.read(args[0], 6))
             authority = (authority_cursor.u16be() << 32) | authority_cursor.u32be()
-            value = sid(authority, args[2:2 + min(args[1], 8)])
+            value = sid(authority, [value & 0xffffffff for value in args[2:2 + min(args[1] & 0xff, 8)]])
             address = machine.allocate(size = len(value), value = value, name = "SID")
-            machine.write_u32le(args[10], address)
+            machine.write_pointer(args[10], address)
             return 0 if name.startswith("rtl") else 1
         if name == "createwellknownsid":
             if not args[3]:
@@ -8742,7 +9019,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         if name == "setthreadtoken":
             return 1
         if name in ["initializesecuritydescriptor", "rtlcreatesecuritydescriptor"]:
-            machine.write(args[0], b"\x00" * 20)
+            machine.write(args[0], b"\x00" * security_descriptor_layout(machine.pointer_size)["Size"])
             machine.write(args[0], bytes([args[1] & 0xff]))
             return 0 if name.startswith("rtl") else 1
         if name in ["initializeacl", "rtlcreateacl"]:
@@ -8799,16 +9076,16 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             machine.write_u16le(args[0] + 4, count + source_count)
             return 1
         if name in ["setsecuritydescriptorowner", "rtlsetownersecuritydescriptor"]:
-            set_descriptor_pointer(machine, args[0], 4, args[1], True, bool(args[2]))
+            set_descriptor_pointer(machine, args[0], "Owner", args[1], True, bool(args[2]))
             return 0 if name.startswith("rtl") else 1
         if name in ["setsecuritydescriptorgroup", "rtlsetgroupsecuritydescriptor"]:
-            set_descriptor_pointer(machine, args[0], 8, args[1], True, bool(args[2]))
+            set_descriptor_pointer(machine, args[0], "Group", args[1], True, bool(args[2]))
             return 0 if name.startswith("rtl") else 1
         if name in ["setsecuritydescriptorsacl", "rtlsetsaclsecuritydescriptor"]:
-            set_descriptor_pointer(machine, args[0], 12, args[2], bool(args[1]), bool(args[3]))
+            set_descriptor_pointer(machine, args[0], "Sacl", args[2], bool(args[1]), bool(args[3]))
             return 0 if name.startswith("rtl") else 1
         if name in ["setsecuritydescriptordacl", "rtlsetdaclsecuritydescriptor"]:
-            set_descriptor_pointer(machine, args[0], 16, args[2], bool(args[1]), bool(args[3]))
+            set_descriptor_pointer(machine, args[0], "Dacl", args[2], bool(args[1]), bool(args[3]))
             return 0 if name.startswith("rtl") else 1
         if name == "isvalidsecuritydescriptor":
             return 1 if args[0] and machine.read_u8(args[0]) == 1 else 0
@@ -8894,20 +9171,20 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             if not args[0] or not args[1] or not args[2]:
                 set_last_error(87)
                 return 0
-            offset = 4 if name.endswith("owner") else 8
+            field = "Owner" if name.endswith("owner") else "Group"
             control = machine.read_u16le(args[0] + 2)
-            machine.write_u32le(args[1], descriptor_pointer(machine, args[0], offset))
-            machine.write_u32le(args[2], 1 if control & (0x1 if offset == 4 else 0x2) else 0)
+            machine.write_pointer(args[1], descriptor_pointer(machine, args[0], field))
+            machine.write_u32le(args[2], 1 if control & (0x1 if field == "Owner" else 0x2) else 0)
             return 1
         if name in ["getsecuritydescriptordacl", "getsecuritydescriptorsacl"]:
             if not args[0] or not args[1] or not args[2] or not args[3]:
                 set_last_error(87)
                 return 0
-            offset = 16 if name.endswith("dacl") else 12
+            field = "Dacl" if name.endswith("dacl") else "Sacl"
             control = machine.read_u16le(args[0] + 2)
-            machine.write_u32le(args[1], 1 if control & (0x4 if offset == 16 else 0x10) else 0)
-            machine.write_u32le(args[2], descriptor_pointer(machine, args[0], offset))
-            machine.write_u32le(args[3], 1 if control & (0x8 if offset == 16 else 0x20) else 0)
+            machine.write_u32le(args[1], 1 if control & (0x4 if field == "Dacl" else 0x10) else 0)
+            machine.write_pointer(args[2], descriptor_pointer(machine, args[0], field))
+            machine.write_u32le(args[3], 1 if control & (0x8 if field == "Dacl" else 0x20) else 0)
             return 1
         if name == "makeabsolutesd":
             if not args[0]:
@@ -8929,32 +9206,32 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
                     parts.append(machine.read(acl, size))
 
             absolute_capacity = machine.read_u32le(args[2]) if args[2] else 0
+            absolute_layout = security_descriptor_layout(machine.pointer_size)
             destinations = [args[7], args[9], args[5], args[3]]
             size_addresses = [args[8], args[10], args[6], args[4]]
             capacities = []
             for address in size_addresses:
                 capacities.append(machine.read_u32le(address) if address else 0)
             if args[2]:
-                machine.write_u32le(args[2], 20)
+                machine.write_u32le(args[2], absolute_layout["Size"])
             for index, address in enumerate(size_addresses):
                 if address:
                     machine.write_u32le(address, len(parts[index]))
-            if not args[1] or absolute_capacity < 20:
+            if not args[1] or absolute_capacity < absolute_layout["Size"]:
                 set_last_error(122)  # ERROR_INSUFFICIENT_BUFFER
                 return 0
             for index, part in enumerate(parts):
                 if part and (not destinations[index] or capacities[index] < len(part)):
                     set_last_error(122)
                     return 0
-            descriptor = binary.builder(capacity = 20)
-            descriptor.u8(revision)
-            descriptor.u8(0)
-            descriptor.u16le(control & ~0x8000)
+            machine.write(args[1], b"\x00" * absolute_layout["Size"])
+            machine.write(args[1], bytes([revision]))
+            machine.write_u16le(args[1] + absolute_layout["Control"], control & ~0x8000)
             for index, part in enumerate(parts):
-                descriptor.u32le(destinations[index] if part else 0)
+                field = ["Owner", "Group", "Sacl", "Dacl"][index]
+                machine.write_pointer(args[1] + absolute_layout[field], destinations[index] if part else 0)
                 if part:
                     machine.write(destinations[index], part)
-            machine.write(args[1], descriptor.bytes())
             return 1
         if name == "makeselfrelativesd":
             if not args[0] or not args[2]:
@@ -8963,7 +9240,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             revision = header.u8()
             header.u8()
             control = header.u16le() | 0x8000
-            pointers = [header.u32le(), header.u32le(), header.u32le(), header.u32le()]
+            pointers = [descriptor_pointer(machine, args[0], field) for field in ["Owner", "Group", "Sacl", "Dacl"]]
             parts = []
             for index, pointer in enumerate(pointers):
                 if not pointer:
@@ -9032,6 +9309,8 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             machine.write(args[0], builder.bytes())
             return 0
         if name == "rtlfreeunicodestring":
+            if kernel != None:
+                _free_counted_string(machine, args[0], kernel.state["local_allocations"])
             return None
         return 0
 
@@ -10842,6 +11121,7 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
     windows_directory = environment.get("windir", environment.get("WINDIR", _module_windows_directory(module_path))).replace("/", "\\").rstrip("\\")
     system_directory = windows_directory + "\\SYSTEM"
     profile = environment.get("USERPROFILE", windows_directory).replace("/", "\\").rstrip("\\")
+    shared_profile = environment.get("ALLUSERSPROFILE", windows_directory + "\\All Users").replace("/", "\\").rstrip("\\")
     folder_paths = {
         0x00: profile + "\\Desktop",
         0x02: profile + "\\Start Menu\\Programs",
@@ -10858,7 +11138,7 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
         0x1b: profile + "\\PrintHood",
         0x1c: profile + "\\Application Data",
         0x1f: windows_directory + "\\All Users\\Favorites",
-        0x23: environment.get("ProgramData", windows_directory + "\\All Users\\Application Data"),
+        0x23: environment.get("ProgramData", shared_profile + "\\Application Data"),
         0x24: windows_directory,
         0x25: system_directory,
         0x26: environment.get("ProgramFiles", "C:\\Program Files"),
@@ -11153,8 +11433,8 @@ def _padded(text, width, left, zero):
     padding = ("0" if zero else " ") * (width - len(text))
     return text + padding if left else padding + text
 
-def _format_argument_word_count(format):
-    """Returns the number of 32-bit variadic words consumed by a format."""
+def _format_argument_word_count(format, pointer_size = 4):
+    """Returns the number of native variadic slots consumed by a format."""
     count = 0
     offset = 0
     digits = "0123456789"
@@ -11196,10 +11476,19 @@ def _format_argument_word_count(format):
         kind = format[offset]
         offset += 1
         if kind in "sSdiuxXcC":
-            count += 2 if length in ["I64", "ll"] else 1
+            count += 2 if pointer_size == 4 and length in ["I64", "ll"] else 1
     return count
 
+def _va_format_arguments(machine, address, format):
+    return [
+        machine.read_pointer(address+index*machine.pointer_size)
+        for index in range(_format_argument_word_count(format,machine.pointer_size))
+    ]
+
 def _stack_format_arguments(event, fixed, format):
+    if event.machine.pointer_size == 8:
+        count = _format_argument_word_count(format,8)
+        return event.machine.arguments(fixed+count)[fixed:]
     return [
         event.machine.read_u32le(event.argument_address + (fixed + index) * 4)
         for index in range(_format_argument_word_count(format))
@@ -11232,7 +11521,7 @@ def _format_win32(machine, format, args, wide):
         if offset < len(format) and format[offset] == "*":
             if argument >= len(args):
                 break
-            width = args[argument]
+            width = args[argument] & 0xffffffff
             argument += 1
             width = width - (1 << 32) if width & 0x80000000 else width
             if width < 0:
@@ -11251,7 +11540,7 @@ def _format_win32(machine, format, args, wide):
             if offset < len(format) and format[offset] == "*":
                 if argument >= len(args):
                     break
-                precision = args[argument]
+                precision = args[argument] & 0xffffffff
                 argument += 1
                 precision = precision - (1 << 32) if precision & 0x80000000 else precision
                 if precision < 0:
@@ -11280,7 +11569,7 @@ def _format_win32(machine, format, args, wide):
         value = args[argument]
         argument += 1
         bits = 64 if length in ["I64", "ll"] else 32
-        if bits == 64:
+        if bits == 64 and machine.pointer_size == 4:
             if argument >= len(args):
                 break
             value |= args[argument] << 32

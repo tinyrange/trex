@@ -73,7 +73,15 @@ func (f *infFile) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", f.Type())
 }
 func (f *infFile) Get(key starlark.Value) (starlark.Value, bool, error) {
-	return f.json.Get(key)
+	name, ok := starlark.AsString(key)
+	if !ok {
+		return f.json.Get(key)
+	}
+	section, found, err := infSection(f.json, name)
+	if !found {
+		return nil, false, err
+	}
+	return section, true, err
 }
 func (f *infFile) Attr(name string) (starlark.Value, error) {
 	switch name {
@@ -327,16 +335,12 @@ func parseINF(data string) (*starlark.Dict, error) {
 		}
 		if strings.HasPrefix(line, "[") && strings.Contains(line, "]") {
 			name := starlark.String(strings.TrimSpace(line[1:strings.Index(line, "]")]))
-			existing, found, err := root.Get(name)
+			existing, found, err := infSection(root, name.GoString())
 			if err != nil {
 				return nil, err
 			}
 			if found {
-				var ok bool
-				section, ok = existing.(*starlark.Dict)
-				if !ok {
-					return nil, fmt.Errorf("inf: section %s is %s, want dict", name.GoString(), existing.Type())
-				}
+				section = existing
 			} else {
 				section = starlark.NewDict(0)
 				if err := root.SetKey(name, section); err != nil {
