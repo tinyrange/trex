@@ -137,6 +137,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"mirror_file":                       "mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600) -> file",
 	"open":                              "open(name) -> file",
 	"repl":                              "repl() -> None",
+	"windows.reactos_record":            "windows.reactos_record(kind, fields) -> bytes",
 	"stdout":                            "stdout(value) -> None",
 	"write":                             "write(name, value, max_bytes=64GiB) -> None",
 	"archive.kwaj":                      "archive.kwaj(file, maximum=512MiB) -> file",

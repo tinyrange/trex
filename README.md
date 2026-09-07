@@ -11,6 +11,11 @@ systems and does not imply endorsement or affiliation.
 
 ## Capabilities
 
+The public [ReactOS image builder](docs/reactos-publication.md) constructs a
+complete installed disk from caller-supplied ISO/ZIP/7z media, with declarative
+accounts and security policy, native pre-boot registration, and fresh-image
+desktop/application smokes.
+
 The tables below describe the implemented behavior, not merely formats that
 trex can identify. In particular:
 
@@ -47,7 +52,7 @@ encrypted variant is supported.
 | AR | Reads System V/GNU archives, GNU filename tables, BSD extended filenames, duplicate names, and member timestamp/UID/GID/mode metadata. | Read-only; symbol tables are ignored as non-payload metadata. |
 | Microsoft CAB | Reads single cabinets and ordered cabinet sets, including continued files/folders. Decodes stored, MSZIP, Quantum, and LZX folders with dictionary/history handling and optional bounded caching. | Read-only; no cabinet writer. |
 | KWAJ | Reads original-name metadata and decodes methods 0–4: stored, XOR, LZSS, LZH, and MSZIP. | Produces a bounded decoded file; no encoder. |
-| 7-Zip | Reads format-major-0 archives using a single Copy or LZMA coder per folder and maps packed folders to file entries with CRC validation. | No coder graphs, BCJ/Delta/LZMA2/PPMd, encryption, external streams, or externally stored filenames. Read-only. |
+| 7-Zip | Reads format-major-0 archives using a single Copy, LZMA or LZMA2 coder per folder and maps packed folders to file entries with CRC validation. | No coder graphs, BCJ/Delta/PPMd, encryption, external streams, or externally stored filenames. Read-only. |
 | SFP | Reads version-1 SFP package trees, names, package label, timestamps, flags, offsets, and payload files. | Version 1 only; read-only. |
 | SZDD | Decodes classic `SZDD` mode-A LZSS files with output bounds and truncation checks. | No other mode and no encoder. |
 | TAR | Reads regular entries, directories, links, devices, FIFOs, GNU/PAX metadata, and resolves archive hard links. Builds deterministic basic directory/file TAR or gzip-TAR output from an in-memory directory. | Direct file views reject GNU sparse entries. The builder emits ordinary files/directories, not the complete metadata model accepted by the reader. |

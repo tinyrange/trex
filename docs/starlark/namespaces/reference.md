@@ -879,6 +879,174 @@ Writes one i386 address space through KD physical-memory operations.
 
 Writes bounded i386 user memory using an EPROCESS address space.
 
+## `windows/reactos/image.star`
+
+Constructs a complete ReactOS image in memory from original media.
+
+### `reactos_disk`
+
+Builds a lazy installed ReactOS disk from its ISO, ZIP or 7z media.
+
+## `windows/reactos/media.star`
+
+Original-media discovery and installed-file destinations.
+
+### `base_name`
+
+Returns the final slash-separated media filename.
+
+### `copy_cab_from_inf`
+
+Populates installed files and their declared directories from a CAB.
+
+### `copy_iso_files`
+
+Copies the selected setup directory, excluding explicitly skipped names.
+
+### `destination_map`
+
+One authoritative INF destination map for copying and registration.
+
+### `installed_files`
+
+Maps installed image paths to lazy CAB files using the INF destinations.
+
+### `reactos_media`
+
+Selects the unique ISO from original ZIP/7z media or accepts a raw ISO.
+
+## `windows/reactos/profiles.star`
+
+User-profile layout and locale defaults.
+
+### `add_profile_skeleton`
+
+Builds each declared profile from one directory and hive specification.
+
+### `international_profile_patches`
+
+Returns the default English locale and keyboard preferences.
+
+### `mkdir_tree`
+
+Ensures all ancestors of an image directory exist.
+
+### `profile_hive`
+
+Builds a user hive with profile-relative shell folders and locale policy.
+
+## `windows/reactos/registry.star`
+
+ReactOS registry, hardware and offline registration policy.
+
+### `add_txtsetup_services`
+
+Appends boot-driver service policy from one TXTSETUP section.
+
+### `font_file_registry_patches`
+
+Registers the installed font filenames and decoded font names.
+
+### `mirror_numbered_control_sets`
+
+Returns patches mirrored into inactive, physically stored control sets.
+
+    CurrentControlSet is a runtime registry symbolic link and must never be
+    materialized in a SYSTEM hive. The kernel creates it from the Select key
+    after mounting the selected numbered control set.
+
+### `network_system_patches`
+
+Returns the tested QEMU adapter and TCP/IP registry policy.
+
+### `reactos_base_patches`
+
+Returns explicit boot and machine-identity policy for generated hives.
+
+### `register_shell`
+
+Executes media exports in-process and applies their effects before boot.
+
+### `selfreg_software_patches`
+
+Applies static registration resources selected by INF registration bits.
+
+### `setup_shell_namespace_patches`
+
+Returns the desktop namespace policy needed by the ReactOS shell.
+
+### `shell_registration_actions`
+
+Selects the shell registrations needed in addition to static resources.
+
+### `software_build_patches`
+
+Combines static registration, font and workstation SOFTWARE policy.
+
+### `software_patches`
+
+Returns workstation shell, autologon and standard-profile defaults.
+
+### `txtsetup_system_patches`
+
+Derives boot services and hardware matches from the setup media.
+
+### `video_system_patches`
+
+Describes the tested QEMU Bochs graphics device and driver.
+
+## `windows/reactos/security.star`
+
+Declarative ReactOS account and local-security policy, without hive templates.
+
+### `security_database`
+
+Builds SAM/SECURITY from account records; no host paths or seed templates.
+
+### `workstation_security`
+
+Returns mutable, explicit defaults; customize this record before building.
+
+## `windows/reactos/shortcuts.star`
+
+INF-declared shortcuts and installed-file lookup.
+
+### `add_shortcuts_from_inf`
+
+Constructs shell links from media declarations for the selected user.
+
+### `expand_shortcut_path`
+
+Expands the media shortcut variables for the selected user.
+
+### `installed_file_size`
+
+Returns the size of a CAB-backed installed file, or zero if absent.
+
+### `installed_windows_path`
+
+Looks up the first installed Windows path for a media filename.
+
+### `safe_shortcut_name`
+
+Replaces characters that cannot occur in a Windows shortcut filename.
+
+### `shortcut_folder_path`
+
+Resolves an INF shortcut folder ID for the selected user.
+
+### `shortcut_int`
+
+Decodes the small icon-index range used by the media shortcut policy.
+
+### `shortcut_rows`
+
+Normalizes repeated INF shortcut rows without losing their order.
+
+### `windows_base_name`
+
+Returns the final backslash-separated filename.
+
 ## `windows/security.star`
 
 Windows registry-key, SID, ACL, ACE, and security-descriptor primitives.
@@ -2605,6 +2773,12 @@ Native `windows` operation. Limits and timeout arguments are validated before wo
 ### `windows.pkcs7_certificates`
 
 `windows.pkcs7_certificates(...)`
+
+Native `windows` operation. Limits and timeout arguments are validated before work begins.
+
+### `windows.reactos_record`
+
+`windows.reactos_record(kind, fields) -> bytes`
 
 Native `windows` operation. Limits and timeout arguments are validated before work begins.
 

@@ -1,5 +1,7 @@
 """Registry API plugin for deterministic Windows self-registration emulation."""
 
+load(":common.star", "expand_environment")
+
 _ROOTS = {
     0x80000000: ("SOFTWARE", "/Classes"),
     0x80000001: ("DEFAULT", "/"),
@@ -47,6 +49,10 @@ _CALLS = {
     "regflushkey": 1,
     "regdeletekeyw": 2,
     "regdeletekeya": 2,
+    "regdeletetreew": 2,
+    "regdeletetreea": 2,
+    "reggetvaluew": 7,
+    "reggetvaluea": 7,
     "regdeletevaluew": 2,
     "regdeletevaluea": 2,
     "regenumkeya": 4,
@@ -132,7 +138,7 @@ _SHLWAPI_NAMED_REGISTRY_WRAPPERS = {
 def _registry_provider_module(name):
     """Reports whether a module imports the Win32 registry contract."""
     normalized = name.replace("/", "\\").split("\\")[-1].lower()
-    return normalized in ["advapi32.dll", "kernel32.dll"] or normalized.startswith("api-ms-win-core-registry-") or normalized.startswith("ext-ms-win-advapi32-registry-")
+    return normalized in ["advapi32.dll", "advapi32_vista.dll", "kernel32.dll"] or normalized.startswith("api-ms-win-core-registry-") or normalized.startswith("ext-ms-win-advapi32-registry-")
 
 def _join(parent, child):
     parent = parent.replace("\\", "/").rstrip("/")
@@ -424,7 +430,7 @@ def _delete_value(state, target, name):
     })
     return 0
 
-def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_key_case = "preserve", prepared_state = None):
+def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_key_case = "preserve", prepared_state = None, environment = {}):
     """Returns a registry plugin initialized from hive-style dictionaries.
 
     Initial values are queryable but are not reported as writes. Each value uses
@@ -955,6 +961,55 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
                 default_address = args[6],
                 default_size = args[7],
             )
+        if name.startswith("reggetvalue"):
+            parent = key_for(args[0])
+            flags, type_address, data_address, size_address = args[3:]
+            capacity = event.machine.read_u32le(size_address) if size_address else 0
+            def failed(status):
+                if flags & 0x20000000 and data_address and capacity:
+                    if capacity > 16 << 20:
+                        event.machine.stop("RegGetValue zero-on-failure buffer exceeds process bound")
+                    else:
+                        event.machine.write(data_address, b"\x00" * capacity)
+                return status
+            if flags & ~0x3003ffff or flags & 0x30000 == 0x30000 or data_address and not size_address:
+                return failed(87)
+            if parent == None:
+                return failed(6)
+            target = join_key(parent, _cstring(event.machine, args[1], wide)) if args[1] else parent
+            value_name = _cstring(event.machine, args[2], wide) if args[2] else "(default)"
+            value = _lookup_value(state, target, value_name)
+            if len(state["queries"]) < 4096:
+                state["queries"].append({"hive": target[0], "key": target[1], "name": value_name, "found": value != None, "flags": flags})
+            if value == None:
+                return failed(2)
+            value_type = value["type"]
+            raw = _api_value_raw(value, wide)
+            if value_type == 2 and not flags & 0x10000000:
+                expanded = expand_environment(_decode_value(value["raw"], 2, True), environment)
+                raw = binary.encode(expanded, encoding = "utf16le" if wide else "ascii", nul = True)
+                value_type = 1
+            if value_type in [1, 2, 7]:
+                terminator = b"\x00\x00" if wide else b"\x00"
+                if value_type == 7:
+                    terminator *= 2
+                if raw[-len(terminator):] != terminator:
+                    raw = bytes_concat([raw, terminator])
+            if type_address:
+                event.machine.write_u32le(type_address, value_type)
+            restriction = flags & 0xffff
+            type_flag = {0: 1, 1: 2, 2: 4, 3: 8, 4: 16, 7: 32, 11: 64}.get(value_type, 0)
+            if restriction not in [0, 0xffff] and not restriction & type_flag:
+                return failed(1630)
+            if value_type == 3 and (restriction == 0x18 and len(raw) != 4 or restriction == 0x48 and len(raw) != 8):
+                return failed(1629)
+            if size_address:
+                event.machine.write_u32le(size_address, len(raw))
+            if data_address:
+                if capacity < len(raw):
+                    return failed(234)
+                event.machine.write(data_address, raw)
+            return 0
         if name.startswith("shreggetvalue"):
             parent = key_for(args[0])
             target = join_key(parent, _cstring(event.machine, args[1], wide)) if parent != None and args[1] else parent
@@ -1099,6 +1154,18 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             if len(state["flushes"]) < 4096:
                 state["flushes"].append({"hive": target[0], "key": target[1]})
             return 0
+        if name.startswith("regdeletetree"):
+            parent = key_for(args[0])
+            if parent == None:
+                return 6
+            subkey = _cstring(event.machine, args[1], wide) if args[1] else ""
+            if subkey:
+                return _delete_tree(state, join_key(parent, subkey))
+            for child in _direct_subkeys(state, parent):
+                _delete_tree(state, join_key(parent, child))
+            for value in _direct_values(state, parent):
+                _delete_value(state, parent, value["name"])
+            return 0
         if name.startswith("regdeletekey"):
             parent = key_for(args[0])
             if parent == None:
@@ -1225,7 +1292,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         return 120
 
     def install(machine):
-        for module in ["advapi32.dll", "kernel32.dll"]:
+        for module in ["advapi32.dll", "advapi32_vista.dll", "kernel32.dll"]:
             for name, argc in _CALLS.items():
                 machine.provide_export(callback, module = module, name = name, argc = argc)
         for imported in machine.imports:

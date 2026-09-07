@@ -2327,6 +2327,152 @@ def test_registration_ui_object_handles():
     true(created != 0, "CreateWindowEx rejected a zero-returning CBT hook")
     equal(machine.call(machine.resolve_export("user32.dll", name = "UnhookWindowsHookEx"), args = [hook_handle[0]]).value, 1)
 
+def test_registration_bitmap_ownership():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    gdi = module["gdi32_plugin"]()
+    machine.use([gdi])
+    data = machine.allocate(value = b"\xaa\x55\x12\x34")
+    bitmap = machine.call(machine.resolve_export("gdi32.dll", name = "CreateBitmap"), args = [9, 2, 1, 1, data]).value
+    equal(gdi.state["bitmaps"][bitmap]["stride"], 2)
+    brush = machine.call(machine.resolve_export("gdi32.dll", name = "CreatePatternBrush"), args = [bitmap]).value
+    machine.write(data, b"\x00" * 4)
+    machine.call(machine.resolve_export("gdi32.dll", name = "DeleteObject"), args = [bitmap])
+    equal(gdi.state["brushes"][brush]["data"], b"\xaa\x55\x12\x34")
+    equal(machine.call(machine.resolve_export("gdi32.dll", name = "CreatePatternBrush"), args = [bitmap]).value, 0)
+    equal(machine.call(machine.resolve_export("gdi32.dll", name = "CreateBitmap"), args = [0xffffffff, 1, 1, 1, 0]).value, 0)
+    machine.call(machine.resolve_export("gdi32.dll", name = "DeleteObject"), args = [brush])
+    true(brush not in gdi.state["brushes"])
+
+def test_registration_activation_context_lifetime():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    kernel = module["kernel32_plugin"](files = {r"C:\test.manifest": b'<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity name="test" version="1.0.0.0" type="win32"/></assembly>'})
+    machine.use([kernel])
+    context = machine.allocate(size = 32)
+    source = machine.allocate(value = binary.encode(r"C:\test.manifest", encoding = "utf16le", nul = True))
+    machine.write_u32le(context, 32)
+    machine.write_u32le(context + 8, source)
+    handle = machine.call(machine.resolve_export("kernel32.dll", name = "CreateActCtxW"), args = [context]).value
+    true(handle != 0xffffffff)
+    cookie = machine.allocate(size = 4)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "ActivateActCtx"), args = [handle, cookie]).value, 1)
+    equal(kernel.state["current_actctx"], handle)
+    current = machine.allocate(size = 4)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "GetCurrentActCtx"), args = [current]).value, 1)
+    equal(machine.read_u32le(current), handle)
+    machine.call(machine.resolve_export("kernel32.dll", name = "ReleaseActCtx"), args = [machine.read_u32le(current)])
+    machine.call(machine.resolve_export("kernel32.dll", name = "ReleaseActCtx"), args = [handle])
+    true(handle in kernel.state["handles"])
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "DeactivateActCtx"), args = [0, machine.read_u32le(cookie)]).value, 1)
+    true(handle not in kernel.state["handles"])
+    equal(kernel.state["current_actctx"], 0)
+    machine.write_u32le(context, 0)
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "CreateActCtxW"), args = [context]).value, 0xffffffff)
+    equal(kernel.state["last_error"], 87)
+
+def test_registration_registry_delete_tree():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    registry = module["registry_plugin"](values = [
+        {"hive": "SOFTWARE", "key": "/Classes/Test", "name": "value", "type": "REG_SZ", "value": "parent"},
+        {"hive": "SOFTWARE", "key": "/Classes/Test/Child", "name": "value", "type": "REG_SZ", "value": "child"},
+    ])
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([registry])
+    output = machine.allocate(size = 4)
+    name = machine.allocate(value = binary.encode("Test", encoding = "utf16le", nul = True))
+    equal(machine.call(machine.resolve_export("advapi32.dll", name = "RegOpenKeyW"), args = [0x80000000, name, output]).value, 0)
+    handle = machine.read_u32le(output)
+    equal(machine.call(machine.resolve_export("advapi32_vista.dll", name = "RegDeleteTreeW"), args = [handle, 0]).value, 0)
+    true(module["_key_exists"](registry.state, ("SOFTWARE", "/Classes/Test")))
+    equal(module["_direct_subkeys"](registry.state, ("SOFTWARE", "/Classes/Test")), [])
+    equal(module["_direct_values"](registry.state, ("SOFTWARE", "/Classes/Test")), [])
+    equal(machine.call(machine.resolve_export("advapi32.dll", name = "RegDeleteTreeW"), args = [0x80000000, name]).value, 0)
+    true(not module["_key_exists"](registry.state, ("SOFTWARE", "/Classes/Test")))
+
+def test_registration_reggetvalue_contract():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    registry = module["registry_plugin"](values = [{"hive": "SOFTWARE", "key": "/Classes/Test", "name": "(default)", "type": "REG_EXPAND_SZ", "value": r"%SystemRoot%\test"}], environment = {"SystemRoot": r"C:\ReactOS"})
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([registry])
+    key = machine.allocate(value = binary.encode("Test", encoding = "utf16le", nul = True))
+    data = machine.allocate(size = 100)
+    size = machine.allocate(size = 4)
+    kind = machine.allocate(size = 4)
+    function = machine.resolve_export("advapi32.dll", name = "RegGetValueW")
+    machine.write_u32le(size, 100)
+    result = machine.call(function, args = [0x80000000, key, 0, 2, kind, data, size])
+    equal(result.reason, "return", result.detail)
+    equal(result.value, 0)
+    equal(machine.read_cstring(data, encoding = "utf16le"), r"C:\ReactOS\test")
+    equal(machine.read_u32le(kind), 1)
+    machine.write_u32le(size, 4)
+    machine.write(data, b"xxxx")
+    equal(machine.call(function, args = [0x80000000, key, 0, 0x20000002, kind, data, size]).value, 234)
+    equal(machine.read(data, 4), b"\x00" * 4)
+    true(machine.read_u32le(size) > 4)
+    machine.write_u32le(size, 100)
+    equal(machine.call(function, args = [0x80000000, key, 0, 0x10000004, kind, data, size]).value, 0)
+    equal(machine.read_cstring(data, encoding = "utf16le"), r"%SystemRoot%\test")
+    equal(machine.read_u32le(kind), 2)
+    equal(machine.call(function, args = [0x80000000, key, 0, 16, kind, 0, 0]).value, 1630)
+
+def test_registration_resource_mapping_skips_initialization():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    calls = []
+    def attach(name):
+        calls.append(("attach", name))
+        return 0x1000000
+    def mapping(name):
+        calls.append(("map", name))
+        return 0x1000000
+    kernel = module["kernel32_plugin"](on_module_load = attach, on_module_map = mapping)
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([kernel])
+    name = machine.allocate(value = binary.encode("resource.dll", encoding = "utf16le", nul = True))
+    function = machine.resolve_export("kernel32.dll", name = "LoadLibraryExW")
+    equal(machine.call(function, args = [name, 0, 2]).value, 0x1000000)
+    equal(machine.call(function, args = [name, 0, 2]).value, 0x1000000)
+    equal(calls, [("map", "resource.dll")])
+    equal(machine.call(function, args = [name, 0, 0]).value, 0x1000000)
+    equal(calls, [("map", "resource.dll"), ("attach", "resource.dll")])
+
+def test_registration_debug_prefix_and_va_list():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    kernel = module["kernel32_plugin"]()
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([kernel])
+    prefix = machine.allocate(value = b"registrar: \x00")
+    format = machine.allocate(value = b"value=%x\x00")
+    arguments = machine.allocate(value = binary.u32le(42))
+    result = machine.call(machine.resolve_export("ntdll.dll", name = "vDbgPrintExWithPrefix"), args = [prefix, 0, 0, format, arguments])
+    equal(result.reason, "return", result.detail)
+    equal(result.value, 0)
+    equal(kernel.state["debug_output"], ["registrar: value=2a"])
+
+def test_registration_crt_long_character_search_and_snprintf():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    machine.use([module["msvcrt_plugin"]()])
+    data = machine.allocate(value = bytes_concat([b"a\x00" * 20000, b"z\x00\x00\x00"]))
+    search = machine.resolve_export("msvcrt.dll", name = "wcschr")
+    equal(machine.call(search, args = [data, ord("a")]).value, data)
+    equal(machine.call(search, args = [data, ord("z")]).value, data + 40000)
+    equal(machine.call(search, args = [data, 0]).value, data + 40002)
+    # One code unit has no terminator; a forward match must not read beyond it.
+    single = machine.allocate(value = b"z\x00")
+    equal(machine.call(search, args = [single, ord("z")]).value, single)
+    format = machine.allocate(value = b"%s:%u\x00")
+    word = machine.allocate(value = b"abc\x00")
+    output = machine.allocate(value = b"!!!!!!")
+    printf = machine.resolve_export("msvcrt.dll", name = "_snprintf")
+    for count, expected, result in [(4, b"abc:!!", 0xffffffff), (5, b"abc:7!", 5), (6, b"abc:7\x00", 5)]:
+        machine.write(output, b"!!!!!!")
+        call = machine.call(printf, args = [output, count, format, word, 7])
+        equal(call.reason, "return", call.detail)
+        equal(call.value, result)
+        equal(machine.read(output, 6), expected)
+
 def test_lz32_copies_memory_backed_files():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     machine = emulator.x86(code = b"\xc3")
@@ -2483,6 +2629,13 @@ TEST_SUITE = suite("stdlib/internal", [
     case("binary_hex", test_binary_hex),
     case("installshield5_conventional_component_locations", test_installshield5_conventional_component_locations),
     case("registration_ui_object_handles", test_registration_ui_object_handles),
+    case("registration_bitmap_ownership", test_registration_bitmap_ownership),
+    case("registration_activation_context_lifetime", test_registration_activation_context_lifetime),
+    case("registration_registry_delete_tree", test_registration_registry_delete_tree),
+    case("registration_reggetvalue_contract", test_registration_reggetvalue_contract),
+    case("registration_resource_mapping_skips_initialization", test_registration_resource_mapping_skips_initialization),
+    case("registration_debug_prefix_and_va_list", test_registration_debug_prefix_and_va_list),
+    case("registration_crt_long_character_search_and_snprintf", test_registration_crt_long_character_search_and_snprintf),
     case("lz32_copies_memory_backed_files", test_lz32_copies_memory_backed_files),
     case("kernel_dos_file_time_round_trip", test_kernel_dos_file_time_round_trip),
     case("netapi_reports_join_information_with_owned_buffer", test_netapi_reports_join_information_with_owned_buffer),

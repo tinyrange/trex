@@ -608,6 +608,8 @@ func sevenZipMethodName(method []byte) string {
 		return "copy"
 	case bytes.Equal(method, []byte{0x03, 0x01, 0x01}):
 		return "lzma"
+	case bytes.Equal(method, []byte{0x21}):
+		return "lzma2"
 	default:
 		return fmt.Sprintf("%x", method)
 	}
@@ -626,6 +628,12 @@ func (f *sevenZipFolderData) initialize() error {
 		f.reader = section
 	case "lzma":
 		reader, err := newLZMAReader(section, f.coder.properties, uint64(f.unpackSize), f.maximumDictionary)
+		if err != nil {
+			return err
+		}
+		f.reader = reader
+	case "lzma2":
+		reader, err := newLZMA2Reader(section, f.coder.properties, uint64(f.unpackSize), f.maximumDictionary)
 		if err != nil {
 			return err
 		}
@@ -1009,6 +1017,10 @@ func validateSevenZipFolder(folder sevenZipFolder) error {
 	case "lzma":
 		if len(coder.properties) != 5 {
 			return fmt.Errorf("7z: LZMA coder has %d property bytes, want 5", len(coder.properties))
+		}
+	case "lzma2":
+		if len(coder.properties) != 1 || coder.properties[0] > 40 {
+			return fmt.Errorf("7z: invalid LZMA2 properties %x", coder.properties)
 		}
 	default:
 		return fmt.Errorf("7z: unsupported coder method %x", coder.method)

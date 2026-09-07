@@ -7,6 +7,9 @@ load("@stdlib//windows:security.star", "legacy_lsa_secret_crypt", "sddl_security
 
 _KERNEL_SIGNATURES = {
     "addrefactctx": 1,
+    "createactctxw": 1,
+    "activateactctx": 2,
+    "deactivateactctx": 2,
     "acquiresrwlockexclusive": 1,
     "acquiresrwlockshared": 1,
     "changetimerqueuetimer": 4,
@@ -41,6 +44,7 @@ _KERNEL_SIGNATURES = {
     "duplicatehandle": 7,
     "decodepointer": 1,
     "dbgprint": 1,
+    "vdbgprintexwithprefix": 5,
     "deletecriticalsection": 1,
     "deletefilea": 1,
     "deletefilew": 1,
@@ -1219,7 +1223,7 @@ def _kernel_provider_module(name):
     normalized = name.replace("/", "\\").split("\\")[-1].lower()
     return normalized in ["kernel32.dll", "ntdll.dll"] or normalized.startswith("api-ms-win-core-") or normalized.startswith("ext-ms-win-")
 
-def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, on_process_create = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800, tls_slots = 0):
+def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, on_process_create = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800, tls_slots = 0, on_module_map = None):
     """Models deterministic allocation, strings, paths, files, and OS facts.
 
     `files` maps guest paths to bytes or trex files. They are made
@@ -1285,6 +1289,9 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     if thread_instruction_limit < 1 or thread_instruction_limit > 10000000:
         fail("kernel thread instruction limit must be between 1 and 10000000")
     state = {"last_error": 0, "modules": {}, "handles": {}, "next_handle": 0x40000, "next_luid": 0x1000, "next_etw_handle": 1, "main": 0, "current_actctx": 0, "actctx_refs": 0, "tls": {}, "tls_slots": tls_slots, "next_tls": 0, "init_once": {}, "next_temp": 1, "next_thread_id": 16, "threads": [], "executions": {}, "current_thread": None, "thread_locale": 0x0409, "thread_priorities": {8: 0}, "thread_io_priorities": {8: 2}, "thread_page_priorities": {8: 5}, "timer_callbacks": [], "tick_count": 0, "time_adjustment": 156250, "time_increment": 156250, "time_adjustment_disabled": False, "paths": paths, "current_directory": current_directory, "named_mappings": {}, "views": {}, "file_queries": [], "volume_queries": [], "module_queries": [], "procedure_queries": [], "process_queries": [], "thread_queries": [], "system_queries": [], "profile_queries": [], "debug_output": [], "heaps": {1: True}, "allocations": {}, "resources": {}, "critical_sections": {}, "condition_variables": {}, "global_allocations": {}, "local_allocations": {}, "virtual_allocations": {}, "virtual_protections": {}, "standard_handles": {}, "command_line": command_line, "command_lines": {}, "process_exit_code": None, "process_userdata": 0, "unhandled_exception_filter": 0}
+
+    state["actctx_stack"] = []
+    state["next_actctx_cookie"] = 1
 
     def entry_data(entry):
         if entry == None or entry.get("directory", False):
@@ -1447,11 +1454,18 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 return {"name": virtual_name, "handle": virtual_handle}
         return None
 
-    def load_module(machine, requested, api):
+    def load_module(machine, requested, api, flags = 0):
         """Resolves one module through the live in-memory loader namespace."""
         requested = module_name(requested)
         loaded = find_module(machine, name = requested)
-        if api.startswith("loadlibrary") and on_module_load != None:
+        if flags & 0x63:  # DONT_RESOLVE_DLL_REFERENCES / resource-only mapping
+            if loaded == None and on_module_map != None:
+                handle = on_module_map(requested)
+                if handle:
+                    state["modules"][requested] = handle
+                    state["handles"][handle] = requested
+                    loaded = find_module(machine, name = requested)
+        elif api.startswith("loadlibrary") and on_module_load != None:
             # A native image may already be mapped but still await process
             # attach. The loader callback owns that state transition.
             handle = on_module_load(requested)
@@ -1468,7 +1482,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 state["modules"][requested] = handle
                 state["handles"][handle] = requested
                 loaded = find_module(machine, name = requested)
-        state["module_queries"].append({"api": api, "module": requested, "found": loaded != None})
+        state["module_queries"].append({"api": api, "module": requested, "found": loaded != None, "flags": flags})
         return loaded
 
     def search_path_exists(machine, path):
@@ -1896,6 +1910,15 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if len(state["debug_output"]) < 4096:
                 state["debug_output"].append(value)
             return len(value)
+        if name == "vdbgprintexwithprefix":
+            prefix = machine.read_cstring(args[0]) if args[0] else ""
+            format = machine.read_cstring(args[3]) if args[3] else ""
+            count = _format_argument_word_count(format)
+            arguments = [machine.read_u32le(args[4] + 4 * i) for i in range(count)] if args[4] else []
+            value = prefix + _format_win32(machine, format, arguments, False)
+            if len(state["debug_output"]) < 4096:
+                state["debug_output"].append(value[:512])
+            return 0
         if name in ["isbadreadptr", "isbadwriteptr", "isbadstringptra", "isbadstringptrw"]:
             return 1 if args[1] and not args[0] else 0
         if name == "rtlintegertounicodestring":
@@ -3936,7 +3959,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 return state["main"]
             wide = name.endswith("w")
             requested = module_name(machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii"))
-            loaded = find_module(machine, name = requested) if name.startswith("getmodulehandle") else load_module(machine, requested, name)
+            loaded = find_module(machine, name = requested) if name.startswith("getmodulehandle") else load_module(machine, requested, name, args[2] if name.startswith("loadlibraryex") else 0)
             if name.startswith("getmodulehandle"):
                 state["module_queries"].append({"api": name, "module": requested, "found": loaded != None})
             state["last_error"] = 0 if loaded != None else 126
@@ -4080,21 +4103,83 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write_u32le(args[0], 1)
             machine.write_u32le(args[0] + 4, 1000000)
             return 0
+        if name == "activateactctx":
+            context = state["handles"].get(args[0])
+            if not args[1] or type(context) != "dict" or context.get("kind") != "actctx":
+                state["last_error"] = 87
+                return 0
+            cookie = state["next_actctx_cookie"]
+            state["next_actctx_cookie"] += 1
+            state["actctx_stack"].append({"cookie": cookie, "previous": state["current_actctx"], "handle": args[0]})
+            state["current_actctx"] = args[0]
+            if "references" in context["value"]:
+                context["value"]["references"] += 1
+            machine.write_u32le(args[1], cookie)
+            return 1
+        if name == "deactivateactctx":
+            if args[0] != 0 or not state["actctx_stack"] or state["actctx_stack"][-1]["cookie"] != args[1]:
+                machine.stop("invalid or non-LIFO activation-context deactivation")
+                return 0
+            frame = state["actctx_stack"].pop()
+            state["current_actctx"] = frame["previous"]
+            context = state["handles"][frame["handle"]]
+            if "references" in context["value"]:
+                context["value"]["references"] -= 1
+                if context["value"]["references"] == 0:
+                    state["handles"].pop(frame["handle"])
+            return 1
+        if name == "createactctxw":
+            if not args[0] or machine.read_u32le(args[0]) != 32:
+                state["last_error"] = 87
+                return 0xffffffff
+            flags = machine.read_u32le(args[0] + 4)
+            source = machine.read_u32le(args[0] + 8)
+            if flags & ~0xff or not source:
+                state["last_error"] = 87
+                return 0xffffffff
+            if flags:
+                machine.stop("activation-context flags require additional manifest resolution")
+                return 0xffffffff
+            path = file_path(machine, source, True)
+            entry = state["paths"].get(path)
+            if entry == None or entry.get("directory", False):
+                state["last_error"] = 2
+                return 0xffffffff
+            manifest = windows.assembly_manifest(entry_data(entry))
+            if not manifest.identity:
+                state["last_error"] = 14001
+                return 0xffffffff
+            state["last_error"] = 0
+            return create_handle("actctx", {"path": path, "manifest": manifest, "references": 1})
         if name == "getcurrentactctx":
             if not args[0]:
                 state["last_error"] = 87
                 return 0
             if not state["current_actctx"]:
                 state["current_actctx"] = create_handle("actctx", {"default": True})
-            state["actctx_refs"] += 1
+            context = state["handles"].get(state["current_actctx"])
+            if type(context) == "dict" and "references" in context["value"]:
+                context["value"]["references"] += 1
+            else:
+                state["actctx_refs"] += 1
             machine.write_u32le(args[0], state["current_actctx"])
             state["last_error"] = 0
             return 1
         if name == "addrefactctx":
+            context = state["handles"].get(args[0])
+            if type(context) == "dict" and context.get("kind") == "actctx" and "references" in context["value"]:
+                context["value"]["references"] += 1
+                return None
             if args[0] == state["current_actctx"]:
                 state["actctx_refs"] += 1
             return None
         if name == "releaseactctx":
+            context = state["handles"].get(args[0])
+            if type(context) == "dict" and context.get("kind") == "actctx" and "references" in context["value"]:
+                context["value"]["references"] -= 1
+                if context["value"]["references"] == 0:
+                    state["handles"].pop(args[0])
+                return None
             if args[0] == state["current_actctx"] and state["actctx_refs"] > 0:
                 state["actctx_refs"] -= 1
             return None
@@ -4751,20 +4836,20 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         # namespace. Publish semantic exports as virtual Kernel32/NTDLL images
         # while retaining import-site hooks for already-linked target modules.
         for function, argc in _KERNEL_SIGNATURES.items():
-            providers = ["ntdll.dll"] if function.startswith("rtl") or function.startswith("nt") or function.startswith("zw") or function.startswith("ldr") or function.startswith("dbg") or function.startswith("etw") else ["kernel32.dll"]
+            providers = ["ntdll.dll"] if function.startswith("rtl") or function.startswith("nt") or function.startswith("zw") or function.startswith("ldr") or function.startswith("dbg") or function.startswith("etw") or function == "vdbgprintexwithprefix" else ["kernel32.dll"]
             # Win9x exposes the RTL memory helpers through Kernel32, while NT
             # exports the same contract from NTDLL.
             if function in ["rtlfillmemory", "rtlmovememory", "rtlzeromemory", "rtlcapturestackbacktrace"]:
                 providers = ["kernel32.dll", "ntdll.dll"]
             for provider in providers:
-                machine.provide_export(callback, module = provider, name = function, argc = argc)
+                machine.provide_export(callback, module = provider, name = function, argc = argc, convention = "cdecl" if function == "vdbgprintexwithprefix" else "stdcall")
         for function, argc in _MULTIMEDIA_SIGNATURES.items():
             machine.provide_export(callback, module = "winmm.dll", name = function, argc = argc)
         machine.provide_export(get_process_dword, module = "kernel32.dll", ordinal = 18, argc = 2)
         for imported in machine.imports:
             function = imported.name.lower()
             if _kernel_provider_module(imported.module) and function in _KERNEL_SIGNATURES:
-                machine.hook(callback, address = imported.address, argc = _KERNEL_SIGNATURES[function])
+                machine.hook(callback, address = imported.address, argc = _KERNEL_SIGNATURES[function], convention = "cdecl" if function == "vdbgprintexwithprefix" else "stdcall")
             elif imported.module.lower() == "winmm.dll" and function in _MULTIMEDIA_SIGNATURES:
                 machine.hook(callback, address = imported.address, argc = _MULTIMEDIA_SIGNATURES[function])
             elif imported.module.lower() == "kernel32.dll" and imported.ordinal == 18:
@@ -6177,6 +6262,8 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
 
     signatures = _OLEAUT_SIGNATURES
     named_ordinals = {
+        "SysAllocString": 2,
+        "SysFreeString": 6,
         "LoadTypeLib": 161,
         "LoadRegTypeLib": 162,
         "RegisterTypeLib": 163,
@@ -6600,6 +6687,7 @@ def msvcrt_plugin(kernel = None):
         "vswprintf": 3,
         "swprintf": 16,
         "_snwprintf": 16,
+        "_snprintf": 3,
         "sprintf": 16,
         "_vsnprintf": 4,
         "_vsnwprintf": 4,
@@ -7205,18 +7293,23 @@ def msvcrt_plugin(kernel = None):
         if name in ["strchr", "strrchr", "wcschr", "wcsrchr", "_mbschr", "_mbsrchr"]:
             wide = name.startswith("wcs")
             width = 2 if wide else 1
-            value = event.machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
             codepoint = args[1] & (0xffff if wide else 0xff)
-            if codepoint == 0:
-                return args[0] + len(value) * width
-            character_data = binary.builder(capacity = width)
-            if wide:
-                character_data.u16le(codepoint)
-            else:
-                character_data.u8(codepoint)
-            character = binary.text(character_data.bytes(), encoding = "utf16le" if wide else "ascii")
-            index = value.rfind(character) if name in ["strrchr", "wcsrchr", "_mbsrchr"] else value.find(character)
-            return 0 if index < 0 else args[0] + index * width
+            reverse = name in ["strrchr", "wcsrchr", "_mbsrchr"]
+            found = 0
+            # Stop on the requested code unit, not after decoding the whole
+            # string. Registry resources can exceed read_cstring's UI-sized
+            # default limit; UTF-16 pointers also count units, not codepoints.
+            for offset in range(0, 16 << 20, width):
+                address = args[0] + offset
+                unit = event.machine.read_u16le(address) if wide else event.machine.read_u8(address)
+                if unit == codepoint:
+                    found = address
+                    if not reverse:
+                        return found
+                if unit == 0:
+                    return found
+            event.machine.stop("CRT character search exceeds bounded string size")
+            return 0
         if name in ["strstr", "_mbsstr"]:
             value = event.machine.read_cstring(args[0], encoding = "ascii")
             needle = event.machine.read_cstring(args[1], encoding = "ascii")
@@ -7318,6 +7411,15 @@ def msvcrt_plugin(kernel = None):
             if name == "sprintf":
                 _write_string(event.machine, args[0], value, False)
             return len(value)
+        if name == "_snprintf":
+            format = event.machine.read_cstring(args[2], encoding = "ascii")
+            value = _format_win32(event.machine, format, _stack_format_arguments(event, 3, format), False)
+            encoded = binary.encode(value, encoding = "ascii")
+            if args[1]:
+                event.machine.write(args[0], encoded[:args[1]])
+                if len(encoded) < args[1]:
+                    event.machine.write(args[0] + len(encoded), b"\x00")
+            return len(encoded) if len(encoded) <= args[1] else 0xffffffff
         if name == "_vsnprintf":
             if len(state["actions"]) < 256:
                 state["actions"].append({"api": name, "args": list(args), "return": event.return_address})
@@ -9036,7 +9138,7 @@ def resource_plugin(file, module_files = {}, kernel = None):
     def callback_identifier(machine, value, wide):
         if value.startswith("#"):
             number = value[1:]
-            if number and all([character >= "0" and character <= "9" for character in number]):
+            if number and all([character >= "0" and character <= "9" for character in number.elems()]):
                 return int(number)
         key = (value, wide)
         address = state["identifiers"].get(key)
@@ -10507,7 +10609,7 @@ def shell_plugin(module_path, kernel = None):
 
 def gdi32_plugin():
     """Models registration-visible GDI stock objects without a host display."""
-    state = {"next_palette": 0xda000001, "palettes": {}, "next_bitmap": 0xda100001, "bitmaps": {}}
+    state = {"next_palette": 0xda000001, "palettes": {}, "next_bitmap": 0xda100001, "bitmaps": {}, "next_brush": 0xdc000001, "brushes": {}}
     def callback(event):
         name = event.name.lower()
         if name == "getstockobject":
@@ -10541,6 +10643,29 @@ def gdi32_plugin():
                 "usage": event.args[5],
             }
             return handle
+        if name == "createbitmap":
+            width, height, planes, depth, bits = event.args
+            if width >= 0x80000000 or height >= 0x80000000 or planes != 1 or depth not in [1, 4, 8, 16, 24, 32]:
+                return 0
+            if width == 0 or height == 0:
+                width, height, planes, depth, bits = 1, 1, 1, 1, 0
+            stride = ((width * depth + 15) // 16) * 2
+            size = stride * height
+            if size > 16 << 20:
+                return 0
+            data = event.machine.read(bits, size) if bits else b"\x00" * size
+            handle = state["next_bitmap"]
+            state["next_bitmap"] = handle + 1
+            state["bitmaps"][handle] = {"width": width, "height": height, "planes": planes, "depth": depth, "stride": stride, "data": data}
+            return handle
+        if name == "createpatternbrush":
+            bitmap = state["bitmaps"].get(event.args[0])
+            if bitmap == None:
+                return 0
+            handle = state["next_brush"]
+            state["next_brush"] = handle + 1
+            state["brushes"][handle] = dict(bitmap)
+            return handle
         if name == "getpaletteentries":
             count = event.args[2]
             if event.args[3]:
@@ -10568,11 +10693,12 @@ def gdi32_plugin():
         if name == "deleteobject":
             state["palettes"].pop(event.args[0], None)
             state["bitmaps"].pop(event.args[0], None)
+            state["brushes"].pop(event.args[0], None)
             return 1 if event.args[0] else 0
         return 0
 
     def install(machine):
-        signatures = {"getstockobject": 1, "createsolidbrush": 1, "createpalette": 1, "createdibitmap": 6, "getpaletteentries": 4, "getdevicecaps": 2, "enumfontfamiliesa": 4, "enumfontfamiliesw": 4, "enumfontfamiliesexa": 5, "enumfontfamiliesexw": 5, "deleteobject": 1}
+        signatures = {"getstockobject": 1, "createsolidbrush": 1, "createpalette": 1, "createdibitmap": 6, "createbitmap": 5, "createpatternbrush": 1, "getpaletteentries": 4, "getdevicecaps": 2, "enumfontfamiliesa": 4, "enumfontfamiliesw": 4, "enumfontfamiliesexa": 5, "enumfontfamiliesexw": 5, "deleteobject": 1}
         for name, argc in signatures.items():
             machine.provide_export(callback, module = "gdi32.dll", name = name, argc = argc)
         for imported in machine.imports:

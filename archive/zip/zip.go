@@ -97,10 +97,13 @@ func (f *Entry) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", f.Type())
 }
 func (f *Entry) Attr(name string) (starlark.Value, error) {
+	if name == "name" {
+		return starlark.String(f.entry.Name), nil
+	}
 	return starfile.Attr(f, name), nil
 }
 func (f *Entry) AttrNames() []string {
-	return starfile.AttrNames()
+	return append(starfile.AttrNames(), "name")
 }
 
 func (f *Entry) cacheUntil(end int64) error {
