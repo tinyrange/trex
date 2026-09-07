@@ -339,6 +339,27 @@ func qemuOptionBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 }
 
 func qemuOptionValue(name string, value starlark.Value) (string, error) {
+	if name == "-boot" {
+		list, ok := value.(*starlark.List)
+		if !ok {
+			return qemuPropertyValue(value)
+		}
+		if list.Len() == 0 || list.Len() > 16 {
+			return "", fmt.Errorf("-boot option list must contain between 1 and 16 values")
+		}
+		parts := make([]string, list.Len())
+		for index := 0; index < list.Len(); index++ {
+			part, err := qemuPropertyValue(list.Index(index))
+			if err != nil {
+				return "", fmt.Errorf("-boot option %d: %w", index, err)
+			}
+			if !strings.Contains(part, "=") {
+				return "", fmt.Errorf("-boot option %d must be key=value", index)
+			}
+			parts[index] = part
+		}
+		return strings.Join(parts, ","), nil
+	}
 	if name != "-d" {
 		return qemuPropertyValue(value)
 	}

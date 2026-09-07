@@ -8,6 +8,7 @@ def dos(
         display_device = "VGA",
         no_reboot = True,
         boot_order = "c",
+        boot_menu = False,
         block_transport = "auto",
         overlay_limit = 256 << 20,
         debug_events = [],
@@ -20,7 +21,7 @@ def dos(
     options = [
         qemu.option("-nodefaults"),
         qemu.option("-cpu", cpu),
-        qemu.option("-boot", "order=" + boot_order),
+        qemu.option("-boot", ["order=" + boot_order] + (["menu=on"] if boot_menu else [])),
         qemu.option("-no-shutdown"),
         qemu.option("-parallel", "none"),
     ]
@@ -48,6 +49,7 @@ def nt351(
         accelerator = "auto",
         display_frontend = "auto",
         machine = "pc-i440fx-5.2",
+        cpu = "pentium",
         network = True,
         no_reboot = True,
         block_transport = "auto"):
@@ -56,7 +58,7 @@ def nt351(
     netdevs = []
     options = [
         qemu.option("-nodefaults"),
-        qemu.option("-cpu", "pentium"),
+        qemu.option("-cpu", cpu),
         qemu.option("-no-shutdown"),
         qemu.option("-parallel", "none"),
     ]

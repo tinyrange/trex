@@ -26,8 +26,9 @@ func hiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, k
 }
 
 type registryHive struct {
-	file     starfile.File
-	rootCell uint32
+	file             starfile.File
+	rootCell         uint32
+	legacyCellPrefix bool
 }
 
 type hiveKey struct {
@@ -51,9 +52,15 @@ func newRegistryHive(file starfile.File) (*registryHive, error) {
 	if string(header[0:4]) != "regf" {
 		return nil, fmt.Errorf("hive: invalid regf signature")
 	}
+	major := binary.LittleEndian.Uint32(header[0x14:0x18])
+	minor := binary.LittleEndian.Uint32(header[0x18:0x1c])
+	if major != 1 || minor < 1 || minor > 6 {
+		return nil, fmt.Errorf("hive: unsupported registry hive format %d.%d", major, minor)
+	}
 	return &registryHive{
-		file:     file,
-		rootCell: binary.LittleEndian.Uint32(header[0x24:0x28]),
+		file:             file,
+		rootCell:         binary.LittleEndian.Uint32(header[0x24:0x28]),
+		legacyCellPrefix: minor == 1,
 	}, nil
 }
 
@@ -466,11 +473,15 @@ func (h *registryHive) readCell(cell uint32) ([]byte, error) {
 	if size < 0 {
 		size = -size
 	}
-	if size < 4 {
+	prefix := int32(0)
+	if h.legacyCellPrefix {
+		prefix = 4
+	}
+	if size < 4+prefix {
 		return nil, fmt.Errorf("hive: invalid cell 0x%x size %d", cell, size)
 	}
-	data := make([]byte, int(size)-4)
-	if _, err := h.file.ReadAt(data, offset+4); err != nil {
+	data := make([]byte, int(size)-4-int(prefix))
+	if _, err := h.file.ReadAt(data, offset+4+int64(prefix)); err != nil {
 		return nil, err
 	}
 	return data, nil
