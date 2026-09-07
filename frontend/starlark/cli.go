@@ -1,6 +1,7 @@
 package starlarkfrontend
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -29,11 +30,29 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	webPublic := fs.Bool("web-public", false, "allow the archive browser to bind a non-loopback address")
 	serveAddr := fs.String("serve", "", "serve a Starlark web application on this address")
 	stdlibDocs := fs.Bool("stdlib-docs", false, "write embedded Starlark API documentation to stdout")
+	replMode := fs.Bool("repl", false, "start an interactive Starlark session without a script")
 	cpuProfile := fs.String("cpuprofile", "", "write a Go CPU profile to this path")
 	memProfile := fs.String("memprofile", "", "write a Go allocation profile to this path")
 	starlarkProfile := fs.String("starlarkprofile", "", "write a Starlark execution profile to this path")
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "Usage:\n  %s [flags] <script.star> [script arguments...]\n  %s [flags] - [script arguments...]\n  %s -repl\n  %s -serve <addr> <script.star> [script arguments...]\n  %s -web <addr> <directory>\n  %s -stdlib-docs\n\nUse - as the script to read a complete program from stdin.\nFlags before the script belong to trex; arguments after it belong to the script.\nIn the REPL, use help() for APIs and EOF (Ctrl-D) to exit.\n\nOptions:\n", name, name, name, name, name, name)
+		fs.PrintDefaults()
+	}
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	modes := 0
+	for _, enabled := range []bool{*replMode, *stdlibDocs, *webAddr != "", *serveAddr != ""} {
+		if enabled {
+			modes++
+		}
+	}
+	if modes > 1 || (*replMode && fs.NArg() != 0) {
+		fmt.Fprintln(stderr, "Select one mode; -repl does not accept a script or arguments")
 		return 1
 	}
 	if *cpuProfile != "" {
@@ -128,13 +147,18 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	if fs.NArg() < 1 {
+	if fs.NArg() < 1 && !*replMode {
 		fs.Usage()
 		return 1
 	}
 
 	script := fs.Arg(0)
-	scriptArgs := fs.Args()[1:]
+	var scriptArgs []string
+	if *replMode {
+		script = "-"
+	} else {
+		scriptArgs = fs.Args()[1:]
+	}
 
 	thread, environment, err := newStarlarkRuntime(script)
 	if err != nil {
@@ -142,6 +166,11 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	installStarlarkConsole(thread, newStreamStarlarkConsole(stdin, stdout, stderr))
+	printOutput := stderr // Preserve script print diagnostics separately from binary stdout.
+	if *replMode {
+		printOutput = stdout
+	}
+	thread.Print = func(_ *starlark.Thread, msg string) { fmt.Fprintln(printOutput, msg) }
 	resources, err := resourcesForThread(thread)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error initializing runtime resources: %v\n", err)
@@ -153,7 +182,9 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}()
 	var source any
-	if script == "-" {
+	if *replMode {
+		source = "def main(args):\n    repl()\n"
+	} else if script == "-" {
 		data, err := io.ReadAll(stdin)
 		if err != nil {
 			fmt.Fprintf(stderr, "Error reading stdin: %v\n", err)

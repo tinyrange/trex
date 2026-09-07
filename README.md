@@ -9,6 +9,20 @@ Product and project names mentioned in this repository are the property of
 their respective owners. Their use identifies interoperable formats and
 systems and does not imply endorsement or affiliation.
 
+## Get started
+
+From a checkout with submodules initialized (`git submodule update --init --recursive`),
+install the CLI with `go install ./cmd/trex`, or run `go run ./cmd/trex`.
+Use Go 1.25.5 or newer. Use `trex -h` for command syntax,
+`trex -repl` to explore without a script, and `trex script.star [arguments...]`
+to run a program.
+
+Start with the [quickstart](docs/starlark/quickstart.md), executable
+[public examples and script index](scripts/README.md), and
+[emulator guide](docs/starlark/emulation.md). The
+[API reference](docs/starlark/namespaces/reference.md) is also available via
+`trex -stdlib-docs`; `help()` provides discovery inside the REPL.
+
 ## Capabilities
 
 The public [ReactOS image builder](docs/reactos-publication.md) constructs a

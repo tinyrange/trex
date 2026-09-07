@@ -27,10 +27,16 @@ def _print_tar(contents):
 
 def main(args):
     if len(args) < 1 or len(args) > 3:
-        fail("usage: debian_package.star PACKAGE.deb [control|data [PATH]]")
+        fail("usage: debian_package.star PACKAGE.deb [control|data [PATH] | --repl]")
 
     package = archive.ar(open(args[0]))
     _print_outer(package)
+    if len(args) == 2 and args[1] == "--repl":
+        control = _tar(package, "control")
+        data = _tar(package, "data")
+        print("package, control, and data are available in the REPL")
+        repl()
+        return
     if len(args) == 1:
         return
 

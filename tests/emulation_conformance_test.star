@@ -2,6 +2,8 @@
 
 load("//tests:testing.star", "case", "equal", "raises", "suite")
 load("@stdlib//windows/emulation:conformance.star", conformance_call = "call", "buffer", "c_memory_bindings", "output", "pointer", "resolve", "run", "sequence", conformance_session = "session", "size_of")
+load("@stdlib//windows/selfreg:plugins.star", "override_plugin")
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
 
 def _u32(value):
     encoded = binary.builder(capacity = 4)
@@ -42,6 +44,53 @@ def test_declared_exports_are_callable():
         expected_return = 7,
     )
     equal(result["buffers"]["value"], b"pass")
+
+def test_call_selectors():
+    session = conformance_session(code = b"\xb8\x2a\x00\x00\x00\xc3")
+    equal(conformance_call(session, rva = 0)["result"].value, 42)
+    equal(conformance_call(session, address = session["raw_base"])["result"].value, 42)
+    raises(conformance_call, args = [session], message = "exactly one")
+    raises(conformance_call, args = [session, session["raw_base"]], kwargs = {"rva": 0}, message = "cannot combine")
+    raises(conformance_call, args = [session], kwargs = {"rva": 0, "name": "Answer"}, message = "exactly one")
+    def answer(event):
+        return 42
+    session["machine"].provide_export(answer, module = "fixture", ordinal = 7)
+    equal(conformance_call(session, module = "fixture", ordinal = 7)["result"].value, 42)
+
+def test_override_validation_and_replacement():
+    machine = emulator.x86(code = b"\xc3")
+    def base(event):
+        return event.args[0]
+    def replacement(event):
+        return event.args[0] + 1
+    raises(machine.override, args = [replacement], kwargs = {"module": "fixture", "name": "Answer"}, message = "install the base plugin first")
+    for selector in [{}, {"name": "Answer", "ordinal": 1}, {"ordinal": -1}, {"ordinal": 65536}]:
+        raises(machine.override, args = [replacement], kwargs = dict(selector, module = "fixture"), message = "exactly one")
+    address = machine.provide_export(base, module = "fixture", ordinal = 7, argc = 1)
+    equal(machine.override(replacement, module = "fixture", ordinal = 7), [address])
+    equal(machine.call(address, args = [41]).value, 42)
+    machine.provide_export(value = b"data", module = "fixture", name = "Data")
+    raises(machine.override, args = [replacement], kwargs = {"module": "fixture", "name": "Data"}, message = "no semantic binding")
+    machine.provide_export(base, module = "fixture", name = "Ambiguous", argc = 1)
+    machine.provide_export(base, module = "fixture", name = "Ambiguous", argc = 2)
+    raises(machine.override, args = [replacement], kwargs = {"module": "fixture", "name": "Ambiguous"}, message = "ambiguous base bindings")
+
+def test_base_plugin_wrapping():
+    state = {"calls": 0}
+    def observe(event, previous):
+        state["calls"] += 1
+        return previous(event) + 1
+    session = conformance_session(code = b"\xc3", plugins = [
+        kernel32_plugin(),
+        override_plugin("observe", [{"module": "kernel32", "name": "GetLastError", "callback": observe, "wrap": True}], state = state),
+    ])
+    machine = session["machine"]
+    saved = machine.checkpoint()
+    for unused in range(2):
+        machine.restore(saved)
+        conformance_call(session, module = "kernel32", name = "SetLastError", arguments = [41])
+        conformance_call(session, module = "kernel32", name = "GetLastError", expected_return = 42)
+        equal(state["calls"], 1)
 
 def test_conformance_expectations_fail_closed():
     session = conformance_session(code = b"\xb8\x01\x00\x00\x00\xc3")
@@ -85,6 +134,9 @@ def test_c_memory_bindings_are_explicit_and_bounded():
     equal(result["buffers"]["value"], b"AAAAA")
 
 TEST_SUITE = suite("windows/emulation/conformance", [
+    case("base_plugin_wrapping", test_base_plugin_wrapping),
+    case("call_selectors", test_call_selectors),
+    case("override_validation_and_replacement", test_override_validation_and_replacement),
     case("buffers_and_rva_calls_are_repeatable", test_buffers_and_rva_calls_are_repeatable),
     case("declared_exports_are_callable", test_declared_exports_are_callable),
     case("conformance_expectations_fail_closed", test_conformance_expectations_fail_closed),

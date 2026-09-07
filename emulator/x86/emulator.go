@@ -1602,6 +1602,7 @@ func (m *emulatorX86) AttrNames() []string {
 	for _, codec := range binaryScalarCodecs {
 		names = append(names, "read_"+codec.Name, "write_"+codec.Name)
 	}
+	names = append(names, "override")
 	sort.Strings(names)
 	return names
 }
@@ -1654,6 +1655,8 @@ func (m *emulatorX86) Attr(name string) (starlark.Value, error) {
 		method = m.getRegisterBuiltin
 	case "hook":
 		method = m.hookBuiltin
+	case "override":
+		method = m.overrideBuiltin
 	case "invoke":
 		method = m.invokeBuiltin
 	case "load_module":

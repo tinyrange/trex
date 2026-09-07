@@ -246,14 +246,21 @@ def sequence(session, steps, buffers = {}, inspect = None):
         "results": results,
     }
 
-def call(session, target, buffers = {}, arguments = [], registers = {}, expected_return = None, expected_reason = "return", inspect = None):
+def call(session, target = None, buffers = {}, arguments = [], registers = {}, expected_return = None, expected_reason = "return", inspect = None, module = None, name = None, ordinal = None, rva = None, address = None):
     """Invokes one target with bounded named buffers and captures post-state.
 
-    `target` is an address returned by `resolve`.  Arguments may contain raw
-    integers, `pointer(name)`, or `size_of(name)` references.  `inspect`, when
+    Pass a positional `target` address or exactly one of `name`, `ordinal`,
+    `rva`, or `address`; `module` selects a mapped or semantic module.
+    Arguments may contain raw integers, `pointer(name)`, or `size_of(name)`
+    references. `inspect`, when
     supplied, runs before allocations are released and may return additional
     caller-defined facts.  CPU state outside the invocation is preserved.
     """
+    if target != None:
+        if module != None or name != None or ordinal != None or rva != None or address != None:
+            fail("conformance call cannot combine target with selectors")
+    else:
+        target = resolve(session, module = module, name = name, ordinal = ordinal, rva = rva, address = address)
     def inspect_one(machine, results, allocations, specifications):
         return inspect(machine, results[0], allocations, specifications) if inspect != None else None
     result = sequence(session, [{
