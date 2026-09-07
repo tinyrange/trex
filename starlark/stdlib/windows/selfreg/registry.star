@@ -9,6 +9,15 @@ _ROOTS = {
     0x80000003: ("DEFAULT", "/@users"),
 }
 
+def _predefined_handle(handle):
+    # Win64's predefined HKEY constants sign-extend a signed 32-bit LONG.
+    # Do not truncate arbitrary handles: only normalize documented roots.
+    low = handle & 0xffffffff
+    return low if handle >> 32 == 0xffffffff and low in _ROOTS else handle
+
+def _write_handle(machine, address, value):
+    machine.write_pointer(address, value)
+
 _BASELINE_KEYS = [
     ("SOFTWARE", "/Classes/AppID"),
     ("SOFTWARE", "/Classes/CLSID"),
@@ -581,6 +590,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         return handle
 
     def key_for(handle):
+        handle = _predefined_handle(handle)
         if handle in _ROOTS and handle in state["overrides"]:
             return state["overrides"][handle]
         return state["handles"].get(handle)
@@ -686,7 +696,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
                 state["opens"].append({"api": name, "hive": target[0], "key": target[1], "found": existing})
             if not existing:
                 return 0xc0000034
-            event.machine.write(args[0], binary.u32le(allocate_handle(target[0], target[1])))
+            _write_handle(event.machine, args[0], allocate_handle(target[0], target[1]))
             return 0
         if name == "rtlpntcreatekey":
             if not args[0]:
@@ -698,7 +708,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             ensure_key(target[0], target[1])
             if not existing:
                 record_created_key(target[0], target[1])
-            event.machine.write(args[0], binary.u32le(allocate_handle(target[0], target[1])))
+            _write_handle(event.machine, args[0], allocate_handle(target[0], target[1]))
             if args[5]:
                 event.machine.write(args[5], binary.u32le(2 if existing else 1))
             return 0
@@ -920,7 +930,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             if not args[1]:
                 return 87
             root = key_for(0x80000001)
-            event.machine.write(args[1], binary.u32le(allocate_handle(root[0], root[1])))
+            _write_handle(event.machine, args[1], allocate_handle(root[0], root[1]))
             return 0
         if name.startswith("shregopenuskey") or name.startswith("shregcreateuskey"):
             path = _cstring(event.machine, args[0], wide)
@@ -941,7 +951,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
                     targets.append(target)
             if not targets:
                 return 2
-            event.machine.write(args[3], binary.u32le(allocate_us_handle(targets)))
+            _write_handle(event.machine, args[3], allocate_us_handle(targets))
             return 0
         if name == "shregcloseuskey":
             if args[0] not in state["us_handles"]:
@@ -1100,7 +1110,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
                 if not existing:
                     record_created_key(hive, key)
             handle = allocate_handle(hive, key)
-            event.machine.write(args[result_index], binary.u32le(handle))
+            _write_handle(event.machine, args[result_index], handle)
             if name.startswith("regcreatekeyex") and args[8]:
                 event.machine.write(args[8], binary.u32le(2 if existing else 1))
             return 0
@@ -1109,18 +1119,19 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             if parent == None:
                 return 6
             target = join_key(parent, _cstring(event.machine, args[1], wide)) if args[1] else parent
-            registry_type = args[2]
-            symbolic = _TYPES.get(registry_type)
-            if symbolic == None:
+            # RegSetValue is the legacy REG_SZ-only API. cbData is ignored;
+            # unlike RegSetValueEx, its data is a NUL-terminated string.
+            # https://learn.microsoft.com/windows/win32/api/winreg/nf-winreg-regsetvaluea
+            if args[2] & 0xffffffff != 1 or not args[3]:
                 return 87
-            raw = event.machine.read(args[3], args[4]) if args[3] and args[4] else b""
+            value = _cstring(event.machine, args[3], wide)
             ensure_key(target[0], target[1])
             store_value(
                 target[0],
                 target[1],
                 "(default)",
-                symbolic,
-                _decode_value(raw, registry_type, wide),
+                "REG_SZ",
+                value,
                 True,
             )
             return 0
@@ -1129,8 +1140,12 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             if target == None:
                 return 6
             value_name = _cstring(event.machine, args[1], wide) if args[1] else "(default)"
-            registry_type = args[3]
-            raw = event.machine.read(args[4], args[5]) if args[5] else b""
+            # DWORD arguments occupy only the low half of a Win64 argument
+            # slot. Native callers may leave unrelated bytes in the high half
+            # of stack-passed cbData; pointers and handles remain full-width.
+            registry_type = args[3] & 0xffffffff
+            size = args[5] & 0xffffffff
+            raw = event.machine.read(args[4], size) if size else b""
             value = _decode_value(raw, registry_type, wide)
             identity = _identity(target[0], target[1], value_name)
             state["deleted_values"].pop(identity, None)

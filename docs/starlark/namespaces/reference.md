@@ -495,6 +495,38 @@ Microsoft command-line parsing shared by Windows process models.
 
 Splits a Microsoft CRT command line, including backslash-quote runs.
 
+## `windows/emulation/abi.star`
+
+Native-width layouts shared by Windows execution plugins.
+
+### `counted_string_layout`
+
+Returns native STRING/UNICODE_STRING field offsets and total size.
+
+### `object_attributes_layout`
+
+Returns the native OBJECT_ATTRIBUTES layout, including alignment.
+
+### `pointer_array`
+
+Allocates an array of guest pointers without host-width assumptions.
+
+### `process_layout`
+
+Returns named offsets for the modeled PEB and process-parameter prefix.
+
+### `security_descriptor_layout`
+
+Returns absolute native-pointer or fixed-width self-relative SD fields.
+
+### `system_info_layout`
+
+Returns SYSTEM_INFO fields with native pointer and affinity-mask widths.
+
+### `teb_layout`
+
+Returns the common NT_TIB and initial TEB pointer-field offsets.
+
 ## `windows/emulation/conformance.star`
 
 Bounded conformance calls into Windows PE32 implementations.
@@ -680,6 +712,10 @@ Runs one target export or executable using semantic system-DLL plugins.
     runtime plugins are constructed and receives a record containing `crt` and
     `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
+    `generated_entries` retains newly created or changed files and directories
+    as path-keyed records with `directory`, file `data`, and optional DOS
+    `attributes` and owned self-relative `security` bytes. `generated_files`
+    is the content-only compatibility view; use entries to preserve metadata.
 
 ## `windows/identity.star`
 
@@ -1186,16 +1222,28 @@ Models bounded legacy CryptoAPI provider contexts.
     emulation remains reproducible; it is not exposed as a cryptographic host
     randomness service.
 
+    RC4 key derivation supports explicit 40–128-bit lengths and the exportable
+    flag, using the leading hash bytes and finalizing the hash. Provider-default
+    lengths, salt policies, and other derived ciphers fail explicitly.
+
+    Process-local RtlEncryptMemory/RtlDecryptMemory use an opaque, per-plugin
+    128-bit key and XTEA blocks. This models their in-process reversible-memory
+    contract, not interoperability with a Windows kernel's private ciphertext.
+    The default key is random; tests may supply a 16-byte key. Cross-process,
+    logon-session and system-only protection require an execution-domain model
+    and currently return STATUS_NOT_SUPPORTED, never successful plaintext.
+
 ## `windows/selfreg/exception.star`
 
-Structured-exception dispatch for bounded 32-bit registration execution.
+Compiler exception and local-unwind semantics for bounded execution.
 
 ### `exception_plugin`
 
 Dispatches RaiseException through active compiler SEH3 scope tables.
 
-    The plugin deliberately supports the explicit x86 registration-chain
-    contract only. Unknown frame layouts and unhandled exceptions fail closed.
+    x86 uses the registration-chain contract. AMD64 supports same-frame local
+    C-scope unwinds, including native termination calls; general exception
+    dispatch and unsupported frame layouts fail closed.
 
 ## `windows/selfreg/facts.star`
 
@@ -1288,7 +1336,7 @@ High-level, data-first Windows self-registration policy.
 
 Returns registry patches for one PE without loading system DLL images.
 
-    Structured resources and static PE facts are preferred. The bounded x86
+    Structured resources and static PE facts are preferred. The bounded native-architecture
     runner is used only as a fallback. Its writes require success, except for
     completed HKCR writes guarded by static class metadata when a registrar
     reports the aggregate SELFREG_E_CLASS result.
@@ -1362,6 +1410,10 @@ Runs one target export or executable using semantic system-DLL plugins.
     runtime plugins are constructed and receives a record containing `crt` and
     `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
+    `generated_entries` retains newly created or changed files and directories
+    as path-keyed records with `directory`, file `data`, and optional DOS
+    `attributes` and owned self-relative `security` bytes. `generated_files`
+    is the content-only compatibility view; use entries to preserve metadata.
 
 ## `windows/selfreg/script.star`
 
@@ -2252,6 +2304,12 @@ Native `debug` operation. Limits and timeout arguments are validated before work
 `debug.select(values, timeout=-1)`
 
 Native `debug` operation. Limits and timeout arguments are validated before work begins.
+
+### `emulator.machine`
+
+`emulator.machine(...)`
+
+Native `emulator` operation. Limits and timeout arguments are validated before work begins.
 
 ### `emulator.plugin`
 

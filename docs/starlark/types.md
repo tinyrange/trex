@@ -80,13 +80,57 @@ behind the backend boundary; stable Starlark recipes use VMM values.
 
 ## Emulator values
 
+`emulator.machine(image=...)` selects the execution architecture from the PE
+header. Raw code accepts `architecture="x86"` or `architecture="amd64"` (the
+default is x86). Both expose `architecture`, `pointer_size`, `read_pointer`, and
+`write_pointer`; pointer operations use guest width, not host width. The AMD64
+backend retains 64-bit virtual addresses and marshals integer/pointer calls
+using the Windows x64 register, shadow-space, and stack-argument convention.
+Unsupported instructions produce a structured stop rather than being skipped.
+
+AMD64 modules keep their preferred PE base when available. Colliding modules
+are placed in a free 64-KiB-aligned range and rebased using their native PE
+relocation records before TLS pointers are interpreted. A collision without
+valid relocation records fails the load; source file bytes remain unchanged.
+
+The AMD64 `mappings` view returns named, sorted address ranges with their
+allocation bases and effective read/write/execute permissions. Protection
+changes can split a single allocation into multiple records. The view exposes
+no guest bytes and modifying returned records does not alter guest mappings.
+The `mxcsr` register preserves SSE control/status state across native save/load
+instructions and snapshots; this does not imply floating-point execution support.
+
+The AMD64 backend is under development; it does not yet provide the complete
+x86 debugging/checkpoint API or floating-point/aggregate call marshaling.
+It provides bounded PC-only traces, sampled hotspot profiles, native-width
+static TLS metadata, and CPU/memory snapshots. Snapshots retain semantic
+callback bindings; they do not independently clone mutable plugin state.
+`local_unwind(frame, target)` executes native C termination handlers when
+leaving scopes in the current AMD64 frame, then resumes the requested target.
+It validates the PE function and C scope tables; cross-frame, chained, and
+frame-pointer unwinds remain explicit unsupported cases. General AMD64
+exception dispatch is not yet implemented. `transfer(address, stack_pointer=...)`
+lets a semantic callback resume a guest continuation without performing its
+ordinary function return.
+`stop(reason, detail="", value=None)` is also available to active AMD64 hooks.
+It returns a structured stop without returning from the guest call; `value`,
+when supplied, sets the full 64-bit RAX. Resuming re-enters the stopped hook.
+Empty reasons and `return`, `plugin`, and `exception` are reserved.
+`arguments(count)` reads integer/pointer arguments at the current native call
+boundary, combining AMD64 registers and stack slots. This supports semantic
+variadic callbacks whose required argument count comes from a format string.
+For bounded investigation, `run(instruction_limit=N, until=address)` stops
+before the requested instruction with reason `breakpoint`, without executing
+that instruction or mutating guest state. The temporary instruction limit
+cannot exceed the constructor budget. Omit `until` to continue normally.
+
 `emulator.x86` is an in-process bounded machine used for low-level executable
 behavior with pluggable semantic APIs. Raw `read` and `write` transfer byte
 ranges. Typed methods such as `read_u32le` and `write_u32le` access scalar guest
 memory without constructing intermediate Starlark bytes. Mappings, instruction
 budgets, call depth, and allocation bytes are bounded.
 
-`machine.checkpoint()` captures CPU and mapped-memory state together with the
+On the x86 backend, `machine.checkpoint()` captures CPU and mapped-memory state together with the
 mutable state of installed semantic plugins and their suspended executions.
 `machine.restore(checkpoint)` rewinds the same machine between calls. A
 checkpoint is reusable and machine-local; restoring it preserves the identities

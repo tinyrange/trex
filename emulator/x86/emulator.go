@@ -7,13 +7,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"math/bits"
 	"sort"
 	"strings"
 
 	binaryapi "github.com/tinyrange/trex/binary"
+	"github.com/tinyrange/trex/emulator/peimage"
 	windowsapi "github.com/tinyrange/trex/windows"
 	"go.starlark.net/starlark"
 	"golang.org/x/arch/x86/x86asm"
@@ -847,23 +847,7 @@ func pe32TLSMetadata(mapped []byte, optional *pe.OptionalHeader32, base uint32) 
 // reader quite reasonably reports EOF for that layout, but Windows accepts it
 // when every byte in VirtualSize is present and zero-fills the absent padding.
 func peSectionDataForMapping(data []byte, section *pe.Section) ([]byte, error) {
-	rawStart := uint64(section.Offset)
-	rawSize := uint64(section.Size)
-	if rawSize == 0 {
-		return nil, nil
-	}
-	if rawStart > uint64(len(data)) {
-		return nil, io.ErrUnexpectedEOF
-	}
-	available := min(rawSize, uint64(len(data))-rawStart)
-	required := rawSize
-	if virtualSize := uint64(section.VirtualSize); virtualSize != 0 {
-		required = min(required, virtualSize)
-	}
-	if available < required {
-		return nil, io.ErrUnexpectedEOF
-	}
-	return data[int(rawStart):int(rawStart+available)], nil
+	return peimage.SectionData(data, section)
 }
 
 func (m *emulatorX86) peImageBase(preferred, size uint32) (uint32, error) {
@@ -908,48 +892,7 @@ func (m *emulatorX86) mappingRangeAvailable(start, size uint32) bool {
 }
 
 func relocatePE32Image(mapped []byte, optional *pe.OptionalHeader32, base uint32) error {
-	if base == optional.ImageBase {
-		return nil
-	}
-	directory := optional.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_BASERELOC]
-	if directory.VirtualAddress == 0 || directory.Size < 8 {
-		return fmt.Errorf("image at preferred base 0x%08x cannot be relocated to 0x%08x", optional.ImageBase, base)
-	}
-	start := uint64(directory.VirtualAddress)
-	end := start + uint64(directory.Size)
-	if end > uint64(len(mapped)) {
-		return fmt.Errorf("base relocation directory exceeds virtual image")
-	}
-	delta := base - optional.ImageBase
-	for cursor := start; cursor < end; {
-		if end-cursor < 8 {
-			return fmt.Errorf("truncated base relocation block")
-		}
-		page := binary.LittleEndian.Uint32(mapped[cursor : cursor+4])
-		blockSize := uint64(binary.LittleEndian.Uint32(mapped[cursor+4 : cursor+8]))
-		if blockSize < 8 || blockSize > end-cursor || (blockSize-8)%2 != 0 {
-			return fmt.Errorf("invalid base relocation block size %d", blockSize)
-		}
-		for entryOffset := cursor + 8; entryOffset < cursor+blockSize; entryOffset += 2 {
-			entry := binary.LittleEndian.Uint16(mapped[entryOffset : entryOffset+2])
-			typ := entry >> 12
-			target := uint64(page) + uint64(entry&0x0fff)
-			switch typ {
-			case 0: // IMAGE_REL_BASED_ABSOLUTE padding.
-				continue
-			case 3: // IMAGE_REL_BASED_HIGHLOW for PE32.
-				if target+4 > uint64(len(mapped)) {
-					return fmt.Errorf("base relocation target 0x%x exceeds virtual image", target)
-				}
-				value := binary.LittleEndian.Uint32(mapped[target : target+4])
-				binary.LittleEndian.PutUint32(mapped[target:target+4], value+delta)
-			default:
-				return fmt.Errorf("unsupported PE32 base relocation type %d", typ)
-			}
-		}
-		cursor += blockSize
-	}
-	return nil
+	return peimage.Relocate(mapped, optional.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_BASERELOC], uint64(optional.ImageBase), uint64(base), 4)
 }
 
 func (m *emulatorX86) relinkImports() error {
@@ -1602,11 +1545,23 @@ func (m *emulatorX86) AttrNames() []string {
 	for _, codec := range binaryScalarCodecs {
 		names = append(names, "read_"+codec.Name, "write_"+codec.Name)
 	}
-	names = append(names, "override")
+	names = append(names, "override", "architecture", "pointer_size", "read_pointer", "write_pointer")
 	sort.Strings(names)
 	return names
 }
 func (m *emulatorX86) Attr(name string) (starlark.Value, error) {
+	if name == "read_pointer" {
+		return m.Attr("read_u32le")
+	}
+	if name == "write_pointer" {
+		return m.Attr("write_u32le")
+	}
+	if name == "architecture" {
+		return starlark.String("x86"), nil
+	}
+	if name == "pointer_size" {
+		return starlark.MakeInt(4), nil
+	}
 	if name == "entry" {
 		return starlark.MakeUint64(uint64(m.entry)), nil
 	}
@@ -2010,9 +1965,16 @@ func (m *emulatorX86) importValues() *starlark.List {
 
 func (m *emulatorX86) runBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	entryValue := starlark.Value(starlark.None)
-	if err := starlark.UnpackArgs("run", args, kwargs, "entry?", &entryValue); err != nil {
+	limit := m.instructionLimit
+	if err := starlark.UnpackArgs("run", args, kwargs, "entry?", &entryValue, "instruction_limit?", &limit); err != nil {
 		return nil, err
 	}
+	if limit == 0 || limit > m.instructionLimit {
+		return nil, fmt.Errorf("run: instruction limit must be within the machine budget")
+	}
+	previousLimit := m.instructionLimit
+	m.instructionLimit = limit
+	defer func() { m.instructionLimit = previousLimit }()
 	if entryValue != starlark.None {
 		entry, err := starlark.AsInt32(entryValue)
 		if err != nil || entry < 0 {

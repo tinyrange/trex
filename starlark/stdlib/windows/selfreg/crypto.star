@@ -31,6 +31,7 @@ _CRYPTOAPI_SIGNATURES = {
     "cryptacquirecontexta": 5,
     "cryptacquirecontextw": 5,
     "cryptcreatehash": 5,
+    "cryptderivekey": 5,
     "cryptdestroyhash": 1,
     "cryptdestroykey": 1,
     "cryptgenrandom": 3,
@@ -41,7 +42,72 @@ _CRYPTOAPI_SIGNATURES = {
     "cryptverifysignaturea": 6,
     "cryptverifysignaturew": 6,
     "systemfunction036": 2,
+    "systemfunction040": 3,
+    "systemfunction041": 3,
 }
+
+_SHA_SIGNATURES = {"a_shainit": 1, "a_shaupdate": 3, "a_shafinal": 2}
+_SHA_INITIAL_WORDS = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
+
+def _sha_initialize(machine, address, clear_buffer = False):
+    # A_SHA_CTX uses a 64-byte pending block, five little-endian chaining
+    # words, then high/low 32-bit BYTE counts. This layout is pointer-free.
+    # Init preserves the pending block; Final resets it as well as the state.
+    if clear_buffer:
+        machine.write(address, b"\x00" * 64)
+    state = binary.builder(capacity = 28)
+    for word in _SHA_INITIAL_WORDS:
+        state.u32le(word)
+    state.u32le(0)
+    state.u32le(0)
+    machine.write(address + 64, state.bytes())
+
+def _sha_state(raw, big_endian):
+    output = binary.builder(capacity = 20)
+    for offset in range(0, 20, 4):
+        if big_endian:
+            output.u32be(binary.read_u32le(raw, offset))
+        else:
+            output.u32le(binary.read_u32be(raw, offset))
+    return output.bytes()
+
+def _sha_update(machine, address, data):
+    context = machine.read(address, 92)
+    length = (binary.read_u32le(context, 84) << 32) | binary.read_u32le(context, 88)
+    buffered = length % 64
+    combined = binary.view(binary.concat([context[:buffered], data]))
+    complete = len(combined) // 64 * 64
+    state = _sha_state(context[64:84], True)
+    if complete:
+        state = crypto.hash_blocks("sha1", state, combined[:complete])
+    pending = combined[complete:]
+    buffer = combined[:64] if buffered and complete else context[:64]
+    buffer = binary.concat([pending, buffer[len(pending):]])
+    length = (length + len(data)) & 0xffffffffffffffff
+    output = binary.builder(capacity = 92)
+    output.append(buffer)
+    output.append(_sha_state(state, False))
+    output.u32le(length >> 32)
+    output.u32le(length & 0xffffffff)
+    machine.write(address, output.bytes())
+
+def _sha_callback(event):
+    machine, args, name = event.machine, event.args, event.name.lower()
+    if name == "a_shainit":
+        _sha_initialize(machine, args[0])
+    elif name == "a_shaupdate":
+        _sha_update(machine, args[0], machine.read(args[1], args[2]) if args[2] else b"")
+    elif name == "a_shafinal":
+        context = machine.read(args[0], 92)
+        length = (binary.read_u32le(context, 84) << 32) | binary.read_u32le(context, 88)
+        padding = binary.builder(capacity = 128)
+        padding.u8(0x80)
+        padding.append(b"\x00" * ((55 - length) % 64))
+        padding.u64be((length * 8) & 0xffffffffffffffff)
+        _sha_update(machine, args[0], padding.bytes())
+        machine.write(args[1], _sha_state(machine.read(args[0] + 64, 20), True))
+        _sha_initialize(machine, args[0], clear_buffer = True)
+    return None
 
 _CRYPT_VERIFYCONTEXT = 0xf0000000
 # CryptImportKey accepts these documented policy flags for public-key blobs.
@@ -77,15 +143,31 @@ def _pkcs1_digest_matches(encoded, digest, prefix):
         return False
     return crypto.constant_time_equal(encoded[2:2 + padding], b"\xff" * padding)
 
-def cryptoapi_plugin(kernel = None):
+def _checked_memory_key(key):
+    if key != None and (type(key) != "bytes" or len(key) != 16):
+        fail("memory_protection_key must contain 16 bytes")
+    return key
+
+def cryptoapi_plugin(kernel = None, memory_protection_key = None):
     """Models bounded legacy CryptoAPI provider contexts.
 
     Verification contexts are process-local handles. Random output is derived
     deterministically from the provider facts and a monotonic counter so
     emulation remains reproducible; it is not exposed as a cryptographic host
     randomness service.
+
+    RC4 key derivation supports explicit 40–128-bit lengths and the exportable
+    flag, using the leading hash bytes and finalizing the hash. Provider-default
+    lengths, salt policies, and other derived ciphers fail explicitly.
+
+    Process-local RtlEncryptMemory/RtlDecryptMemory use an opaque, per-plugin
+    128-bit key and XTEA blocks. This models their in-process reversible-memory
+    contract, not interoperability with a Windows kernel's private ciphertext.
+    The default key is random; tests may supply a 16-byte key. Cross-process,
+    logon-session and system-only protection require an execution-domain model
+    and currently return STATUS_NOT_SUPPORTED, never successful plaintext.
     """
-    state = {"providers": {}, "hashes": {}, "keys": {}, "next_handle": 0x70000, "random_counter": 0, "actions": []}
+    state = {"providers": {}, "hashes": {}, "keys": {}, "next_handle": 0x70000, "random_counter": 0, "actions": [], "memory_protection_key": _checked_memory_key(memory_protection_key)}
 
     def fail(code):
         if kernel != None:
@@ -99,6 +181,24 @@ def cryptoapi_plugin(kernel = None):
         name = event.name.lower()
         args = event.args
         machine = event.machine
+        if name in ["systemfunction040", "systemfunction041"]:
+            address, size, options = args
+            # NTSecAPI.h: RTL_ENCRYPT_MEMORY_SIZE is 8. The key and cipher
+            # bytes are deliberately private to this emulated process.
+            # https://learn.microsoft.com/windows/win32/api/ntsecapi/nf-ntsecapi-rtlencryptmemory
+            if size % 8 or size > (1 << 20) or (size and not address) or options not in [0, 1, 2, 4]:
+                return 0xc000000d  # STATUS_INVALID_PARAMETER
+            if options:
+                return 0xc00000bb  # STATUS_NOT_SUPPORTED
+            data = machine.read(address, size) if size else b""
+            if state["memory_protection_key"] == None:
+                state["memory_protection_key"] = crypto.random(16)
+            decrypt = name == "systemfunction041"
+            protected = crypto.xtea(state["memory_protection_key"], data, decrypt = decrypt)
+            if size:
+                machine.write(address, protected)
+            state["actions"].append({"operation": "unprotect-memory" if decrypt else "protect-memory", "size": size, "scope": "process"})
+            return 0
         if name == "systemfunction036":
             address, size = args
             if size > (1 << 20) or (size and not address):
@@ -134,7 +234,7 @@ def cryptoapi_plugin(kernel = None):
             state["next_handle"] = handle + 1
             state["providers"][handle] = context
             state["actions"].append(dict(context, operation = "acquire", handle = handle))
-            machine.write_u32le(output, handle)
+            machine.write_pointer(output, handle)
             if kernel != None:
                 kernel.state["last_error"] = 0
             return 1
@@ -183,7 +283,7 @@ def cryptoapi_plugin(kernel = None):
                 "hasher": crypto.hasher(specification[0]),
                 "provider": provider,
             }
-            machine.write_u32le(output, handle)
+            machine.write_pointer(output, handle)
             state["actions"].append({"operation": "create-hash", "handle": handle, "algorithm": algorithm})
             if kernel != None:
                 kernel.state["last_error"] = 0
@@ -192,6 +292,8 @@ def cryptoapi_plugin(kernel = None):
             current = state["hashes"].get(args[0])
             if current == None:
                 return fail(0x80090002)  # NTE_BAD_HASH
+            if current.get("finalized", False):
+                return fail(0x8009000c)  # NTE_BAD_HASH_STATE
             if args[3] or args[2] > (16 << 20) or (args[2] and not args[1]):
                 return fail(0x80090009 if args[3] else 87)
             current["hasher"].update(machine.read(args[1], args[2]) if args[2] else b"")
@@ -235,6 +337,41 @@ def cryptoapi_plugin(kernel = None):
             if kernel != None:
                 kernel.state["last_error"] = 0
             return 1
+        if name == "cryptderivekey":
+            provider, algorithm, hashed, flags, output = args
+            algorithm &= 0xffffffff
+            flags &= 0xffffffff
+            current = state["hashes"].get(hashed)
+            if provider not in state["providers"]:
+                return fail(6)
+            if current == None or current["provider"] != provider:
+                return fail(0x80090002)
+            if algorithm != 0x6801:  # CALG_RC4
+                return fail(0x80090008)
+            bits = flags >> 16
+            # Explicit RC4 lengths only: default lengths and salted provider
+            # policies depend on the selected CSP and are not modeled here.
+            if flags & 0xffff & ~1:  # Only CRYPT_EXPORTABLE is supported.
+                return fail(0x80090009)
+            if not output:
+                return fail(87)
+            digest = current["hasher"].sum()
+            if bits < 40 or bits > 128 or bits % 8 or bits > len(digest)*8:
+                return fail(0x80090004)
+            # For RC4, CryptDeriveKey takes the first n digest bytes.
+            # https://learn.microsoft.com/windows/win32/api/wincrypt/nf-wincrypt-cryptderivekey
+            handle = state["next_handle"]
+            machine.write_pointer(output, handle)
+            state["next_handle"] = handle + 1
+            state["keys"][handle] = {
+                "algorithm": algorithm, "provider": provider,
+                "flags": flags & 0xffff, "secret": digest[:bits//8],
+            }
+            current["finalized"] = True
+            state["actions"].append({"operation": "derive-key", "handle": handle, "algorithm": algorithm, "bits": bits})
+            if kernel != None:
+                kernel.state["last_error"] = 0
+            return 1
         if name == "cryptdestroyhash":
             if state["hashes"].pop(args[0], None) == None:
                 return fail(0x80090002)
@@ -264,7 +401,7 @@ def cryptoapi_plugin(kernel = None):
                 "modulus": data[20:],
                 "provider": provider,
             }
-            machine.write_u32le(output, handle)
+            machine.write_pointer(output, handle)
             state["actions"].append({"operation": "import-public-key", "handle": handle, "bits": bits, "flags": flags})
             if kernel != None:
                 kernel.state["last_error"] = 0
@@ -281,7 +418,7 @@ def cryptoapi_plugin(kernel = None):
             key = state["keys"].get(args[3])
             if current == None:
                 return fail(0x80090002)
-            if key == None:
+            if key == None or "modulus" not in key:
                 return fail(0x80090003)
             if args[5] or args[2] != len(key["modulus"]) or not args[1]:
                 return fail(0x80090009 if args[5] else 0x80090004)  # NTE_BAD_FLAGS / NTE_BAD_LEN
@@ -298,10 +435,15 @@ def cryptoapi_plugin(kernel = None):
         return 0
 
     def install(machine):
+        for module in ["advapi32.dll", "ntdll.dll"]:
+            for name, argc in _SHA_SIGNATURES.items():
+                machine.provide_export(_sha_callback, module = module, name = name, argc = argc)
         for name, argc in _CRYPTOAPI_SIGNATURES.items():
             machine.provide_export(callback, module = "advapi32.dll", name = name, argc = argc)
         for imported in machine.imports:
             name = imported.name.lower()
+            if imported.module.lower() in ["advapi32.dll", "ntdll.dll"] and name in _SHA_SIGNATURES:
+                machine.hook(_sha_callback, address = imported.address, argc = _SHA_SIGNATURES[name])
             if _cryptoapi_provider_module(imported.module) and name in _CRYPTOAPI_SIGNATURES:
                 machine.hook(callback, address = imported.address, argc = _CRYPTOAPI_SIGNATURES[name])
 
