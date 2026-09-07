@@ -76,10 +76,10 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
 
     deferred = {canonical_module_name(name): True for name in deferred_modules}
     virtual_system_modules = [
-        "advapi32.dll", "api-ms-win-core-com-l1-1-1.dll", "cabinet.dll", "comctl32.dll", "crypt32.dll", "gdi32.dll",
+        "advapi32.dll", "advapi32_vista.dll", "api-ms-win-core-com-l1-1-1.dll", "cabinet.dll", "comctl32.dll", "crypt32.dll", "gdi32.dll",
         "kernel32.dll", "loadperf.dll", "lz32.dll", "msvcrt.dll", "netapi32.dll", "ntdll.dll",
         "ole32.dll", "oleaut32.dll", "rpcrt4.dll", "setupapi.dll",
-        "shell32.dll", "shlwapi.dll", "user32.dll", "version.dll",
+        "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll", "version.dll",
         "winmm.dll", "wintrust.dll", "ws2_32.dll",
     ]
     virtual_system_module_names = {name: True for name in virtual_system_modules}
@@ -182,6 +182,18 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         module_initialization_state[name] = 2 if current.reason == "return" and current.value != 0 else 3
         return current
 
+    def map_target_module(name):
+        """Maps PE resources without running process attach or dependencies."""
+        canonical = canonical_module_name(name)
+        loaded = module_records.get(canonical)
+        if loaded == None and canonical in module_sources:
+            source = module_sources[canonical]
+            loaded = machine.load_module(image = source, name = canonical)
+            module_records[canonical] = loaded
+            module_images[canonical] = source
+            module_dependencies[canonical] = target_module_dependencies(source, canonical)
+        return loaded.base if loaded != None else None
+
     def load_target_module(name):
         """Maps and initializes one media-backed DLL, returning its image base."""
         canonical = canonical_module_name(name)
@@ -202,9 +214,9 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "windir": "C:\\Windows",
     }
     process_environment.update(environment)
-    registry = registry_plugin(values = registry_values, keys = registry_keys, hives = registry_hives, user_sid = user_sid, output_key_case = registry_output_key_case, prepared_state = prepared_registry_state)
+    registry = registry_plugin(values = registry_values, keys = registry_keys, hives = registry_hives, user_sid = user_sid, output_key_case = registry_output_key_case, prepared_state = prepared_registry_state, environment = process_environment)
     versions = version_plugin(file, module_path = module, module_files = module_images)
-    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time, tls_slots = tls_slots)
+    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, on_module_map = map_target_module, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time, tls_slots = tls_slots)
     setup = setupapi_plugin(infs = setup_infs, directories = setup_directories, registry = registry, kernel = kernel)
     advpack = advpack_plugin(registry, module_images, kernel = kernel, setup = setup)
     performance = loadperf_plugin(registry, kernel)
@@ -362,6 +374,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 break
         if primary == None:
             fail("target module is not mapped")
+        # Import cycles may refer back to the primary during process attach.
+        module_initialization_state[canonical_module_name(primary.name)] = 1
         # The image recipe supplies explicit target modules in dependency-first
         # order. Keep those loader records separate from sorted virtual modules.
         for loaded in loaded_target_modules:
@@ -474,6 +488,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 "crt_actions": crt.state["actions"],
                 "crt_calls": crt.state["calls"],
             }
+        module_initialization_state[canonical_module_name(primary.name)] = 2
     if execute != None and (arguments or prepare != None):
         fail("run execute cannot be combined with arguments or prepare")
     call_arguments = arguments
