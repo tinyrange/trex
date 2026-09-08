@@ -6,6 +6,7 @@ import "go.starlark.net/starlark"
 // the optional Starlark frontend.
 func Builtins() starlark.StringDict {
 	functions := map[string]func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error){
+		"memory_image":              memoryImageBuiltin,
 		"reactos_record":            reactOSRecordBuiltin,
 		"ne_fastboot":               windowsNEFastBootBuiltin,
 		"setver":                    windowsSetverBuiltin,

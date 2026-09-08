@@ -254,6 +254,35 @@ Builds an SSDT that assigns _CID on an absolute ACPI device path.
 
 Builds a checksummed ACPI table around a caller-supplied binary body.
 
+## `inspect/memory.star`
+
+Declarative, bounded structure readers over a memory image or address space.
+
+Layouts map field names to (offset, kind, size). Kinds are uint, bytes,
+cstring and unicode (a 32-bit Windows UNICODE_STRING descriptor, size 8).
+Results retain only fully decoded fields/entries and an explicit fault.
+Pointers are uint fields: callers choose whether and when to dereference them.
+
+### `read_list`
+
+Combines walk_list with a caller-supplied structure layout.
+
+### `read_structure`
+
+Reads named fields; never fills missing bytes or follows arbitrary pointers.
+
+    Offsets and sizes are validated before reading. unicode validates length,
+    capacity and pointer bounds, then reads precisely Length bytes as UTF-16LE.
+    A partial result contains preceding complete fields, not a fabricated value.
+
+### `walk_list`
+
+Returns containing-object addresses from a circular doubly linked list.
+
+    Checks reciprocal links, alignment, cycles and a hard entry bound. The head
+    is a sentinel, not an object; link_offset locates its embedded LIST_ENTRY.
+    Incomplete results are checked prefixes, never a claim of complete inventory.
+
 ## `inspect/snapshot.star`
 
 Bounded filesystem and registry snapshots for focused comparisons.
@@ -779,6 +808,177 @@ Returns the next KD event whose kind is selected.
 ### `wait_for_exception`
 
 Waits for a kernel exception state change.
+
+## `windows/memory.star`
+
+Read-only NT x86 inventories with caller-supplied, build-qualified layouts.
+
+All results use {value, complete, fault}; incomplete values are checked prefixes.
+No offsets are guessed, and no absent pages are synthesized. Layouts are the
+same field dictionaries used by inspect/memory.star. See docs/starlark/memory.md.
+
+### `read_drivers`
+
+Reads the kernel loader list (including kernel/HAL, not just .sys files).
+
+    Required fields: base and size (uint). Names/paths are caller layout fields.
+    By default adds per-entry pe results for resident DOS/PE32 headers and size,
+    accepting exact or page-rounded loader sizes. Top-level complete describes
+    the loader inventory; pe.complete separately describes header checks, not file hashes,
+    signatures or module trust. A mapped image is not an on-disk PE file.
+
+### `read_file_handles`
+
+Filters handle records by object type name File before reading FILE_OBJECT.
+
+    header_layout needs uint field type; type_layout needs unicode field name;
+    file_layout needs uint field type (IO_TYPE_FILE=5), and may include name,
+    device, related_file, flags and size. Names are raw FILE_OBJECT names, not
+    canonical DOS paths; unnamed files and device/relative names are preserved.
+    Access masks stay raw. No file contents or credential material is read.
+
+### `read_handle_table`
+
+Reads XP-style 0/1/2-level handle tables, preserving handle aliases.
+
+    Required uint fields: table_code, next_handle, count. TableCode uses its low
+    two bits as level, 4 KiB pages, 4-byte directory pointers and 8-byte entries.
+    Handles have stride four; zero is reserved. Free entries have a zero object
+    word. Object-header pointers mask the low three attribute/lock bits. This
+    encoding is not the encoded handle representation of newer Windows kernels.
+    maximum bounds examined slots, including free entries, not just live handles.
+
+### `read_threads`
+
+Reads an ETHREAD list and checks owner IDs, unique TIDs and optional count.
+
+    Required uint fields: pid, tid. Extra caller fields such as start_address,
+    state or TEB are retained without interpreting build-specific enums.
+
+### `read_vads`
+
+Walks an NT x86 VAD binary tree, returning half-open byte ranges.
+
+    Required uint fields: left, right, parent, start_vpn, end_vpn. Additional
+    caller fields (for example raw flags) are retained. Parent pointers must be
+    untagged, the root parent zero, and VPN intervals ordered and nonoverlapping.
+    This reads the XP-style tree, not later balanced-root sentinel structures.
+
+## `windows/memory_context.star`
+
+Context and content recovery from NT x86 memory, with explicit layouts.
+
+These readers preserve per-artifact faults. Offsets, flag encodings, roots and
+context seeds must come from the captured build, not a guessed Windows version.
+
+### `describe_vad`
+
+Adds private/mapped, protection and backing-file evidence to one VAD.
+
+    flags supplies private_bit, protection_shift, protection_mask, protections
+    (numeric-code to descriptive value), and control_area_offset. Private VADs
+    never read a long-VAD control-area field. control_layout requires file;
+    file_layout describes FILE_OBJECT fields, conventionally type and name.
+    Region permissions are allocation metadata, not CPU page-table permissions.
+
+### `module_at`
+
+Returns every covering module and RVA; overlapping evidence is not hidden.
+
+    modules is a list of dictionaries with base, size and optional name/path.
+    An empty list means unattributed, not proof of suspicious executable memory.
+
+### `read_cache_views`
+
+Reads a flat XP VACB pointer array into file-offset/memory mappings.
+
+    Shared-cache fields: file_size (uint64), vacbs (pointer). VACB fields: base,
+    owner, offset (uint64); low view-size bits of offset include active-count
+    metadata and are masked. Owner and slot offset must agree. Null VACBs are
+    explicit uncached ranges. Caller must select a verified flat-array layout;
+    multi-level VACB trees are not interpreted by this reader.
+
+### `read_endpoints`
+
+Reads an explicitly rooted IPv4 endpoint hash table with singly linked buckets.
+
+    Layout requires next, pid (uint), local_address (4 bytes), local_port
+    (2 network-order bytes); optional remote fields use the same encodings.
+    Protocol/state fields are retained raw. This is a table reader, not a pool
+    signature scan or automatic tcpip.sys version detector. Zero buckets with
+    a null root describe an uninitialized table, not proof of no network use.
+
+### `read_key_path`
+
+Reads registry KCB ancestors and compressed/uncompressed name blocks.
+
+    layout requires parent and name pointers. name_layout requires compressed
+    and length; name_offset locates inline bytes. No registry values are read.
+    Returned components are leaf-to-root so a partial path cannot look absolute.
+
+### `read_object_handles`
+
+Reads all handle types with optional named, type-specific body fields.
+
+    Header fields: type and name_offset (backward offset to optional name info).
+    Type fields: name. Name-info layout normally includes unicode name and
+    directory pointer. Names are object-manager components, not full paths.
+    body_layouts maps exact type names to declarative fields; unknown types
+    remain in the inventory. Each name/body has its own result and fault.
+    Registry keys need their KCB path, not just an object-manager name. Named
+    pipes are File objects; retain device/name evidence, not a guessed subtype.
+
+### `read_object_path`
+
+Walks named object-manager directories, returning leaf-to-root components.
+
+    header_layout requires name_offset; name_layout requires directory and name.
+    Directory pointers address object bodies. An unnamed object or missing
+    ancestor returns a partial result, never an invented absolute path. Useful
+    for events, sections and file device names such as Device/NamedPipe.
+
+### `read_process_context`
+
+Reads parent/create-time metadata and PEB process parameters separately.
+
+    process_layout requires peb; other fields such as parent_pid/created are
+    caller-defined. peb_layout requires parameters. parameter_layout requires
+    flags and may contain unicode command_line, image_path and directory fields.
+    FILETIME values remain raw 100 ns ticks. PIDs are not durable identities.
+    Relative UNICODE_STRING buffers are resolved for unnormalized parameters.
+
+### `read_relative_unicode`
+
+Decodes a 32-bit UNICODE_STRING with an explicit buffer-pointer bias.
+
+### `read_thread_context`
+
+Reads thread state/start attribution and a bounded trap-seeded EBP chain.
+
+    Thread fields: state, start, trap, teb, stack_limit, stack_base; optional
+    win32_start is also attributed. Trap fields: eip, ebp, cs, esp. TEB fields:
+    stack_limit/stack_base. User-mode traps select process memory and TEB bounds;
+    kernel traps select kernel memory and KTHREAD bounds. A saved trap context
+    is not necessarily the running thread's current CPU state. Stack failure
+    leaves readable thread metadata intact with its own result.
+
+### `recover_cached_file`
+
+Returns resident bytes as offset-tagged extents plus explicit missing ranges.
+
+    Never fills gaps with zeros or falls back to disk. Reading is page-bounded
+    so later resident pages survive an earlier fault. Only complete contiguous
+    recovery returns file bytes; partial recovery returns data=None and extents.
+    This is a current memory view, not necessarily the durable on-disk version.
+
+### `walk_frames`
+
+Walks a conventional x86 EBP chain within caller-proven stack bounds.
+
+    Records saved return addresses, not arbitrary stack words. This is not an
+    FPO/optimized-code unwinder. Null ends the chain; bounds, nonmonotonic links,
+    missing pages or the frame limit stop it explicitly. Unmapped module names
+    do not erase frames. A complete chain is not proof of a complete call stack.
 
 ## `windows/process.star`
 
@@ -2797,6 +2997,12 @@ Builds InternetShortcut (.url) bytes for a URL with optional icon location and i
 
 Creates a Windows kernel-debugging protocol session over an existing byte channel. The session exposes packets, events, context and memory operations, bounded by the configured protocol limits.
 
+### `windows.memory_image`
+
+`windows.memory_image(file, ranges=None) -> windows.memory_image`
+
+Borrows a file as a read-only physical capture. Optional ranges map (physical_start, file_offset, size); omitted ranges cover the whole file, while an empty list captures nothing. Gaps remain unavailable, not zero-filled. Keep the source unchanged while views exist; this does not parse crash dumps or discover RAM ranges.
+
 ### `windows.minidump`
 
 `windows.minidump(file) -> minidump`
@@ -3193,6 +3399,12 @@ A named portable guest-network request. kind selects networking behavior; requir
 
 Methods and attributes: `kind`, `name`, `required`.
 
+### `windows.address_space` value
+
+An i386 virtual-memory view with explicit CR3 and PAE mode. read/probe/view share physical capture semantics and never substitute zeros for absent data. translate returns mapped, physical_address, page_size, raw entries and fault; a present translation does not guarantee its payload was captured. Faults identify the virtual address, physical address and paging stage. Supports present 4 KiB, non-PAE 4 MiB and PAE 2 MiB mappings; not-present software PTEs, PSE-36 and x64 paging are not recovered. No CPU permission validation is implied. Structure interpretation lives in @stdlib//inspect:memory.star.
+
+Methods and attributes: `directory_table_base`, `pae`, `probe(address, size)`, `read(address, size)`, `translate(address)`, `view(address, size)`.
+
 ### `windows.kd` value
 
 A Windows kernel-debugging session over a byte channel. breakin/continue control execution, next_event observes notifications, context/set_context access registers and read/write methods access virtual or physical memory. request/packet expose lower-level protocol operations; file_io installs a handler for guest debugger file requests.
@@ -3204,6 +3416,12 @@ Methods and attributes: `breakin()`, `breakpoint(address, timeout=30)`, `close()
 A breakpoint installed through the Windows KD protocol. handle identifies the remote breakpoint; remove deletes it and removed reports the local handle state.
 
 Methods and attributes: `address`, `handle`, `remove(timeout=30)`, `removed`.
+
+### `windows.memory_image` value
+
+A borrowed physical capture. read requires all bytes; probe returns data (the valid prefix), complete and fault. Fault kinds distinguish not-captured bytes from source-error failures. view returns a bounded, lazy read-only file for existing binary readers. Reads/views are limited to 64 MiB each. ranges returns an independent mapping list. address_space constructs an i386 paging view from an explicit CR3 and PAE mode without altering the source.
+
+Methods and attributes: `address_space(directory_table_base, pae=False)`, `probe(address, size)`, `ranges`, `read(address, size)`, `view(address, size)`.
 
 ### `windows.pdb` value
 

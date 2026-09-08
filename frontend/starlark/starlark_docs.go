@@ -129,6 +129,8 @@ var nativeStarlarkTypes = map[string][]string{
 	"windows.pe":            {"codeview", "data", "disasm(rva, size=256)", "exports", "imports", "info", "messages", "patch(rva, data, update_checksum=True)", "pointer_string_tables(suffix='', minimum=2, maximum=260)", "read(rva, size)", "resources", "sections", "typelibs", "version"},
 	"windows.pdb":           {"age", "guid", "nearest(rva)", "signature", "symbols"},
 	"windows.pdb_symbol":    {"kind", "name", "rva"},
+	"windows.memory_image":  {"read(address, size)", "probe(address, size)", "view(address, size)", "ranges", "address_space(directory_table_base, pae=False)"},
+	"windows.address_space": {"read(address, size)", "probe(address, size)", "view(address, size)", "translate(address)", "directory_table_base", "pae"},
 }
 
 var nativeStarlarkSignatures = map[string]string{
