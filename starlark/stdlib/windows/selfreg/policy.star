@@ -136,7 +136,8 @@ def registration_patches(file, module, mmc_snapins = [], replacements = {}, exec
     """Returns registry patches for one PE without loading system DLL images.
 
     Structured resources and static PE facts are preferred. The bounded native-architecture
-    runner is used only as a fallback. Its writes require success, except for
+    runner fills missing behavior and resolves Active Scripting language aliases
+    and primary classes. Its writes require success, except for
     completed HKCR writes guarded by static class metadata when a registrar
     reports the aggregate SELFREG_E_CLASS result.
     """
@@ -166,7 +167,10 @@ def registration_patches(file, module, mmc_snapins = [], replacements = {}, exec
     # A type library describes classes and interfaces, but not ProgIDs,
     # categories, or module-specific setup. It is therefore a fallback, not
     # evidence that DllRegisterServer has been fully represented.
-    if execute and (executable or not structured or execute_with_static or missing_classes):
+    # Active Scripting class-table order does not identify the language's
+    # primary CLSID or aliases (JavaScript/LiveScript, versioned names). Let
+    # the original registrar supply those runtime relationships.
+    if execute and (executable or not structured or script or execute_with_static or missing_classes):
         registration_entries = [None] if executable else _registration_exports(pe)
         for export in registration_entries:
             for initialize in ([True] if executable else [True, False]):
