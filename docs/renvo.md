@@ -72,3 +72,42 @@ must emit exactly `PASS\n` and exit with 0. Run these and the existing x86
 examples with `go test ./frontend/starlark -run 'TestRenvo.*Execute'`.
 Compilation and PE execution stay in memory. These are bounded execution
 smokes, not a claim that the full Renvo self-hosting suite is supported.
+
+## Native ReactOS CI smoke
+
+The `renvo-reactos` GitHub Actions job downloads
+[ReactOS 0.4.16](https://sourceforge.net/projects/reactos/files/ReactOS/0.4.16/ReactOS-0.4.16-i386.zip/download)
+and verifies its pinned SHA-256 before parsing it. It compiles a Go program for
+`windows/386`, constructs the ReactOS system disk and a small test disk in memory,
+and boots a fresh QEMU/KVM guest with 512 MiB RAM and networking disabled. The
+Ubuntu Actions job grants its runner access to `/dev/kvm` and explicitly requests
+KVM; unavailable acceleration fails rather than silently falling back. Local
+runs default to TCG and do not require KVM. No host extraction tool or compiler
+constructs the guest payload.
+
+The program reads a per-run random input, computes `fib(10)-13`, formats the
+answer, and writes a fixed-size result using native Windows file APIs. The host
+reads immutable snapshots of the in-memory test disk and requires the exact
+nonce-bound answer, including length and padding. An empty file, stale nonce,
+partial write, wrong answer, or screenshot change cannot pass the test. A guest
+batch wrapper must also confirm exit code zero, and both disk transports must
+report zero command errors; writing an answer and then crashing is not success.
+
+```sh
+go run ./cmd/trex scripts/smoke/renvo_reactos.star
+# Optional already-downloaded media is still checked against the same hash:
+go run ./cmd/trex scripts/smoke/renvo_reactos.star \
+  media=/path/to/ReactOS-0.4.16-i386.zip output=local/renvo-reactos
+```
+
+`cache=directory` selects the original-download cache, `accelerator=tcg|kvm`
+selects QEMU acceleration, and `timeout=180` bounds each readiness/result wait
+(1–600 seconds). The CI job also has a 20-minute overall limit. Only the original
+download is cached; every invocation rebuilds and boots fresh images.
+
+The action fails if the smoke fails, appends a Markdown result to its job summary,
+and uploads JSON, screenshots and the guest result as `renvo-reactos-smoke`.
+The report starts as failed/incomplete before downloading, so construction or
+boot errors cannot leave a success report behind. Consult the action log for
+exceptions. All outputs use the `output` prefix; no disk image is written.
+This is a bounded native execution check, not full ReactOS or Renvo conformance.

@@ -480,6 +480,66 @@ func TestMutableHiveAppliesMultiStringAppend(t *testing.T) {
 	}
 }
 
+func TestPatchHiveCreatesEmptyKeys(t *testing.T) {
+	for _, minor := range []uint32{1, 3} {
+		t.Run(fmt.Sprintf("REGF1.%d", minor), func(t *testing.T) {
+			root := newRegistryTree("SYSTEM")
+			setRegistryValue(root, "/Services/Transport", "Start", registryDWORD(3))
+			data, err := buildRegistryHiveWithFormat(root, registryHiveFormat{major: 1, minor: minor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := bytes.Clone(data)
+			input := &starfile.Bytes{Name: "source.hiv", Data: data}
+			result, err := patchHiveBuiltin(nil, nil, starlark.Tuple{input, starlark.NewList(nil)}, []starlark.Tuple{
+				{starlark.String("keys"), starlark.NewList([]starlark.Value{
+					starlark.String("/Services/Transport"),
+					starlark.String("/Services/Transport/Parameters"),
+					starlark.String("/Services/Transport/Parameters"),
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(data, original) {
+				t.Fatal("input hive mutated")
+			}
+			hive, err := newRegistryHive(result.(starfile.File))
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, err := hive.lookup("/Services/Transport/Parameters")
+			if err != nil {
+				t.Fatal(err)
+			}
+			values, err := hive.readRawValues(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(values) != 0 {
+				t.Fatalf("empty key has values: %#v", values)
+			}
+			parent, err := hive.lookup("/Services/Transport")
+			if err != nil {
+				t.Fatal(err)
+			}
+			values, err = hive.readRawValues(parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(values) != 1 {
+				t.Fatalf("existing values changed: %#v", values)
+			}
+			_, err = patchHiveBuiltin(nil, nil, starlark.Tuple{input, starlark.NewList(nil)}, []starlark.Tuple{
+				{starlark.String("keys"), starlark.NewList([]starlark.Value{starlark.MakeInt(1)})},
+			})
+			if err == nil {
+				t.Fatal("accepted non-string key")
+			}
+		})
+	}
+}
+
 func TestMutableHivePatchesNT31CellsInPlace(t *testing.T) {
 	root := newRegistryTree("SYSTEM")
 	setRegistryValue(root, "/ControlSet001/Services/Atdisk", "Start", registryDWORD(3))

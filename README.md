@@ -25,6 +25,17 @@ Start with the [quickstart](docs/starlark/quickstart.md), executable
 
 ## Capabilities
 
+[Offline memory inspection](docs/starlark/memory.md) combines read-only physical
+captures and i386 paging in Go with declarative Starlark structure/list readers.
+Sparse captures retain explicit missing-data faults; Windows layouts remain
+caller-supplied and build-qualified.
+Starlark inventory readers cover XP-style VAD regions, threads, kernel modules,
+and file handles, with separate missing-page and structural-validation results.
+Context helpers add process parameters, VAD backing files, bounded EBP frames,
+object/key paths, explicit-root IPv4 endpoint tables and sparse cached-file
+recovery. Network parsing is synthetic-tested; the XP capture has uninitialized
+network tables. Cache recovery currently supports caller-verified flat VACB arrays.
+
 The public [ReactOS image builder](docs/reactos-publication.md) constructs a
 complete installed disk from caller-supplied ISO/ZIP/7z media, with declarative
 accounts and security policy, native pre-boot registration, and fresh-image
@@ -156,6 +167,9 @@ proprietary operating-system media.
 The [LZX throughput benchmarks](compression/lzx/README.md) cover in-memory
 synthetic streams and opt-in CAB/WIM media, including allocation measurements
 and output hashes for comparing decoder revisions.
+
+CI also [compiles and runs a Renvo program inside pinned ReactOS](docs/renvo.md#native-reactos-ci-smoke),
+using QEMU/KVM and publishing the guest result and screenshots in Actions.
 
 ## Starlark quickstart
 

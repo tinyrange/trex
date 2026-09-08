@@ -22,3 +22,42 @@ jobs:
       - run: go vet ./...
       - run: go build ./cmd/trex
       - run: go run ./cmd/trex test.star
+
+  renvo-reactos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - name: Enable KVM for the runner
+        run: |
+          sudo chown "$(id -u):$(id -g)" /dev/kvm
+          sudo chmod 660 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Compile with Renvo and execute in pinned ReactOS
+        run: go run ./cmd/trex scripts/smoke/renvo_reactos.star accelerator=kvm
+      - name: Publish smoke summary
+        if: always()
+        shell: bash
+        run: |
+          if test -f local/renvo-reactos.md; then
+            cat local/renvo-reactos.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## Renvo / ReactOS smoke: did not run' >> "$GITHUB_STEP_SUMMARY"
+            echo 'See the preceding setup or build failure in the action log.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renvo-reactos-smoke
+          path: local/renvo-reactos*
+          if-no-files-found: warn
+          retention-days: 14

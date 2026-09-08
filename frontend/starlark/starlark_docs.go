@@ -130,6 +130,8 @@ var nativeStarlarkTypes = map[string][]string{
 	"windows.pe":               {"codeview", "data", "disasm(rva, size=256)", "exports", "imports", "info", "messages", "patch(rva, data, update_checksum=True)", "pointer_string_tables(suffix='', minimum=2, maximum=260)", "read(rva, size)", "resources", "sections", "typelibs", "version"},
 	"windows.pdb":              {"age", "guid", "nearest(rva)", "signature", "symbols"},
 	"windows.pdb_symbol":       {"kind", "name", "rva"},
+	"windows.memory_image":     {"read(address, size)", "probe(address, size)", "view(address, size)", "ranges", "address_space(directory_table_base, pae=False)"},
+	"windows.address_space":    {"read(address, size)", "probe(address, size)", "view(address, size)", "translate(address)", "directory_table_base", "pae"},
 }
 
 var nativeStarlarkSignatures = map[string]string{
@@ -205,7 +207,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"windows.win9x_vxd_library":         "windows.win9x_vxd_library(base, members, exclude=[]) -> file",
 	"windows.win9x_vxd_library_members": "windows.win9x_vxd_library_members(file) -> list[string]",
 	"qemu.acpi_table":                   "qemu.acpi_table(file)",
-	"qemu.backend":                      "qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[])",
+	"qemu.backend":                      "qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', display_zoom_to_fit=False, block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[])",
 	"qemu.chardev":                      "qemu.chardev(name, **properties)",
 	"qemu.device":                       "qemu.device(name, **properties)",
 	"qemu.extension":                    "qemu.extension(vm)",
@@ -223,7 +225,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"windows.catalog_hash":              "windows.catalog_hash(file, algorithm='sha1')",
 	"windows.signing_identity":          "windows.signing_identity(certificate, private_key, chain=[]) -> signing identity",
 	"windows.test_signing_identity":     "windows.test_signing_identity(subject, not_before, not_after) -> signing identity",
-	"windows.pe_sign":                   "windows.pe_sign(file, identity, replace=False) -> bytes",
+	"windows.pe_sign":                   "windows.pe_sign(file, identity, replace=False, page_hashes=False) -> bytes",
 	"windows.catalog_members":           "windows.catalog_members(value)",
 	"windows.pdb":                       "windows.pdb(file, stream_limit=256MiB)",
 	"windows.symbol_server":             "windows.symbol_server(base_url, name, key, guid=None, age=None, maximum=256MiB, timeout=45)",
