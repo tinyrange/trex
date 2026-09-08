@@ -334,6 +334,14 @@ func peDisasmBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 		return nil, err
 	}
 	defer image.Close()
+	if image.FileHeader.Machine == pe.IMAGE_FILE_MACHINE_ARM64 {
+		raw, err := peRVAOffset(image, uint32(rva))
+		if err != nil || uint64(raw) >= uint64(len(data)) {
+			return nil, fmt.Errorf("pe_disasm: ARM64 RVA %#x outside file", rva)
+		}
+		end := min(uint64(len(data)), uint64(raw)+uint64(size))
+		return peDisasmARM64(data[uint64(raw):end], rva), nil
+	}
 	mode, err := peDisasmMode(image.FileHeader.Machine)
 	if err != nil {
 		return nil, err

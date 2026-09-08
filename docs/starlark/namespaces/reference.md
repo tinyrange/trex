@@ -311,6 +311,13 @@ Returns the QEMU hardware profile used by 32-bit NT6 image recipes.
 
 Returns QEMU policy matching the devices in the ReactOS image recipe.
 
+### `windows_arm64`
+
+ARM64 UEFI machine with inbox NVMe storage and USB input policy.
+
+    Attach the system disk with bus="nvme". HVF uses the host ARM CPU;
+    emulated runs may select accelerator="tcg", cpu="max".
+
 ## `vmm/automation.star`
 
 Event-driven portable VM automation without implicit sleeps.
@@ -2493,7 +2500,7 @@ Creates a QEMU audio-backend descriptor from its name and properties. It is conf
 
 ### `qemu.backend`
 
-`qemu.backend(binary='', machine='pc', accelerator='auto', display_frontend='auto', block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[])`
+`qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[])`
 
 Creates a QEMU implementation of the portable VMM backend with selected machine, acceleration, devices and transport policies. A separate vmm.start call launches the guest.
 
@@ -2851,6 +2858,12 @@ Creates a lazy inspection object for a PE32 or PE32+ file. Metadata and data sha
 
 Links a labeled section, fixups and optional imports into a minimal PE32 executable. The caller supplies instruction bytes and policy; the builder lays out headers, RVAs and imports and checks fixup bounds.
 
+### `windows.pe_sign`
+
+`windows.pe_sign(file, identity, replace=False) -> bytes`
+
+Signs a PE32 or PE32+ file with RSA/SHA-256 Authenticode entirely in memory and returns new bytes with an aligned WIN_CERTIFICATE and updated checksum. Preserves sections and overlay data. Existing certificate tables require replace=True. No timestamp, page hashes, nested signatures, or trust-store changes are generated. See docs/pe-signing.md.
+
 ### `windows.pkcs7_certificates`
 
 `windows.pkcs7_certificates(value) -> list[certificate record]`
@@ -2899,11 +2912,23 @@ Returns a SETVER driver image with the named executable's reported DOS version a
 
 Builds Windows Shell Link (.lnk) bytes for a target with optional arguments, working directory, description and icon metadata. It serializes a shortcut; it does not resolve or launch its target on the host.
 
+### `windows.signing_identity`
+
+`windows.signing_identity(certificate, private_key, chain=[]) -> signing identity`
+
+Loads a DER or PEM X.509 certificate and matching unencrypted PKCS#1/PKCS#8 RSA private key for in-memory PE signing. Optional chain certificates are embedded without establishing trust. The identity exposes only its public certificate; private key material is not printable or exportable.
+
 ### `windows.symbol_server`
 
 `windows.symbol_server(base_url, name, key, guid=None, age=None, maximum=256MiB, timeout=45)`
 
 Retrieves a symbol file from a symbol-server layout using its name and identity key, with optional PDB GUID/age validation. maximum and timeout bound the download; windows.pdb parses the result.
+
+### `windows.test_signing_identity`
+
+`windows.test_signing_identity(subject, not_before, not_after) -> signing identity`
+
+Generates an ephemeral RSA-2048 key and self-signed code-signing certificate. not_before and not_after are explicit Unix seconds supplied by the caller. Returns an opaque identity with a public certificate attribute; does not install trust or change driver-signing policy.
 
 ### `windows.utf16_strings`
 
@@ -3222,3 +3247,9 @@ Methods and attributes: `kind`, `name`, `rva`.
 A lazy PE32/PE32+ inspection value. Metadata attributes expose headers, sections, imports, exports, resources, strings and debug/type-library data from an owned snapshot. read/disasm use RVAs; patch returns modified file bytes without changing the original. data provides the shared immutable source snapshot.
 
 Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `typelibs`, `version`.
+
+### `windows.signing_identity` value
+
+Opaque RSA code-signing identity. certificate contains the public DER X.509 certificate; private-key material is not exposed by attributes or representations.
+
+Methods and attributes: `certificate (DER bytes; private key is not exposed)`.

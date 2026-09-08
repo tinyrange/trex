@@ -1,10 +1,12 @@
 package qemu
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
 	"os/exec"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -72,6 +74,109 @@ func qemuAvailable(t *testing.T) {
 	}
 	if _, err := exec.LookPath("qemu-system-i386"); err != nil {
 		t.Skip("qemu-system-i386 is not installed")
+	}
+}
+
+func TestARM64ConfigurationAndNVMeValidation(t *testing.T) {
+	properties := starlark.NewDict(2)
+	_ = properties.SetKey(starlark.String("gic-version"), starlark.MakeInt(3))
+	_ = properties.SetKey(starlark.String("its"), starlark.True)
+	value, err := qemuBackendBuiltin(nil, nil, nil, []starlark.Tuple{
+		{starlark.String("machine"), starlark.String("virt")},
+		{starlark.String("machine_properties"), properties},
+		{starlark.String("accelerator"), starlark.String("hvf")},
+		{starlark.String("firmware"), starlark.String("uefi")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := value.(*qemuBackend)
+	machine := vmmapi.Machine{Architecture: "aarch64", Disks: []vmmapi.Disk{{Device: testBlockDevice(t, 4096), Bus: "nvme", Unit: -1, Snapshot: true}}}
+	if issues := backend.Validate(machine); len(issues) != 0 {
+		t.Fatalf("valid ARM NVMe machine: %v", issues)
+	}
+	for _, bus := range []string{"ide", "floppy"} {
+		machine.Disks[0].Bus = bus
+		if len(backend.Validate(machine)) == 0 {
+			t.Fatalf("ARM accepted %s", bus)
+		}
+	}
+	machine.Disks[0].Bus, machine.Disks[0].Unit = "nvme", 0
+	if len(backend.Validate(machine)) == 0 {
+		t.Fatal("ignored NVMe unit accepted")
+	}
+	machine.Disks[0].Unit = -1
+	backend.firmware = "bios"
+	if len(backend.Validate(machine)) == 0 {
+		t.Fatal("ARM BIOS accepted")
+	}
+	_ = properties.SetKey(starlark.String("its"), starlark.String("on,gic-version=2"))
+	if _, err := qemuBackendBuiltin(nil, nil, nil, []starlark.Tuple{{starlark.String("machine_properties"), properties}}); err == nil {
+		t.Fatal("machine property separator accepted")
+	}
+	properties = starlark.NewDict(1)
+	_ = properties.SetKey(starlark.String("type"), starlark.String("pc"))
+	if _, err := qemuBackendBuiltin(nil, nil, nil, []starlark.Tuple{{starlark.String("machine_properties"), properties}}); err == nil {
+		t.Fatal("machine properties overrode the validated machine type")
+	}
+}
+
+func TestARM64FirmwareBootOnDarwin(t *testing.T) {
+	if testing.Short() || runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("Apple Silicon firmware integration test")
+	}
+	if _, err := exec.LookPath("qemu-system-aarch64"); err != nil {
+		t.Skip("qemu-system-aarch64 unavailable")
+	}
+	firmware, err := qemuUEFIFirmware("aarch64", "")
+	if err != nil {
+		t.Skip(err)
+	}
+	_ = firmware.Close()
+	backend := &qemuBackend{
+		machine: "virt", accelerator: "hvf", firmware: "uefi", displayFrontend: "none", blockTransport: "nbd",
+		machineProperties: []qemuProperty{{name: "gic-version", value: "3"}, {name: "its", value: "on"}},
+		overlayLimit:      4 << 20, stderrLimit: 1 << 20, capabilities: qemuCapabilities(),
+		options: []*qemuSpecValue{{kind: "option", name: "-cpu", properties: []qemuProperty{{name: "value", value: "host"}}}},
+	}
+	machine := vmmapi.Machine{
+		Architecture: "aarch64", Memory: 256 << 20, CPUs: 1,
+		Channels: []vmmapi.Channel{{Name: "boot", Kind: "serial"}},
+		Disks:    []vmmapi.Disk{{Device: testBlockDevice(t, 1<<20), Name: "test", Bus: "nvme", Unit: -1, Snapshot: true}},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	driver, err := startQEMU(ctx, backend, machine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer driver.Close(context.Background())
+	serial, err := driver.(*qemuDriver).Channel(ctx, "boot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A running QMP process alone does not prove that Darwin loaded the ROM.
+	// The firmware previously ran zero-filled memory when passed /dev/fd/N.
+	output := make(chan []byte, 1)
+	go func() {
+		var data []byte
+		buffer := make([]byte, 256)
+		for len(data) < 4096 {
+			n, err := serial.Read(buffer)
+			data = append(data, buffer[:n]...)
+			if bytes.Contains(data, []byte("UEFI firmware")) || err != nil {
+				break
+			}
+		}
+		output <- data
+	}()
+	select {
+	case data := <-output:
+		if !bytes.Contains(data, []byte("UEFI firmware")) {
+			t.Fatalf("firmware did not initialize: %q", data)
+		}
+	case <-ctx.Done():
+		t.Fatal("firmware initialization timed out")
 	}
 }
 

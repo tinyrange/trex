@@ -1,5 +1,17 @@
 # Third-party format references
 
+## Authenticode page hashes
+
+The SHA-256 page-hash wire layout and padding rules were cross-checked against
+[SAS Relic](https://github.com/sassoftware/relic/tree/master/lib/authenticode),
+particularly `structs.go`, `pedigest.go`, and `pesign.go`. trex implements the
+operation using its existing validated PE ranges and DER constructors. It does
+not import Relic or launch an external signer.
+
+Upstream notice retained conservatively: Copyright (c) SAS Institute Inc.
+Licensed under the Apache License, Version 2.0; the full license is included
+in [LICENSE](../LICENSE). No GPL implementation is incorporated.
+
 ## Microsoft MS-DOS 4.0 FDISK MBR
 
 The independently assembled BIOS MBR in `filesystem/mbr` was informed by the

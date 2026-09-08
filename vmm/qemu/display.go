@@ -50,15 +50,37 @@ func (d *qemuDriver) Input(ctx context.Context, input vmmapi.Input) error {
 		return err
 	case "text":
 		characters := []rune(input.Text)
+		usbKeyboard := false
+		for _, device := range d.backend.devices {
+			usbKeyboard = usbKeyboard || device.name == "usb-kbd"
+		}
 		for index, character := range characters {
 			events, err := qemuTextEvents(string(character))
 			if err != nil {
 				return err
 			}
-			if _, err := d.qmp.Call(ctx, "input-send-event", map[string]any{"events": events}); err != nil {
-				return err
+			if usbKeyboard {
+				// USB HID delivers individual reports at the guest's polling
+				// interval. Bursting press/release events overflows its queue,
+				// losing characters or leaving the final key held down.
+				for _, event := range events {
+					if _, err := d.qmp.Call(ctx, "input-send-event", map[string]any{"events": []any{event}}); err != nil {
+						return err
+					}
+					timer := time.NewTimer(20 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return ctx.Err()
+					case <-timer.C:
+					}
+				}
+			} else {
+				if _, err := d.qmp.Call(ctx, "input-send-event", map[string]any{"events": events}); err != nil {
+					return err
+				}
 			}
-			if index+1 < len(characters) {
+			if !usbKeyboard && index+1 < len(characters) {
 				timer := time.NewTimer(qemuTextCharacterDelay)
 				select {
 				case <-ctx.Done():
