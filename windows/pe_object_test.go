@@ -1,12 +1,69 @@
 package windows
 
 import (
+	"bytes"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"io"
 	"testing"
 
 	"go.starlark.net/starlark"
 )
+
+func TestPESnapshotReadSharingAndPatchOwnership(t *testing.T) {
+	labels := starlark.NewDict(1)
+	_ = labels.SetKey(starlark.String("entry"), starlark.MakeInt(0))
+	value, err := pe32ExecutableBuiltin(nil, nil, starlark.Tuple{starlark.Bytes("\x90\xc3"), labels, starlark.NewList(nil)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := &starfile.Bytes{Name: "snapshot", Data: []byte(value.(starlark.Bytes))}
+	p := &windowsPE{file: input, cache: make(starlark.StringDict)}
+	source, err := p.sourceFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := peReadSnapshotData(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Clone(data)
+	input.Data[0] = 0
+	if data[0] != 'M' {
+		t.Fatal("snapshot aliases caller's mutable input")
+	}
+	second, _ := peReadSnapshotData(source)
+	if &data[0] != &second[0] {
+		t.Fatal("read-only parse recopied snapshot")
+	}
+	child := &windowsPE{file: source, cache: make(starlark.StringDict)}
+	shared, _ := child.sourceFile()
+	if shared != source {
+		t.Fatal("nested PE copied owned snapshot")
+	}
+	sections, err := p.Attr("sections")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childSections, err := child.Attr("sections")
+	if err != nil || childSections != sections {
+		t.Fatalf("nested PE reparsed immutable sections: %v", err)
+	}
+	if err := sections.(*starlark.List).Append(starlark.None); err == nil {
+		t.Fatal("shared sections must remain immutable")
+	}
+	independent := &windowsPE{file: &starfile.Bytes{Data: want}, cache: make(starlark.StringDict)}
+	independentSections, err := independent.Attr("sections")
+	if err != nil || independentSections == sections {
+		t.Fatalf("independent source must own a separate cache: %v", err)
+	}
+	_, err = p.patchBuiltin(nil, nil, nil, []starlark.Tuple{{starlark.String("rva"), starlark.MakeInt(0x1000)}, {starlark.String("data"), starlark.Bytes("\xcc")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Fatal("patch changed cached source")
+	}
+}
 
 func peFixupValue(t *testing.T, offset int, label string) *starlark.Dict {
 	t.Helper()

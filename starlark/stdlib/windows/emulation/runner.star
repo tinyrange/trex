@@ -51,7 +51,13 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         fail("rpc_continuation_limit must be between 0 and 4096")
     if service_continuation_limit < 0 or service_continuation_limit > 1024:
         fail("service_continuation_limit must be between 0 and 1024")
-    amd64 = windows.pe(file).info["machine"] == 0x8664
+    primary = windows.pe(file)
+    amd64 = primary.info["machine"] == 0x8664
+    # All metadata plugins observe the same immutable image as the loader.
+    # Share this run's owned snapshots instead of copying each source again
+    # for imports, versions, resources, messages, and string tables.
+    file = primary.data
+    modules = {name: windows.pe(image).data for name, image in modules.items()}
     teb = 0x7fffffdde000 if amd64 else 0x7ffde000
     segment = {"gs_base": teb} if amd64 else {"fs_base": teb}
     machine = emulator.machine(
@@ -89,14 +95,9 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll", "version.dll",
         "winmm.dll", "wintrust.dll", "ws2_32.dll",
     ]
-    virtual_system_module_names = {name: True for name in virtual_system_modules}
     module_images = dict(modules)
     module_images[module] = file
-    module_sources = {}
-    for path, source in files.items():
-        name = canonical_module_name(path)
-        if name.endswith(".dll") and name not in virtual_system_module_names and name not in module_sources:
-            module_sources[name] = source
+    module_sources = windows.module_sources(files, exclude = virtual_system_modules)
     module_records = {}
     for loaded in machine.modules:
         if loaded.entry != 0:
@@ -163,7 +164,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
             return None
         loaded = module_records.get(name)
         if loaded == None and name in module_sources:
-            source = module_sources[name]
+            source = windows.pe(module_sources[name]).data
             loaded = machine.load_module(image = source, name = name)
             module_records[name] = loaded
             module_images[name] = source
@@ -194,7 +195,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         canonical = canonical_module_name(name)
         loaded = module_records.get(canonical)
         if loaded == None and canonical in module_sources:
-            source = module_sources[canonical]
+            source = windows.pe(module_sources[canonical]).data
             loaded = machine.load_module(image = source, name = canonical)
             module_records[canonical] = loaded
             module_images[canonical] = source
@@ -228,12 +229,10 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     advpack = advpack_plugin(registry, module_images, kernel = kernel, setup = setup)
     performance = loadperf_plugin(registry, kernel)
     cabinet = cabinet_plugin(kernel)
-    def generated_files():
-        output = {}
-        for path, entry in kernel.state["paths"].items():
-            if not entry.get("directory", False) and (not entry.get("initial", False) or entry.get("dirty", False)):
-                output[path] = entry.get("data", b"")
-        return output
+    def generated_files(entries):
+        # Entries already contain only changed/new paths. Do not scan the
+        # entire initial filesystem again for the content-only view.
+        return {path: entry["data"] for path, entry in entries.items() if not entry["directory"]}
     def generated_entries():
         output = {}
         for path, entry in kernel.state["paths"].items():
@@ -407,6 +406,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 continue
             current = initialize_target_module(loaded.name)
             if current != None and (current.reason != "return" or current.value == 0):
+                entries = generated_entries()
                 return {
                     "patches": registry.patches(),
                     "queries": registry.queries(),
@@ -432,8 +432,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                     "cabinet_actions": cabinet.state["actions"],
                     "threads": kernel.state["threads"],
                     "timer_callbacks": kernel.state["timer_callbacks"],
-                    "generated_files": generated_files(),
-                    "generated_entries": generated_entries(),
+                    "generated_files": generated_files(entries),
+                    "generated_entries": entries,
                     "performance_actions": performance.state["actions"],
                     "resource_queries": resources.state["queries"],
                     "type_library_actions": automation.state["actions"],
@@ -459,6 +459,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         if initialization == None and not executable:
             initialization = machine.call(machine.entry, args = [primary.base, 1, 0])
         if initialization != None and (initialization.reason != "return" or initialization.value == 0):
+            entries = generated_entries()
             return {
                 "patches": registry.patches(),
                 "queries": registry.queries(),
@@ -485,8 +486,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 "cabinet_actions": cabinet.state["actions"],
                 "threads": kernel.state["threads"],
                 "timer_callbacks": kernel.state["timer_callbacks"],
-                "generated_files": generated_files(),
-                "generated_entries": generated_entries(),
+                "generated_files": generated_files(entries),
+                "generated_entries": entries,
                 "performance_actions": performance.state["actions"],
                 "resource_queries": resources.state["queries"],
                 "type_library_actions": automation.state["actions"],
@@ -519,6 +520,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
             fail("run accepts either arguments or prepare, not both")
         call_arguments = prepare(machine)
     result = execute(machine) if execute != None else machine.call_export(export, args = call_arguments)
+    entries = generated_entries()
     return {
         "patches": registry.patches(),
         "queries": registry.queries(),
@@ -545,8 +547,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "cabinet_actions": cabinet.state["actions"],
         "threads": kernel.state["threads"],
         "timer_callbacks": kernel.state["timer_callbacks"],
-        "generated_files": generated_files(),
-        "generated_entries": generated_entries(),
+        "generated_files": generated_files(entries),
+        "generated_entries": entries,
         "performance_actions": performance.state["actions"],
         "resource_queries": resources.state["queries"],
         "type_library_actions": automation.state["actions"],

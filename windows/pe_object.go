@@ -7,6 +7,7 @@ import (
 	"fmt"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"strings"
+	"sync"
 
 	"go.starlark.net/starlark"
 )
@@ -19,6 +20,49 @@ type windowsPE struct {
 	cache          starlark.StringDict
 	materialized   starfile.File
 	materializeErr error
+}
+
+// A PE object's materialized source is an owned, immutable snapshot. Internal
+// read-only parsers can share it; arbitrary File implementations still require
+// a copy, and patching always obtains a separate writable buffer.
+type peSnapshotFile struct {
+	*starfile.Bytes
+	mu         sync.Mutex
+	properties starlark.StringDict
+}
+
+// Only immutable property values belong here, never methods bound to a PE
+// object or results of mutable transformations. The cache lives with this
+// owned snapshot, not with an arbitrary file identity or a global build cache.
+func (s *peSnapshotFile) property(name string, parse func() (starlark.Value, error)) (starlark.Value, error) {
+	s.mu.Lock()
+	value := s.properties[name]
+	s.mu.Unlock()
+	if value != nil {
+		return value, nil
+	}
+	value, err := parse()
+	if err != nil {
+		return nil, err
+	}
+	value.Freeze()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.properties[name]; existing != nil {
+		return existing, nil
+	}
+	if s.properties == nil {
+		s.properties = make(starlark.StringDict)
+	}
+	s.properties[name] = value
+	return value, nil
+}
+
+func peReadSnapshotData(file starfile.File) ([]byte, error) {
+	if snapshot, ok := file.(*peSnapshotFile); ok {
+		return snapshot.Data, nil
+	}
+	return starfile.ReadAll(file)
 }
 
 func peObjectBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -71,7 +115,9 @@ func (p *windowsPE) Attr(name string) (starlark.Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		value, err := property(nil, nil, starlark.Tuple{source}, nil)
+		value, err := source.(*peSnapshotFile).property(name, func() (starlark.Value, error) {
+			return property(nil, nil, starlark.Tuple{source}, nil)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -113,12 +159,16 @@ func (p *windowsPE) sourceFile() (starfile.File, error) {
 	if p.materialized != nil || p.materializeErr != nil {
 		return p.materialized, p.materializeErr
 	}
+	if snapshot, ok := p.file.(*peSnapshotFile); ok {
+		p.materialized = snapshot
+		return snapshot, nil
+	}
 	data, err := starfile.ReadAll(p.file)
 	if err != nil {
 		p.materializeErr = err
 		return nil, err
 	}
-	p.materialized = &starfile.Bytes{Name: p.file.String(), Data: data}
+	p.materialized = &peSnapshotFile{Bytes: &starfile.Bytes{Name: p.file.String(), Data: data}}
 	return p.materialized, nil
 }
 
@@ -135,7 +185,7 @@ func (p *windowsPE) pointerStringTablesBuiltin(_ *starlark.Thread, _ *starlark.B
 	if err != nil {
 		return nil, err
 	}
-	data, err := starfile.ReadAll(source)
+	data, err := peReadSnapshotData(source)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +297,7 @@ func (p *windowsPE) readBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 	if err != nil {
 		return nil, err
 	}
-	data, err := starfile.ReadAll(source)
+	data, err := peReadSnapshotData(source)
 	if err != nil {
 		return nil, err
 	}

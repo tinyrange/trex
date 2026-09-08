@@ -18,6 +18,75 @@ func testStarlarkStringDict(values map[string]starlark.Value) *starlark.Dict {
 	return dict
 }
 
+type resourceSnapshotCountingFile struct {
+	*starfile.Bytes
+	reads int
+}
+
+func (f *resourceSnapshotCountingFile) ReadAt(p []byte, offset int64) (int, error) {
+	f.reads++
+	return f.Bytes.ReadAt(p, offset)
+}
+
+func TestResourcePluginSharesSnapshotForResourcesAndMessages(t *testing.T) {
+	thread, _, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := thread.Load(thread, "@stdlib//windows/selfreg:win32.star")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(syntheticRegistryClientPE(t))
+	primary := &resourceSnapshotCountingFile{Bytes: &starfile.Bytes{Name: "primary", Data: data}}
+	dependency := &resourceSnapshotCountingFile{Bytes: &starfile.Bytes{Name: "dependency", Data: data}}
+	files := testStarlarkStringDict(map[string]starlark.Value{"dependency.dll": dependency})
+	_, err = starlark.Call(thread, module["resource_plugin"], starlark.Tuple{primary}, []starlark.Tuple{
+		{starlark.String("module_files"), files},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []*resourceSnapshotCountingFile{primary, dependency} {
+		if file.reads != 1 {
+			t.Errorf("%s: read %d times, want one owned snapshot shared by both parsers", file.String(), file.reads)
+		}
+	}
+}
+
+func TestRunnerSharesOwnedImageSnapshotsAcrossMetadataPlugins(t *testing.T) {
+	thread, predeclared, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := &resourceSnapshotCountingFile{Bytes: &starfile.Bytes{Name: "primary", Data: []byte(relocatablePE32TestImage(t, 0x200000))}}
+	dependency := &resourceSnapshotCountingFile{Bytes: &starfile.Bytes{Name: "dependency", Data: []byte(relocatablePE32TestImage(t, 0x300000))}}
+	predeclared["primary"] = primary
+	predeclared["dependency"] = dependency
+	_, err = starlark.ExecFile(thread, "snapshot-sharing.star", `
+load("@stdlib//windows/emulation:runner.star", "run")
+def execute(machine):
+    return machine.call(machine.resolve_export("kernel32.dll", name="GetTickCount"), args=[])
+def check():
+    for unused in range(2):
+        result = run(primary, "primary.dll", modules={"dependency.dll": dependency}, execute=execute)
+        if result["result"].reason != "return":
+            fail("runner did not return")
+check()
+`, predeclared)
+	if err != nil {
+		if evaluation, ok := err.(*starlark.EvalError); ok {
+			t.Fatal(evaluation.Backtrace())
+		}
+		t.Fatal(err)
+	}
+	for _, file := range []*resourceSnapshotCountingFile{primary, dependency} {
+		if file.reads != 2 {
+			t.Errorf("%s: read %d times, want one owned snapshot per run", file.String(), file.reads)
+		}
+	}
+}
+
 func TestSelfregGUIDAndStaticPolicies(t *testing.T) {
 	thread, _, err := newStarlarkRuntime("-")
 	if err != nil {

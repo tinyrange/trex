@@ -13,9 +13,9 @@ func TestResumeImportAfterProvidingTarget(t *testing.T) {
 	const thunk, target, stack = 0x7fff00000000, 0x180001000, 0x200000000
 	m := &Machine{
 		processor: &amd64.CPU{}, memory: cpu.NewAddressSpace(8192), limit: 20,
-		imports:  map[uint64]imported{thunk: {module: "support.dll", name: "Run", address: thunk}},
 		provided: make(map[string]uint64),
 	}
+	m.addImport(imported{module: "support.dll", name: "Run", address: thunk})
 	if err := m.memory.Map(stack, make([]byte, 4096), cpu.Read|cpu.Write); err != nil {
 		t.Fatal(err)
 	}

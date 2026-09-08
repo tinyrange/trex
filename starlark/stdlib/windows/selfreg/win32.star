@@ -938,9 +938,9 @@ def event_log_plugin():
                 argc = argc,
                 convention = "cdecl" if name == "tracemessage" else "stdcall",
             )
-        for imported in machine.imports:
+        for imported in machine.imports_named(signatures):
             name = imported.name.lower()
-            if _event_log_provider_module(imported.module) and name in signatures:
+            if name in signatures and _event_log_provider_module(imported.module):
                 machine.hook(
                     callback,
                     address = imported.address,
@@ -1105,9 +1105,9 @@ def environment_plugin(values = {}, system_time = 946684800):
         for function, argc in signatures.items():
             module = "ntdll.dll" if function.startswith("rtl") else "kernel32.dll"
             machine.provide_export(callback, module = module, name = function, argc = argc)
-        for imported in machine.imports:
+        for imported in machine.imports_named(signatures):
             name = imported.name.lower()
-            if _kernel_provider_module(imported.module) and name in signatures:
+            if name in signatures and _kernel_provider_module(imported.module):
                 machine.hook(callback, address = imported.address, argc = signatures[name])
     return emulator.plugin(install, name = "windows.environment", state = state)
 
@@ -1388,10 +1388,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     volume_facts = {name[:2].upper(): dict(value) for name, value in volumes.items()}
     maximum_file_size = 16 << 20
     maximum_source_file_size = 512 << 20
-    paths = _virtual_file_entries(files, maximum_source_file_size, directories = directories) if prepared_file_entries == None else {
-        path: dict(entry)
-        for path, entry in prepared_file_entries.items()
-    }
+    paths = _virtual_file_entries(files, maximum_source_file_size, directories = directories) if prepared_file_entries == None else windows.clone_file_entries(prepared_file_entries)
     module_directory = normalized_module.rsplit("\\", 1)[0] if "\\" in normalized_module else windows_directory
     current_directory = environment.get("CurrentDirectory", environment.get("CD", module_directory)).replace("/", "\\").rstrip("\\")
     if thread_instruction_limit < 1 or thread_instruction_limit > 10000000:
@@ -5108,20 +5105,18 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 providers = ["kernel32.dll", "ntdll.dll"]
             for provider in providers:
                 machine.provide_export(callback, module = provider, name = function, argc = argc, convention = "cdecl" if function == "vdbgprintexwithprefix" else "stdcall")
-        for function, argc in _MULTIMEDIA_SIGNATURES.items():
-            machine.provide_export(callback, module = "winmm.dll", name = function, argc = argc)
-        for function, argc in _PSAPI_SIGNATURES.items():
-            machine.provide_export(callback, module = "psapi.dll", name = function, argc = argc)
+        machine.provide_exports(callback, module = "winmm.dll", signatures = _MULTIMEDIA_SIGNATURES)
+        machine.provide_exports(callback, module = "psapi.dll", signatures = _PSAPI_SIGNATURES)
         machine.provide_export(get_process_dword, module = "kernel32.dll", ordinal = 18, argc = 2)
-        for imported in machine.imports:
+        for imported in machine.imports_named(list(_KERNEL_SIGNATURES) + list(_MULTIMEDIA_SIGNATURES) + list(_PSAPI_SIGNATURES) + [""]):
             function = imported.name.lower()
-            if _kernel_provider_module(imported.module) and function in _KERNEL_SIGNATURES:
+            if function in _KERNEL_SIGNATURES and _kernel_provider_module(imported.module):
                 machine.hook(callback, address = imported.address, argc = _KERNEL_SIGNATURES[function], convention = "cdecl" if function == "vdbgprintexwithprefix" else "stdcall")
-            elif imported.module.lower() == "winmm.dll" and function in _MULTIMEDIA_SIGNATURES:
+            elif function in _MULTIMEDIA_SIGNATURES and imported.module.lower() == "winmm.dll":
                 machine.hook(callback, address = imported.address, argc = _MULTIMEDIA_SIGNATURES[function])
-            elif imported.module.lower() == "psapi.dll" and function in _PSAPI_SIGNATURES:
+            elif function in _PSAPI_SIGNATURES and imported.module.lower() == "psapi.dll":
                 machine.hook(callback, address = imported.address, argc = _PSAPI_SIGNATURES[function])
-            elif imported.module.lower() == "kernel32.dll" and imported.ordinal == 18:
+            elif imported.ordinal == 18 and imported.module.lower() == "kernel32.dll":
                 machine.hook(get_process_dword, address = imported.address, argc = 2)
     return emulator.plugin(install, name = "windows.kernel32", state = state)
 
@@ -5265,11 +5260,10 @@ def version_plugin(file, module_path = "", module_files = {}):
         "verqueryvaluew": 4,
     }
     def install(machine):
-        for function, argc in signatures.items():
-            machine.provide_export(callback, module = "version.dll", name = function, argc = argc)
-        for imported in machine.imports:
+        machine.provide_exports(callback, module = "version.dll", signatures = signatures)
+        for imported in machine.imports_named(signatures):
             name = imported.name.lower()
-            if imported.module.lower() == "version.dll" and name in signatures:
+            if name in signatures and imported.module.lower() == "version.dll":
                 machine.hook(callback, address = imported.address, argc = signatures[name])
     return emulator.plugin(install, name = "windows.version", state = state)
 
@@ -6021,8 +6015,7 @@ def ole32_plugin(on_class_registration = None, on_class_activation = None, on_se
         vtable_address = pointer_array(machine, pointers, "IMalloc.vtable")
         state["malloc"] = pointer_array(machine, [vtable_address], "IMalloc")
         for module in ["ole32.dll", "api-ms-win-core-com-l1-1-1.dll"]:
-            for name, argc in _OLE_SIGNATURES.items():
-                machine.provide_export(callback, module = module, name = name, argc = argc)
+            machine.provide_exports(callback, module = module, signatures = _OLE_SIGNATURES)
     return emulator.plugin(install, name = "windows.ole32", state = state)
 
 def _resolve_type_library_path(path, libraries):
@@ -6577,9 +6570,9 @@ def com_plugin(registry):
     def install(machine):
         for name, argc in signatures.items():
             machine.provide_export(callback, module = "ole32.dll", name = name, argc = argc)
-        for imported in machine.imports:
+        for imported in machine.imports_named(signatures):
             name = imported.name.lower()
-            if imported.module.lower() == "ole32.dll" and name in signatures:
+            if name in signatures and imported.module.lower() == "ole32.dll":
                 machine.hook(callback, address = imported.address, argc = signatures[name])
     return emulator.plugin(install, name = "windows.com-registration")
 
@@ -7781,7 +7774,7 @@ def msvcrt_plugin(kernel = None):
                     argc = argc,
                     convention = convention,
                 )
-        for imported in machine.imports:
+        for imported in machine.imports_named(signatures):
             name = imported.name.lower()
             module = imported.module.lower()
             if module not in ["msvcrt.dll", "crtdll.dll", "ntdll.dll"]:
@@ -8021,9 +8014,9 @@ def netapi_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], pr
         return 0
 
     def install(machine):
-        for imported in machine.imports:
+        for imported in machine.imports_named(signatures):
             name = imported.name.lower()
-            if imported.module.lower() == "netapi32.dll" and name in signatures:
+            if name in signatures and imported.module.lower() == "netapi32.dll":
                 machine.hook(callback, address = imported.address, argc = signatures[name])
         for name, argc in signatures.items():
             machine.provide_export(callback, module = "netapi32.dll", name = name, argc = argc)
@@ -8063,9 +8056,9 @@ def winsock_helper_plugin():
         return 0
 
     def install(machine):
-        for imported in machine.imports:
+        for imported in machine.imports_named(_WS2HELP_SIGNATURES):
             name = imported.name.lower()
-            if imported.module.lower() == "ws2help.dll" and name in _WS2HELP_SIGNATURES:
+            if name in _WS2HELP_SIGNATURES and imported.module.lower() == "ws2help.dll":
                 machine.hook(callback, address = imported.address, argc = _WS2HELP_SIGNATURES[name])
 
     return emulator.plugin(install, name = "windows.ws2help", state = state)
@@ -9353,11 +9346,13 @@ def resource_plugin(file, module_files = {}, kernel = None):
     LoadLibrary/FindResource sequence observes the same module state as NT
     without eagerly parsing every DLL available to the process.
     """
-    resources_by_name = {"": windows.pe(file).resources}
-    messages_by_name = {"": windows.pe(file).messages}
+    primary = windows.pe(file)
+    resources_by_name = {"": primary.resources}
+    messages_by_name = {"": primary.messages}
     for name, module_file in module_files.items():
-        resources_by_name[_module_basename(name)] = windows.pe(module_file).resources
-        messages_by_name[_module_basename(name)] = windows.pe(module_file).messages
+        module = windows.pe(module_file)
+        resources_by_name[_module_basename(name)] = module.resources
+        messages_by_name[_module_basename(name)] = module.messages
     state = {"handles": {}, "loaded": {}, "modules": {}, "messages": {}, "identifiers": {}, "next_handle": 0x20000, "queries": []}
 
     def ensure_module_data(name):
@@ -10980,9 +10975,9 @@ def gdi32_plugin():
         signatures = {"getstockobject": 1, "createsolidbrush": 1, "createpalette": 1, "createdibitmap": 6, "createbitmap": 5, "createpatternbrush": 1, "getpaletteentries": 4, "getdevicecaps": 2, "enumfontfamiliesa": 4, "enumfontfamiliesw": 4, "enumfontfamiliesexa": 5, "enumfontfamiliesexw": 5, "deleteobject": 1}
         for name, argc in signatures.items():
             machine.provide_export(callback, module = "gdi32.dll", name = name, argc = argc)
-        for imported in machine.imports:
+        for imported in machine.imports_named(signatures):
             name = imported.name.lower()
-            if imported.module.lower() == "gdi32.dll" and name in signatures:
+            if name in signatures and imported.module.lower() == "gdi32.dll":
                 machine.hook(callback, address = imported.address, argc = signatures[name])
     return emulator.plugin(install, name = "windows.gdi32", state = state)
 
@@ -11026,9 +11021,9 @@ def lz32_plugin(kernel):
         for name, argc in signatures.items():
             machine.provide_export(callback, module = "lz32.dll", name = name, argc = argc)
         folded = {name.lower(): argc for name, argc in signatures.items()}
-        for imported in machine.imports:
+        for imported in machine.imports_named(folded):
             name = imported.name.lower()
-            if imported.module.lower() == "lz32.dll" and name in folded:
+            if name in folded and imported.module.lower() == "lz32.dll":
                 machine.hook(callback, address = imported.address, argc = folded[name])
     return emulator.plugin(install, name = "windows.lz32", state = state)
 
@@ -11108,9 +11103,9 @@ def userenv_plugin(environment = {}, kernel = None):
         for name, argc in signatures.items():
             machine.provide_export(callback, module = "userenv.dll", name = name, argc = argc)
         normalized = {name.lower(): argc for name, argc in signatures.items()}
-        for imported in machine.imports:
+        for imported in machine.imports_named(normalized):
             name = imported.name.lower()
-            if imported.module.lower() == "userenv.dll" and name in normalized:
+            if name in normalized and imported.module.lower() == "userenv.dll":
                 machine.hook(callback, address = imported.address, argc = normalized[name])
 
     return emulator.plugin(install, name = "windows.userenv", state = state)
@@ -12446,7 +12441,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
         machine.provide_export(callback, module = "user32.dll", name = "wvsprintfA", argc = 3)
         machine.provide_export(callback, module = "user32.dll", name = "wvsprintfW", argc = 3)
         signatures = {name.lower(): argc for name, argc in exported.items()}
-        for imported in machine.imports:
+        for imported in machine.imports_named(list(signatures) + ["wsprintfa", "wsprintfw", "wvsprintfa", "wvsprintfw"]):
             name = imported.name.lower()
             if imported.module.lower() != "user32.dll":
                 continue

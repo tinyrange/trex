@@ -27,7 +27,7 @@ func peResourcesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 	if !ok {
 		return nil, fmt.Errorf("pe_resources: got %s, want file", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func peVersionBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if !ok {
 		return nil, fmt.Errorf("pe_version: got %s, want file", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +187,7 @@ func peMessagesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if !ok {
 		return nil, fmt.Errorf("pe_messages: got %s, want file", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +226,7 @@ func peSectionsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if !ok {
 		return nil, fmt.Errorf("pe_sections: got %s, want file", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +268,7 @@ func peInfoBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 	if !ok {
 		return nil, fmt.Errorf("pe_info: got %s, want file", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +325,7 @@ func peDisasmBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 	if rva > uint64(^uint32(0)) || size < 0 {
 		return nil, fmt.Errorf("pe_disasm: invalid RVA or size")
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +402,9 @@ func peDisasmBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 }
 
 func peDisasmOperand(argument x86asm.Arg, address uint64, length int) (*starlark.Dict, error) {
-	operand := starlark.NewDict(8)
+	// Memory operands have the most fields (seven). Eight would force an
+	// external bucket allocation even though all fields fit in the inline bucket.
+	operand := starlark.NewDict(7)
 	set := func(name string, value starlark.Value) error {
 		return operand.SetKey(starlark.String(name), value)
 	}
@@ -573,7 +575,7 @@ func peImportsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if !ok {
 		return nil, fmt.Errorf("pe_imports: got %s, want file", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}
@@ -629,7 +631,7 @@ func peExportsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if !ok {
 		return nil, fmt.Errorf("pe_exports: got %s, want file", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}
@@ -670,7 +672,7 @@ func peCodeViewBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if !ok {
 		return nil, fmt.Errorf("pe_codeview: got %s, want file", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +718,7 @@ func selfregPatchesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlar
 	default:
 		return nil, fmt.Errorf("selfreg_patches: got %s, want file or windows.pe", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}

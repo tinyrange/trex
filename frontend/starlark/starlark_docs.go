@@ -74,11 +74,16 @@ func standardLibraryDocumentation() ([]byte, error) {
 			fmt.Fprintf(&output, "### `%s`\n\n%s\n\n", name, doc)
 		}
 	}
-	writeNativeStarlarkDocumentation(&output)
+	if err := writeNativeStarlarkDocumentation(&output); err != nil {
+		return nil, err
+	}
 	return append(bytes.TrimRight(output.Bytes(), "\n"), '\n'), nil
 }
 
 var nativeStarlarkTypes = map[string][]string{
+	"crypto.hasher":         {"reset()", "sum()", "update(value)"},
+	"emulator.plugin":       {"install(machine)", "name", "state"},
+	"emulator.machine":      {"architecture", "pointer_size", "entry", "stack", "imports", "modules", "mappings", "run(entry=None, instruction_limit=current, until=None)", "call(address, args=[])", "call_export(name, args=[])", "get_register(name)", "set_register(name, value)", "read(address, size)", "write(address, value)", "allocate(size=0, value=None, address=None, alignment=16, name='allocation', readable=True, writable=True, executable=False)", "free(address)", "load_module(image, name)", "hook(callback, module='', name='', ordinal=0, address=0, argc=0, convention='win64')", "provide_export(callback=None, module, name|ordinal, argc=0, convention='win64', value=None, writable=True)", "provide_exports(callback, module, signatures, convention='stdcall')", "imports_named(names)", "resolve_export(module, name='', ordinal=0)", "use(plugins)", "segment_base(segment)", "read_cstring(address, maximum=32KiB, encoding='ascii')", "read_cbytes(address, maximum=32KiB, require_terminator=True, unit_width=1)", "invoke(address, args=[])", "read_pointer(address)", "write_pointer(address, value)", "protect(address, size, readable=True, writable=False, executable=False)", "snapshot()", "profile(limit=256, reset=False)", "local_unwind(frame, target)", "transfer(address, stack_pointer=current_rsp)", "arguments(count)", "stop(reason, detail='', value=None)"},
 	"compiledModule":        {"ok", "diagnostic", "binary", "outputs (immutable dict of virtual output names to bytes)"},
 	"ar":                    {"entries", "files", "find(name, occurrence=0)"},
 	"ar_entry":              {"binary", "bytes", "gid", "hex", "mode", "mtime", "name", "read", "size", "slice", "uid"},
@@ -225,7 +230,7 @@ var nativeStarlarkSignatures = map[string]string{
 // entry points cannot silently disappear from the generated API reference.
 // Opaque value methods are listed explicitly because they are capability-
 // dependent and cannot all be instantiated while generating documentation.
-func writeNativeStarlarkDocumentation(output *bytes.Buffer) {
+func writeNativeStarlarkDocumentation(output *bytes.Buffer) error {
 	output.WriteString("## Native namespaces and values\n\n")
 	environment := predeclared()
 	var topLevel []string
@@ -236,7 +241,11 @@ func writeNativeStarlarkDocumentation(output *bytes.Buffer) {
 	}
 	sort.Strings(topLevel)
 	for _, name := range topLevel {
-		fmt.Fprintf(output, "### `%s`\n\n`%s`\n\nNative top-level operation.\n\n", name, nativeStarlarkSignature(name))
+		description, err := nativeStarlarkDescription(name)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "### `%s`\n\n`%s`\n\n%s\n\n", name, nativeStarlarkSignature(name), description)
 	}
 	var namespaces []string
 	for name, value := range environment {
@@ -257,7 +266,11 @@ func writeNativeStarlarkDocumentation(output *bytes.Buffer) {
 		for _, builtin := range builtins {
 			qualified := name + "." + builtin
 			signature := nativeStarlarkSignature(qualified)
-			fmt.Fprintf(output, "### `%s`\n\n`%s`\n\nNative `%s` operation. Limits and timeout arguments are validated before work begins.\n\n", qualified, signature, name)
+			description, err := nativeStarlarkDescription(qualified)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(output, "### `%s`\n\n`%s`\n\n%s\n\n", qualified, signature, description)
 		}
 	}
 	var types []string
@@ -278,16 +291,27 @@ func writeNativeStarlarkDocumentation(output *bytes.Buffer) {
 			}
 		}
 		if name == "emulator.x86" {
+			methods = append(methods, "imports_named(names)", "provide_exports(callback, module, signatures, convention='stdcall')")
+		}
+		if name == "emulator.x86" || name == "emulator.machine" {
 			for _, codec := range binaryapi.ScalarCodecs {
 				methods = append(methods, "read_"+codec.Name+"(address)", "write_"+codec.Name+"(address, value)")
 			}
 		}
 		sort.Strings(methods)
-		fmt.Fprintf(output, "### `%s` value\n\nMethods and attributes: `%s`.\n\n", name, strings.Join(methods, "`, `"))
+		description := nativeStarlarkValueDescriptions[name]
+		if strings.TrimSpace(description) == "" {
+			return fmt.Errorf("native value %s has no description", name)
+		}
+		fmt.Fprintf(output, "### `%s` value\n\n%s\n\nMethods and attributes: `%s`.\n\n", name, description, strings.Join(methods, "`, `"))
 	}
+	return nil
 }
 
 func nativeStarlarkSignature(qualified string) string {
+	if signature := nativeStarlarkAdditionalSignatures[qualified]; signature != "" {
+		return signature
+	}
 	if signature := nativeStarlarkSignatures[qualified]; signature != "" {
 		return signature
 	}

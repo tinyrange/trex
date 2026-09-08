@@ -39,15 +39,7 @@ def expand(value, replacements):
     """Expands percent-delimited registration variables to a fixed point."""
     if type(value) != "string":
         return value
-    output = value
-    for _ in range(4):
-        previous = output
-        for name, replacement in replacements.items():
-            output = output.replace("%" + name.upper() + "%", replacement)
-            output = output.replace("%" + name.lower() + "%", replacement)
-        if output == previous:
-            break
-    return output
+    return windows.registration_expand(value, replacements)
 
 def expand_environment(value, environment):
     """Expands case-insensitive percent-delimited process environment names."""

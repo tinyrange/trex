@@ -13,6 +13,7 @@ import (
 	binaryapi "github.com/tinyrange/trex/binary"
 	"github.com/tinyrange/trex/emulator/amd64"
 	"github.com/tinyrange/trex/emulator/cpu"
+	importquery "github.com/tinyrange/trex/emulator/internal/imports"
 	"github.com/tinyrange/trex/emulator/peimage"
 	"github.com/tinyrange/trex/emulator/windowsabi"
 	starvalue "github.com/tinyrange/trex/script/value"
@@ -48,13 +49,18 @@ type hook struct {
 }
 
 type Machine struct {
+	importNameIndex                            *importquery.Index
+	attrCache                                  starlark.StringDict
+	importRecords                              []starlark.Value
 	processor                                  cpu.Processor
 	memory                                     *cpu.AddressSpace
 	entry, stackLow, stackHigh, nextAllocation uint64
 	limit, memoryLimit                         uint64
 	modules                                    []module
 	imports                                    map[uint64]imported
+	importIATs                                 map[string][]uint64
 	hooks                                      map[uint64]hook
+	dispatchFilter                             [1024]uint64
 	provided                                   map[string]uint64
 	pluginStates                               []starlark.Value
 	allocations                                map[uint64]bool
@@ -228,9 +234,26 @@ func (m *Machine) load(data []byte, name string) (module, error) {
 	loaded := module{name, image, exports, tls}
 	m.modules = append(m.modules, loaded)
 	for _, imported := range newImports {
-		m.imports[imported.address] = imported
+		m.addImport(imported)
 	}
 	return loaded, nil
+}
+
+// addImport indexes every IAT slot, including duplicate imports in different
+// modules. Normalize once at load time, not for every provided semantic export.
+func (m *Machine) addImport(item imported) {
+	if m.imports == nil {
+		m.imports = make(map[uint64]imported)
+	}
+	if m.importIATs == nil {
+		m.importIATs = make(map[string][]uint64)
+	}
+	m.imports[item.address] = item
+	m.markDispatch(item.address)
+	m.importRecords = nil
+	m.importNameIndex = nil
+	key := exportKey(item.module, item.name, int(item.ordinal))
+	m.importIATs[key] = append(m.importIATs[key], item.iat)
 }
 
 func (m *Machine) String() string {
@@ -240,15 +263,18 @@ func (*Machine) Type() string          { return "emulator.machine" }
 func (m *Machine) Freeze()             { m.frozen = true }
 func (*Machine) Truth() starlark.Bool  { return starlark.True }
 func (*Machine) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: emulator.machine") }
-func (*Machine) AttrNames() []string {
+
+var machineAttrNames = func() []string {
 	names := []string{"architecture", "pointer_size", "entry", "stack", "imports", "modules", "mappings", "run", "call", "call_export", "get_register", "set_register", "read", "write", "allocate", "free", "load_module", "hook", "provide_export", "resolve_export", "use", "segment_base", "read_cstring", "read_cbytes"}
 	for _, codec := range binaryapi.ScalarCodecs {
 		names = append(names, "read_"+codec.Name, "write_"+codec.Name)
 	}
-	names = append(names, "invoke", "read_pointer", "write_pointer", "protect", "snapshot", "profile", "local_unwind", "transfer", "arguments", "stop")
+	names = append(names, "invoke", "read_pointer", "write_pointer", "protect", "snapshot", "profile", "local_unwind", "transfer", "arguments", "stop", "imports_named", "provide_exports")
 	sort.Strings(names)
 	return names
-}
+}()
+
+func (*Machine) AttrNames() []string { return append([]string(nil), machineAttrNames...) }
 
 func record(values starlark.StringDict) starlark.Value { return starvalue.NewRecord(values) }
 
@@ -258,6 +284,9 @@ func (m *Machine) Attr(name string) (starlark.Value, error) {
 	}
 	if name == "write_pointer" {
 		return m.Attr("write_u64le")
+	}
+	if value := m.attrCache[name]; value != nil {
+		return value, nil
 	}
 	switch name {
 	case "architecture":
@@ -269,6 +298,9 @@ func (m *Machine) Attr(name string) (starlark.Value, error) {
 	case "stack":
 		return record(starlark.StringDict{"low": starlark.MakeUint64(m.stackLow), "high": starlark.MakeUint64(m.stackHigh)}), nil
 	case "imports":
+		if m.importRecords != nil {
+			return starlark.NewList(append([]starlark.Value(nil), m.importRecords...)), nil
+		}
 		keys := make([]uint64, 0, len(m.imports))
 		for key := range m.imports {
 			keys = append(keys, key)
@@ -279,7 +311,10 @@ func (m *Machine) Attr(name string) (starlark.Value, error) {
 			item := m.imports[key]
 			values = append(values, record(starlark.StringDict{"module": starlark.String(item.module), "name": starlark.String(item.name), "ordinal": starlark.MakeUint(uint(item.ordinal)), "iat": starlark.MakeUint64(item.iat), "address": starlark.MakeUint64(item.address)}))
 		}
-		return starlark.NewList(values), nil
+		// Records contain only immutable scalar values. Keep the returned list
+		// independently mutable while reusing its parsed import records.
+		m.importRecords = values
+		return starlark.NewList(append([]starlark.Value(nil), values...)), nil
 	case "modules":
 		var values []starlark.Value
 		for i, item := range m.modules {
@@ -311,9 +346,14 @@ func (m *Machine) Attr(name string) (starlark.Value, error) {
 		}
 		return starlark.NewList(values), nil
 	}
-	for _, attr := range m.AttrNames() {
+	for _, attr := range machineAttrNames {
 		if attr == name {
-			return starlark.NewBuiltin("machine."+name, m.method), nil
+			value := starlark.NewBuiltin("machine."+name, m.method)
+			if m.attrCache == nil {
+				m.attrCache = make(starlark.StringDict)
+			}
+			m.attrCache[name] = value
+			return value, nil
 		}
 	}
 	return nil, nil
@@ -349,7 +389,16 @@ func (m *Machine) runUntil(thread *starlark.Thread, until *uint64) (starlark.Val
 		m.recent[m.recentCount%uint64(len(m.recent))] = pc
 		m.recentCount++
 		m.observe(pc)
-		if hook, ok := m.hooks[pc]; ok {
+		var hook hook
+		var imported imported
+		var hooked, isImport bool
+		if m.mayDispatch(pc) {
+			hook, hooked = m.hooks[pc]
+			if !hooked {
+				imported, isImport = m.imports[pc]
+			}
+		}
+		if hooked {
 			arguments, err := windowsabi.AMD64IntegerArguments(m.processor, m.memory, hook.argc)
 			if err != nil {
 				return m.result("memory", steps, err.Error()), nil
@@ -396,7 +445,7 @@ func (m *Machine) runUntil(thread *starlark.Thread, until *uint64) (starlark.Val
 			}
 			continue
 		}
-		if imported, ok := m.imports[pc]; ok {
+		if isImport {
 			// Resolve at dispatch as well as through the IAT. A machine may be
 			// suspended at this thunk when a dependency or semantic export is
 			// supplied, and updating the IAT alone cannot resume that call.
@@ -419,6 +468,16 @@ func (m *Machine) runUntil(thread *starlark.Thread, until *uint64) (starlark.Val
 
 func (m *Machine) method(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	name := strings.TrimPrefix(builtin.Name(), "machine.")
+	if name == "imports_named" {
+		if m.importNameIndex == nil {
+			value, err := m.Attr("imports")
+			if err != nil {
+				return nil, err
+			}
+			m.importNameIndex = importquery.New(value.(*starlark.List))
+		}
+		return m.importNameIndex.Named(args, kwargs)
+	}
 	if m.frozen && name != "get_register" && name != "read" && !strings.HasPrefix(name, "read_") {
 		return nil, fmt.Errorf("machine is frozen")
 	}
@@ -464,7 +523,7 @@ func (m *Machine) method(thread *starlark.Thread, builtin *starlark.Builtin, arg
 		return m.controlMethod(thread, name, args, kwargs)
 	case "snapshot", "profile":
 		return m.diagnosticMethod(name, args, kwargs)
-	case "provide_export", "resolve_export", "use", "segment_base", "read_cstring", "read_cbytes":
+	case "provide_export", "provide_exports", "resolve_export", "use", "segment_base", "read_cstring", "read_cbytes":
 		return m.environmentMethod(thread, name, args, kwargs)
 	case "get_register", "set_register":
 		var register string
@@ -620,12 +679,12 @@ func (m *Machine) method(thread *starlark.Thread, builtin *starlark.Builtin, arg
 					export = item.name
 				}
 			}
-			m.hooks[value] = hook{canonical(moduleName), export, argc, callback}
+			m.setHook(value, hook{canonical(moduleName), export, argc, callback})
 			targets = append(targets, starlark.MakeUint64(value))
 		} else {
 			for target, item := range m.imports {
 				if (moduleName == "" || canonical(moduleName) == item.module) && (export != "" && strings.EqualFold(export, item.name) || ordinal != 0 && uint16(ordinal) == item.ordinal) {
-					m.hooks[target] = hook{item.module, item.name, argc, callback}
+					m.setHook(target, hook{item.module, item.name, argc, callback})
 					targets = append(targets, starlark.MakeUint64(target))
 				}
 			}

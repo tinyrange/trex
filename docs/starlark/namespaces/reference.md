@@ -1649,1438 +1649,1576 @@ Applies one KD load/unload event to resolver state.
 
 `bytes_concat(parts) -> bytes`
 
-Native top-level operation.
+Materializes a list of binary values into one bytes value, preserving order. Use binary.concat when a lazy file composition is preferable.
 
 ### `digest`
 
 `digest(value, algorithm='sha256') -> bytes`
 
-Native top-level operation.
+Hashes a file, string or bytes value and returns raw digest bytes, not hexadecimal text. The default algorithm is SHA-256.
 
 ### `directory`
 
 `directory() -> directory`
 
-Native top-level operation.
+Creates an empty, mutable in-memory directory tree. Add files and metadata to it before passing it to a filesystem image builder.
 
 ### `error`
 
 `error(message)`
 
-Native top-level operation.
+Stops evaluation with the supplied error message. Use testing.attempt when a caller needs to inspect an expected failure.
 
 ### `help`
 
 `help(value=None) -> None`
 
-Native top-level operation.
+Prints runtime help for a value, or an overview of available globals when no value is supplied. Returns None and does not modify the inspected value.
 
 ### `hex`
 
 `hex(value, width=0) -> string`
 
-Native top-level operation.
+Formats an integer as signed, 0x-prefixed hexadecimal text with optional digit padding. For file, string or bytes input, returns the raw bytes as unprefixed hexadecimal text; width applies only to integers.
 
 ### `mirror_file`
 
 `mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600) -> file`
 
-Native top-level operation.
+Opens a cached download or tries the supplied mirror URLs, checking the requested size and SHA-256 when supplied. The cache and key identify persistent native-backend storage; the result is a file, not extracted contents.
 
 ### `open`
 
 `open(name) -> file`
 
-Native top-level operation.
+Opens a host-backed file for reading through the native storage backend. This is an explicit host-path boundary; portable format APIs consume the returned file.
 
 ### `repl`
 
 `repl() -> None`
 
-Native top-level operation.
+Enters the interactive Starlark prompt using the current runtime. Useful for retaining parsed inputs or a VM while running bounded experiments.
 
 ### `stdout`
 
 `stdout(value) -> None`
 
-Native top-level operation.
+Writes the supplied value to the runtime's standard output and returns None. It does not create a named file.
 
 ### `write`
 
 `write(name, value, max_bytes=64GiB) -> None`
 
-Native top-level operation.
+Writes a binary value to the named host output file, subject to max_bytes. This materializes an explicit output; use in-memory files to connect construction stages.
 
 ### `archive.ar`
 
 `archive.ar(file, maximum_entries=1M, maximum_metadata=64MiB) -> ar`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Parses a Unix ar archive and returns ordered member metadata and file views. find(name, occurrence) distinguishes duplicate member names.
 
 ### `archive.cab`
 
-`archive.cab(...)`
+`archive.cab(file, cache=True) -> cab`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Parses a Microsoft Cabinet file and exposes its members as file views. Folder decompression is shared when caching is enabled, so several entries in one compressed folder need not decode it repeatedly.
 
 ### `archive.cab_set`
 
 `archive.cab_set(files, cache=True) -> cab`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Opens related Cabinet files as one set, resolving files and compressed data that span cabinet boundaries. The caller supplies the cabinet files; the parser does not search host directories.
 
 ### `archive.installer`
 
 `archive.installer(file, maximum_scan=256MiB, cache=True) -> installer`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Recognizes a supported installer container, including supported embedded payloads, and returns an inspection object with files and a declarative installation plan. It does not run the installer or apply that plan.
 
 ### `archive.installer_probe`
 
 `archive.installer_probe(file, maximum_scan=256MiB, cache=True) -> dict`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Inspects a candidate installer and returns detection details and diagnostics as a dictionary. Use it to distinguish unsupported packaging from a recognized payload before requesting a full plan.
 
 ### `archive.installscript`
 
 `archive.installscript(file) -> installscript`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Parses compiled InstallShield InstallScript into functions, callbacks, calls and effects. The result supports bounded evaluation of the modeled script semantics; parsing does not execute a host installer.
 
 ### `archive.installshield`
 
 `archive.installshield(header, cabinets, external={}) -> installshield`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Combines an InstallShield header, cabinet files and optional externally supplied files into an archive view. Exposes file groups, components and shortcuts needed for installation planning.
 
 ### `archive.kwaj`
 
 `archive.kwaj(file, maximum=512MiB) -> file`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Decodes a Microsoft KWAJ-compressed input into a file, enforcing the decoded-size bound. Use kwaj_info when the header's original name and compression method are also needed.
 
 ### `archive.kwaj_info`
 
 `archive.kwaj_info(file, maximum=512MiB) -> record(file, name, method, decoded_size, compressed_size)`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Returns the decoded KWAJ file together with its original name, method and compressed/decoded sizes. This preserves wrapper metadata that archive.kwaj omits.
 
 ### `archive.sevenzip`
 
 `archive.sevenzip(file, maximum_entries=1M, maximum_metadata=64MiB, max_dictionary=256MiB) -> sevenzip`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Parses a 7-Zip archive into member file views with bounded entry count, metadata and decoder dictionary size. Unsupported compression methods fail explicitly.
 
 ### `archive.sfp`
 
 `archive.sfp(file, maximum_entries=1M, maximum_metadata=64MiB) -> sfp`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Parses an SFP installer archive and exposes member paths, timestamps, stored sizes and payload file views. It does not install the contents.
 
 ### `archive.szdd`
 
 `archive.szdd(file, maximum=512MiB) -> file`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Decodes the legacy Microsoft SZDD single-file compression format and returns a file. maximum bounds decoded output rather than the compressed input alone.
 
 ### `archive.tar`
 
 `archive.tar(directory, compress='') -> bytes; archive.tar(file, maximum_entries=1M) -> tar`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+With a directory, serializes its entries into tar bytes, optionally compressed. With a file, parses a tar archive and preserves ordered entries, metadata and duplicate-name occurrences.
 
 ### `archive.wim`
 
-`archive.wim(...)`
+`archive.wim(file) -> wim`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image.
 
 ### `archive.xz`
 
 `archive.xz(file, max_dictionary=64MiB) -> file`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Decodes an XZ stream into a file, rejecting decoder dictionaries above max_dictionary. This unwraps compression; it does not interpret an archive contained in the decoded bytes.
 
 ### `archive.zip`
 
-`archive.zip(...)`
+`archive.zip(file) -> zip`
 
-Native `archive` operation. Limits and timeout arguments are validated before work begins.
+Parses a ZIP archive and exposes its member files. Reads decompress the selected entries without extracting them into a host directory.
 
 ### `binary.annotate`
 
-`binary.annotate(...)`
+`binary.annotate(file, attrs) -> file`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Wraps a file with caller-supplied attributes while retaining its bytes. Use this to attach construction metadata without rebuilding the file's contents.
 
 ### `binary.base64`
 
 `binary.base64(value, url=False, padding=True, maximum=512MiB)`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes binary input as a Base64 string. url selects the URL-safe alphabet, padding controls trailing equals signs, and maximum bounds encoded output.
 
 ### `binary.bits`
 
-`binary.bits(...)`
+`binary.bits(value, order='msb') -> bit reader`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Creates a stateful bit reader over binary input. Its read, peek, drop and align operations consume or inspect bits in the selected bit order.
 
 ### `binary.builder`
 
-`binary.builder(...)`
+`binary.builder(capacity=0, limit=512MiB) -> binary.builder`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Creates a bounded mutable byte builder. Append encoded values, reserve or patch regions, then obtain bytes or a file; capacity is an allocation hint and limit bounds growth.
 
 ### `binary.concat`
 
-`binary.concat(...)`
+`binary.concat(parts) -> file`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Returns a lazy file formed by concatenating binary parts in order. Unlike bytes_concat, it need not materialize the complete result at construction time.
 
 ### `binary.cursor`
 
-`binary.cursor(...)`
+`binary.cursor(value, offset=0) -> binary.cursor`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Creates a sequential byte reader at the selected offset. Scalar reads and bytes(size) advance its position; seek, skip and align change that position explicitly.
 
 ### `binary.decode`
 
-`binary.decode(...)`
+`binary.decode(value, encoding, maximum=512MiB) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Decodes a hex, Base64 or unpadded URL-safe Base64 string into bytes. This is the inverse of binary.hex/base64, not a character-set decoder; use binary.text for text.
 
 ### `binary.encode`
 
-`binary.encode(...)`
+`binary.encode(value, encoding='utf8', nul=False) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a string into bytes using the selected character encoding. nul appends an encoding-appropriate terminator; binary.text performs the reverse conversion.
 
 ### `binary.extents`
 
-`binary.extents(...)`
+`binary.extents(size, extents) -> file`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Constructs a file of the requested logical size from supplied byte extents. Unpopulated ranges read as zero, allowing sparse image layouts without allocating every logical byte.
 
 ### `binary.f32be`
 
 `binary.f32be(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 32-bit IEEE-754 floating-point value as 4 bytes in big-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.f32le`
 
 `binary.f32le(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 32-bit IEEE-754 floating-point value as 4 bytes in little-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.f64be`
 
 `binary.f64be(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 64-bit IEEE-754 floating-point value as 8 bytes in big-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.f64le`
 
 `binary.f64le(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 64-bit IEEE-754 floating-point value as 8 bytes in little-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.hex`
 
 `binary.hex(value, maximum=512MiB)`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes binary input as lowercase hexadecimal text, with two characters per input byte. maximum bounds the encoded result; use top-level hex to format an integer.
 
 ### `binary.i16be`
 
 `binary.i16be(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 16-bit signed integer as 2 bytes in big-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.i16le`
 
 `binary.i16le(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 16-bit signed integer as 2 bytes in little-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.i32be`
 
 `binary.i32be(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 32-bit signed integer as 4 bytes in big-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.i32le`
 
 `binary.i32le(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 32-bit signed integer as 4 bytes in little-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.i64be`
 
 `binary.i64be(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 64-bit signed integer as 8 bytes in big-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.i64le`
 
 `binary.i64le(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 64-bit signed integer as 8 bytes in little-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.i8`
 
 `binary.i8(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 8-bit signed integer as 1 bytes in single-byte order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.layout`
 
-`binary.layout(...)`
+`binary.layout(format, names=None) -> binary.layout`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Compiles a fixed-size binary layout from a format string and optional field names. The returned value encodes records or decodes a source at a byte offset.
 
 ### `binary.read_f32be`
 
 `binary.read_f32be(source, offset=0) -> float`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 32-bit IEEE-754 floating-point value from source at the byte offset, using big-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_f32le`
 
 `binary.read_f32le(source, offset=0) -> float`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 32-bit IEEE-754 floating-point value from source at the byte offset, using little-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_f64be`
 
 `binary.read_f64be(source, offset=0) -> float`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 64-bit IEEE-754 floating-point value from source at the byte offset, using big-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_f64le`
 
 `binary.read_f64le(source, offset=0) -> float`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 64-bit IEEE-754 floating-point value from source at the byte offset, using little-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_i16be`
 
 `binary.read_i16be(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 16-bit signed integer from source at the byte offset, using big-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_i16le`
 
 `binary.read_i16le(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 16-bit signed integer from source at the byte offset, using little-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_i32be`
 
 `binary.read_i32be(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 32-bit signed integer from source at the byte offset, using big-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_i32le`
 
 `binary.read_i32le(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 32-bit signed integer from source at the byte offset, using little-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_i64be`
 
 `binary.read_i64be(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 64-bit signed integer from source at the byte offset, using big-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_i64le`
 
 `binary.read_i64le(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 64-bit signed integer from source at the byte offset, using little-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_i8`
 
 `binary.read_i8(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 8-bit signed integer from source at the byte offset, using single-byte encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_u16be`
 
 `binary.read_u16be(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 16-bit unsigned integer from source at the byte offset, using big-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_u16le`
 
 `binary.read_u16le(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 16-bit unsigned integer from source at the byte offset, using little-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_u32be`
 
 `binary.read_u32be(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 32-bit unsigned integer from source at the byte offset, using big-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_u32le`
 
 `binary.read_u32le(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 32-bit unsigned integer from source at the byte offset, using little-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_u64be`
 
 `binary.read_u64be(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 64-bit unsigned integer from source at the byte offset, using big-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_u64le`
 
 `binary.read_u64le(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 64-bit unsigned integer from source at the byte offset, using little-endian encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.read_u8`
 
 `binary.read_u8(source, offset=0) -> int`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Reads a 8-bit unsigned integer from source at the byte offset, using single-byte encoding. Returns the decoded scalar without advancing a cursor; a truncated read fails.
 
 ### `binary.replace`
 
-`binary.replace(...)`
+`binary.replace(value, old, new, count=-1, maximum=512MiB) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Returns bytes with up to count non-overlapping occurrences of old replaced by new; count=-1 replaces all. old must be nonempty and maximum bounds the result.
 
 ### `binary.strings`
 
-`binary.strings(...)`
+`binary.strings(value, encoding='ascii', minimum=4, maximum=64MiB) -> list[string]`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Scans binary input for printable ASCII or UTF-16LE strings of at least minimum characters. Returns string values, not offsets or a decoded version of the entire file.
 
 ### `binary.text`
 
-`binary.text(...)`
+`binary.text(value, encoding='utf8', nul=False, maximum=16MiB) -> string`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Decodes binary input into a string using the selected character encoding. nul requests terminator-aware decoding; maximum bounds input size.
 
 ### `binary.u16be`
 
 `binary.u16be(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 16-bit unsigned integer as 2 bytes in big-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.u16le`
 
 `binary.u16le(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 16-bit unsigned integer as 2 bytes in little-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.u32be`
 
 `binary.u32be(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 32-bit unsigned integer as 4 bytes in big-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.u32le`
 
 `binary.u32le(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 32-bit unsigned integer as 4 bytes in little-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.u64be`
 
 `binary.u64be(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 64-bit unsigned integer as 8 bytes in big-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.u64le`
 
 `binary.u64le(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 64-bit unsigned integer as 8 bytes in little-endian order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.u8`
 
 `binary.u8(value) -> bytes`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Encodes a 8-bit unsigned integer as 1 bytes in single-byte order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
 ### `binary.view`
 
-`binary.view(...)`
+`binary.view(value, offset=0, size=None) -> byte_view`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Creates a bounded random-access byte view, optionally over a source slice. It supports byte search, comparisons and further slicing without requiring the entire source to be copied.
 
 ### `binary.xml`
 
 `binary.xml(value, maximum=16MiB, max_depth=256, max_nodes=1M)`
 
-Native `binary` operation. Limits and timeout arguments are validated before work begins.
+Parses XML into namespace-aware immutable document and node values. Size, depth and node-count limits bound parsing; with_root/with_children/with_text create edited values for serialization.
 
 ### `block.cache`
 
 `block.cache(base, max_bytes=32MiB, chunk_size=64KiB)`
 
-Native `block` operation. Limits and timeout arguments are validated before work begins.
+Adds a bounded read-through chunk cache to a block device. It speeds repeated reads but is not a writable overlay or a persistent image cache.
 
 ### `block.device`
 
 `block.device(file, format='raw', logical_block_size=512, physical_block_size=logical, writable=False)`
 
-Native `block` operation. Limits and timeout arguments are validated before work begins.
+Wraps a file as a block device with declared logical and physical block geometry. Writable mode requires a source that supports writes; it does not implicitly add copy-on-write storage.
 
 ### `block.nbd`
 
 `block.nbd(device, export_name='', max_request=8MiB, structured=True, handshake_timeout=10, request_timeout=30, workers=4)`
 
-Native `block` operation. Limits and timeout arguments are validated before work begins.
+Creates an NBD protocol server for a block device. serve(channel) processes requests over a supplied byte channel; constructing the server does not open a listening socket.
 
 ### `block.overlay`
 
 `block.overlay(base, max_dirty_bytes=128MiB, chunk_size=64KiB, trace_operations=0)`
 
-Native `block` operation. Limits and timeout arguments are validated before work begins.
+Creates a bounded writable copy-on-write layer over a base block device. Writes affect the overlay, leaving the base unchanged; max_dirty_bytes bounds retained changes.
 
 ### `block.view`
 
 `block.view(device) -> live read-only file view`
 
-Native `block` operation. Limits and timeout arguments are validated before work begins.
+Returns a read-only file view of a live block device. Later device changes remain visible through the view; it is not an immutable snapshot.
 
 ### `clock.monotonic`
 
 `clock.monotonic() -> elapsed seconds`
 
-Native `clock` operation. Limits and timeout arguments are validated before work begins.
+Returns seconds from the runtime's monotonic clock. Subtract readings to time work; the value is not a calendar timestamp.
 
 ### `clock.profiler`
 
 `clock.profiler() -> clock.profiler`
 
-Native `clock` operation. Limits and timeout arguments are validated before work begins.
+Creates a profiler for named spans, counters and measured calls. Its snapshots and reports summarize work explicitly recorded through this profiler.
 
 ### `clock.unix`
 
-`clock.unix(...)`
+`clock.unix() -> int`
 
-Native `clock` operation. Limits and timeout arguments are validated before work begins.
+Returns the runtime clock's current Unix timestamp in seconds. Use clock.monotonic rather than calendar time to measure durations.
 
 ### `clock.utc`
 
-`clock.utc(...)`
+`clock.utc(timestamp) -> dict`
 
-Native `clock` operation. Limits and timeout arguments are validated before work begins.
+Converts an integer Unix timestamp into a dictionary of UTC year, month, weekday, day, hour, minute, second and millisecond fields. Weekday uses Sunday=0; this converts a supplied time rather than reading the current clock.
 
 ### `crypto.aes`
 
-`crypto.aes(...)`
+`crypto.aes(key, value, decrypt=False, mode='cbc', iv=None) -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Encrypts or decrypts complete 16-byte AES blocks in CBC or ECB mode, returning bytes without adding or removing padding. CBC uses a zero IV when none is supplied; callers implementing a protocol must provide its required IV and authentication.
 
 ### `crypto.checksum`
 
-`crypto.checksum(...)`
+`crypto.checksum(algorithm, value) -> int`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Returns an integer Adler-32 or supported CRC-32 checksum for binary input. These checksums detect accidental changes; they are not cryptographic authentication.
 
 ### `crypto.constant_time_equal`
 
-`crypto.constant_time_equal(...)`
+`crypto.constant_time_equal(left, right) -> bool`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Compares two binary values using a constant-time comparison for equal-length inputs. Returns a boolean; differing lengths are not hidden.
 
 ### `crypto.des`
 
-`crypto.des(...)`
+`crypto.des(key, value, decrypt=False, iv=None) -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Encrypts or decrypts complete 8-byte blocks with an 8-byte DES key. Supplying an IV selects CBC; otherwise blocks are processed independently. This legacy compatibility primitive adds no padding or authentication.
 
 ### `crypto.deterministic`
 
-`crypto.deterministic(...)`
+`crypto.deterministic(seed, size, algorithm='sha256') -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Derives a reproducible byte sequence from a seed using domain-separated counter hashes. Equal seed, algorithm and size produce equal output; it is not an entropy source.
 
 ### `crypto.hash`
 
-`crypto.hash(...)`
+`crypto.hash(algorithm, value) -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Returns raw digest bytes for binary input using MD4, MD5, SHA-1, SHA-224, SHA-256, SHA-384 or SHA-512. Legacy algorithms are provided for format compatibility, not as recommendations for new security protocols.
 
 ### `crypto.hash_blocks`
 
-`crypto.hash_blocks(...)`
+`crypto.hash_blocks(algorithm, state, blocks) -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Advances a supplied SHA-1 or SHA-256 compression state over complete blocks and returns the updated state. It does not perform message padding or finalization; use crypto.hash for a complete digest.
 
 ### `crypto.hasher`
 
-`crypto.hasher(...)`
+`crypto.hasher(algorithm) -> crypto.hasher`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Creates a mutable incremental hash state. update(value) feeds input, sum() reads the current digest without resetting, and reset() starts a new message.
 
 ### `crypto.hmac`
 
-`crypto.hmac(...)`
+`crypto.hmac(algorithm, key, value) -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Computes an HMAC over binary input using the supplied key and hash algorithm. Returns raw authentication bytes rather than hexadecimal text.
 
 ### `crypto.mod_exp`
 
-`crypto.mod_exp(...)`
+`crypto.mod_exp(base, exponent, modulus, byte_order='big') -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Computes base raised to exponent modulo modulus from byte-encoded nonnegative operands. byte_order applies to inputs and output; the result is padded to the modulus byte width.
 
 ### `crypto.mod_inverse`
 
-`crypto.mod_inverse(...)`
+`crypto.mod_inverse(value, modulus) -> int|None`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Returns the multiplicative inverse of an integer modulo a positive modulus, or None when no inverse exists. Operands are bounded to 16384 bits; this arithmetic operation is not a constant-time cryptographic protocol.
 
 ### `crypto.mod_mul`
 
-`crypto.mod_mul(...)`
+`crypto.mod_mul(left, right, modulus, byte_order='big') -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Multiplies byte-encoded nonnegative operands modulo a byte-encoded modulus. The selected byte order is preserved and the result has the modulus's byte width.
 
 ### `crypto.random`
 
-`crypto.random(...)`
+`crypto.random(size) -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Returns the requested number of bytes from the runtime's cryptographic randomness source. Unlike crypto.deterministic, repeated calls are not reproducible.
 
 ### `crypto.rc4`
 
-`crypto.rc4(...)`
+`crypto.rc4(key, value) -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Applies the RC4 stream cipher to binary input using a fresh state initialized from key. Encryption and decryption use the same operation; this unauthenticated legacy primitive is for compatibility.
 
 ### `crypto.xtea`
 
-`crypto.xtea(...)`
+`crypto.xtea(key, value, decrypt=False, byte_order='big') -> bytes`
 
-Native `crypto` operation. Limits and timeout arguments are validated before work begins.
+Encrypts or decrypts complete 8-byte XTEA blocks with a 16-byte key and the selected word byte order. Returns bytes without padding or authentication.
 
 ### `database.ese`
 
 `database.ese(file) -> ESE database`
 
-Native `database` operation. Limits and timeout arguments are validated before work begins.
+Parses an Extensible Storage Engine database into inspectable tables and records. It is a file-format reader, not a host ESE engine or SQL connection.
 
 ### `database.ese_build`
 
 `database.ese_build(tables, database_pages=0, sort_data=None) -> file`
 
-Native `database` operation. Limits and timeout arguments are validated before work begins.
+Builds an ESE database file from declarative tables, optionally controlling database page allocation and sort data. Construction stays in memory.
 
 ### `database.sqlite`
 
-`database.sqlite(...)`
+`database.sqlite(file, wal=None) -> SQLite database`
 
-Native `database` operation. Limits and timeout arguments are validated before work begins.
+Parses a SQLite database, optionally applying a supplied WAL view, and exposes schema and table rows. It does not execute arbitrary SQL through a host SQLite process.
 
 ### `database.sqlite_build`
 
-`database.sqlite_build(...)`
+`database.sqlite_build(objects, page_size=4096, encoding=1, user_version=0, application_id=0) -> file`
 
-Native `database` operation. Limits and timeout arguments are validated before work begins.
+Builds a SQLite database file from declarative schema and row data. The output can be embedded in an image without invoking a host database engine.
 
 ### `debug.disassemble`
 
 `debug.disassemble(data, address=0, architecture='i386', maximum=64MiB, count=-1); architectures: i8086/x86-16, i386/x86, amd64/x86_64`
 
-Native `debug` operation. Limits and timeout arguments are validated before work begins.
+Decodes machine-code bytes into instruction records at a supplied base address. Supports the listed 16-, 32- and 64-bit x86 modes; count bounds returned instructions.
 
 ### `debug.gdb`
 
 `debug.gdb(channel, memory_limit=64MiB, stop_queue=256, timeout=15)`
 
-Native `debug` operation. Limits and timeout arguments are validated before work begins.
+Connects a GDB remote-protocol session over an existing byte channel. The returned session controls the target and reads structured stops, registers and memory without launching a host debugger.
 
 ### `debug.select`
 
 `debug.select(values, timeout=-1)`
 
-Native `debug` operation. Limits and timeout arguments are validated before work begins.
+Waits until one of the supplied selectable values is ready, returning that value, or None on timeout. Read the event from the returned source separately; selection itself does not consume the event.
 
 ### `emulator.machine`
 
-`emulator.machine(...)`
+`emulator.machine(image|code, architecture='auto', **architecture_options) -> emulator`
 
-Native `emulator` operation. Limits and timeout arguments are validated before work begins.
+Creates an in-process machine for the input's supported architecture, using native instruction execution and modeled Windows API callbacks. Instruction and memory limits bound execution; this is not a QEMU VM.
 
 ### `emulator.plugin`
 
-`emulator.plugin(...)`
+`emulator.plugin(install, name='plugin', state=None, attrs=None) -> plugin`
 
-Native `emulator` operation. Limits and timeout arguments are validated before work begins.
+Wraps explicit mutable plugin state and its installation callback for emulator use. Keep checkpointed callback state here rather than hiding it in closures.
 
 ### `emulator.x86`
 
 `emulator.x86(image|code, base=0x1000, entry=None, instruction_limit=2M, memory_limit=32MiB, stack_size=1MiB, call_depth_limit=1024, trace=False, trace_limit=4096, profile=False, profile_interval=256, profile_limit=16384, image_name='main', fs_base=0, segment_size=4096)`
 
-Native `emulator` operation. Limits and timeout arguments are validated before work begins.
+Creates a bounded 32-bit x86 execution context from a PE image or raw code. Exposes guest registers, memory, hooks and snapshots; unsupported behavior returns structured stops rather than executing host code.
 
 ### `filesystem.fat`
 
-`filesystem.fat(...)`
+`filesystem.fat(file) -> FAT filesystem`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+Parses an existing FAT volume into a filesystem view. Use fat12, fat16 or fat32 with a directory to construct a new volume.
 
 ### `filesystem.fat12`
 
 `filesystem.fat12(directory, size, boot_code=None, hidden_sectors=0, label='NO NAME', file_order=[], directory_label=True, extended_bpb=False, chs=None) -> file`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+Builds a FAT12 volume from a directory with the requested size, boot metadata and file order. The returned file is an in-memory image, not a mounted filesystem.
 
 ### `filesystem.fat16`
 
 `filesystem.fat16(directory, size, boot_code=None, hidden_sectors=0, label='NO NAME', file_order=[], directory_label=True, extended_bpb=True, chs=None) -> file`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+Builds a FAT16 volume from a directory, preserving supported attributes and requested boot metadata. Geometry and hidden-sector fields must match the surrounding disk layout.
 
 ### `filesystem.fat32`
 
-`filesystem.fat32(...)`
+`filesystem.fat32(directory, size, boot_code=None, hidden_sectors=0, label='NO NAME', boot_stage_sector=14, file_order=[], directory_label=True, chs=None) -> file`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+Builds a FAT32 volume from a directory and requested layout options. It produces a volume file for composition into a disk rather than writing or formatting a host device.
 
 ### `filesystem.gpt`
 
 `filesystem.gpt(file) -> parsed GPT; filesystem.gpt(size, disk_guid=...) -> builder`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+With a file, parses GPT partition metadata; with a size, creates a partition-table builder. Populate the builder with partition contents to produce a complete disk layout.
 
 ### `filesystem.host`
 
-`filesystem.host(...)`
+`filesystem.host(root) -> host filesystem`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+Exposes a host directory through the native filesystem backend. This is a host-path boundary, not an image parser or a portable replacement for an in-memory directory.
 
 ### `filesystem.iso9660`
 
-`filesystem.iso9660(...)`
+`filesystem.iso9660(file) -> ISO filesystem`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+Parses an ISO 9660 filesystem and exposes its directory tree and file views. It does not mount the image or copy its contents to the host.
 
 ### `filesystem.mbr`
 
 `filesystem.mbr(file) -> parsed MBR; filesystem.mbr(size, boot_code=None, disk_signature=0, chs=None) -> builder`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+With a file, parses the MBR and partitions; with a disk size, creates a builder with optional boot code, signature and CHS geometry. Partition payloads remain caller-supplied.
 
 ### `filesystem.ntfs`
 
 `filesystem.ntfs(source, size=None, boot_code=None, hidden_sectors=0, label='NO NAME', version='1.1', log_file=None, upcase=None, upcase_profile='default')`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+Parses an NTFS volume when given a file, or builds one from a directory and size. Construction accepts explicit NTFS generation, boot metadata, log and upcase data so older NT layouts need not inherit modern defaults.
 
 ### `filesystem.udf`
 
-`filesystem.udf(...)`
+`filesystem.udf(file) -> UDF filesystem`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+Parses a UDF filesystem into directory and file views. Reads resolve the filesystem's on-disk structures without mounting it.
 
 ### `filesystem.vhdx`
 
-`filesystem.vhdx(...)`
+`filesystem.vhdx(file) -> VHDX disk`
 
-Native `filesystem` operation. Limits and timeout arguments are validated before work begins.
+Parses a VHDX container and exposes its logical disk contents. This unwraps the virtual-disk format; parse the returned disk's partitions/filesystems separately.
 
 ### `firmware.acpi_compatible_id`
 
 `firmware.acpi_compatible_id(device, compatible_id)`
 
-Native `firmware` operation. Limits and timeout arguments are validated before work begins.
+Builds a complete SSDT file that assigns an ACPI compatible ID to the selected device. The output includes the ACPI header and checksum and can be supplied directly to qemu.acpi_table.
 
 ### `firmware.acpi_table`
 
 `firmware.acpi_table(signature, body, revision=2, oem_id='TREXOS', oem_table_id='TREXACPI', oem_revision=1, creator_id='TREX', creator_revision=1)`
 
-Native `firmware` operation. Limits and timeout arguments are validated before work begins.
+Wraps an ACPI table body with the requested signature, revision and OEM/creator identifiers, computing its checksum. Returns a table file for use by a VM backend.
 
 ### `html.escape`
 
-`html.escape(...)`
+`html.escape(value) -> string`
 
-Native `html` operation. Limits and timeout arguments are validated before work begins.
+Escapes special characters in text for HTML output. This is text escaping, not sanitization of an existing HTML document.
 
 ### `html.unescape`
 
-`html.unescape(...)`
+`html.unescape(value) -> string`
 
-Native `html` operation. Limits and timeout arguments are validated before work begins.
+Decodes HTML character references in a string. It does not parse or validate markup.
 
 ### `image.compare`
 
 `image.compare(left, right, threshold=8, maximum=128MiB, max_pixels=16MiP) -> record`
 
-Native `image` operation. Limits and timeout arguments are validated before work begins.
+Compares decoded images and returns difference measurements using the specified per-pixel threshold. Pixel differences alone are not proof that a guest application launched successfully.
 
 ### `image.info`
 
 `image.info(source, maximum=128MiB, max_pixels=16MiP) -> record`
 
-Native `image` operation. Limits and timeout arguments are validated before work begins.
+Decodes image metadata and returns dimensions and format information within input and pixel-count bounds.
 
 ### `image.pixel`
 
 `image.pixel(source, x, y, maximum=128MiB, max_pixels=16MiP) -> record`
 
-Native `image` operation. Limits and timeout arguments are validated before work begins.
+Returns the color of one decoded image pixel at x,y. Coordinates must be inside the image; input size and decoded pixel limits apply.
 
 ### `json.decode`
 
 `json.decode(value, maximum=64MiB) -> value`
 
-Native `json` operation. Limits and timeout arguments are validated before work begins.
+Parses bounded JSON input into Starlark dictionaries, lists and scalar values. Invalid JSON produces an error.
 
 ### `json.encode`
 
-`json.encode(...)`
+`json.encode(value, indent=None) -> string`
 
-Native `json` operation. Limits and timeout arguments are validated before work begins.
+Serializes a supported Starlark value as JSON text. Values that have no JSON representation fail rather than being stringified implicitly.
 
 ### `path.base`
 
 `path.base(path) -> string`
 
-Native `path` operation. Limits and timeout arguments are validated before work begins.
+Returns the last component of a logical path. It operates on path text and does not access the filesystem.
 
 ### `path.clean`
 
 `path.clean(path) -> logical absolute path`
 
-Native `path` operation. Limits and timeout arguments are validated before work begins.
+Normalizes a logical path, resolving separators and dot components into the library's absolute-path form. It does not resolve symlinks or check host existence.
 
 ### `path.dir`
 
 `path.dir(path) -> logical directory path`
 
-Native `path` operation. Limits and timeout arguments are validated before work begins.
+Returns the containing directory of a logical path. This is lexical path manipulation, not a filesystem lookup.
 
 ### `path.ext`
 
 `path.ext(path) -> extension`
 
-Native `path` operation. Limits and timeout arguments are validated before work begins.
+Returns the final filename extension, including its leading dot, or an empty string when none exists.
 
 ### `path.from_windows`
 
-`path.from_windows(...)`
+`path.from_windows(path) -> string`
 
-Native `path` operation. Limits and timeout arguments are validated before work begins.
+Converts a Windows-style path into the library's logical slash-separated path representation. It does not translate it into a host path or access a drive.
 
 ### `path.join`
 
-`path.join(...)`
+`path.join(*parts) -> string`
 
-Native `path` operation. Limits and timeout arguments are validated before work begins.
+Joins logical path components and normalizes the result. The operation is independent of the host operating system's path rules.
 
 ### `qemu.acpi_table`
 
 `qemu.acpi_table(file)`
 
-Native `qemu` operation. Limits and timeout arguments are validated before work begins.
+Creates a QEMU backend descriptor for an ACPI table file. The table is supplied through the backend when the VM starts.
 
 ### `qemu.audiodev`
 
-`qemu.audiodev(...)`
+`qemu.audiodev(name, **properties) -> qemu_audiodev`
 
-Native `qemu` operation. Limits and timeout arguments are validated before work begins.
+Creates a QEMU audio-backend descriptor from its name and properties. It is configuration data; creating it does not start audio or launch QEMU.
 
 ### `qemu.backend`
 
 `qemu.backend(binary='', machine='pc', accelerator='auto', display_frontend='auto', block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[])`
 
-Native `qemu` operation. Limits and timeout arguments are validated before work begins.
+Creates a QEMU implementation of the portable VMM backend with selected machine, acceleration, devices and transport policies. A separate vmm.start call launches the guest.
 
 ### `qemu.chardev`
 
 `qemu.chardev(name, **properties)`
 
-Native `qemu` operation. Limits and timeout arguments are validated before work begins.
+Creates a QEMU character-device backend descriptor from a backend name and properties. Use it in qemu.backend configuration.
 
 ### `qemu.device`
 
 `qemu.device(name, **properties)`
 
-Native `qemu` operation. Limits and timeout arguments are validated before work begins.
+Creates a QEMU device descriptor from a device model and properties. This is backend-specific configuration, not an already-running device.
 
 ### `qemu.extension`
 
 `qemu.extension(vm)`
 
-Native `qemu` operation. Limits and timeout arguments are validated before work begins.
+Returns the QEMU-specific control extension for an existing VM, including QMP/HMP and block statistics. Use portable VM methods when backend-specific control is unnecessary.
 
 ### `qemu.netdev`
 
 `qemu.netdev(name, **properties)`
 
-Native `qemu` operation. Limits and timeout arguments are validated before work begins.
+Creates a QEMU network-backend descriptor with the supplied properties. It does not independently create a host network interface.
 
 ### `qemu.option`
 
 `qemu.option(name, value=None); -d accepts a list of debug event names`
 
-Native `qemu` operation. Limits and timeout arguments are validated before work begins.
+Creates a supported QEMU command-line option descriptor. The backend validates and translates it at launch; it is not a shell command.
 
 ### `regexp.compile`
 
-`regexp.compile(...)`
+`regexp.compile(pattern) -> regexp`
 
-Native `regexp` operation. Limits and timeout arguments are validated before work begins.
+Compiles a regular expression into a reusable matching object. Invalid patterns fail at compilation rather than at the first match.
 
 ### `renvo.cc`
 
 `renvo.cc(source, input, target, flags=[], arena_size=32MiB) -> compiledModule; input is a virtual source path or list of paths`
 
-Native `renvo` operation. Limits and timeout arguments are validated before work begins.
+Compiles virtual C/C++ sources with the in-process Renvo toolchain for the selected target. Returns a compiledModule containing success/diagnostic information and virtual output bytes.
 
 ### `renvo.go`
 
 `renvo.go(source, input, target, arena_size=32MiB) -> compiledModule`
 
-Native `renvo` operation. Limits and timeout arguments are validated before work begins.
+Compiles a virtual Go source tree with Renvo for the selected target. Returns compilation status and outputs without invoking a host Go compiler.
 
 ### `renvo.make`
 
 `renvo.make(source, target, input='Makefile', targets=[], output='', arena_size=32MiB) -> compiledModule; rebuilds Renvo recipes in memory; output selects the binary by virtual path relative to the Makefile`
 
-Native `renvo` operation. Limits and timeout arguments are validated before work begins.
+Evaluates supported Renvo make recipes against a virtual source tree and rebuilds their outputs in memory. output selects the desired binary relative to the Makefile; no host make process is launched.
 
 ### `runtime.stats`
 
 `runtime.stats() -> record`
 
-Native `runtime` operation. Limits and timeout arguments are validated before work begins.
+Returns a snapshot of runtime resource statistics for diagnostics and benchmarking. Counters describe the running runtime, not just one image recipe.
 
 ### `testing.attempt`
 
-`testing.attempt(...)`
+`testing.attempt(callback, args=None, kwargs=None) -> record(ok, value, error)`
 
-Native `testing` operation. Limits and timeout arguments are validated before work begins.
+Calls a function with supplied positional and keyword arguments and captures success or failure in an ok/value/error record. It does not roll back side effects performed before an error.
 
 ### `testing.module`
 
-`testing.module(...)`
+`testing.module(label) -> dict`
 
-Native `testing` operation. Limits and timeout arguments are validated before work begins.
+Loads a module label and returns its globals as a dictionary. Used by the portable test runner to discover tests through the normal module loader.
 
 ### `url.path_escape`
 
-`url.path_escape(...)`
+`url.path_escape(value) -> string`
 
-Native `url` operation. Limits and timeout arguments are validated before work begins.
+Percent-encodes text for use as one URL path segment. It is not query-string encoding or whole-URL normalization.
 
 ### `url.path_unescape`
 
-`url.path_unescape(...)`
+`url.path_unescape(value) -> string`
 
-Native `url` operation. Limits and timeout arguments are validated before work begins.
+Decodes percent escapes in URL path text. Malformed escape sequences produce an error.
 
 ### `vmm.backends`
 
 `vmm.backends()`
 
-Native `vmm` operation. Limits and timeout arguments are validated before work begins.
+Lists the VMM backends registered in this runtime and their advertised capabilities. Availability depends on the runtime's backend implementations.
 
 ### `vmm.channel`
 
 `vmm.channel(kind, name, required=True)`
 
-Native `vmm` operation. Limits and timeout arguments are validated before work begins.
+Describes a named VM byte channel of the requested kind. required determines whether lack of backend support is a validation failure.
 
 ### `vmm.disk`
 
 `vmm.disk(source, name='disk0', bus='auto', media='disk', unit=-1, chs=None, read_only=None, snapshot=False, required=True)`
 
-Native `vmm` operation. Limits and timeout arguments are validated before work begins.
+Describes a guest disk or optical medium backed by a file or block device, including bus, unit and write/snapshot policy. It does not boot or materialize the source.
 
 ### `vmm.display`
 
 `vmm.display(mode, required=True)`
 
-Native `vmm` operation. Limits and timeout arguments are validated before work begins.
+Describes the requested guest display mode and whether support is mandatory. This is part of a portable machine specification.
 
 ### `vmm.machine`
 
 `vmm.machine(architecture, memory, cpus=1, disks=[], networks=[], display=vmm.display('none'), channels=[], start_paused=False, required_capabilities=[])`
 
-Native `vmm` operation. Limits and timeout arguments are validated before work begins.
+Creates a portable machine specification from architecture, memory, CPUs, storage, networking and channels. It does not start a VM.
 
 ### `vmm.network`
 
 `vmm.network(kind, name='net0', required=True)`
 
-Native `vmm` operation. Limits and timeout arguments are validated before work begins.
+Describes a named guest network connection and whether its requested kind is required. The selected backend implements the transport.
 
 ### `vmm.start`
 
 `vmm.start(machine, backend)`
 
-Native `vmm` operation. Limits and timeout arguments are validated before work begins.
+Validates a machine specification against a backend and starts a VM. Returns the live VM handle used for input, screenshots, events and lifecycle control.
 
 ### `vmm.validate`
 
 `vmm.validate(machine, backend)`
 
-Native `vmm` operation. Limits and timeout arguments are validated before work begins.
+Checks whether a backend can implement a machine specification and its required capabilities without launching it. Use this before committing to a boot experiment.
 
 ### `web.file`
 
-`web.file(...)`
+`web.file(file, name='download', status=200, headers={}) -> response`
 
-Native `web` operation. Limits and timeout arguments are validated before work begins.
+Builds an HTTP response that serves a file, optionally with a download name, status and headers. Constructing the response does not start a web server.
 
 ### `web.redirect`
 
-`web.redirect(...)`
+`web.redirect(location, status=303) -> response`
 
-Native `web` operation. Limits and timeout arguments are validated before work begins.
+Builds an HTTP redirect response with a Location header and selected redirect status. It does not follow the redirect.
 
 ### `web.response`
 
-`web.response(...)`
+`web.response(body='', status=200, headers={}) -> response`
 
-Native `web` operation. Limits and timeout arguments are validated before work begins.
+Builds an HTTP response from body, status and headers for the web runtime to send.
 
 ### `web.zip`
 
-`web.zip(...)`
+`web.zip(filesystem, path, name='download.zip') -> response`
 
-Native `web` operation. Limits and timeout arguments are validated before work begins.
+Builds a downloadable ZIP response for a directory in a supplied virtual filesystem. Packaging is handled in-process rather than by a host archiver.
 
 ### `windows.assembly_manifest`
 
-`windows.assembly_manifest(...)`
+`windows.assembly_manifest(value) -> record(identity, files)`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Parses an assembly manifest XML value into identity attribute records and declared file records, including hashes and hash algorithms. It does not install a side-by-side assembly or verify those hashes.
 
 ### `windows.catalog_hash`
 
 `windows.catalog_hash(file, algorithm='sha1')`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Computes the Windows catalog membership hash of a file. For PE inputs this uses the format's Authenticode hashing rules rather than a plain whole-file digest.
 
 ### `windows.catalog_members`
 
 `windows.catalog_members(value)`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Reads a PKCS#7 catalog and returns its member digest byte strings. Extracting membership does not verify the catalog signature or establish certificate trust.
 
 ### `windows.certificate`
 
-`windows.certificate(...)`
+`windows.certificate(value) -> certificate record`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Parses one DER X.509 certificate and returns its DER bytes, subject, issuer, SHA-1 fingerprint and a subject/issuer-equality flag named self_signed. That flag is not cryptographic signature verification.
+
+### `windows.clone_file_entries`
+
+`windows.clone_file_entries(entries) -> dict`
+
+Copies a path-to-metadata dictionary and each entry dictionary, preserving insertion order. The two dictionary layers are independently mutable; file sources and other field values remain shared and are not read.
 
 ### `windows.creg_compare`
 
 `windows.creg_compare(left, right) -> structural difference report`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Compares two Windows 9x CREG registry files structurally and returns a difference report. This avoids treating different physical record layouts as necessarily different registry contents.
 
 ### `windows.creg_from_patches`
 
 `windows.creg_from_patches(name, patches, keys=[], state=1, generation='windows95') -> file`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Constructs a Windows 9x CREG registry file from a name, value patches and optional key records. generation selects the intended Windows 9x layout; this is not an NT REGF hive writer.
 
 ### `windows.creg_keys`
 
 `windows.creg_keys(file) -> list[list[string]]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Returns the key paths represented by a Windows 9x CREG registry file as lists of path components. Empty keys can therefore be preserved independently of value patches.
 
 ### `windows.creg_patches`
 
 `windows.creg_patches(file) -> list[dict]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Converts values in a Windows 9x CREG registry file into declarative registry patch dictionaries. Use creg_keys as well when reconstructing empty keys.
 
 ### `windows.csp_registrations`
 
 `windows.csp_registrations(file, strict=True)`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Derives CryptoAPI provider-registration arguments from a 32-bit provider DLL without assigning registry paths or defaults. strict=False returns an empty list for unrecognized registration code; malformed input still fails. The provider is not executed.
 
 ### `windows.empty_event_log`
 
-`windows.empty_event_log(...)`
+`windows.empty_event_log(size=5MiB) -> file`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Constructs a valid empty legacy Windows event-log file of the requested size. This creates an EVT-format starting state, not an EVTX log.
 
 ### `windows.event_log`
 
-`windows.event_log(...)`
+`windows.event_log(file) -> list[dict]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Parses legacy EVT or supported EVTX event-log input into event records. The format is detected from the file; this does not query the host's event-log service.
 
 ### `windows.font_names`
 
-`windows.font_names(...)`
+`windows.font_names(file) -> list[string]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Extracts full font-name strings from supported OpenType/TrueType files, including collections. Returns a list of names without installing or rendering the font.
 
 ### `windows.hive`
 
-`windows.hive(...)`
+`windows.hive(file) -> registry hive`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Parses an NT REGF registry hive and returns a read-only key/value inspection object. Use hive_from_patches to construct a hive and patch_hive to produce an edited copy.
 
 ### `windows.hive_from_patches`
 
-`windows.hive_from_patches(...)`
+`windows.hive_from_patches(name, patches, keys=None, format=None) -> file`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Builds an NT registry hive from declarative value patches and optional key records. format controls the supported on-disk generation; security and key metadata remain caller-supplied policy.
 
 ### `windows.hive_keys`
 
-`windows.hive_keys(...)`
+`windows.hive_keys(file, metadata=False) -> list`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Enumerates an NT hive's key paths, optionally including key metadata. This preserves keys that have no values when exporting a hive for reconstruction.
 
 ### `windows.hive_log`
 
-`windows.hive_log(...)`
+`windows.hive_log(file) -> file`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Constructs the transaction-log companion for the supplied NT hive. The result is a new file; it does not replay a host registry log.
 
 ### `windows.hive_patches`
 
-`windows.hive_patches(...)`
+`windows.hive_patches(file, raw=False) -> list[dict]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Exports an NT hive's values as declarative patches. raw requests raw value representations, useful when preserving types or bytes that should not be interpreted as text.
 
 ### `windows.hives_from_inf`
 
-`windows.hives_from_inf(...)`
+`windows.hives_from_inf(inf, txtsetup=None, extra=None, patches=None, format=None) -> dict`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Builds registry hives from setup INF data with optional TXTSETUP context, extra inputs and patches. format selects the hive generation; the function does not boot Windows or execute setup.
 
 ### `windows.icon`
 
 `windows.icon(file, index=0, width=32, height=32)`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Selects an icon image from an ICO, PE or NE file using its index and requested dimensions. Returns image bytes with actual dimensions, bit depth and resource identity; it does not launch or render the executable.
 
 ### `windows.inf`
 
-`windows.inf(...)`
+`windows.inf(file) -> INF`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Parses a Windows INF file into section and entry data, with helpers for install sections and registry patches. This is declarative inspection, not execution of every installer directive.
 
 ### `windows.inf_patches`
 
-`windows.inf_patches(...)`
+`windows.inf_patches(inf, hive, section='AddReg') -> list[dict]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Converts a selected INF registry section into patches for the named hive. Returns modifications for later construction rather than changing an existing hive.
 
 ### `windows.internet_shortcut`
 
-`windows.internet_shortcut(...)`
+`windows.internet_shortcut(url, icon_location='', icon_index=0) -> bytes`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Builds InternetShortcut (.url) bytes for a URL with optional icon location and index. It creates the shortcut contents but does not fetch or open the URL.
 
 ### `windows.kd`
 
 `windows.kd(channel, architecture='i386', packet_limit=65535, memory_limit=64MiB, event_queue=512)`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Creates a Windows kernel-debugging protocol session over an existing byte channel. The session exposes packets, events, context and memory operations, bounded by the configured protocol limits.
 
 ### `windows.minidump`
 
-`windows.minidump(...)`
+`windows.minidump(file) -> minidump`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Parses a Windows minidump into inspectable dump streams and associated metadata. It operates on the supplied file and does not attach to a live process.
+
+### `windows.module_sources`
+
+`windows.module_sources(files, exclude=[]) -> dict`
+
+Indexes a path-to-source dictionary by normalized DLL basename without reading sources. Matching is case-insensitive, both slash styles are accepted, extensionless basenames gain .dll, and the first non-excluded match wins.
 
 ### `windows.mof`
 
-`windows.mof(...)`
+`windows.mof(value) -> MOF document`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Parses Managed Object Format source into a structured document containing its declarations. Pass documents to wmi_repository to construct repository files; parsing alone does not register classes with a running service.
 
 ### `windows.msc_snapins`
 
-`windows.msc_snapins(...)`
+`windows.msc_snapins(file) -> list[string]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Extracts snap-in identifiers referenced by an MMC console file. Use the identifiers to select registration metadata; the function does not launch MMC.
 
 ### `windows.ne_fastboot`
 
 `windows.ne_fastboot(modules, overlay_path='C:\\WINDOWS\\WIN100.OVL', maximum=64MiB) -> {bin, overlay}`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Constructs the Windows NE fast-boot binary and overlay from supplied modules, returning bin and overlay files. overlay_path is the guest-visible location to encode, not a host output path.
 
 ### `windows.patch_hive`
 
-`windows.patch_hive(...)`
+`windows.patch_hive(file, patches, root_name='') -> file`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Applies declarative registry patches to an NT hive and returns a new file, optionally replacing the root name. The input hive is not edited in place.
 
 ### `windows.pdb`
 
 `windows.pdb(file, stream_limit=256MiB)`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Parses a PDB symbol file with bounded stream sizes. Exposes identity and symbols, including lookup of the nearest symbol to an RVA; symbol parsing does not download files automatically.
 
 ### `windows.pe`
 
-`windows.pe(...)`
+`windows.pe(file) -> windows.pe`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Creates a lazy inspection object for a PE32 or PE32+ file. Metadata and data share an owned immutable snapshot; read uses RVAs, while patch returns a separate modified file.
 
 ### `windows.pe32_executable`
 
-`windows.pe32_executable(...)`
+`windows.pe32_executable(section, labels, fixups, imports=None, entry='entry', image_base=0x400000) -> bytes`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Links a labeled section, fixups and optional imports into a minimal PE32 executable. The caller supplies instruction bytes and policy; the builder lays out headers, RVAs and imports and checks fixup bounds.
 
 ### `windows.pkcs7_certificates`
 
-`windows.pkcs7_certificates(...)`
+`windows.pkcs7_certificates(value) -> list[certificate record]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Extracts distinct embedded DER certificates from PKCS#7/CMS input, including legacy catalogs. Returns certificate records; extraction is deliberately separate from signature or trust verification.
 
 ### `windows.reactos_record`
 
 `windows.reactos_record(kind, fields) -> bytes`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Encodes a named ReactOS binary-record kind from declarative fields. Layout and field validation stay in Go while values and operating-system policy remain with the caller.
+
+### `windows.registration_expand`
+
+`windows.registration_expand(value, replacements) -> value`
+
+Expands percent-delimited registration variables in replacement-dictionary order, uppercase token then lowercase token, for at most four passes. Unknown tokens remain unchanged and non-string inputs pass through; this is not general case-insensitive environment expansion.
+
+### `windows.registry_children`
+
+`windows.registry_children(entries, hive, key, values=False) -> dict`
+
+Selects direct children from a self-registration registry-state dictionary. values=True selects direct values; otherwise it derives immediate subkeys, without changing the input or recursively returning descendants.
+
+### `windows.registry_partition`
+
+`windows.registry_partition(entries, hive, key, values=False) -> tuple(selected, retained)`
+
+Splits a self-registration registry-state dictionary into selected and retained dictionaries for a hive subtree. values selects the value-identity layout; ordering and payload identity are preserved, and neither result aliases the input dictionary.
 
 ### `windows.selfreg_patches`
 
-`windows.selfreg_patches(...)`
+`windows.selfreg_patches(file, module) -> list[dict]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Derives registry patches from supported self-registration resources in a PE file or windows.pe object, using module for path substitutions. It does not emulate DllRegisterServer; use the self-registration policy/runner for runtime effects.
 
 ### `windows.setver`
 
 `windows.setver(source, name, major, minor, maximum=16MiB) -> file`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Returns a SETVER driver image with the named executable's reported DOS version added or updated. The original source remains unchanged and maximum bounds the processed image.
 
 ### `windows.shortcut`
 
-`windows.shortcut(...)`
+`windows.shortcut(target, short_target='', description='', arguments='', working_dir='', icon_location='', icon_index=0, target_size=0, system_root='') -> bytes`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Builds Windows Shell Link (.lnk) bytes for a target with optional arguments, working directory, description and icon metadata. It serializes a shortcut; it does not resolve or launch its target on the host.
 
 ### `windows.symbol_server`
 
 `windows.symbol_server(base_url, name, key, guid=None, age=None, maximum=256MiB, timeout=45)`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Retrieves a symbol file from a symbol-server layout using its name and identity key, with optional PDB GUID/age validation. maximum and timeout bound the download; windows.pdb parses the result.
 
 ### `windows.utf16_strings`
 
-`windows.utf16_strings(...)`
+`windows.utf16_strings(file, minimum=4) -> list[string]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Scans a file for printable UTF-16LE strings meeting the minimum length. Returns extracted strings rather than decoding the entire file as text.
 
 ### `windows.win9x_vxd_library`
 
 `windows.win9x_vxd_library(base, members, exclude=[]) -> file`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Builds a Windows 9x VxD library from a base and supplied members, excluding requested names. Returns the constructed file rather than installing drivers.
 
 ### `windows.win9x_vxd_library_members`
 
 `windows.win9x_vxd_library_members(file) -> list[string]`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Lists the member names contained in a Windows 9x VxD library. It provides inventory without writing member files to the host.
 
 ### `windows.win9x_vxd_unpack`
 
 `windows.win9x_vxd_unpack(file) -> file`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Decodes the supported compressed Windows 9x VxD container into an unpacked file. The result can be inspected or rebuilt without a host conversion tool.
 
 ### `windows.wmi_repository`
 
 `windows.wmi_repository(files=None, documents=None, default_namespace='root\cimv2', server_name='')`
 
-Native `windows` operation. Limits and timeout arguments are validated before work begins.
+Either parses supplied repository files or constructs repository files from parsed MOF documents; exactly one input mode is required. Construction uses default_namespace and server_name to resolve repository identities without running WMI.
 
 ### `ar` value
+
+An ordered ar member inventory. entries/files expose member records and file views; find(name, occurrence=0) selects a particular occurrence when an archive repeats a member name.
 
 Methods and attributes: `entries`, `files`, `find(name, occurrence=0)`.
 
 ### `ar_entry` value
 
+One ar member, combining ownership, mode and timestamp metadata with a file view of its payload. Byte reads and slices operate on this member, not on the enclosing archive.
+
 Methods and attributes: `binary`, `bytes`, `gid`, `hex`, `mode`, `mtime`, `name`, `read`, `size`, `slice`, `uid`.
 
 ### `binary.builder` value
+
+A mutable, bounded byte buffer. append and scalar methods grow it; reserve adds filled space, align adds padding, and patch methods replace existing ranges. bytes() materializes the result and file() exposes it as a file.
 
 Methods and attributes: `align(alignment, fill=0)`, `append(value)`, `bytes()`, `f32be(value)`, `f32le(value)`, `f64be(value)`, `f64le(value)`, `file()`, `i16be(value)`, `i16le(value)`, `i32be(value)`, `i32le(value)`, `i64be(value)`, `i64le(value)`, `i8(value)`, `patch(offset, value)`, `patch_f32be(offset, value)`, `patch_f32le(offset, value)`, `patch_f64be(offset, value)`, `patch_f64le(offset, value)`, `patch_i16be(offset, value)`, `patch_i16le(offset, value)`, `patch_i32be(offset, value)`, `patch_i32le(offset, value)`, `patch_i64be(offset, value)`, `patch_i64le(offset, value)`, `patch_i8(offset, value)`, `patch_u16be(offset, value)`, `patch_u16le(offset, value)`, `patch_u32be(offset, value)`, `patch_u32le(offset, value)`, `patch_u64be(offset, value)`, `patch_u64le(offset, value)`, `patch_u8(offset, value)`, `reserve(size, fill=0)`, `size`, `u16be(value)`, `u16le(value)`, `u32be(value)`, `u32le(value)`, `u64be(value)`, `u64le(value)`, `u8(value)`.
 
 ### `binary.cursor` value
 
+A sequential reader with an explicit byte offset. Scalar methods and bytes(size) advance the cursor; seek sets an absolute position, skip moves relatively, and align advances to an alignment boundary. remaining reports unread bytes.
+
 Methods and attributes: `align(alignment)`, `bytes(size)`, `f32be()`, `f32le()`, `f64be()`, `f64le()`, `i16be()`, `i16le()`, `i32be()`, `i32le()`, `i64be()`, `i64le()`, `i8()`, `offset`, `remaining`, `seek(offset)`, `skip(size)`, `u16be()`, `u16le()`, `u32be()`, `u32le()`, `u64be()`, `u64le()`, `u8()`.
 
 ### `binary.layout` value
+
+A fixed-size binary record layout. decode reads a record from a source offset; encode serializes supplied field values using the same layout. size is the encoded byte width.
 
 Methods and attributes: `decode(source, offset=0)`, `encode(values)`, `size`.
 
 ### `binary.xml_document` value
 
+An immutable parsed XML document. root exposes its element tree; with_root returns a new document and bytes serializes it within an output bound.
+
 Methods and attributes: `bytes(maximum=16MiB)`, `root`, `with_root(root)`.
 
 ### `binary.xml_node` value
+
+An immutable namespace-aware element. child/children_named select direct children and attribute performs a named lookup; direct_text excludes descendants while text includes their text. with_children and with_text return edited nodes without changing the original.
 
 Methods and attributes: `attribute(name, default=None, namespace='')`, `attributes`, `bytes(maximum=16MiB)`, `child(name, namespace='')`, `children`, `children_named(name, namespace='')`, `direct_text`, `name`, `namespace`, `prefix`, `qualified_name`, `text`, `with_children(children)`, `with_text(text)`.
 
 ### `block_device` value
 
+A random-access block device with declared geometry and capabilities. read/write, zero and trim address byte ranges; extents reports range layout, flush requests durability, and snapshot/commit are available only where supported. stats exposes backend counters.
+
 Methods and attributes: `capabilities`, `commit()`, `extents(offset, length)`, `flush()`, `geometry`, `read(offset, size)`, `size`, `snapshot()`, `stats`, `trim(offset, length)`, `write(offset, value)`, `zero(offset, length)`.
 
 ### `byte_channel` value
+
+An owned bidirectional byte transport. read requests a specified amount, read_some returns available bytes within its bound/timeout, write sends bytes, and close releases the endpoint. Channel operations do not imply any particular wire protocol.
 
 Methods and attributes: `close()`, `name`, `read(size, maximum=8MiB)`, `read_some(maximum=64KiB, timeout=30)`, `write(value)`.
 
 ### `byte_view` value
 
+A bounded random-access view of binary data. slice derives a subview, bytes reads a range, find returns a match position, find_all collects bounded matches, and find_indices searches several needles. compare performs the requested binary comparison without advancing a cursor.
+
 Methods and attributes: `bytes(offset=0, size=remaining)`, `compare(other, signed=False, exact=False)`, `find(needle, start=0, end=size)`, `find_all(needle, start=0, end=size, limit=1M)`, `find_indices(needles, start=0, end=size)`, `size`, `slice(offset=0, size=remaining)`.
 
 ### `clock.profiler` value
+
+An explicit instrumentation collector. span/end time a region, measure wraps a call and counter adds a named quantity. snapshot exposes current measurements and report applies the requested coverage criterion.
 
 Methods and attributes: `counter(name, amount=1)`, `measure(name, function, *args, **kwargs)`, `report(minimum_coverage=0.95)`, `snapshot()`, `span(name)`.
 
 ### `clock.span` value
 
+An open timed region belonging to a profiler. end() closes the region and returns its elapsed duration in seconds.
+
 Methods and attributes: `end() -> elapsed seconds`.
 
 ### `compiledModule` value
 
+A compilation result rather than an automatically executed program. Check ok and diagnostic before using binary; outputs maps virtual output names to immutable bytes.
+
 Methods and attributes: `binary`, `diagnostic`, `ok`, `outputs (immutable dict of virtual output names to bytes)`.
 
+### `crypto.hasher` value
+
+A mutable incremental digest. update feeds binary input, sum returns the current digest without clearing state, and reset discards accumulated input. Frozen hashers cannot be updated or reset.
+
+Methods and attributes: `reset()`, `sum()`, `update(value)`.
+
 ### `directory` value
+
+A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
 Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_security(name, descriptor)`, `write(name, value)`.
 
 ### `emulator.execution` value
 
+A retained in-process execution that can be advanced with a bounded run. done distinguishes completed execution from a suspended one; close releases it and closed records that lifecycle state. It is not a QEMU snapshot.
+
 Methods and attributes: `close()`, `closed`, `done`, `run(instruction_limit=0)`.
+
+### `emulator.machine` value
+
+The AMD64 execution context returned by emulator.machine for a 64-bit target; x86 targets use the emulator.x86 value. Calls marshal Windows x64 integer arguments, while hooks and provided exports model APIs. imports_named filters import records and provide_exports binds an ordered name-to-argument-count table. Memory/register methods affect guest state; snapshot copies the context, but callback closure state is not independently forked. See [emulation](../emulation.md) for architecture-specific behavior.
+
+Methods and attributes: `allocate(size=0, value=None, address=None, alignment=16, name='allocation', readable=True, writable=True, executable=False)`, `architecture`, `arguments(count)`, `call(address, args=[])`, `call_export(name, args=[])`, `entry`, `free(address)`, `get_register(name)`, `hook(callback, module='', name='', ordinal=0, address=0, argc=0, convention='win64')`, `imports`, `imports_named(names)`, `invoke(address, args=[])`, `load_module(image, name)`, `local_unwind(frame, target)`, `mappings`, `modules`, `pointer_size`, `profile(limit=256, reset=False)`, `protect(address, size, readable=True, writable=False, executable=False)`, `provide_export(callback=None, module, name|ordinal, argc=0, convention='win64', value=None, writable=True)`, `provide_exports(callback, module, signatures, convention='stdcall')`, `read(address, size)`, `read_cbytes(address, maximum=32KiB, require_terminator=True, unit_width=1)`, `read_cstring(address, maximum=32KiB, encoding='ascii')`, `read_f32be(address)`, `read_f32le(address)`, `read_f64be(address)`, `read_f64le(address)`, `read_i16be(address)`, `read_i16le(address)`, `read_i32be(address)`, `read_i32le(address)`, `read_i64be(address)`, `read_i64le(address)`, `read_i8(address)`, `read_pointer(address)`, `read_u16be(address)`, `read_u16le(address)`, `read_u32be(address)`, `read_u32le(address)`, `read_u64be(address)`, `read_u64le(address)`, `read_u8(address)`, `resolve_export(module, name='', ordinal=0)`, `run(entry=None, instruction_limit=current, until=None)`, `segment_base(segment)`, `set_register(name, value)`, `snapshot()`, `stack`, `stop(reason, detail='', value=None)`, `transfer(address, stack_pointer=current_rsp)`, `use(plugins)`, `write(address, value)`, `write_f32be(address, value)`, `write_f32le(address, value)`, `write_f64be(address, value)`, `write_f64le(address, value)`, `write_i16be(address, value)`, `write_i16le(address, value)`, `write_i32be(address, value)`, `write_i32le(address, value)`, `write_i64be(address, value)`, `write_i64le(address, value)`, `write_i8(address, value)`, `write_pointer(address, value)`, `write_u16be(address, value)`, `write_u16le(address, value)`, `write_u32be(address, value)`, `write_u32le(address, value)`, `write_u64be(address, value)`, `write_u64le(address, value)`, `write_u8(address, value)`.
+
+### `emulator.plugin` value
+
+A named installation callback with explicit mutable state and optional caller-defined attributes. The emulator calls install(machine) when attaching the plugin; state makes checkpoint participation explicit instead of relying on closure-hidden mutations.
+
+Methods and attributes: `install(machine)`, `name`, `state`.
 
 ### `emulator.x86` value
 
-Methods and attributes: `accelerate_loop(address, pattern=None, size=0, digest=None, normalize_relative=False, maximum_instructions=1Mi)`, `accelerate_region(entry, start, size, digest, reenter=False, maximum_instructions=1Mi)`, `accelerate_runtime_region(anchor, size, digest, entry_offset=0, anchor_mask=None, name='runtime executable region', normalize_relative=True, reenter=False, maximum_instructions=1Mi)`, `allocate(size=0, value=None, address=None, alignment=16, name='plugin', readable=True, writable=True, executable=False)`, `call(address, args=[], registers={})`, `call_export(name, args=[], registers={})`, `call_trace(reset=False)`, `checkpoint()`, `code_trace(watch, reset=False)`, `configure_call_trace(enabled=True, limit=unchanged, start=0, size=0, reset=True)`, `configure_trace(enabled=True, limit=unchanged, reset=True)`, `entry`, `free(address)`, `get_register(name)`, `hook(...) and use(plugins)`, `imports`, `invoke(address, args=[], registers={})`, `load_module(image, name)`, `mappings`, `memory_writes(watch, reset=False)`, `modules`, `override(callback, module, name|ordinal, wrap=False)`, `profile(limit=256, reset=False)`, `protect(address, size, readable=True, writable=False, executable=False)`, `provide_export(callback=None, module, name|ordinal, argc=0, convention='stdcall', value=None, writable=True)`, `read_cbytes(address, maximum=32KiB, require_terminator=True, unit_width=1)`, `read_f32be(address)`, `read_f32le(address)`, `read_f64be(address)`, `read_f64le(address)`, `read_i16be(address)`, `read_i16le(address)`, `read_i32be(address)`, `read_i32le(address)`, `read_i64be(address)`, `read_i64le(address)`, `read_i8(address)`, `read_u16be(address)`, `read_u16le(address)`, `read_u32be(address)`, `read_u32le(address)`, `read_u64be(address)`, `read_u64le(address)`, `read_u8(address)`, `restore(checkpoint)`, `rewrite(address, pattern=None, size=0, digest=None, callback, name='inline rewrite', normalize_relative=False)`, `run()`, `set_register(name, value)`, `snapshot()`, `spawn(address, args=[], registers={})`, `stack`, `stop(reason, detail='')`, `transfer(address, esp=None, ebp=None, return_address=None)`, `transform(anchor, size, digest, callback, anchor_mask=None, name='runtime transformation', normalize_relative=True)`, `u32_multiply_accumulate(destination, source, count, scalar, carry=0, subtract=False)`, `watch_code(address, size, limit=4096, stack_bytes=0, captures={})`, `watch_memory(address, size, limit=4096)`, `write_f32be(address, value)`, `write_f32le(address, value)`, `write_f64be(address, value)`, `write_f64le(address, value)`, `write_i16be(address, value)`, `write_i16le(address, value)`, `write_i32be(address, value)`, `write_i32le(address, value)`, `write_i64be(address, value)`, `write_i64le(address, value)`, `write_i8(address, value)`, `write_u16be(address, value)`, `write_u16le(address, value)`, `write_u32be(address, value)`, `write_u32le(address, value)`, `write_u64be(address, value)`, `write_u64le(address, value)`, `write_u8(address, value)`.
+A bounded 32-bit guest execution context. run/call/invoke execute modeled instructions; hooks and provided exports bind guest API calls to callbacks. Read/write and register methods inspect or change guest state. checkpoint/restore and snapshot support controlled variants; tracing, watches and profiles provide bounded observations. Acceleration/rewrite/transform operations require their documented code-identity checks; see [emulation](../emulation.md) for their contracts and checkpoint limitations.
+
+Methods and attributes: `accelerate_loop(address, pattern=None, size=0, digest=None, normalize_relative=False, maximum_instructions=1Mi)`, `accelerate_region(entry, start, size, digest, reenter=False, maximum_instructions=1Mi)`, `accelerate_runtime_region(anchor, size, digest, entry_offset=0, anchor_mask=None, name='runtime executable region', normalize_relative=True, reenter=False, maximum_instructions=1Mi)`, `allocate(size=0, value=None, address=None, alignment=16, name='plugin', readable=True, writable=True, executable=False)`, `call(address, args=[], registers={})`, `call_export(name, args=[], registers={})`, `call_trace(reset=False)`, `checkpoint()`, `code_trace(watch, reset=False)`, `configure_call_trace(enabled=True, limit=unchanged, start=0, size=0, reset=True)`, `configure_trace(enabled=True, limit=unchanged, reset=True)`, `entry`, `free(address)`, `get_register(name)`, `hook(...) and use(plugins)`, `imports`, `imports_named(names)`, `invoke(address, args=[], registers={})`, `load_module(image, name)`, `mappings`, `memory_writes(watch, reset=False)`, `modules`, `override(callback, module, name|ordinal, wrap=False)`, `profile(limit=256, reset=False)`, `protect(address, size, readable=True, writable=False, executable=False)`, `provide_export(callback=None, module, name|ordinal, argc=0, convention='stdcall', value=None, writable=True)`, `provide_exports(callback, module, signatures, convention='stdcall')`, `read_cbytes(address, maximum=32KiB, require_terminator=True, unit_width=1)`, `read_f32be(address)`, `read_f32le(address)`, `read_f64be(address)`, `read_f64le(address)`, `read_i16be(address)`, `read_i16le(address)`, `read_i32be(address)`, `read_i32le(address)`, `read_i64be(address)`, `read_i64le(address)`, `read_i8(address)`, `read_u16be(address)`, `read_u16le(address)`, `read_u32be(address)`, `read_u32le(address)`, `read_u64be(address)`, `read_u64le(address)`, `read_u8(address)`, `restore(checkpoint)`, `rewrite(address, pattern=None, size=0, digest=None, callback, name='inline rewrite', normalize_relative=False)`, `run()`, `set_register(name, value)`, `snapshot()`, `spawn(address, args=[], registers={})`, `stack`, `stop(reason, detail='')`, `transfer(address, esp=None, ebp=None, return_address=None)`, `transform(anchor, size, digest, callback, anchor_mask=None, name='runtime transformation', normalize_relative=True)`, `u32_multiply_accumulate(destination, source, count, scalar, carry=0, subtract=False)`, `watch_code(address, size, limit=4096, stack_bytes=0, captures={})`, `watch_memory(address, size, limit=4096)`, `write_f32be(address, value)`, `write_f32le(address, value)`, `write_f64be(address, value)`, `write_f64le(address, value)`, `write_i16be(address, value)`, `write_i16le(address, value)`, `write_i32be(address, value)`, `write_i32le(address, value)`, `write_i64be(address, value)`, `write_i64le(address, value)`, `write_i8(address, value)`, `write_u16be(address, value)`, `write_u16le(address, value)`, `write_u32be(address, value)`, `write_u32le(address, value)`, `write_u64be(address, value)`, `write_u64le(address, value)`, `write_u8(address, value)`.
 
 ### `gdb` value
+
+A live remote-debugging session. continue, step, interrupt and wait change or observe target execution; register and memory operations use the selected thread/context. Breakpoints and watchpoints return removable handles. with_state/with_register temporarily modify target state around a callback; packet and monitor expose protocol-specific control.
 
 Methods and attributes: `address_space(page_table, kind='user')`, `architecture`, `breakpoint(address, kind='hardware', size=1, timeout=30)`, `close()`, `continue(timeout=30)`, `current_thread(timeout=30)`, `features`, `generation`, `interrupt(timeout=30)`, `monitor(command, timeout=30)`, `packet(payload, timeout=30)`, `read_memory(address, size, timeout=30)`, `read_register(name, timeout=30)`, `registers(timeout=30)`, `running`, `search_memory(address, size, pattern, limit=256, timeout=30)`, `select_thread(thread, general=True, execution=True, timeout=30)`, `step(timeout=30)`, `threads(timeout=30)`, `wait(timeout=30)`, `watchpoint(address, size, access='write', timeout=30)`, `with_register(name, value, callback)`, `with_state(registers, memory, callback, timeout=30)`, `write_memory(address, data, timeout=30)`, `write_register(name, value, timeout=30)`.
 
 ### `gdb_address_space` value
 
+A checked page-table context for reading target virtual memory. page_table and kind identify the address space; generation ties it to the debugger's observed state so stale handles can be rejected.
+
 Methods and attributes: `generation`, `kind`, `page_table`, `read_memory(address, size, timeout=30)`.
 
 ### `gdb_point` value
+
+A breakpoint or watchpoint installed in a GDB target. remove deletes it and removed reports that state; with_disabled runs a callback while the point is temporarily disabled.
 
 Methods and attributes: `address`, `kind`, `remove(timeout=30)`, `removed`, `size`, `with_disabled(callback, timeout=30)`.
 
 ### `installer` value
 
+A recognized installer container with payload files and detection metadata. plan returns declarative modifications using caller-supplied locations, variables and component selection. It does not apply the plan or run a host installer.
+
 Methods and attributes: `container`, `files`, `find(path)`, `format`, `installscript`, `offset`, `payload`, `plan(locations={}, variables={}, components=None)`, `size`.
 
 ### `installscript` value
+
+A parsed InstallShield script with functions, callbacks, calls and effects. find_function locates a declaration; evaluate interprets the supported subset using explicit state and step/depth bounds, returning analysis rather than running a host executable.
 
 Methods and attributes: `blocks`, `callbacks`, `calls`, `effects`, `evaluate(entry='application', strings={}, numbers={}, profiles={}, maximum_steps=200000, maximum_depth=64)`, `find_function(name)`, `functions`, `strings`.
 
 ### `installshield` value
 
+An InstallShield cabinet view. Files, groups, components and shortcuts preserve package organization; find selects a member path. version identifies the parsed package generation.
+
 Methods and attributes: `components`, `entries`, `files`, `find(path)`, `groups`, `shortcuts`, `version`.
 
 ### `nbd_server` value
+
+An NBD export bound to a block device. serve processes protocol requests on a supplied byte channel, stats exposes activity and close ends service. It does not own an implicit host listening socket.
 
 Methods and attributes: `close()`, `export_name`, `serve(channel)`, `stats`.
 
 ### `qemu.v1` value
 
+The backend-specific extension of a running QEMU VM. qmp sends structured monitor requests, qmp_schema inspects available commands, hmp uses the human monitor and block_stats reports storage activity. process exposes backend lifecycle state; these operations are not portable to every VMM.
+
 Methods and attributes: `block_stats()`, `capabilities`, `hmp(command, timeout=30)`, `process`, `qmp(command, arguments={}, timeout=30)`, `qmp_schema(timeout=30)`.
 
 ### `qemu_acpi_table` value
+
+A launch descriptor carrying an ACPI table file and its QEMU properties. It is configuration data consumed by the backend, not a running guest object.
 
 Methods and attributes: `file`, `name`, `properties`.
 
 ### `qemu_chardev` value
 
+A named QEMU character-backend descriptor. properties are passed through the backend's supported configuration handling when a VM is launched.
+
 Methods and attributes: `name`, `properties`.
 
 ### `qemu_device` value
+
+A QEMU device-model descriptor with named properties. Adding the descriptor to a backend configuration selects guest hardware at launch.
 
 Methods and attributes: `name`, `properties`.
 
 ### `qemu_netdev` value
 
+A QEMU network-backend descriptor. name identifies the backend kind and properties configure it; the object itself does not start networking.
+
 Methods and attributes: `name`, `properties`.
 
 ### `qemu_option` value
+
+A validated QEMU option descriptor with its value/properties. It is interpreted by the backend at launch, not executed by a shell.
 
 Methods and attributes: `name`, `properties`.
 
 ### `sfp` value
 
+A parsed SFP package inventory. entries/files expose member metadata and content, find selects a path, and package_label/version identify the package. archive_size/data_offset describe the enclosing container.
+
 Methods and attributes: `archive_size`, `data_offset`, `entries`, `files`, `find(path)`, `package_label`, `version`.
 
 ### `sfp_entry` value
+
+An SFP member with its logical path, entry type, timestamps and stored/unpacked lengths. Its read/bytes/slice operations expose decoded member content while payload_offset/record_offset locate its archive records.
 
 Methods and attributes: `binary`, `bytes`, `created_time`, `entry_type`, `file_length`, `flags`, `hex`, `modified_time`, `name`, `parent`, `path`, `payload_offset`, `read`, `record_offset`, `size`, `slice`, `stored_size`.
 
 ### `tar` value
 
+An ordered tar archive view. entries/files retain metadata and payload views; find(path, occurrence=0) selects repeated paths without losing earlier archive entries.
+
 Methods and attributes: `entries`, `files`, `find(path, occurrence=0)`.
 
 ### `tar_entry` value
+
+A tar member with path, type, ownership, permissions, timestamp and link target. Payload reads are relative to the member; entry_type and link distinguish regular content from directories and links.
 
 Methods and attributes: `binary`, `bytes`, `entry_type`, `gid`, `gname`, `hex`, `link`, `mode`, `mtime`, `name`, `path`, `read`, `size`, `slice`, `stored_size`, `uid`, `uname`.
 
 ### `vm` value
 
+A live virtual machine. Input helpers send guest keys, text or pointer events; screenshot captures the display. pause/resume/reset/powerdown/shutdown/stop control lifecycle, wait observes completion and next_event consumes events. channel and debugger open declared guest endpoints; extensions expose backend-specific features. Check capabilities before using optional operations.
+
 Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `reset(timeout=30)`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
 
 ### `vmm_backend` value
+
+A backend configuration and its advertised capabilities. id identifies the implementation; machine, accelerator and block_transport describe backend choices used during validation and startup.
 
 Methods and attributes: `accelerator`, `block_transport`, `capabilities`, `id`, `machine`.
 
 ### `vmm_channel` value
 
+A portable request for a named guest communication channel. kind selects its purpose and required controls whether unsupported channels make validation fail.
+
 Methods and attributes: `kind`, `name`, `required`.
 
 ### `vmm_disk` value
+
+A guest storage attachment specification. device supplies bytes, bus/unit choose placement, media distinguishes disk from optical media, and read_only/snapshot specify write policy. CHS is optional legacy geometry.
 
 Methods and attributes: `bus`, `chs`, `device`, `media`, `name`, `read_only`, `required`, `snapshot`, `unit`.
 
 ### `vmm_display` value
 
+A guest display requirement. mode selects the requested display arrangement and required distinguishes a mandatory capability from an optional preference.
+
 Methods and attributes: `mode`, `required`.
 
 ### `vmm_machine` value
+
+A portable VM specification, not a live VM. It records architecture, resources, disks, networks, channels, display and required capabilities for backend validation and vmm.start.
 
 Methods and attributes: `architecture`, `channels`, `cpus`, `disks`, `display`, `memory`, `networks`, `required_capabilities`, `start_paused`.
 
 ### `vmm_network` value
 
+A named portable guest-network request. kind selects networking behavior; required controls whether a backend may omit unsupported networking.
+
 Methods and attributes: `kind`, `name`, `required`.
 
 ### `windows.kd` value
+
+A Windows kernel-debugging session over a byte channel. breakin/continue control execution, next_event observes notifications, context/set_context access registers and read/write methods access virtual or physical memory. request/packet expose lower-level protocol operations; file_io installs a handler for guest debugger file requests.
 
 Methods and attributes: `breakin()`, `breakpoint(address, timeout=30)`, `close()`, `context(timeout=30)`, `continue(status=0x10002, timeout=30)`, `file_io(handler=None)`, `next_event(timeout=-1)`, `packet(kind, payload, packet_id=None, timeout=30)`, `read_physical(address, size, timeout=30)`, `read_virtual(address, size, timeout=30)`, `request(api, processor=-1, arguments={}, data=b'', timeout=30)`, `set_context(raw, edi=None, esi=None, ebx=None, edx=None, ecx=None, eax=None, ebp=None, eip=None, eflags=None, esp=None, timeout=30)`, `write_physical(address, data, timeout=30)`, `write_virtual(address, data, timeout=30)`.
 
 ### `windows.kd_breakpoint` value
 
+A breakpoint installed through the Windows KD protocol. handle identifies the remote breakpoint; remove deletes it and removed reports the local handle state.
+
 Methods and attributes: `address`, `handle`, `remove(timeout=30)`, `removed`.
 
 ### `windows.pdb` value
+
+A parsed PDB identity and symbol index. GUID/age or signature identify its build; symbols exposes entries and nearest(rva) finds the nearest applicable symbol for address annotation.
 
 Methods and attributes: `age`, `guid`, `nearest(rva)`, `signature`, `symbols`.
 
 ### `windows.pdb_symbol` value
 
+One PDB symbol record containing its name, kind and relative virtual address. It identifies metadata in the parsed module, not an automatically resolved live-process address.
+
 Methods and attributes: `kind`, `name`, `rva`.
 
 ### `windows.pe` value
+
+A lazy PE32/PE32+ inspection value. Metadata attributes expose headers, sections, imports, exports, resources, strings and debug/type-library data from an owned snapshot. read/disasm use RVAs; patch returns modified file bytes without changing the original. data provides the shared immutable source snapshot.
 
 Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `typelibs`, `version`.

@@ -122,7 +122,7 @@ def loadperf_plugin(registry, kernel):
             "unloadperfcountertextstringsa": 1,
             "unloadperfcountertextstringsw": 1,
         }
-        for imported in machine.imports:
+        for imported in machine.imports_named(signatures):
             name = imported.name.lower()
             if imported.module.lower() == "loadperf.dll" and name in signatures:
                 machine.hook(callback, address = imported.address, argc = signatures[name])

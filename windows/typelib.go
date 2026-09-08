@@ -57,7 +57,7 @@ func peTypeLibsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if !ok {
 		return nil, fmt.Errorf("pe_typelibs: got %s, want file", value.Type())
 	}
-	data, err := starfile.ReadAll(file)
+	data, err := peReadSnapshotData(file)
 	if err != nil {
 		return nil, err
 	}

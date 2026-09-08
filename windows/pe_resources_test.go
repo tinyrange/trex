@@ -264,6 +264,21 @@ func TestRGSParserExpandsModuleAliases(t *testing.T) {
 }
 
 func TestPEDisasmOperandsAreStructured(t *testing.T) {
+	register, err := peDisasmOperand(x86asm.EAX, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, _, _ := register.Get(starlark.String("name"))
+	if register.Len() != 2 || name != starlark.String("eax") {
+		t.Fatalf("register = %s", register)
+	}
+	immediate, err := peDisasmOperand(x86asm.Imm(-1), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if immediate.Len() != 3 || testDictUint(t, immediate, "u32") != 0xffffffff {
+		t.Fatalf("immediate = %s", immediate)
+	}
 	relative, err := peDisasmOperand(x86asm.Rel(-5), 0x1200, 5)
 	if err != nil {
 		t.Fatal(err)
@@ -276,6 +291,9 @@ func TestPEDisasmOperandsAreStructured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if relative.Len() != 3 || memory.Len() != 7 {
+		t.Fatalf("operand field counts: relative=%d memory=%d", relative.Len(), memory.Len())
+	}
 	for name, want := range map[string]string{"kind": "memory", "segment": "fs", "base": "eax", "index": "ecx"} {
 		value, found, err := memory.Get(starlark.String(name))
 		if err != nil || !found {
@@ -284,6 +302,27 @@ func TestPEDisasmOperandsAreStructured(t *testing.T) {
 		if got, _ := starlark.AsString(value); got != want {
 			t.Fatalf("%s = %q, want %q", name, got, want)
 		}
+	}
+}
+
+func BenchmarkPEDisasmOperand(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		arg  x86asm.Arg
+	}{
+		{"register", x86asm.EAX},
+		{"immediate", x86asm.Imm(42)},
+		{"relative", x86asm.Rel(-5)},
+		{"memory", x86asm.Mem{Segment: x86asm.FS, Base: x86asm.EAX, Index: x86asm.ECX, Scale: 4, Disp: -8}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := peDisasmOperand(tc.arg, 0x1200, 5); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

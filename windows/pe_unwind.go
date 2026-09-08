@@ -93,7 +93,7 @@ func (p *windowsPE) amd64UnwindBuiltin(_ *starlark.Thread, _ *starlark.Builtin, 
 	if err != nil {
 		return nil, err
 	}
-	data, err := starfile.ReadAll(source)
+	data, err := peReadSnapshotData(source)
 	if err != nil {
 		return nil, err
 	}

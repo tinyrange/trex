@@ -37,10 +37,12 @@ func utf16StringsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.
 func scanUTF16Strings(data []byte, minimum int) []string {
 	seen := make(map[string]struct{})
 	var out []string
+	// Reuse scratch space across candidates, most of which are rejected as
+	// binary data. Decoding accepted strings produces independently owned text.
+	var units []uint16
 	for alignment := 0; alignment < 2; alignment++ {
 		for offset := alignment; offset+1 < len(data); {
-			start := offset
-			var units []uint16
+			units = units[:0]
 			ascii := 0
 			for offset+1 < len(data) {
 				unit := uint16(data[offset]) | uint16(data[offset+1])<<8
@@ -62,11 +64,7 @@ func scanUTF16Strings(data []byte, minimum int) []string {
 					}
 				}
 			}
-			if offset == start {
-				offset += 2
-			} else {
-				offset += 2
-			}
+			offset += 2
 		}
 	}
 	return out

@@ -385,7 +385,7 @@ def setupapi_plugin(infs = {}, directories = {}, registry = None, kernel = None)
     def install(machine):
         for function, argc in _SIGNATURES.items():
             machine.provide_export(callback, module = "setupapi.dll", name = function, argc = argc)
-        for imported in machine.imports:
+        for imported in machine.imports_named(_SIGNATURES):
             name = imported.name.lower()
             if imported.module.lower() == "setupapi.dll" and name in _SIGNATURES:
                 machine.hook(callback, address = imported.address, argc = _SIGNATURES[name])

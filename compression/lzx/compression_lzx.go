@@ -1,6 +1,7 @@
 package lzx
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 )
@@ -19,14 +20,15 @@ const (
 )
 
 type lzxDecoder struct {
-	window       []byte
-	windowPos    int
+	windowSize   int
 	r0, r1, r2   int
 	mainLens     []byte
 	lengthLens   []byte
-	mainTree     *lzxHuffman
-	lengthTree   *lzxHuffman
-	alignedTree  *lzxHuffman
+	mainTree     lzxHuffman
+	lengthTree   lzxHuffman
+	alignedTree  lzxHuffman
+	preTree      lzxHuffman
+	aligned      bool
 	posBase      []int
 	extraBits    []int
 	intelSize    int32
@@ -35,6 +37,9 @@ type lzxDecoder struct {
 
 // Decompress decodes a Microsoft LZX stream.
 func Decompress(data []byte, windowBits int, outSize int) ([]byte, error) {
+	if outSize < 0 {
+		return nil, fmt.Errorf("lzx: negative output size")
+	}
 	dec, err := newLZXDecoder(windowBits)
 	if err != nil {
 		return nil, err
@@ -46,24 +51,24 @@ func Decompress(data []byte, windowBits int, outSize int) ([]byte, error) {
 		dec.intelSize = int32((hi << 16) | lo)
 	}
 	out := make([]byte, 0, outSize)
-	frameStart := 0
 	for len(out) < outSize {
 		if err := dec.decodeBlock(br, &out, outSize); err != nil {
 			return nil, err
 		}
-		for frameStart+lzxFrameSize <= len(out) {
-			dec.undoE8(out[frameStart:frameStart+lzxFrameSize], frameStart)
-			frameStart += lzxFrameSize
-		}
 	}
-	if frameStart < len(out) {
-		dec.undoE8(out[frameStart:], frameStart)
+	// Keep history in its original, pre-E8 form until all matches are decoded.
+	// The API already retains the whole output, so a second window is needless.
+	for frameStart := 0; frameStart < len(out); frameStart += lzxFrameSize {
+		dec.undoE8(out[frameStart:min(frameStart+lzxFrameSize, len(out))], frameStart)
 	}
 	return out[:outSize], nil
 }
 
 // DecompressWIMChunk decodes an LZX chunk using the WIM framing variant.
 func DecompressWIMChunk(data []byte, windowBits int, outSize int) ([]byte, error) {
+	if outSize < 0 {
+		return nil, fmt.Errorf("lzx: negative output size")
+	}
 	if len(data) == outSize {
 		return append([]byte(nil), data...), nil
 	}
@@ -98,7 +103,7 @@ func newLZXDecoder(windowBits int) (*lzxDecoder, error) {
 		base += 1 << uint(extraBits[slot])
 	}
 	return &lzxDecoder{
-		window:     make([]byte, 1<<uint(windowBits)),
+		windowSize: 1 << uint(windowBits),
 		r0:         1,
 		r1:         1,
 		r2:         1,
@@ -144,13 +149,12 @@ func (d *lzxDecoder) decodeBlock(br *lzxBitReader, out *[]byte, outSize int) err
 			for i := range lens {
 				lens[i] = byte(br.readBits(3))
 			}
-			var err error
-			d.alignedTree, err = newLZXHuffman(lens)
-			if err != nil {
+			d.aligned = true
+			if err := d.alignedTree.reset(lens); err != nil {
 				return err
 			}
 		} else {
-			d.alignedTree = nil
+			d.aligned = false
 		}
 		if err := d.readLengths(br, d.mainLens, 0, lzxNumChars); err != nil {
 			return fmt.Errorf("main literal lengths: %w", err)
@@ -158,9 +162,7 @@ func (d *lzxDecoder) decodeBlock(br *lzxBitReader, out *[]byte, outSize int) err
 		if err := d.readLengths(br, d.mainLens, lzxNumChars, len(d.mainLens)); err != nil {
 			return fmt.Errorf("main match lengths: %w", err)
 		}
-		var err error
-		d.mainTree, err = newLZXHuffman(d.mainLens)
-		if err != nil {
+		if err := d.mainTree.reset(d.mainLens); err != nil {
 			return err
 		}
 		if d.mainLens[0xe8] != 0 {
@@ -169,8 +171,7 @@ func (d *lzxDecoder) decodeBlock(br *lzxBitReader, out *[]byte, outSize int) err
 		if err := d.readLengths(br, d.lengthLens, 0, len(d.lengthLens)); err != nil {
 			return fmt.Errorf("secondary lengths: %w", err)
 		}
-		d.lengthTree, err = newLZXHuffman(d.lengthLens)
-		if err != nil {
+		if err := d.lengthTree.reset(d.lengthLens); err != nil {
 			return err
 		}
 		if err := d.decodeCompressedBlock(br, out, len(*out)+blockLen); err != nil {
@@ -185,24 +186,22 @@ func (d *lzxDecoder) decodeBlock(br *lzxBitReader, out *[]byte, outSize int) err
 		d.r1 = int(binary.LittleEndian.Uint32(br.takeBytes(4)))
 		d.r2 = int(binary.LittleEndian.Uint32(br.takeBytes(4)))
 		d.intelStarted = true
-		for i := 0; i < blockLen; i++ {
-			b := br.takeBytes(1)
-			if len(b) != 1 {
-				return fmt.Errorf("lzx: truncated uncompressed data")
-			}
-			d.putByte(out, b[0])
+		data := br.takeBytes(blockLen)
+		if br.err != nil {
+			return br.err
 		}
+		d.putBytes(out, data)
 		if declaredBlockLen&1 != 0 && len(*out) < outSize {
 			_ = br.takeBytes(1)
 		}
 	default:
-		return fmt.Errorf("lzx: invalid block type %d at output %d byte %d bit %d", blockType, len(*out), br.pos, br.bit)
+		return fmt.Errorf("lzx: invalid block type %d at output %d byte %d bit %d", blockType, len(*out), br.bytePosition(), br.bitPosition())
 	}
 	if len(*out)%lzxFrameSize == 0 && len(*out) < outSize {
 		br.align16()
 	}
 	if br.err != nil {
-		return fmt.Errorf("lzx: block type %d output %d input byte %d bit %d: %w", blockType, len(*out), br.pos, br.bit, br.err)
+		return fmt.Errorf("lzx: block type %d output %d input byte %d bit %d: %w", blockType, len(*out), br.bytePosition(), br.bitPosition(), br.err)
 	}
 	return nil
 }
@@ -212,7 +211,7 @@ func (d *lzxDecoder) decodeWIMBlock(br *lzxBitReader, out *[]byte, outSize int) 
 	defaultSize := br.readBits(1)
 	blockLen := lzxFrameSize
 	if defaultSize == 0 {
-		if len(d.window) == lzxFrameSize {
+		if d.windowSize == lzxFrameSize {
 			blockLen = int(br.readBits(16))
 		} else {
 			blockLen = int(br.readBits(16)<<8 | br.readBits(8))
@@ -228,13 +227,12 @@ func (d *lzxDecoder) decodeWIMBlock(br *lzxBitReader, out *[]byte, outSize int) 
 			for i := range lens {
 				lens[i] = byte(br.readBits(3))
 			}
-			var err error
-			d.alignedTree, err = newLZXHuffman(lens)
-			if err != nil {
+			d.aligned = true
+			if err := d.alignedTree.reset(lens); err != nil {
 				return err
 			}
 		} else {
-			d.alignedTree = nil
+			d.aligned = false
 		}
 		if err := d.readLengths(br, d.mainLens, 0, lzxNumChars); err != nil {
 			return fmt.Errorf("main literal lengths: %w", err)
@@ -242,9 +240,7 @@ func (d *lzxDecoder) decodeWIMBlock(br *lzxBitReader, out *[]byte, outSize int) 
 		if err := d.readLengths(br, d.mainLens, lzxNumChars, len(d.mainLens)); err != nil {
 			return fmt.Errorf("main match lengths: %w", err)
 		}
-		var err error
-		d.mainTree, err = newLZXHuffman(d.mainLens)
-		if err != nil {
+		if err := d.mainTree.reset(d.mainLens); err != nil {
 			return err
 		}
 		if d.mainLens[0xe8] != 0 {
@@ -253,8 +249,7 @@ func (d *lzxDecoder) decodeWIMBlock(br *lzxBitReader, out *[]byte, outSize int) 
 		if err := d.readLengths(br, d.lengthLens, 0, len(d.lengthLens)); err != nil {
 			return fmt.Errorf("secondary lengths: %w", err)
 		}
-		d.lengthTree, err = newLZXHuffman(d.lengthLens)
-		if err != nil {
+		if err := d.lengthTree.reset(d.lengthLens); err != nil {
 			return err
 		}
 		if err := d.decodeCompressedBlock(br, out, len(*out)+blockLen); err != nil {
@@ -269,21 +264,19 @@ func (d *lzxDecoder) decodeWIMBlock(br *lzxBitReader, out *[]byte, outSize int) 
 		d.r1 = int(binary.LittleEndian.Uint32(br.takeBytes(4)))
 		d.r2 = int(binary.LittleEndian.Uint32(br.takeBytes(4)))
 		d.intelStarted = true
-		for i := 0; i < blockLen; i++ {
-			b := br.takeBytes(1)
-			if len(b) != 1 {
-				return fmt.Errorf("lzx: truncated uncompressed data")
-			}
-			d.putByte(out, b[0])
+		data := br.takeBytes(blockLen)
+		if br.err != nil {
+			return br.err
 		}
+		d.putBytes(out, data)
 		if blockLen&1 != 0 && len(*out) < outSize {
 			_ = br.takeBytes(1)
 		}
 	default:
-		return fmt.Errorf("lzx: invalid WIM block type %d at output %d byte %d bit %d", blockType, len(*out), br.pos, br.bit)
+		return fmt.Errorf("lzx: invalid WIM block type %d at output %d byte %d bit %d", blockType, len(*out), br.bytePosition(), br.bitPosition())
 	}
 	if br.err != nil {
-		return fmt.Errorf("lzx: WIM block type %d output %d input byte %d bit %d: %w", blockType, len(*out), br.pos, br.bit, br.err)
+		return fmt.Errorf("lzx: WIM block type %d output %d input byte %d bit %d: %w", blockType, len(*out), br.bytePosition(), br.bitPosition(), br.err)
 	}
 	return nil
 }
@@ -293,10 +286,10 @@ func (d *lzxDecoder) readLengths(br *lzxBitReader, lens []byte, first, last int)
 	for i := range preLens {
 		preLens[i] = byte(br.readBits(4))
 	}
-	preTree, err := newLZXHuffman(preLens)
-	if err != nil {
+	if err := d.preTree.reset(preLens); err != nil {
 		return err
 	}
+	preTree := &d.preTree
 	for i := first; i < last; {
 		sym, err := preTree.decode(br)
 		if err != nil {
@@ -364,15 +357,15 @@ func (d *lzxDecoder) decodeCompressedBlock(br *lzxBitReader, out *[]byte, end in
 		if err != nil {
 			return err
 		}
-		if offset <= 0 || offset > len(d.window) {
+		if offset <= 0 || offset > d.windowSize {
 			return fmt.Errorf("lzx: invalid match offset %d", offset)
 		}
-		for i := 0; i < length && len(*out) < end; i++ {
-			src := (d.windowPos - offset) & (len(d.window) - 1)
-			d.putByte(out, d.window[src])
-			if len(*out)%lzxFrameSize == 0 && len(*out) < end {
-				br.align16()
-			}
+		start := len(*out)
+		d.putMatch(out, offset, min(length, end-start))
+		// Matches contain no intervening input bits, so one alignment suffices
+		// even if the copy crosses a frame boundary. Do not align at block end.
+		if start/lzxFrameSize != len(*out)/lzxFrameSize && (len(*out)%lzxFrameSize != 0 || len(*out) < end) {
+			br.align16()
 		}
 	}
 	return br.err
@@ -398,7 +391,7 @@ func (d *lzxDecoder) matchOffset(br *lzxBitReader, slot int) (int, error) {
 		}
 		extra := d.extraBits[slot]
 		footer := 0
-		if d.alignedTree != nil && extra >= 3 {
+		if d.aligned && extra >= 3 {
 			footer = int(br.readBits(uint(extra-3)) << 3)
 			aligned, err := d.alignedTree.decode(br)
 			if err != nil {
@@ -418,18 +411,46 @@ func (d *lzxDecoder) matchOffset(br *lzxBitReader, slot int) (int, error) {
 
 func (d *lzxDecoder) putByte(out *[]byte, b byte) {
 	*out = append(*out, b)
-	d.window[d.windowPos] = b
-	d.windowPos = (d.windowPos + 1) & (len(d.window) - 1)
+}
+
+func (d *lzxDecoder) putBytes(out *[]byte, data []byte) {
+	*out = append(*out, data...)
+}
+
+func (d *lzxDecoder) putMatch(out *[]byte, offset, length int) {
+	start := len(*out)
+	*out = (*out)[:start+length]
+	dst := (*out)[start:]
+	src := start - offset
+	// Preserve the initial zero-filled history, including a match which begins
+	// before the output and then continues through already decoded bytes.
+	if src < 0 {
+		n := min(-src, length)
+		clear(dst[:n])
+		dst = dst[n:]
+		src += n
+		if len(dst) == 0 {
+			return
+		}
+	}
+	// Expand overlapping matches by doubling the initialized prefix, never
+	// reading uninitialized output (copy itself has memmove semantics).
+	for len(dst) > 0 {
+		n := copy(dst, (*out)[src:len(*out)-len(dst)])
+		dst = dst[n:]
+	}
 }
 
 func (d *lzxDecoder) undoE8(frame []byte, absoluteStart int) {
 	if d.intelSize == 0 || !d.intelStarted || len(frame) <= 10 {
 		return
 	}
-	for i := 0; i < len(frame)-10; i++ {
-		if frame[i] != 0xe8 {
-			continue
+	for i := 0; i < len(frame)-10; {
+		next := bytes.IndexByte(frame[i:len(frame)-10], 0xe8)
+		if next < 0 {
+			return
 		}
+		i += next
 		curpos := int32(absoluteStart + i)
 		value := int32(binary.LittleEndian.Uint32(frame[i+1 : i+5]))
 		if value >= -curpos && value < d.intelSize {
@@ -440,17 +461,16 @@ func (d *lzxDecoder) undoE8(frame []byte, absoluteStart int) {
 			}
 			binary.LittleEndian.PutUint32(frame[i+1:i+5], uint32(value))
 		}
-		i += 4
+		i += 5
 	}
 }
 
 type lzxBitReader struct {
-	data   []byte
-	pos    int
-	word   uint16
-	bit    uint
-	loaded bool
-	err    error
+	data  []byte
+	pos   int
+	bits  uint64 // MSB-first, assembled from little-endian 16-bit words
+	nbits uint
+	err   error
 }
 
 func newLZXBitReader(data []byte) *lzxBitReader {
@@ -458,40 +478,43 @@ func newLZXBitReader(data []byte) *lzxBitReader {
 }
 
 func (r *lzxBitReader) readBits(n uint) uint32 {
-	var value uint32
-	for i := uint(0); i < n; i++ {
-		if !r.loaded || r.bit == 16 {
-			if r.pos+1 >= len(r.data) {
-				r.err = fmt.Errorf("lzx: truncated bitstream")
-				return 0
-			}
-			r.word = binary.LittleEndian.Uint16(r.data[r.pos : r.pos+2])
-			r.pos += 2
-			r.bit = 0
-			r.loaded = true
-		}
-		value = (value << 1) | uint32((r.word>>(15-r.bit))&1)
-		r.bit++
+	if r.nbits < n {
+		r.fill()
 	}
+	if r.nbits < n {
+		r.err = fmt.Errorf("lzx: truncated bitstream")
+		return 0
+	}
+	value := uint32(r.bits >> (64 - n))
+	r.dropBits(n)
 	return value
 }
 
+func (r *lzxBitReader) fill() {
+	for r.nbits <= 48 && r.pos+1 < len(r.data) {
+		r.bits |= uint64(binary.LittleEndian.Uint16(r.data[r.pos:r.pos+2])) << (48 - r.nbits)
+		r.pos += 2
+		r.nbits += 16
+	}
+}
+
 func (r *lzxBitReader) align16() {
-	r.bit = 16
+	r.dropBits(r.nbits % 16)
 }
 
 func (r *lzxBitReader) align16Always() {
-	if r.loaded && r.bit == 16 {
-		_ = r.takeBytes(2)
-		return
+	if r.nbits%16 == 0 {
+		r.readBits(16)
+	} else {
+		r.align16()
 	}
-	r.align16()
 }
 
 func (r *lzxBitReader) takeBytes(n int) []byte {
-	if r.loaded && r.bit < 16 {
-		r.bit = 16
-	}
+	r.align16()
+	// Return all whole prefetched words before entering the raw-byte portion.
+	r.pos -= int(r.nbits/16) * 2
+	r.bits, r.nbits = 0, 0
 	if r.pos+n > len(r.data) {
 		r.err = fmt.Errorf("lzx: truncated byte stream")
 		return nil
@@ -502,41 +525,64 @@ func (r *lzxBitReader) takeBytes(n int) []byte {
 }
 
 func (r *lzxBitReader) remaining() int {
-	return len(r.data) - r.pos
+	return len(r.data) - r.pos + int(r.nbits/16)*2
 }
+
+func (r *lzxBitReader) bytePosition() int { return r.pos - int((r.nbits+15)/16)*2 }
+func (r *lzxBitReader) bitPosition() uint { return (16 - r.nbits%16) % 16 }
 
 type lzxHuffman struct {
-	root  *lzxHuffmanNode
-	empty bool
+	// A short-code lookup plus canonical ranges for the uncommon long codes.
+	// Entries pack the symbol above a five-bit code length; zero means missing.
+	table   [1 << lzxHuffmanTableBits]uint16
+	count   [17]uint16
+	first   [17]uint32
+	index   [17]uint16
+	symbols [256 + 50*8]uint16
+	empty   bool
 }
 
-type lzxHuffmanNode struct {
-	sym    int
-	hasSym bool
-	child  [2]*lzxHuffmanNode
-}
+const lzxHuffmanTableBits = 10
 
 func newLZXHuffman(lengths []byte) (*lzxHuffman, error) {
+	h := &lzxHuffman{}
+	if err := h.reset(lengths); err != nil {
+		return nil, err
+	}
+	return h, nil
+}
+
+func (h *lzxHuffman) reset(lengths []byte) error {
 	const maxBits = 16
-	count := make([]int, maxBits+1)
+	*h = lzxHuffman{}
+	if len(lengths) > len(h.symbols) {
+		return fmt.Errorf("lzx: too many huffman symbols")
+	}
 	nonZero := 0
 	for _, l := range lengths {
 		if l > maxBits {
-			return nil, fmt.Errorf("lzx: invalid huffman length")
+			return fmt.Errorf("lzx: invalid huffman length")
 		}
 		if l > 0 {
-			count[l]++
+			h.count[l]++
 			nonZero++
 		}
 	}
-	root := &lzxHuffmanNode{}
 	if nonZero == 0 {
-		return &lzxHuffman{root: root, empty: true}, nil
+		h.empty = true
+		return nil
 	}
-	next := make([]int, maxBits+1)
-	code := 0
+	var next [maxBits + 1]uint32
+	var positions [maxBits + 1]uint16
+	var code uint32
 	for bits := 1; bits <= maxBits; bits++ {
-		code = (code + count[bits-1]) << 1
+		code = (code + uint32(h.count[bits-1])) << 1
+		if code+uint32(h.count[bits]) > 1<<bits {
+			return fmt.Errorf("lzx: oversubscribed huffman tree")
+		}
+		h.first[bits] = code
+		h.index[bits] = h.index[bits-1] + h.count[bits-1]
+		positions[bits] = h.index[bits]
 		next[bits] = code
 	}
 	for sym, l := range lengths {
@@ -545,34 +591,52 @@ func newLZXHuffman(lengths []byte) (*lzxHuffman, error) {
 		}
 		c := next[l]
 		next[l]++
-		node := root
-		for bit := int(l) - 1; bit >= 0; bit-- {
-			branch := (c >> uint(bit)) & 1
-			if node.child[branch] == nil {
-				node.child[branch] = &lzxHuffmanNode{}
+		h.symbols[positions[l]] = uint16(sym)
+		positions[l]++
+		if l <= lzxHuffmanTableBits {
+			start := int(c) << (lzxHuffmanTableBits - l)
+			end := start + 1<<(lzxHuffmanTableBits-l)
+			entry := uint16(sym<<5) | uint16(l)
+			for i := start; i < end; i++ {
+				h.table[i] = entry
 			}
-			node = node.child[branch]
 		}
-		node.sym = sym
-		node.hasSym = true
 	}
-	return &lzxHuffman{root: root}, nil
+	return nil
 }
 
 func (h *lzxHuffman) decode(br *lzxBitReader) (int, error) {
 	if h.empty {
 		return 0, fmt.Errorf("lzx: empty huffman tree")
 	}
-	node := h.root
-	for node != nil {
-		if node.hasSym {
-			return node.sym, nil
+	// At EOF the reservoir is zero-padded, but a code is accepted only when
+	// all of its bits are present. Raw reads return unused prefetched words.
+	if br.nbits < 16 {
+		br.fill()
+	}
+	entry := h.table[br.bits>>(64-lzxHuffmanTableBits)]
+	if n := uint(entry & 31); n != 0 && n <= br.nbits {
+		br.dropBits(n)
+		return int(entry >> 5), nil
+	}
+	peek := uint32(br.bits >> 48)
+	available := min(br.nbits, 16)
+	for bits := uint(lzxHuffmanTableBits + 1); bits <= available; bits++ {
+		code := peek >> (16 - bits)
+		if offset := code - h.first[bits]; offset < uint32(h.count[bits]) {
+			br.dropBits(bits)
+			return int(h.symbols[uint32(h.index[bits])+offset]), nil
 		}
-		bit := br.readBits(1)
-		if br.err != nil {
-			return 0, br.err
-		}
-		node = node.child[bit]
+	}
+	if available < 16 {
+		br.err = fmt.Errorf("lzx: truncated bitstream")
+		return 0, br.err
 	}
 	return 0, fmt.Errorf("lzx: invalid huffman code")
+}
+
+// dropBits consumes only a code whose presence was established by the peek.
+func (br *lzxBitReader) dropBits(n uint) {
+	br.bits <<= n
+	br.nbits -= n
 }

@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	binaryapi "github.com/tinyrange/trex/binary"
+	exportbatch "github.com/tinyrange/trex/emulator/internal/exports"
+	importquery "github.com/tinyrange/trex/emulator/internal/imports"
 	"github.com/tinyrange/trex/emulator/peimage"
 	windowsapi "github.com/tinyrange/trex/windows"
 	"go.starlark.net/starlark"
@@ -419,6 +421,7 @@ type emulatorX86 struct {
 	importsByOrdinal    map[emulatorImportOrdinalKey][]uint32
 	indexedImports      int
 	importValuesCache   *starlark.List
+	importNameIndex     *importquery.Index
 	hooks               map[uint32]emulatorHook
 	hookRules           []emulatorHookRule
 	modules             map[string]*emulatorModule
@@ -748,6 +751,7 @@ func (m *emulatorX86) mapPE(value starlark.Value, name string, primary bool) (*e
 		entry := emulatorImport{module: canonicalEmulatorModuleName(item.DLL), name: item.Name, ordinal: item.Ordinal, iat: base + item.IATRVA, target: target}
 		m.imports[target] = entry
 		m.importValuesCache = nil
+		m.importNameIndex = nil
 		m.indexImport(target, entry)
 		m.applyHookRules(target, entry)
 		if err := m.writeUint32(entry.iat, target); err != nil {
@@ -1545,7 +1549,7 @@ func (m *emulatorX86) AttrNames() []string {
 	for _, codec := range binaryScalarCodecs {
 		names = append(names, "read_"+codec.Name, "write_"+codec.Name)
 	}
-	names = append(names, "override", "architecture", "pointer_size", "read_pointer", "write_pointer")
+	names = append(names, "override", "architecture", "pointer_size", "read_pointer", "write_pointer", "imports_named", "provide_exports")
 	sort.Strings(names)
 	return names
 }
@@ -1626,6 +1630,10 @@ func (m *emulatorX86) Attr(name string) (starlark.Value, error) {
 		method = m.protectBuiltin
 	case "provide_export":
 		method = m.provideExportBuiltin
+	case "provide_exports":
+		method = m.provideExportsBuiltin
+	case "imports_named":
+		method = m.importsNamedBuiltin
 	case "read":
 		method = m.readBuiltin
 	case "read_cbytes":
@@ -1799,6 +1807,12 @@ func (m *emulatorX86) loadModuleBuiltin(_ *starlark.Thread, _ *starlark.Builtin,
 	return emulatorModuleValue(module), nil
 }
 
+func (m *emulatorX86) provideExportsBuiltin(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return exportbatch.Provide(args, kwargs, func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		return m.provideExportBuiltin(thread, builtin, args, kwargs)
+	})
+}
+
 func (m *emulatorX86) provideExportBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	callbackValue := starlark.Value(starlark.None)
 	value := starlark.Value(starlark.None)
@@ -1941,6 +1955,13 @@ func (m *emulatorX86) resolveExport(moduleName, name string, ordinal uint32, dep
 		return m.resolveExport(forwardModule, "", forwardedOrdinal, depth+1)
 	}
 	return m.resolveExport(forwardModule, symbol, 0, depth+1)
+}
+
+func (m *emulatorX86) importsNamedBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if m.importNameIndex == nil {
+		m.importNameIndex = importquery.New(m.importValues())
+	}
+	return m.importNameIndex.Named(args, kwargs)
 }
 
 func (m *emulatorX86) importValues() *starlark.List {
@@ -2266,6 +2287,11 @@ func (m *emulatorX86) crc32Loop(address uint32) *emulatorCRC32Loop {
 	if err != nil {
 		return nil
 	}
+	// Both supported loops begin with MOV. Reject unrelated code before
+	// constructing their larger sparse instruction patterns.
+	if code[0] != 0x8b {
+		return nil
+	}
 	reflected := map[int]byte{
 		0: 0x8b, 1: 0x45, 3: 0x0f, 4: 0xb6, 5: 0x14, 6: 0x01,
 		7: 0x8b, 8: 0x45, 10: 0x0f, 11: 0xb6, 12: 0xf0,
@@ -2501,6 +2527,9 @@ func (m *emulatorX86) isASCIILower(address uint32) bool {
 	if err != nil {
 		return false
 	}
+	if code[0] != 0x8b || code[1] != 0xff || code[2] != 0x55 {
+		return false
+	}
 	fixed := map[int]byte{
 		0: 0x8b, 1: 0xff, 2: 0x55, 3: 0x8b, 4: 0xec, 5: 0x51,
 		6: 0x8b, 7: 0x45, 8: 0x08, 9: 0x66, 10: 0x3d, 11: 0x7f,
@@ -2615,6 +2644,9 @@ func (m *emulatorX86) isMixedASCIIFoldCompare(address uint32) bool {
 	m.mixedCompareChecked[address] = true
 	code, err := m.readMemory(address, 80, 'x')
 	if err != nil {
+		return false
+	}
+	if code[0] != 0x8b || code[1] != 0xff || code[2] != 0x55 {
 		return false
 	}
 	fixed := map[int]byte{
@@ -7887,6 +7919,7 @@ func (m *emulatorX86) clone() *emulatorX86 {
 		clone.importsByOrdinal[key] = append([]uint32(nil), addresses...)
 	}
 	clone.importValuesCache = nil
+	clone.importNameIndex = nil
 	clone.moduleValuesCache = nil
 	clone.attrCache = make(starlark.StringDict)
 	clone.cachedCodePages = make(map[uint32]bool, len(m.cachedCodePages))
