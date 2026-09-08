@@ -2,6 +2,7 @@ package starlarkfrontend
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 	"unicode/utf16"
 
@@ -129,6 +130,69 @@ func TestSelfregGUIDAndStaticPolicies(t *testing.T) {
 	}
 	if got := selfregPatchValue(t, patches, "/Classes/JScript.Encode/CLSID", "(default)"); got != "{F414C262-6AC0-11CF-B6D1-00AA00BBBB58}" {
 		t.Fatalf("encoded class = %q", got)
+	}
+}
+
+func TestScriptMetadataDoesNotSuppressNativeRegistration(t *testing.T) {
+	thread, predeclared, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Export the synthetic registry writer as a DLL registrar. No proprietary
+	// script engine bytes are needed to test execution policy.
+	data := []byte(syntheticRegistryClientPE(t))
+	pe := int(binary.LittleEndian.Uint32(data[0x3c:]))
+	optional := pe + 24
+	sections := optional + int(binary.LittleEndian.Uint16(data[pe+20:]))
+	last := sections + (int(binary.LittleEndian.Uint16(data[pe+6:]))-1)*40
+	raw := int(binary.LittleEndian.Uint32(data[last+20:]))
+	va := binary.LittleEndian.Uint32(data[last+12:])
+	exportOffset := len(data)
+	exportRVA := va + uint32(exportOffset-raw)
+	data = append(data, make([]byte, 512)...)
+	binary.LittleEndian.PutUint32(data[last+8:], uint32(len(data)-raw))
+	binary.LittleEndian.PutUint32(data[last+16:], uint32(len(data)-raw))
+	alignment := binary.LittleEndian.Uint32(data[optional+32:])
+	imageEnd := va + uint32(len(data)-raw)
+	binary.LittleEndian.PutUint32(data[optional+56:], (imageEnd+alignment-1)&^(alignment-1))
+	binary.LittleEndian.PutUint32(data[optional+96:], exportRVA)
+	binary.LittleEndian.PutUint32(data[optional+100:], 128)
+	export := data[exportOffset:]
+	for offset, value := range map[int]uint32{16: 1, 20: 1, 24: 1, 28: exportRVA + 40, 32: exportRVA + 44, 36: exportRVA + 48, 40: binary.LittleEndian.Uint32(data[optional+16:]), 44: exportRVA + 50} {
+		binary.LittleEndian.PutUint32(export[offset:], value)
+	}
+	copy(export[50:], "DllRegisterServer\x00")
+	predeclared["image"] = &starfile.Bytes{Name: "script.dll", Data: data}
+	// Supply already-derived script metadata, independently of PE class-table
+	// recognition. The real runner must still execute the exported registrar.
+	originalLoad := thread.Load
+	thread.Load = func(thread *starlark.Thread, module string) (starlark.StringDict, error) {
+		if module == ":script.star" {
+			return starlark.ExecFile(thread, "script-facts.star", `
+def script_engine_patches(file, module, pe=None):
+    return [{"hive":"SOFTWARE", "key":"/Classes/TestScript", "name":"(default)", "type":"REG_SZ", "value":"metadata"}]
+`, nil)
+		}
+		return originalLoad(thread, module)
+	}
+	_, err = starlark.ExecFile(thread, "script-registration.star", `
+load("@stdlib//windows/selfreg:policy.star", "registration_patches")
+def check():
+    static = registration_patches(image, "script.dll", execute=False)
+    if static["execution"] != None or not any([p["key"] == "/Classes/TestScript" for p in static["patches"]]):
+        fail("test did not provide the static script metadata control")
+    result = registration_patches(image, "script.dll")
+    if result["execution"] == None:
+        fail("static script metadata suppressed the native registrar")
+    if not any([p["key"].lower() == "/classes/example" and p["name"] == "Greeting" and p["value"] == "hello" for p in result["patches"]]):
+        fail("native script registration writes were not retained")
+check()
+`, predeclared)
+	if err != nil {
+		if evaluation, ok := err.(*starlark.EvalError); ok {
+			t.Fatal(evaluation.Backtrace())
+		}
+		t.Fatal(err)
 	}
 }
 
