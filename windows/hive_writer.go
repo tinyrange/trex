@@ -725,7 +725,8 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	var value starlark.Value
 	var patches *starlark.List
 	rootName := ""
-	if err := starlark.UnpackArgs("patch_hive", args, kwargs, "file", &value, "patches", &patches, "root_name?", &rootName); err != nil {
+	var keys *starlark.List
+	if err := starlark.UnpackArgs("patch_hive", args, kwargs, "file", &value, "patches", &patches, "root_name?", &rootName, "keys?", &keys); err != nil {
 		return nil, err
 	}
 	file, ok := value.(starfile.File)
@@ -750,6 +751,17 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if rootName != "" {
 		if err := hive.renameRoot(rootName); err != nil {
 			return nil, err
+		}
+	}
+	if keys != nil {
+		for i := 0; i < keys.Len(); i++ {
+			path, ok := starlark.AsString(keys.Index(i))
+			if !ok {
+				return nil, fmt.Errorf("patch_hive: keys[%d] is %s, want string", i, keys.Index(i).Type())
+			}
+			if _, err := hive.ensureKey(path); err != nil {
+				return nil, fmt.Errorf("patch_hive: keys[%d]: %w", i, err)
+			}
 		}
 	}
 	for i := 0; i < patches.Len(); i++ {

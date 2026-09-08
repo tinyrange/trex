@@ -3035,9 +3035,9 @@ Constructs the Windows NE fast-boot binary and overlay from supplied modules, re
 
 ### `windows.patch_hive`
 
-`windows.patch_hive(file, patches, root_name='') -> file`
+`windows.patch_hive(file, patches, root_name='', keys=[]) -> file`
 
-Applies declarative registry patches to an NT hive and returns a new file, optionally replacing the root name. The input hive is not edited in place.
+Applies declarative registry patches to an NT hive and returns a new file, optionally replacing the root name. `keys` lists registry paths to create without adding values; existing keys and their values remain intact. This preserves the source hive's layout, including legacy REGF 1.1 cells. The input hive is not edited in place.
 
 ### `windows.pdb`
 
