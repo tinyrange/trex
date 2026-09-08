@@ -153,6 +153,10 @@ go run ./cmd/trex test.star
 The Go and Starlark suites use synthetic fixtures and do not require
 proprietary operating-system media.
 
+The [LZX throughput benchmarks](compression/lzx/README.md) cover in-memory
+synthetic streams and opt-in CAB/WIM media, including allocation measurements
+and output hashes for comparing decoder revisions.
+
 ## Starlark quickstart
 
 A script exposes `main(args)` and receives lazy file values from `open`:

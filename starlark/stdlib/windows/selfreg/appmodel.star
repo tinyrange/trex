@@ -93,7 +93,7 @@ def appmodel_plugin():
         for name, argc in _SIGNATURES.items():
             for module in modules:
                 machine.provide_export(callback, module = module, name = name, argc = argc)
-        for imported in machine.imports:
+        for imported in machine.imports_named(_SIGNATURES):
             name = imported.name.lower()
             if (imported.module.lower().startswith("api-ms-win-appmodel-runtime-") or imported.module.lower() == "kernel32.dll") and name in _SIGNATURES:
                 machine.hook(callback, address = imported.address, argc = _SIGNATURES[name])

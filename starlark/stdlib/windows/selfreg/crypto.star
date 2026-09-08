@@ -438,13 +438,12 @@ def cryptoapi_plugin(kernel = None, memory_protection_key = None):
         for module in ["advapi32.dll", "ntdll.dll"]:
             for name, argc in _SHA_SIGNATURES.items():
                 machine.provide_export(_sha_callback, module = module, name = name, argc = argc)
-        for name, argc in _CRYPTOAPI_SIGNATURES.items():
-            machine.provide_export(callback, module = "advapi32.dll", name = name, argc = argc)
-        for imported in machine.imports:
+        machine.provide_exports(callback, module = "advapi32.dll", signatures = _CRYPTOAPI_SIGNATURES)
+        for imported in machine.imports_named(list(_SHA_SIGNATURES) + list(_CRYPTOAPI_SIGNATURES)):
             name = imported.name.lower()
-            if imported.module.lower() in ["advapi32.dll", "ntdll.dll"] and name in _SHA_SIGNATURES:
+            if name in _SHA_SIGNATURES and imported.module.lower() in ["advapi32.dll", "ntdll.dll"]:
                 machine.hook(_sha_callback, address = imported.address, argc = _SHA_SIGNATURES[name])
-            if _cryptoapi_provider_module(imported.module) and name in _CRYPTOAPI_SIGNATURES:
+            if name in _CRYPTOAPI_SIGNATURES and _cryptoapi_provider_module(imported.module):
                 machine.hook(callback, address = imported.address, argc = _CRYPTOAPI_SIGNATURES[name])
 
     return emulator.plugin(install, name = "windows.cryptoapi", state = state)

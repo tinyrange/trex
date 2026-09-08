@@ -8,6 +8,7 @@ import (
 
 	binaryapi "github.com/tinyrange/trex/binary"
 	"github.com/tinyrange/trex/emulator/cpu"
+	exportbatch "github.com/tinyrange/trex/emulator/internal/exports"
 	"go.starlark.net/starlark"
 )
 
@@ -20,6 +21,10 @@ func exportKey(module, name string, ordinal int) string {
 
 func (m *Machine) environmentMethod(thread *starlark.Thread, name string, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	switch name {
+	case "provide_exports":
+		return exportbatch.Provide(args, kwargs, func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			return m.environmentMethod(thread, "provide_export", args, kwargs)
+		})
 	case "segment_base":
 		var segment string
 		if err := starlark.UnpackArgs(name, args, kwargs, "segment", &segment); err != nil {
@@ -121,15 +126,12 @@ func (m *Machine) environmentMethod(thread *starlark.Thread, name string, args s
 			hookName = fmt.Sprintf("#%d", ordinal)
 		}
 		if callback != nil {
-			m.hooks[address] = hook{canonical(moduleName), hookName, argc, callback}
+			m.setHook(address, hook{canonical(moduleName), hookName, argc, callback})
 		}
-		for _, item := range m.imports {
-			if key != exportKey(item.module, item.name, int(item.ordinal)) {
-				continue
-			}
+		for _, iat := range m.importIATs[key] {
 			var data [8]byte
 			binary.LittleEndian.PutUint64(data[:], address)
-			if err := m.memory.WriteMemory(item.iat, data[:]); err != nil {
+			if err := m.memory.WriteMemory(iat, data[:]); err != nil {
 				return nil, err
 			}
 		}

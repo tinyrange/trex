@@ -39,9 +39,9 @@ func localUnwindFixture(t *testing.T) (*Machine, uint64, uint64) {
 	m.processor.SetRegister("rcx", frame)
 	m.processor.SetRegister("rdx", base+0x80)
 	m.processor.SetPC(hookAddress)
-	m.hooks[hookAddress] = hook{module: "kernel32.dll", name: "_local_unwind", argc: 2, callback: starlark.NewBuiltin("local", func(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
+	m.setHook(hookAddress, hook{module: "kernel32.dll", name: "_local_unwind", argc: 2, callback: starlark.NewBuiltin("local", func(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
 		return m.controlMethod(thread, "local_unwind", starlark.Tuple{starlark.MakeUint64(frame), starlark.MakeUint64(base + 0x80)}, nil)
-	})}
+	})})
 	return m, frame, base
 }
 

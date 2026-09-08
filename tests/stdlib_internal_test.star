@@ -157,6 +157,24 @@ def test_registry_multi_string_decode():
     equal(module["_api_value_raw"](canonical, False), b"C:\\WINDOWS\x00")
     equal(module["_api_value_raw"](canonical, True), canonical["raw"])
 
+def test_registry_initial_assignment_modes():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    registry = module["registry_plugin"]()
+    base = {"hive": "SOFTWARE", "key": "/Example", "name": "Value", "type": "REG_MULTI_SZ"}
+    registry.load_values([dict(base, value = ["first"])])
+    registry.load_values([dict(base, value = ["ignored"], if_absent = True)])
+    equal(registry.get_value("SOFTWARE", "/Example", "Value"), ["first"])
+    registry.load_values([dict(base, value = ["FIRST", "second"], append = True)])
+    equal(registry.get_value("SOFTWARE", "/Example", "Value"), ["first", "second"])
+    registry.load_values([dict(base, value = ["replaced"], overwrite_only = True)])
+    equal(registry.get_value("SOFTWARE", "/Example", "Value"), ["replaced"])
+    registry.load_values([dict(base, delete = True)])
+    registry.load_values([dict(base, value = ["ignored"], overwrite_only = True)])
+    equal(registry.get_value("SOFTWARE", "/Example", "Value"), None)
+    registry.load_values([dict(base, value = ["new"])])
+    equal(registry.get_value("SOFTWARE", "/Example", "Value"), ["new"])
+    equal(registry.patches(), [])
+
 def test_registry_qword_round_trip():
     module = testing.module("@stdlib//windows/selfreg:registry.star")
     value = 0xFEDCBA9876543210
@@ -2551,6 +2569,7 @@ def test_kernel_file_information_reports_memory_backed_size():
     equal(machine.read_u32le(information + 40), 1)
 
 TEST_SUITE = suite("stdlib/internal", [
+    case("registry_initial_assignment_modes", test_registry_initial_assignment_modes),
     case("gdb_integer_codecs", test_gdb_integer_codecs),
     case("resource_patch_normalization", test_resource_patch_normalization),
     case("registration_execution_preserves_static_server_path", test_registration_execution_preserves_static_server_path),

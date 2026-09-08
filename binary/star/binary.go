@@ -651,9 +651,11 @@ func (v *binaryByteView) findIndicesBuiltin(_ *starlark.Thread, _ *starlark.Buil
 		const chunkSize = 128 << 10
 		buffer := make([]byte, chunkSize+max(0, maximum-1))
 		var groups map[int]map[string][]int
+		var firstBytes map[int]*[256]bool
 		var lengths []int
 		if remaining >= 16 {
 			groups = make(map[int]map[string][]int)
+			firstBytes = make(map[int]*[256]bool)
 			for index, needle := range needles {
 				if len(needle) == 0 {
 					continue
@@ -662,9 +664,11 @@ func (v *binaryByteView) findIndicesBuiltin(_ *starlark.Thread, _ *starlark.Buil
 				if group == nil {
 					group = make(map[string][]int)
 					groups[len(needle)] = group
+					firstBytes[len(needle)] = new([256]bool)
 					lengths = append(lengths, len(needle))
 				}
 				key := string(needle)
+				firstBytes[len(needle)][needle[0]] = true
 				group[key] = append(group[key], index)
 			}
 			sort.Ints(lengths)
@@ -690,7 +694,11 @@ func (v *binaryByteView) findIndicesBuiltin(_ *starlark.Thread, _ *starlark.Buil
 						break
 					}
 					group := groups[length]
+					allowed := firstBytes[length]
 					for offset := 0; offset+length <= len(window) && remaining > 0; offset++ {
+						if !allowed[window[offset]] {
+							continue
+						}
 						for _, index := range group[string(window[offset:offset+length])] {
 							if !found[index] {
 								found[index] = true

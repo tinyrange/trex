@@ -347,6 +347,26 @@ func TestBinaryViewFindIndicesLargeFixedWidthSet(t *testing.T) {
 	}
 }
 
+func BenchmarkFindIndicesFixedWidthSet(b *testing.B) {
+	data := bytes.Repeat([]byte{0xcc}, 1<<20)
+	patterns := make([]starlark.Value, 64)
+	for i := range patterns {
+		patterns[i] = starlark.Bytes(bytes.Repeat([]byte{byte(i)}, 16))
+	}
+	view, err := newBinaryByteView(starlark.Bytes(data))
+	if err != nil {
+		b.Fatal(err)
+	}
+	args := starlark.Tuple{starlark.NewList(patterns)}
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := view.findIndicesBuiltin(nil, nil, args, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestBinaryViewFindAll(t *testing.T) {
 	view, err := newBinaryByteView(starlark.Bytes("aaaa-prefix-aa"))
 	if err != nil {

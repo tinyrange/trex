@@ -1,5 +1,14 @@
 # Calling code and customizing semantic plugins
 
+Both `emulator.x86` and the AMD64 `emulator.machine` expose
+`machine.imports_named(names)` for plugin installation. Pass a sequence of
+function names or a signature dictionary (its keys are used). Matching is
+case-insensitive; results retain the original import spelling, address order,
+and duplicate imports from different modules or IAT slots. Ordinal-only imports
+match only an explicitly requested empty name. The returned list is independent
+and module loading refreshes the query's internal index. Plugins must still
+check the returned import's provider module before installing a hook.
+
 Use the smallest execution environment that answers your question. For a
 bounded function, start with `windows/emulation:conformance.star`. For Windows
 self-registration or code requiring the semantic Windows environment, use
@@ -96,7 +105,52 @@ demonstrates wrapping and repeatable checkpoint restoration. Use `hook` when
 you are supplying a missing import's ABI yourself; use `provide_export` when
 you are defining a virtual module's callable or data export.
 
+For a table of named callable exports sharing a callback, both architectures
+support `machine.provide_exports(callback, module="example.dll",
+signatures={"First": 2, "Second": 0}, convention="stdcall")`. The result is a
+list of addresses in dictionary insertion order, equivalent to individual
+`provide_export` calls in that order. Argument counts must be integers from
+0 through 4096; invalid table entries are rejected before publishing anything.
+Binding failures stop at the failing entry without rolling back earlier entries.
+The underlying architecture's calling-convention rules still apply. Ordinal and
+data exports use `provide_export`. Batching does not replace import-site hooks.
+
 ## The Windows runner
+
+`windows.clone_file_entries(entries)` copies a prepared path-to-metadata dictionary
+and each metadata dictionary in insertion order. File sources and other field
+values remain shared without reads; the returned dictionary layers are mutable
+and independent, including when the input is frozen.
+
+`windows.registration_expand(value, replacements)` applies registration-resource
+substitutions in dictionary order, replacing uppercase then lowercase percent
+tokens for each entry, for at most four passes (stopping when unchanged).
+Unknown and mixed-case tokens remain unchanged; non-string values pass through.
+This differs from case-insensitive process environment expansion.
+
+`windows.module_sources(files, exclude=[])` indexes a path-to-source dictionary
+by case-insensitive DLL basename. Both slash styles are accepted; basenames
+without an extension receive `.dll`. Other extensions are ignored. The first
+source for a basename wins, and excluded module names use the same normalization.
+Sources are returned unchanged without reads, parsing or eager materialization.
+
+Registry plugins can use `windows.registry_partition(entries, hive, key,
+values=False)` to split an identity-keyed dictionary into `(subtree, remaining)`.
+Key identities are `HIVE + "\x00" + normalized_key`; value identities additionally
+append `"\x00" + normalized_value_name`. Stored identities must already use
+uppercase hive names and lowercase slash-separated keys. The target hive/key
+is normalized by the operation. Set `values=True` for value dictionaries.
+Both outputs preserve input order and own their dictionary storage; values are
+shared without mutation. The operation does not generate deletion patches or
+change registry tombstones. The registry plugin retains that policy.
+
+`windows.registry_children(entries, hive, key, values=False)` selects direct
+children using the same identities without copying nonmatches. For key maps it
+returns case-folded child names mapped to decoded names (including percent-escaped
+slashes). For value maps, `values=True` returns value names mapped to their
+unchanged payloads; names containing slashes are not treated as subkeys. Results
+retain first-insertion order; callers handle sorting, source-hive merging and
+tombstones.
 
 `runner.run(file, module, ...)` constructs the semantic Windows environment,
 installs base plugins before custom plugins, and invokes `DllRegisterServer`

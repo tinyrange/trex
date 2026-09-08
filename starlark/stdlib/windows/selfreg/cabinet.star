@@ -78,7 +78,10 @@ def cabinet_plugin(kernel):
             set_error(machine, context, 1, 2)
             state["actions"].append({"api": "fdicopy", "path": path, "found": False})
             return 0
-        cabinet = archive.cab(_cabinet_file(kernel.state["file_data"](path)), cache = False)
+        # FDI visits multiple entries in the same compressed folder. Keep the
+        # bounded folder cache for this copy so each entry does not restart
+        # decompression from the beginning of the folder.
+        cabinet = archive.cab(_cabinet_file(kernel.state["file_data"](path)))
         extracted = 0
         skipped = 0
         for archived_name in cabinet.files:

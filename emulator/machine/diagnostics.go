@@ -54,12 +54,17 @@ func (m *Machine) traceValue() starlark.Value {
 // semantic callbacks retain their bindings; mutable plugin state is not forked.
 func (m *Machine) clone() *Machine {
 	clone := *m
+	clone.attrCache = nil // methods must bind the clone, not the original machine
 	clone.hookDepth = 0
 	clone.pendingStop, clone.pendingStopDetail = "", ""
 	clone.processor = m.processor.Clone()
 	clone.memory = m.memory.Clone()
 	clone.modules = slices.Clone(m.modules)
 	clone.imports = maps.Clone(m.imports)
+	clone.importIATs = make(map[string][]uint64, len(m.importIATs))
+	for key, slots := range m.importIATs {
+		clone.importIATs[key] = slices.Clone(slots)
+	}
 	clone.hooks = maps.Clone(m.hooks)
 	clone.provided = maps.Clone(m.provided)
 	clone.allocations = maps.Clone(m.allocations)

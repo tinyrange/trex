@@ -40,6 +40,8 @@ _TYPES = {
     11: "REG_QWORD",
 }
 
+_TYPE_NUMBERS = {symbolic: numeric for numeric, symbolic in _TYPES.items()}
+
 _CALLS = {
     "regopenkeyw": 3,
     "regopenkeya": 3,
@@ -307,8 +309,6 @@ def _lookup_value(state, target, name):
 
 def _direct_subkeys(state, target):
     hive, key = target
-    base = _key_identity(hive, key)
-    child_prefix = base.rstrip("/") + "/"
     output = {}
     source = _source_entry(state, target)
     if source != None:
@@ -316,18 +316,11 @@ def _direct_subkeys(state, target):
             child = _key_identity(hive, _join(key, _encode_key_part(name)))
             if not _key_deleted(state, child):
                 output[name.lower()] = name
-    for identity in state["keys"]:
-        if not identity.startswith(child_prefix):
-            continue
-        relative = identity[len(child_prefix):]
-        if relative:
-            name = _decode_key_part(relative.split("/")[0])
-            output[name.lower()] = name
+    output.update(windows.registry_children(state["keys"], hive, key))
     return [output[name] for name in sorted(output.keys())]
 
 def _direct_values(state, target):
     hive, key = target
-    value_prefix = _key_identity(hive, key) + "\x00"
     output = {}
     source = _source_entry(state, target)
     if source != None:
@@ -335,10 +328,7 @@ def _direct_values(state, target):
             identity = _identity(hive, key, name)
             if identity not in state.get("deleted_values", {}):
                 output[name] = {"name": "" if name == "(default)" else value["name"], "value": {"type": value["type"], "raw": value["raw"]}}
-    for identity, value in state["values"].items():
-        if not identity.startswith(value_prefix):
-            continue
-        name = identity[len(value_prefix):]
+    for name, value in windows.registry_children(state["values"], hive, key, values = True).items():
         output[name] = {"name": "" if name == "(default)" else name, "value": value}
     return sorted(output.values(), key = lambda item: item["name"].lower())
 
@@ -378,45 +368,28 @@ def _delete_tree(state, target):
     """Deletes a known registry key tree and records its removed values."""
     hive, key = target
     base = _key_identity(hive, key).rstrip("/")
-    value_exact = base + "\x00"
-    descendant = base + "/"
-    retained = {}
     deleted = _key_exists(state, target)
-    for identity, value in state["values"].items():
-        if identity.startswith(value_exact) or identity.startswith(descendant):
-            deleted = True
-            separator = identity.rfind("\x00")
-            value_key = identity[len(hive) + 1:separator]
-            value_name = identity[separator + 1:]
-            state["patches"].append({
-                "hive": hive,
-                "key": value_key,
-                "name": value_name,
-                "type": _TYPES.get(value["type"], value["type"]),
-                "value": _decode_value(value["raw"], value["type"], True),
-                "delete": True,
-            })
-        else:
-            retained[identity] = value
+    removed, retained = windows.registry_partition(state["values"], hive, key, values = True)
+    for identity, value in removed.items():
+        deleted = True
+        separator = identity.rfind("\x00")
+        value_key = identity[len(hive) + 1:separator]
+        value_name = identity[separator + 1:]
+        state["patches"].append({
+            "hive": hive,
+            "key": value_key,
+            "name": value_name,
+            "type": _TYPES.get(value["type"], value["type"]),
+            "value": _decode_value(value["raw"], value["type"], True),
+            "delete": True,
+        })
     state["values"] = retained
-    state["keys"] = {
-        identity: True
-        for identity in state["keys"]
-        if identity != base and not identity.startswith(descendant)
-    }
+    _, state["keys"] = windows.registry_partition(state["keys"], hive, key)
     state.setdefault("deleted_keys", {})[base] = True
     if "created_keys" in state:
-        state["created_keys"] = {
-            identity: item
-            for identity, item in state["created_keys"].items()
-            if identity != base and not identity.startswith(descendant)
-        }
+        _, state["created_keys"] = windows.registry_partition(state["created_keys"], hive, key)
     if "security" in state:
-        state["security"] = {
-            identity: item
-            for identity, item in state["security"].items()
-            if identity != base and not identity.startswith(descendant)
-        }
+        _, state["security"] = windows.registry_partition(state["security"], hive, key)
     return 0 if deleted else 2
 
 def _delete_value(state, target, name):
@@ -503,11 +476,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
 
     def store_value(hive, key, name, registry_type, value, record):
         name = _value_name(name)
-        numeric_type = None
-        for numeric, symbolic in _TYPES.items():
-            if symbolic == registry_type:
-                numeric_type = numeric
-                break
+        numeric_type = _TYPE_NUMBERS.get(registry_type)
         if numeric_type == None:
             fail("unsupported registry type " + str(registry_type))
         ensure_key(hive, key)
@@ -530,14 +499,19 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         for value in initial:
             key = _initial_key(value)
             name = _value_name(value["name"])
-            identity = _identity(value["hive"], key, name)
-            current = _lookup_value(state, (value["hive"], key), name)
             registry_type = _TYPES.get(value["type"], value["type"])
             if value.get("delete", False):
+                identity = _identity(value["hive"], key, name)
                 state["values"].pop(identity, None)
                 state["deleted_values"][identity] = True
                 continue
-            if value.get("append", False) and current != None:
+            append_value = value.get("append", False)
+            if_absent = value.get("if_absent", False)
+            overwrite_only = value.get("overwrite_only", False)
+            # Ordinary assignments do not depend on the old value. Avoid
+            # normalizing and looking it up before store_value does its work.
+            current = _lookup_value(state, (value["hive"], key), name) if append_value or if_absent or overwrite_only else None
+            if append_value and current != None:
                 if current["type"] != 7 or registry_type != "REG_MULTI_SZ":
                     fail("registry append requires REG_MULTI_SZ values")
                 merged = _decode_value(current["raw"], current["type"], True)
@@ -548,9 +522,9 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
                         merged.append(item)
                 store_value(value["hive"], key, name, registry_type, merged, False)
                 continue
-            if value.get("if_absent", False) and current != None:
+            if if_absent and current != None:
                 continue
-            if value.get("overwrite_only", False) and current == None:
+            if overwrite_only and current == None:
                 continue
             store_value(
                 value["hive"],
@@ -1308,14 +1282,12 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
 
     def install(machine):
         for module in ["advapi32.dll", "advapi32_vista.dll", "kernel32.dll"]:
-            for name, argc in _CALLS.items():
-                machine.provide_export(callback, module = module, name = name, argc = argc)
-        for imported in machine.imports:
+            machine.provide_exports(callback, module = module, signatures = _CALLS)
+        for imported in machine.imports_named(_CALLS):
             name = imported.name.lower()
-            if _registry_provider_module(imported.module) and name in _CALLS:
+            if name in _CALLS and _registry_provider_module(imported.module):
                 machine.hook(callback, address = imported.address, argc = _CALLS[name])
-        for name, argc in _NATIVE_CALLS.items():
-            machine.provide_export(callback, module = "ntdll.dll", name = name, argc = argc)
+        machine.provide_exports(callback, module = "ntdll.dll", signatures = _NATIVE_CALLS)
         for ordinal, binding in _SHLWAPI_REGISTRY_WRAPPERS.items():
             function, argc = binding
             def wrapped(event, function = function):

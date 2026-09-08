@@ -62,6 +62,32 @@ func TestCABUncachedEntryDecompressesOnce(t *testing.T) {
 	}
 }
 
+func TestCABFolderCacheSharesDecodingAcrossEntries(t *testing.T) {
+	payload := []byte("firstsecond")
+	data := appendMSZIPTestDataBlock(nil, mszipTestBlock(t, payload, nil), len(payload))
+	source := &countingCABFile{data: data}
+	archive := &Archive{
+		file:        source,
+		folders:     []folder{{blocks: 1, compression: 1}},
+		cache:       true,
+		cacheStore:  bytecache.New(1024),
+		cacheSource: 1,
+	}
+	for _, item := range []struct {
+		start uint32
+		want  string
+	}{{0, "first"}, {5, "second"}} {
+		entry := &Entry{archive: archive, file: fileRecord{size: uint32(len(item.want)), uncompressedStart: item.start}}
+		out := make([]byte, len(item.want))
+		if _, err := entry.ReadAt(out, 0); err != nil || string(out) != item.want {
+			t.Fatalf("entry at %d = %q, %v", item.start, out, err)
+		}
+	}
+	if source.reads != 2 {
+		t.Fatalf("source reads = %d, want one folder header and payload", source.reads)
+	}
+}
+
 func mszipTestBlock(t *testing.T, data, dictionary []byte) []byte {
 	t.Helper()
 	var compressed bytes.Buffer

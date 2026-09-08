@@ -207,6 +207,17 @@ func readWord(memory cpu.Memory, address uint64, width int) (uint64, error) {
 	if width != 1 && width != 2 && width != 4 && width != 8 {
 		return 0, fmt.Errorf("amd64: unsupported scalar width %d", width)
 	}
+	if space, ok := memory.(*cpu.AddressSpace); ok {
+		var data [8]byte
+		if err := space.ReadMemory(address, data[:width], cpu.Read); err != nil {
+			return 0, err
+		}
+		return binary.LittleEndian.Uint64(data[:]), nil
+	}
+	return readWordGeneric(memory, address, width)
+}
+
+func readWordGeneric(memory cpu.Memory, address uint64, width int) (uint64, error) {
 	var data [8]byte
 	if err := memory.ReadMemory(address, data[:width], cpu.Read); err != nil {
 		return 0, err
@@ -218,12 +229,21 @@ func writeWord(memory cpu.Memory, address uint64, width int, value uint64) error
 	if width != 1 && width != 2 && width != 4 && width != 8 {
 		return fmt.Errorf("amd64: unsupported scalar width %d", width)
 	}
+	if space, ok := memory.(*cpu.AddressSpace); ok {
+		var data [8]byte
+		binary.LittleEndian.PutUint64(data[:], value)
+		return space.WriteMemory(address, data[:width])
+	}
+	return writeWordGeneric(memory, address, width, value)
+}
+
+func writeWordGeneric(memory cpu.Memory, address uint64, width int, value uint64) error {
 	var data [8]byte
 	binary.LittleEndian.PutUint64(data[:], value)
 	return memory.WriteMemory(address, data[:width])
 }
 
-func operandWidth(arg x86asm.Arg, inst x86asm.Inst) int {
+func operandWidth(arg x86asm.Arg, inst *x86asm.Inst) int {
 	if r, ok := arg.(x86asm.Reg); ok {
 		if a, ok := registerAlias(r); ok {
 			return a.width
@@ -235,7 +255,7 @@ func operandWidth(arg x86asm.Arg, inst x86asm.Inst) int {
 	return inst.DataSize / 8
 }
 
-func (c *CPU) readOperand(memory cpu.Memory, arg x86asm.Arg, inst x86asm.Inst, next uint64, width int) (uint64, error) {
+func (c *CPU) readOperand(memory cpu.Memory, arg x86asm.Arg, inst *x86asm.Inst, next uint64, width int) (uint64, error) {
 	switch a := arg.(type) {
 	case x86asm.Reg:
 		return c.reg(a)
@@ -253,7 +273,7 @@ func (c *CPU) readOperand(memory cpu.Memory, arg x86asm.Arg, inst x86asm.Inst, n
 	return 0, fmt.Errorf("amd64: unsupported operand %v", arg)
 }
 
-func (c *CPU) writeOperand(memory cpu.Memory, arg x86asm.Arg, inst x86asm.Inst, next uint64, width int, value uint64) error {
+func (c *CPU) writeOperand(memory cpu.Memory, arg x86asm.Arg, inst *x86asm.Inst, next uint64, width int, value uint64) error {
 	switch a := arg.(type) {
 	case x86asm.Reg:
 		return c.setReg(a, value)
@@ -352,21 +372,11 @@ func (c *CPU) push(memory cpu.Memory, value uint64, width int) error {
 // Step never loops over guest instructions. Unsupported instructions produce
 // a precise error at the current RIP rather than being treated as no-ops.
 func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
-	var code [15]byte
-	count := 0
-	for count < len(code) {
-		if c.rip > math.MaxUint64-uint64(count) {
-			break
-		}
-		if err := memory.ReadMemory(c.rip+uint64(count), code[count:count+1], cpu.Execute); err != nil {
-			if count == 0 {
-				return cpu.Continue, err
-			}
-			break
-		}
-		count++
+	code, count, err := fetchInstruction(memory, c.rip)
+	if err != nil {
+		return cpu.Continue, err
 	}
-	inst, err := x86asm.Decode(code[:count], 64)
+	inst, err := decodeInstruction(code, count)
 	if err != nil || inst.Op == 0 {
 		return cpu.Continue, fmt.Errorf("amd64: decode at %#x: %v", c.rip, err)
 	}

@@ -114,16 +114,29 @@ func TestRegistrationGeneratedEntries(t *testing.T) {
 	_, err = starlark.ExecFile(thread, "generated-entries.star", `
 load("@stdlib//windows/emulation:runner.star", "run")
 def execute(machine):
+    path = machine.allocate(value=binary.encode("C:\\root\\new.txt\x00",encoding="utf16le"))
+    opened = machine.call(machine.resolve_export("kernel32.dll",name="CreateFileW"),args=[path,0x40000000,0,0,2,0x80,0])
+    if opened.reason != "return" or opened.value == 0xffffffff:
+        fail("file creation failed")
+    data = machine.allocate(value=b"hello")
+    written = machine.allocate(size=4)
+    result = machine.call(machine.resolve_export("kernel32.dll",name="WriteFile"),args=[opened.value,data,5,written,0])
+    if result.reason != "return" or result.value != 1:
+        fail("file write failed")
     name = machine.allocate(value=binary.encode("C:\\root\\empty\x00",encoding="utf16le"))
     return machine.call(machine.resolve_export("kernel32.dll",name="CreateDirectoryW"),args=[name,0])
 def check():
     result = run(binary.concat([image]),"example.dll",directories=["C:\\root"],execute=execute)
     if result["result"].reason != "return" or result["result"].value != 1:
         fail("directory creation failed")
-    if result["generated_entries"] != {"c:\\root\\empty": {"directory": True}}:
+    entries = dict(result["generated_entries"])
+    entry = entries.pop("c:\\root\\new.txt")
+    if entry["directory"] or entry["data"] != b"hello":
+        fail("generated file entry lost content")
+    if entries != {"c:\\root\\empty": {"directory": True}}:
         fail("generated entries must retain empty directories and exclude initial paths")
-    if result["generated_files"] != {}:
-        fail("legacy file outputs must not turn directories into empty files")
+    if result["generated_files"] != {"c:\\root\\new.txt": b"hello"}:
+        fail("legacy file outputs must agree with entries and exclude directories")
 check()
 `, predeclared)
 	if err != nil {
