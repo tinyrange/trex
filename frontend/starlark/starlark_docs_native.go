@@ -9,6 +9,7 @@ import (
 // Each native entry point needs an explicit contract. Do not replace missing
 // descriptions with boilerplate: generation must fail until the API is documented.
 var nativeStarlarkDescriptions = map[string]string{
+	"windows.memory_image":              "Borrows a file as a read-only physical capture. Optional ranges map (physical_start, file_offset, size); omitted ranges cover the whole file, while an empty list captures nothing. Gaps remain unavailable, not zero-filled. Keep the source unchanged while views exist; this does not parse crash dumps or discover RAM ranges.",
 	"windows.icon":                      "Selects an icon image from an ICO, PE or NE file using its index and requested dimensions. Returns image bytes with actual dimensions, bit depth and resource identity; it does not launch or render the executable.",
 	"archive.ar":                        "Parses a Unix ar archive and returns ordered member metadata and file views. find(name, occurrence) distinguishes duplicate member names.",
 	"archive.cab":                       "Parses a Microsoft Cabinet file and exposes its members as file views. Folder decompression is shared when caching is enabled, so several entries in one compressed folder need not decode it repeatedly.",
@@ -264,6 +265,7 @@ var nativeStarlarkAdditionalSignatures = map[string]string{
 	"windows.inf":                 "windows.inf(file) -> INF",
 	"windows.inf_patches":         "windows.inf_patches(inf, hive, section='AddReg') -> list[dict]",
 	"windows.internet_shortcut":   "windows.internet_shortcut(url, icon_location='', icon_index=0) -> bytes",
+	"windows.memory_image":        "windows.memory_image(file, ranges=None) -> windows.memory_image",
 	"windows.minidump":            "windows.minidump(file) -> minidump",
 	"windows.module_sources":      "windows.module_sources(files, exclude=[]) -> dict",
 	"windows.mof":                 "windows.mof(value) -> MOF document",
