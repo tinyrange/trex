@@ -1544,7 +1544,8 @@ High-level, data-first Windows self-registration policy.
 Returns registry patches for one PE without loading system DLL images.
 
     Structured resources and static PE facts are preferred. The bounded native-architecture
-    runner is used only as a fallback. Its writes require success, except for
+    runner fills missing behavior and resolves Active Scripting language aliases
+    and primary classes. Its writes require success, except for
     completed HKCR writes guarded by static class metadata when a registrar
     reports the aggregate SELFREG_E_CLASS result.
 
