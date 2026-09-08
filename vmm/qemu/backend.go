@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,7 +136,11 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 	if err := parent.Err(); err != nil {
 		return fail(err)
 	}
-	args := []string{"-machine", backend.machine, "-m", fmt.Sprintf("%dB", machine.Memory), "-smp", strconv.Itoa(machine.CPUs), "-monitor", "none"}
+	machineArg := backend.machine
+	for _, property := range backend.machineProperties {
+		machineArg += "," + property.name + "=" + property.value
+	}
+	args := []string{"-machine", machineArg, "-m", fmt.Sprintf("%dB", machine.Memory), "-smp", strconv.Itoa(machine.CPUs), "-monitor", "none"}
 	if backend.accelerator != "auto" {
 		args = append(args, "-accel", backend.accelerator)
 	}
@@ -147,15 +152,20 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 			display = "none"
 		}
 	}
+	if backend.displayZoomToFit {
+		if display != "cocoa" && display != "gtk" {
+			return fail(fmt.Errorf("zoom-to-fit requires the cocoa or gtk display frontend"))
+		}
+		display += ",zoom-to-fit=on"
+	}
 	args = append(args, "-display", display)
 	if backend.firmware == "uefi" {
-		firmware, err := qemuUEFIFirmwareMemfd()
+		firmware, err := qemuUEFIFirmware(machine.Architecture, backend.binary)
 		if err != nil {
 			return fail(err)
 		}
-		driver.extra = append(driver.extra, firmware)
-		fd := 2 + len(driver.extra)
-		args = append(args, "-bios", qemuInheritedFDPath(fd))
+		args = append(args, "-bios", firmware.Name())
+		_ = firmware.Close()
 	}
 
 	qmpParent, qmpChild, err := inheritedSocket("qmp")
@@ -248,6 +258,8 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 		if bus == "auto" {
 			if disk.Media == "floppy" {
 				bus = "floppy"
+			} else if machine.Architecture == "aarch64" {
+				bus = "virtio"
 			} else {
 				bus = "ide"
 			}
@@ -289,6 +301,8 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 				deviceArg += fmt.Sprintf(",bus=ide.%d,unit=%d", disk.Unit/2, disk.Unit%2)
 			}
 			args = append(args, "-device", deviceArg)
+		} else if bus == "nvme" {
+			args = append(args, "-device", fmt.Sprintf("nvme,drive=%s,serial=trex-nvme-%d", node, index))
 		} else {
 			args = append(args, "-device", "virtio-blk-pci,drive="+node)
 		}
@@ -376,38 +390,37 @@ func fileToMemfd(name string, source starfile.File) (*os.File, error) {
 	return file, nil
 }
 
-func qemuUEFIFirmwareMemfd() (*os.File, error) {
+// Firmware is an existing immutable backend input, never an intermediate.
+// Use its native filename: QEMU's ROM loader does not load the firmware bytes
+// correctly through Darwin's /dev/fd paths. Generated disks still use NBD.
+func qemuUEFIFirmware(architecture, binaryName string) (*os.File, error) {
 	candidates := []string{
 		"/usr/share/edk2/x64/OVMF.4m.fd",
 		"/usr/share/OVMF/OVMF.fd",
 		"/usr/share/qemu/OVMF.fd",
 	}
-	var source *os.File
-	var sourceName string
+	firmwareName := "edk2-x86_64-code.fd"
+	if architecture == "aarch64" {
+		firmwareName = "edk2-aarch64-code.fd"
+		candidates = []string{
+			"/usr/share/AAVMF/AAVMF_CODE.fd",
+			"/usr/share/edk2/aarch64/QEMU_EFI.fd",
+			"/usr/share/qemu/edk2-aarch64-code.fd",
+		}
+	}
+	if binaryName == "" {
+		binaryName = "qemu-system-" + architecture
+	}
+	if executable, err := exec.LookPath(binaryName); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(executable), "..", "share", "qemu", firmwareName))
+	}
 	for _, candidate := range candidates {
 		file, err := os.Open(candidate)
 		if err == nil {
-			source, sourceName = file, candidate
-			break
+			return file, nil
 		}
 	}
-	if source == nil {
-		return nil, fmt.Errorf("QEMU UEFI firmware is not installed (looked for %s)", strings.Join(candidates, ", "))
-	}
-	defer source.Close()
-	firmware, err := qemuCreateAnonymousFile("trex-ovmf")
-	if err != nil {
-		return nil, fmt.Errorf("load QEMU UEFI firmware %s: %w", sourceName, err)
-	}
-	if _, err := io.Copy(firmware, source); err != nil {
-		firmware.Close()
-		return nil, fmt.Errorf("load QEMU UEFI firmware %s: %w", sourceName, err)
-	}
-	if _, err := firmware.Seek(0, io.SeekStart); err != nil {
-		firmware.Close()
-		return nil, err
-	}
-	return firmware, nil
+	return nil, fmt.Errorf("QEMU %s UEFI firmware is not installed (looked for %s)", architecture, strings.Join(candidates, ", "))
 }
 
 func inheritedSocket(name string) (channelpkg.ByteChannel, *os.File, error) {

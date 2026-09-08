@@ -65,21 +65,23 @@ func (v *qemuSpecValue) AttrNames() []string {
 }
 
 type qemuBackend struct {
-	binary          string
-	machine         string
-	accelerator     string
-	displayFrontend string
-	blockTransport  string
-	firmware        string
-	overlayLimit    int64
-	stderrLimit     int
-	devices         []*qemuSpecValue
-	netdevs         []*qemuSpecValue
-	audiodevs       []*qemuSpecValue
-	chardevs        []*qemuSpecValue
-	options         []*qemuSpecValue
-	acpiTables      []*qemuSpecValue
-	capabilities    []string
+	binary            string
+	machine           string
+	machineProperties []qemuProperty
+	accelerator       string
+	displayFrontend   string
+	displayZoomToFit  bool
+	blockTransport    string
+	firmware          string
+	overlayLimit      int64
+	stderrLimit       int
+	devices           []*qemuSpecValue
+	netdevs           []*qemuSpecValue
+	audiodevs         []*qemuSpecValue
+	chardevs          []*qemuSpecValue
+	options           []*qemuSpecValue
+	acpiTables        []*qemuSpecValue
+	capabilities      []string
 }
 
 func (b *qemuBackend) String() string {
@@ -115,23 +117,32 @@ func (b *qemuBackend) Capabilities() []string     { return append([]string(nil),
 func (b *qemuBackend) Validate(machine vmmapi.Machine) []vmmapi.ValidationIssue {
 	var issues []vmmapi.ValidationIssue
 	switch machine.Architecture {
-	case "i386", "x86_64":
+	case "i386", "x86_64", "aarch64":
 	default:
-		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.architecture", Field: "architecture", Message: "QEMU backend supports i386 and x86_64"})
+		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.architecture", Field: "architecture", Message: "QEMU backend supports i386, x86_64, and aarch64"})
+	}
+	if machine.Architecture == "aarch64" && (b.machine != "virt" && !strings.HasPrefix(b.machine, "virt-") || b.firmware != "uefi") {
+		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.arm_machine", Field: "architecture", Message: "aarch64 requires a virt machine with UEFI firmware"})
 	}
 	if b.blockTransport == "direct" && len(machine.Disks) != 0 {
 		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.block_transport", Field: "disks", Message: "direct transport requires a backend-native host file and is unavailable for opaque block devices"})
 	}
 	for index, disk := range machine.Disks {
+		if machine.Architecture == "aarch64" && (disk.Bus == "ide" || disk.Bus == "floppy" || disk.Media == "cdrom" || disk.Media == "floppy") {
+			issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.arm_disk", Field: fmt.Sprintf("disks[%d]", index), Message: "ARM virt disks require NVMe or virtio hard-disk attachments"})
+		}
+		if disk.Bus == "nvme" && disk.Unit != -1 {
+			issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.nvme_unit", Field: fmt.Sprintf("disks[%d].unit", index), Message: "NVMe attachments use separate controllers; unit must be -1"})
+		}
 		switch disk.Bus {
-		case "auto", "floppy", "ide", "virtio":
+		case "auto", "floppy", "ide", "virtio", "nvme":
 		default:
 			issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.disk_bus", Field: fmt.Sprintf("disks[%d].bus", index), Message: "unsupported QEMU disk bus"})
 		}
 		switch disk.Media {
 		case "", "disk":
 		case "cdrom":
-			if disk.Bus == "virtio" {
+			if disk.Bus == "virtio" || disk.Bus == "nvme" {
 				issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.cdrom_bus", Field: fmt.Sprintf("disks[%d].bus", index), Message: "QEMU CD-ROM media requires an IDE bus"})
 			}
 			if disk.Device.Geometry().LogicalBlockSize != 2048 {
@@ -208,7 +219,7 @@ func Capabilities() []string { return qemuCapabilities() }
 func qemuCapabilities() []string {
 	return normalizedCapabilities([]string{
 		"channel.console", "channel.custom", "channel.debugger", "channel.serial",
-		"debugger.gdb", "disk", "disk.bus.auto", "disk.bus.floppy", "disk.bus.ide", "disk.bus.virtio", "disk.geometry.chs",
+		"debugger.gdb", "disk", "disk.bus.auto", "disk.bus.floppy", "disk.bus.ide", "disk.bus.virtio", "disk.bus.nvme", "disk.geometry.chs",
 		"disk.snapshot", "display.capturable", "display.interactive", "extension.qemu.v1",
 		"input.key", "input.pointer", "input.text", "lifecycle.pause", "lifecycle.powerdown",
 		"lifecycle.reset", "lifecycle.stop", "network.bridge", "network.nat", "screenshot",
@@ -218,14 +229,18 @@ func qemuCapabilities() []string {
 func qemuBackendBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	binaryName, machine, accelerator := "", "pc", "auto"
 	displayFrontend, blockTransport, firmware := "auto", "auto", "bios"
+	var displayZoomToFit bool
 	overlayLimit := int64(defaultQEMUOverlayLimit)
 	stderrLimit := defaultQEMUStderrLimit
 	var devices, netdevs, audiodevs, chardevs, options, acpiTables *starlark.List
+	var machineProperties *starlark.Dict
 	if err := starlark.UnpackArgs("backend", args, kwargs,
 		"binary?", &binaryName,
 		"machine?", &machine,
+		"machine_properties?", &machineProperties,
 		"accelerator?", &accelerator,
 		"display_frontend?", &displayFrontend,
+		"display_zoom_to_fit?", &displayZoomToFit,
 		"block_transport?", &blockTransport,
 		"firmware?", &firmware,
 		"overlay_limit?", &overlayLimit,
@@ -243,9 +258,9 @@ func qemuBackendBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 		return nil, fmt.Errorf("backend: invalid machine name")
 	}
 	switch accelerator {
-	case "auto", "kvm", "tcg":
+	case "auto", "kvm", "hvf", "tcg":
 	default:
-		return nil, fmt.Errorf("backend: accelerator must be auto, kvm, or tcg")
+		return nil, fmt.Errorf("backend: accelerator must be auto, kvm, hvf, or tcg")
 	}
 	switch displayFrontend {
 	case "auto", "none", "gtk", "sdl", "cocoa":
@@ -268,9 +283,21 @@ func qemuBackendBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 	backend := &qemuBackend{
 		binary: binaryName, machine: machine, accelerator: accelerator,
 		displayFrontend: displayFrontend, blockTransport: blockTransport, firmware: firmware,
-		overlayLimit: overlayLimit, stderrLimit: stderrLimit, capabilities: qemuCapabilities(),
+		displayZoomToFit: displayZoomToFit,
+		overlayLimit:     overlayLimit, stderrLimit: stderrLimit, capabilities: qemuCapabilities(),
 	}
 	var err error
+	if machineProperties != nil {
+		if backend.machineProperties, err = qemuProperties(machineProperties.Items()); err != nil {
+			return nil, fmt.Errorf("backend: machine_properties: %w", err)
+		}
+		for _, property := range backend.machineProperties {
+			switch property.name {
+			case "type", "accel", "firmware", "memory", "memory-backend", "smp":
+				return nil, fmt.Errorf("backend: machine property %q is controlled by the backend or VMM machine", property.name)
+			}
+		}
+	}
 	if backend.devices, err = qemuSpecList(devices, "device"); err != nil {
 		return nil, err
 	}

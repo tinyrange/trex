@@ -215,6 +215,44 @@ def modern_windows(
         options = options,
     )
 
+def windows_arm64(
+        accelerator = "hvf",
+        display_frontend = "auto",
+        cpu = "host",
+        network = False,
+        no_reboot = True,
+        block_transport = "nbd",
+        zoom_to_fit = True):
+    """ARM64 UEFI machine with inbox NVMe storage and USB input policy.
+
+    Attach the system disk with bus="nvme". HVF uses the host ARM CPU;
+    emulated runs may select accelerator="tcg", cpu="max".
+    """
+    if network:
+        error("windows_arm64 has no validated network device")
+    return qemu.backend(
+        machine = "virt",
+        # Keep ITS enabled: QEMU 10.2.1 emits a malformed IORT without it,
+        # and Windows 11 build 26100 loops while scanning that table.
+        machine_properties = {"gic-version": 3, "its": True},
+        accelerator = accelerator,
+        firmware = "uefi",
+        display_frontend = display_frontend,
+        display_zoom_to_fit = zoom_to_fit and display_frontend in ["cocoa", "gtk"],
+        block_transport = block_transport,
+        devices = [
+            qemu.device("ramfb"),
+            qemu.device("qemu-xhci", id = "usb"),
+            qemu.device("usb-kbd", bus = "usb.0"),
+            qemu.device("usb-tablet", bus = "usb.0"),
+        ],
+        options = [
+            qemu.option("-nodefaults"),
+            qemu.option("-cpu", cpu),
+            qemu.option("-no-shutdown"),
+        ] + ([qemu.option("-no-reboot")] if no_reboot else []),
+    )
+
 def reactos(
         accelerator = "auto",
         display_frontend = "auto",
