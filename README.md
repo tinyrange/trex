@@ -157,6 +157,9 @@ The [LZX throughput benchmarks](compression/lzx/README.md) cover in-memory
 synthetic streams and opt-in CAB/WIM media, including allocation measurements
 and output hashes for comparing decoder revisions.
 
+CI also [compiles and runs a Renvo program inside pinned ReactOS](docs/renvo.md#native-reactos-ci-smoke),
+using QEMU/KVM and publishing the guest result and screenshots in Actions.
+
 ## Starlark quickstart
 
 A script exposes `main(args)` and receives lazy file values from `open`:
