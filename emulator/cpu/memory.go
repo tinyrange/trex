@@ -16,11 +16,45 @@ type region struct {
 // AddressSpace is a bounded, sparse, in-memory guest address space. It owns
 // mapping bytes; callers cannot mutate memory through retained input slices.
 type AddressSpace struct {
-	regions     []region
-	limit       uint64
-	used        uint64
-	protections []Protection
-	readCache   [64]permissionSpan
+	regions        []region
+	limit          uint64
+	used           uint64
+	protections    []Protection
+	readCache      [64]permissionSpan
+	trackedPages   map[uint64]struct{}
+	trackedFilter  [64]uint64
+	trackedVersion uint64
+}
+
+// TrackPageWrites subscribes to changes to the 4 KiB page containing address.
+// TrackedWriteVersion changes on writes to any subscribed page and on mapping
+// or permission changes. Derived-data caches can therefore remain coherent
+// with debugger writes as well as guest writes. Subscriptions are not cloned.
+func (m *AddressSpace) TrackPageWrites(address uint64) {
+	page := address >> 12
+	if m.trackedPages == nil {
+		m.trackedPages = make(map[uint64]struct{})
+	}
+	m.trackedPages[page] = struct{}{}
+	bit := (page ^ page>>12) & 4095
+	m.trackedFilter[bit>>6] |= uint64(1) << (bit & 63)
+}
+
+func (m *AddressSpace) TrackedWriteVersion() uint64 { return m.trackedVersion }
+
+func (m *AddressSpace) trackWrite(address uint64, size int) {
+	if size == 0 || len(m.trackedPages) == 0 {
+		return
+	}
+	for page, last := address>>12, (address+uint64(size)-1)>>12; page <= last; page++ {
+		bit := (page ^ page>>12) & 4095
+		if m.trackedFilter[bit>>6]&(uint64(1)<<(bit&63)) != 0 {
+			if _, ok := m.trackedPages[page]; ok {
+				m.trackedVersion++
+				return
+			}
+		}
+	}
 }
 
 // A cache entry never straddles an effective protection boundary, even when
@@ -124,6 +158,7 @@ func (m *AddressSpace) Map(address uint64, data []byte, access Access) error {
 	sort.Slice(m.regions, func(i, j int) bool { return m.regions[i].start < m.regions[j].start })
 	m.used += uint64(len(data))
 	clear(m.readCache[:])
+	m.trackedVersion++
 	return nil
 }
 
@@ -202,6 +237,7 @@ func (m *AddressSpace) WriteMemory(address uint64, source []byte) error {
 	if err := m.check(address, len(source), Write); err != nil {
 		return err
 	}
+	m.trackWrite(address, len(source))
 	for len(source) > 0 {
 		r := m.find(address)
 		n := copy(r.data[address-r.start:], source)
@@ -245,6 +281,7 @@ func (m *AddressSpace) Unmap(address uint64) error {
 			m.used -= uint64(len(r.data))
 			m.regions = append(m.regions[:i], m.regions[i+1:]...)
 			clear(m.readCache[:])
+			m.trackedVersion++
 			return nil
 		}
 	}
@@ -273,5 +310,6 @@ func (m *AddressSpace) Protect(address uint64, size int, access Access) ([]Prote
 	}
 	m.protections = append(m.protections, Protection{address, uint64(size), access})
 	clear(m.readCache[:])
+	m.trackedVersion++
 	return previous, nil
 }

@@ -64,10 +64,13 @@ func Parse(data []byte, memoryLimit uint64) (*Image, error) {
 		image.Directories = optional.DataDirectory
 		imageSize, headerSize = optional.SizeOfImage, optional.SizeOfHeaders
 	case *pe.OptionalHeader64:
-		if file.Machine != pe.IMAGE_FILE_MACHINE_AMD64 {
-			return nil, fmt.Errorf("PE32+ machine %#x is not AMD64", file.Machine)
+		if file.Machine != pe.IMAGE_FILE_MACHINE_AMD64 && file.Machine != pe.IMAGE_FILE_MACHINE_ARM64 {
+			return nil, fmt.Errorf("PE32+ machine %#x is not AMD64 or ARM64", file.Machine)
 		}
 		image.Architecture = cpu.Architecture{Name: "amd64", PointerSize: 8}
+		if file.Machine == pe.IMAGE_FILE_MACHINE_ARM64 {
+			image.Architecture.Name = "arm64"
+		}
 		image.PreferredBase = optional.ImageBase
 		image.EntryRVA = optional.AddressOfEntryPoint
 		image.Directories = optional.DataDirectory

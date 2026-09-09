@@ -615,7 +615,8 @@ func cryptoDESBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 func cryptoChecksumBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var algorithm string
 	var value starlark.Value
-	if err := starlark.UnpackArgs("checksum", args, kwargs, "algorithm", &algorithm, "value", &value); err != nil {
+	var initial uint32
+	if err := starlark.UnpackArgs("checksum", args, kwargs, "algorithm", &algorithm, "value", &value, "initial?", &initial); err != nil {
 		return nil, err
 	}
 	data, err := bytesForBinaryValue(value)
@@ -623,7 +624,24 @@ func cryptoChecksumBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlar
 		return nil, fmt.Errorf("checksum: %w", err)
 	}
 	var result uint32
-	switch strings.ToLower(strings.ReplaceAll(algorithm, "-", "")) {
+	algorithm = strings.ToLower(strings.ReplaceAll(algorithm, "-", ""))
+	if initial != 0 && algorithm != "sum16le" {
+		return nil, fmt.Errorf("checksum: initial is supported only for sum16le")
+	}
+	switch algorithm {
+	case "sum16le":
+		if initial > 0xffff {
+			return nil, fmt.Errorf("checksum: sum16le initial exceeds 16 bits")
+		}
+		result = initial
+		for offset := 0; offset < len(data); offset += 2 {
+			word := uint32(data[offset])
+			if offset+1 < len(data) {
+				word |= uint32(data[offset+1]) << 8
+			}
+			result += word
+			result = (result + (result >> 16)) & 0xffff
+		}
 	case "adler32":
 		result = adler32.Checksum(data)
 	case "crc32", "crc32ieee":

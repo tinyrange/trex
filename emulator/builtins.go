@@ -9,6 +9,7 @@ import (
 
 	binaryapi "github.com/tinyrange/trex/binary"
 	"github.com/tinyrange/trex/emulator/machine"
+	"github.com/tinyrange/trex/emulator/uefi"
 	"github.com/tinyrange/trex/emulator/x86"
 	"go.starlark.net/starlark"
 )
@@ -16,6 +17,7 @@ import (
 func Builtins() starlark.StringDict {
 	values := x86.Builtins()
 	values["machine"] = starlark.NewBuiltin("machine", Builtin)
+	values["uefi"] = starlark.NewBuiltin("uefi", uefi.Builtin)
 	return values
 }
 
