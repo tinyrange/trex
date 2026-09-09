@@ -10,6 +10,24 @@ import (
 	"go.starlark.net/starlark"
 )
 
+func TestLittleEndianChecksumCarryAndOddByte(t *testing.T) {
+	for _, tc := range []struct {
+		data          []byte
+		initial, want int
+	}{
+		{nil, 123, 123}, {[]byte{1, 2, 3}, 0, 0x204}, {[]byte{255, 255, 1, 0}, 0, 1}, {[]byte{255, 255}, 65535, 65535},
+	} {
+		v, err := cryptoChecksumBuiltin(nil, nil, starlark.Tuple{starlark.String("sum16le"), starlark.Bytes(tc.data)}, []starlark.Tuple{{starlark.String("initial"), starlark.MakeInt(tc.initial)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got int
+		if err := starlark.AsInt(v, &got); err != nil || got != tc.want {
+			t.Fatalf("checksum=%v want=%d error=%v", v, tc.want, err)
+		}
+	}
+}
+
 func TestSHA1BlocksAgainstStandardLibrary(t *testing.T) {
 	initial, _ := hex.DecodeString("67452301efcdab8998badcfe10325476c3d2e1f0")
 	for _, size := range []int{0, 1, 3, 55, 56, 63, 64, 65, 127, 128, 10000} {

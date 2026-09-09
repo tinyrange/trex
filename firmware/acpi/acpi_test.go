@@ -6,6 +6,42 @@ import (
 	"testing"
 )
 
+func TestARM64RootAndFixedDescription(t *testing.T) {
+	root, err := RootPointer(0x1234567890, "TREXOS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(root[:8]) != "RSD PTR " || root[15] != 2 || binary.LittleEndian.Uint64(root[24:]) != 0x1234567890 {
+		t.Fatal("invalid RSDP fields")
+	}
+	for _, data := range [][]byte{root[:20], root} {
+		var sum byte
+		for _, v := range data {
+			sum += v
+		}
+		if sum != 0 {
+			t.Fatal("invalid RSDP checksum")
+		}
+	}
+	fadt, err := ARM64FixedDescription(0x876543210, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fadt) != 276 || string(fadt[:4]) != "FACP" || fadt[8] != 6 || binary.LittleEndian.Uint32(fadt[112:]) != 1<<20 || binary.LittleEndian.Uint16(fadt[129:]) != 3 || binary.LittleEndian.Uint64(fadt[140:]) != 0x876543210 {
+		t.Fatal("invalid ARM64 FADT fields")
+	}
+	var sum byte
+	for _, v := range fadt {
+		sum += v
+	}
+	if sum != 0 {
+		t.Fatal("invalid FADT checksum")
+	}
+	if _, err := ARM64FixedDescription(0, false, true); err == nil {
+		t.Fatal("HVC accepted without PSCI")
+	}
+}
+
 func TestACPICompatibleIDTable(t *testing.T) {
 	body, err := CompatibleIDAML(`\_SB.PCI0.FWCF`, "PNPFFFF")
 	if err != nil {

@@ -8,6 +8,51 @@ import (
 
 const acpiHeaderSize = 36
 
+// ARM64FixedDescription describes a hardware-reduced ACPI 6.0 platform. The
+// caller owns the DSDT address and whether a PSCI conduit exists on its platform.
+func ARM64FixedDescription(dsdt uint64, psci, hvc bool) ([]byte, error) {
+	if hvc && !psci {
+		return nil, fmt.Errorf("HVC conduit requires PSCI")
+	}
+	body := make([]byte, 276-acpiHeaderSize)
+	binary.LittleEndian.PutUint32(body[112-acpiHeaderSize:], 1<<20) // HW_REDUCED_ACPI
+	var flags uint16
+	if psci {
+		flags |= 1
+	}
+	if hvc {
+		flags |= 2
+	}
+	binary.LittleEndian.PutUint16(body[129-acpiHeaderSize:], flags)
+	binary.LittleEndian.PutUint64(body[140-acpiHeaderSize:], dsdt)
+	return Table("FACP", body, 6, "TREXOS", "ARM64   ", 1, "TREX", 1)
+}
+
+// RootPointer constructs the ACPI 2.0+ RSDP pointing to an XSDT in guest memory.
+// Both the legacy twenty-byte checksum and extended checksum are populated.
+func RootPointer(xsdt uint64, oemID string) ([]byte, error) {
+	if err := acpiFixedName("OEM ID", oemID, 6); err != nil {
+		return nil, err
+	}
+	data := make([]byte, 36)
+	copy(data, "RSD PTR ")
+	copy(data[9:15], oemID)
+	data[15] = 2
+	binary.LittleEndian.PutUint32(data[20:], 36)
+	binary.LittleEndian.PutUint64(data[24:], xsdt)
+	var sum byte
+	for _, v := range data[:20] {
+		sum += v
+	}
+	data[8] = -sum
+	sum = 0
+	for _, v := range data {
+		sum += v
+	}
+	data[32] = -sum
+	return data, nil
+}
+
 // Table constructs an ACPI system-description table and computes its checksum.
 func Table(signature string, body []byte, revision int, oemID, oemTableID string, oemRevision uint64, creatorID string, creatorRevision uint64) ([]byte, error) {
 	if err := acpiFixedName("signature", signature, 4); err != nil {

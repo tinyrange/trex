@@ -2389,9 +2389,9 @@ Encrypts or decrypts complete 16-byte AES blocks in CBC or ECB mode, returning b
 
 ### `crypto.checksum`
 
-`crypto.checksum(algorithm, value) -> int`
+`crypto.checksum(algorithm, value, initial=0) -> int`
 
-Returns an integer Adler-32 or supported CRC-32 checksum for binary input. These checksums detect accidental changes; they are not cryptographic authentication.
+Returns Adler-32, a supported CRC-32, or sum16le for binary input. sum16le adds little-endian 16-bit words with end-around carry and no complement; an odd final byte is a low byte. Its optional initial accumulator must fit 16 bits. Continue using even-sized chunks; nonzero initial is rejected for other algorithms. These checksums are not cryptographic authentication.
 
 ### `crypto.constant_time_equal`
 
@@ -2525,6 +2525,12 @@ Creates an in-process machine for the input's supported architecture, using nati
 
 Wraps explicit mutable plugin state and its installation callback for emulator use. Keep checkpointed callback state here rather than hiding it in closures.
 
+### `emulator.uefi`
+
+`emulator.uefi(image, memory=256MiB, memory_base=0x40000000, image_base=0, stack_size=1MiB, time_unix=0, image_path='\\EFI\\Boot\\BootAA64.efi', registers={}, observe=None, device_path=b'', event_kinds=None)`
+
+Loads an ARM64 EFI image into a configurable in-process interpreter. Runs stop at budgets, watches, explicit breakpoints, unsupported operations or validated ExitBootServices. CPU, RAM, firmware and disk overlays support checkpoints; digest-checked rewrites accelerate recognized routines. See the [UEFI inspection API](../../../emulator/uefi/README.md) for configuration and limitations. Native HVF continuation is not implemented.
+
 ### `emulator.x86`
 
 `emulator.x86(image|code, base=0x1000, entry=None, instruction_limit=2M, memory_limit=32MiB, stack_size=1MiB, call_depth_limit=1024, trace=False, trace_limit=4096, profile=False, profile_interval=256, profile_limit=16384, image_name='main', fs_base=0, segment_size=4096)`
@@ -2602,6 +2608,24 @@ Parses a VHDX container and exposes its logical disk contents. This unwraps the 
 `firmware.acpi_compatible_id(device, compatible_id)`
 
 Builds a complete SSDT file that assigns an ACPI compatible ID to the selected device. The output includes the ACPI header and checksum and can be supplied directly to qemu.acpi_table.
+
+### `firmware.acpi_fadt_arm64`
+
+`firmware.acpi_fadt_arm64(dsdt, psci=False, hvc=False)`
+
+Builds a hardware-reduced ARM64 FADT with an explicit DSDT guest address and PSCI conduit declarations. HVC requires PSCI; the caller supplies the declared platform.
+
+### `firmware.acpi_madt_arm64`
+
+`firmware.acpi_madt_arm64(distributor, redistributor, mpidrs, performance_interrupt=0, maintenance_interrupt=0)`
+
+Builds a GICv3 MADT with enabled CPU interfaces for the supplied MPIDRs, a distributor, and an always-on redistributor range with one 128 KiB frame per CPU. Addresses and interrupt IDs are explicit platform inputs.
+
+### `firmware.acpi_rsdp`
+
+`firmware.acpi_rsdp(xsdt, oem_id='TREXOS')`
+
+Builds an ACPI 2.0+ root pointer with both checksums and an explicit guest XSDT address. Returns a file containing the serialized structure.
 
 ### `firmware.acpi_table`
 
