@@ -3,15 +3,21 @@ package windows
 import (
 	"encoding/binary"
 	"fmt"
-	starfile "github.com/tinyrange/trex/storage/star"
+	"io"
 	"path"
 	"strings"
 	"unicode/utf16"
 
+	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
 
 const hiveBaseBlockSize = 4096
+
+// Hive versions 1.4 and later store values above this threshold in a db
+// descriptor. Each segment contributes at most this many bytes, excluding
+// the cell's alignment padding.
+const hiveBigDataSegmentSize = 0x3fd8
 
 func hiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
@@ -260,13 +266,13 @@ func (h *registryHive) readSubkeys(key hiveKey) ([]hiveKey, error) {
 	}
 	cells, err := h.readSubkeyList(key.subkeyList)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("hive: key %q subkey list cell 0x%x: %w", key.name, key.subkeyList, err)
 	}
 	keys := make([]hiveKey, 0, len(cells))
 	for _, cell := range cells {
 		child, err := h.readKey(cell)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("hive: key %q child cell 0x%x: %w", key.name, cell, err)
 		}
 		keys = append(keys, child)
 	}
@@ -426,11 +432,19 @@ func (h *registryHive) readValueData(lengthRaw uint32, cell uint32) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	if length > len(data) {
+	var version [4]byte
+	if _, err := h.file.ReadAt(version[:], 24); err != nil {
+		return nil, err
+	}
+	segmented := length > hiveBigDataSegmentSize && binary.LittleEndian.Uint32(version[:]) >= 4
+	if segmented || length > len(data) {
 		if len(data) < 8 || string(data[:2]) != "db" {
 			return nil, fmt.Errorf("hive: truncated value data")
 		}
 		count := int(binary.LittleEndian.Uint16(data[2:4]))
+		if count != (length+hiveBigDataSegmentSize-1)/hiveBigDataSegmentSize {
+			return nil, fmt.Errorf("hive: invalid large-value segment count %d", count)
+		}
 		listCell := binary.LittleEndian.Uint32(data[4:8])
 		list, err := h.readCell(listCell)
 		if err != nil {
@@ -446,11 +460,11 @@ func (h *registryHive) readValueData(lengthRaw uint32, cell uint32) ([]byte, err
 			if err != nil {
 				return nil, fmt.Errorf("hive: read large-value segment %d: %w", index, err)
 			}
-			remaining := length - len(value)
-			if len(segment) > remaining {
-				segment = segment[:remaining]
+			needed := min(length-len(value), hiveBigDataSegmentSize)
+			if len(segment) < hiveBigDataSegmentSize {
+				return nil, fmt.Errorf("hive: truncated large-value segment %d", index)
 			}
-			value = append(value, segment...)
+			value = append(value, segment[:needed]...)
 		}
 		if len(value) != length {
 			return nil, fmt.Errorf("hive: large value has %d bytes, want %d", len(value), length)
@@ -462,27 +476,39 @@ func (h *registryHive) readValueData(lengthRaw uint32, cell uint32) ([]byte, err
 
 func (h *registryHive) readCell(cell uint32) ([]byte, error) {
 	offset := int64(hiveBaseBlockSize + cell)
-	header := make([]byte, 4)
-	if _, err := h.file.ReadAt(header, offset); err != nil {
-		return nil, err
+	if offset < hiveBaseBlockSize || offset > h.file.Size()-4 {
+		return nil, fmt.Errorf("hive: cell 0x%x header at 0x%x exceeds %d-byte file", cell, offset, h.file.Size())
 	}
-	size := int32(binary.LittleEndian.Uint32(header))
+	header := make([]byte, 4)
+	if n, err := h.file.ReadAt(header, offset); n != len(header) {
+		if err == nil {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, fmt.Errorf("hive: read cell 0x%x header at 0x%x: %w", cell, offset, err)
+	}
+	size := int64(int32(binary.LittleEndian.Uint32(header)))
 	if size == 0 {
 		return nil, fmt.Errorf("hive: empty cell 0x%x", cell)
 	}
 	if size < 0 {
 		size = -size
 	}
-	prefix := int32(0)
+	prefix := int64(0)
 	if h.legacyCellPrefix {
 		prefix = 4
 	}
 	if size < 4+prefix {
 		return nil, fmt.Errorf("hive: invalid cell 0x%x size %d", cell, size)
 	}
+	if size > h.file.Size()-offset {
+		return nil, fmt.Errorf("hive: cell 0x%x size %d at 0x%x exceeds %d-byte file", cell, size, offset, h.file.Size())
+	}
 	data := make([]byte, int(size)-4-int(prefix))
-	if _, err := h.file.ReadAt(data, offset+4+int64(prefix)); err != nil {
-		return nil, err
+	if n, err := h.file.ReadAt(data, offset+4+prefix); n != len(data) {
+		if err == nil {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, fmt.Errorf("hive: read cell 0x%x body at 0x%x: %w", cell, offset+4+prefix, err)
 	}
 	return data, nil
 }

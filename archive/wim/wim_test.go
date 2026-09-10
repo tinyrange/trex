@@ -2,8 +2,11 @@ package wim
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"unicode/utf16"
 
@@ -11,6 +14,30 @@ import (
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
+
+func TestExternalResourceBacksWIMEntryBySHA1(t *testing.T) {
+	data := []byte("canonical cabinet member")
+	digest := sha1.Sum(data)
+	reader := &countingWIMFile{data: data}
+	archive := &Archive{
+		byHash:          make(map[string]wimResourceLocation),
+		locationsByHash: make(map[string][]wimResourceLocation),
+	}
+	if err := archive.AddExternalResources([]ExternalResource{{SHA1: digest, File: reader}}); err != nil {
+		t.Fatal(err)
+	}
+	file := archive.newFile(entry{path: "/image1/member", hash: digest})
+	if file.Size() != int64(len(data)) {
+		t.Fatalf("external size = %d, want %d", file.Size(), len(data))
+	}
+	actual, err := io.ReadAll(io.NewSectionReader(file, 0, file.Size()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, data) {
+		t.Fatalf("external data = %q", actual)
+	}
+}
 
 type countingWIMFile struct {
 	data  []byte
@@ -36,6 +63,58 @@ func (f *countingWIMFile) Type() string                       { return "file" }
 func (f *countingWIMFile) Freeze()                            {}
 func (f *countingWIMFile) Truth() starlark.Bool               { return starlark.True }
 func (f *countingWIMFile) Hash() (uint32, error)              { return 0, nil }
+
+func minimalWIMHeader(flags, chunkSize uint32) []byte {
+	header := make([]byte, wimHeaderSize)
+	copy(header[0:8], []byte{'M', 'S', 'W', 'I', 'M', 0, 0, 0})
+	binary.LittleEndian.PutUint32(header[8:12], wimHeaderSize)
+	binary.LittleEndian.PutUint32(header[16:20], flags)
+	binary.LittleEndian.PutUint32(header[20:24], chunkSize)
+	binary.LittleEndian.PutUint16(header[40:42], 1)
+	binary.LittleEndian.PutUint16(header[42:44], 1)
+	return header
+}
+
+func TestWIMChunkSizeValidationAllowsUncompressedZero(t *testing.T) {
+	archive, err := OpenWithCache(
+		&countingWIMFile{data: minimalWIMHeader(0x80, 0)},
+		bytecache.New(bytecache.DefaultBytes),
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archive.chunkSize != 0 {
+		t.Fatalf("chunk size = %d, want 0", archive.chunkSize)
+	}
+}
+
+func TestWIMChunkSizeValidationRejectsCompressedZero(t *testing.T) {
+	_, err := OpenWithCache(
+		&countingWIMFile{data: minimalWIMHeader(wimFlagLZMS, 0)},
+		bytecache.New(bytecache.DefaultBytes),
+		1,
+	)
+	if err == nil || !strings.Contains(err.Error(), "compressed archive has zero chunk size") {
+		t.Fatalf("OpenWithCache error = %v, want compressed zero chunk rejection", err)
+	}
+}
+
+func TestResourceChunksRejectsCompressedZeroChunkSize(t *testing.T) {
+	archive := &Archive{chunkSize: 0}
+	_, err := archive.resourceChunks(wimResource{flags: wimResourceCompressed, size: 1, originalSize: 1})
+	if err == nil || !strings.Contains(err.Error(), "invalid chunk size") {
+		t.Fatalf("resourceChunks error = %v, want zero chunk rejection", err)
+	}
+}
+
+func TestResourceChunksRejectsTruncatedTable(t *testing.T) {
+	archive := &Archive{file: &countingWIMFile{data: []byte{0, 0}}, chunkSize: 4}
+	_, err := archive.resourceChunks(wimResource{flags: wimResourceCompressed, size: 10, originalSize: 8})
+	if err == nil || !strings.Contains(err.Error(), "read chunk table") {
+		t.Fatalf("resourceChunks error = %v, want truncated table rejection", err)
+	}
+}
 
 func TestWIMResourceFileReadsAndCachesIndividualChunks(t *testing.T) {
 	container := make([]byte, 12)
@@ -148,4 +227,65 @@ func utf16Bytes(value string) []byte {
 		binary.LittleEndian.PutUint16(data[index*2:], code)
 	}
 	return data
+}
+
+func indexedLookupFixture(names []string) *Archive {
+	metadata := make([]byte, 8)
+	for _, name := range names {
+		encoded := utf16Bytes(name)
+		data := make([]byte, wimMetadataEntryBaseLen+len(encoded))
+		binary.LittleEndian.PutUint64(data, uint64(len(data)))
+		binary.LittleEndian.PutUint16(data[100:], uint16(len(encoded)))
+		copy(data[102:], encoded)
+		metadata = append(metadata, data...)
+	}
+	metadata = append(metadata, make([]byte, 8)...)
+	root := entry{path: "/image1", isDir: true, subdirOff: 8}
+	return &Archive{images: []image{{root: root, metadata: metadata,
+		dirs: make(map[string][]entry), byPath: map[string]entry{wimPathKey(root.path): root}}}}
+}
+
+func TestIndexedWIMLookupPreservesSimpleFoldAndLazyLoading(t *testing.T) {
+	a := indexedLookupFixture([]string{"Σ.txt", "S.txt", "ı.txt", "I.txt", "Hello.txt"})
+	if len(a.images[0].dirs) != 0 {
+		t.Fatal("fixture already parsed")
+	}
+	for query, want := range map[string]string{
+		"/IMAGE1/hello.TXT": "Hello.txt", "/image1/ς.txt": "Σ.txt",
+		"/image1/ſ.txt": "S.txt", "/image1/ı.txt": "ı.txt", "/image1/i.txt": "I.txt",
+	} {
+		got, err := a.lookupPath(query)
+		if err != nil || got.name != want {
+			t.Fatalf("lookup %q = %q, %v; want %q", query, got.name, err, want)
+		}
+	}
+	if len(a.images[0].dirs) != 1 {
+		t.Fatal("directory was not cached")
+	}
+	if _, err := a.lookupPath("/image1/missing"); err == nil {
+		t.Fatal("missing file accepted")
+	}
+	if _, err := a.lookupPath("/image1/Hello.txt/child"); err == nil {
+		t.Fatal("traversed through a file")
+	}
+	if _, err := a.lookupPath("/image10/Hello.txt"); err == nil {
+		t.Fatal("wrong image prefix accepted")
+	}
+}
+
+func BenchmarkIndexedWIMLookup(b *testing.B) {
+	names := make([]string, 20000)
+	for i := range names {
+		names[i] = fmt.Sprintf("component-%05d.manifest", i)
+	}
+	a := indexedLookupFixture(names)
+	if _, err := a.lookupPath("/image1/" + names[0]); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := a.lookupPath("/IMAGE1/" + names[i%len(names)]); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

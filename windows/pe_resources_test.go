@@ -104,6 +104,13 @@ func TestUpdatePEChecksum(t *testing.T) {
 	if first == 0 {
 		t.Fatal("checksum was not populated")
 	}
+	stored, computed, err := peChecksums(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored != computed || stored != first {
+		t.Fatalf("PE checksums = stored %#x computed %#x, want %#x", stored, computed, first)
+	}
 	if err := updatePEChecksum(data); err != nil {
 		t.Fatal(err)
 	}

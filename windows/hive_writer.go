@@ -51,11 +51,13 @@ const (
 	regResourceRequirementsList = 10
 	regQWord                    = 11
 
-	infAddRegNoClobber     = uint32(0x00000002)
-	infAddRegDeleteValue   = uint32(0x00000004)
-	infAddRegAppend        = uint32(0x00000008)
-	infAddRegKeyOnly       = uint32(0x00000010)
-	infAddRegOverwriteOnly = uint32(0x00000020)
+	infAddRegNoClobber     = 0x00000002
+	infAddRegDeleteValue   = 0x00000004
+	infAddRegAppend        = 0x00000008
+	infAddRegKeyOnly       = 0x00000010
+	infAddRegOverwriteOnly = 0x00000020
+	// Native CBS operation, outside the 32-bit INF flags/type namespace.
+	registryPrepend = uint64(1) << 32
 )
 
 type registryTree struct {
@@ -420,7 +422,7 @@ func (h *registryHive) appendPatches(key hiveKey, keyParts []string, patches *st
 	}
 	children, err := h.readSubkeys(key)
 	if err != nil {
-		return err
+		return fmt.Errorf("hive: enumerate %s: %w", keyPath, err)
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
@@ -477,7 +479,7 @@ func (h *registryHive) appendKeys(key hiveKey, keyParts []string, keys *starlark
 	}
 	children, err := h.readSubkeys(key)
 	if err != nil {
-		return err
+		return fmt.Errorf("hive: enumerate %s: %w", keyPath, err)
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
@@ -519,7 +521,7 @@ func (h *registryHive) appendKeyMetadata(key hiveKey, keyParts []string, keys *s
 	}
 	children, err := h.readSubkeys(key)
 	if err != nil {
-		return err
+		return fmt.Errorf("hive: enumerate %s: %w", keyPath, err)
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
@@ -615,7 +617,7 @@ type hiveBuildPatch struct {
 	key         string
 	name        string
 	value       registryData
-	addRegFlags uint32
+	addRegFlags uint64
 }
 
 func unpackHiveBuildPatches(value starlark.Value) ([]hiveBuildPatch, error) {
@@ -753,14 +755,16 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 			return nil, err
 		}
 	}
+	// Some registry indexes encode records as empty child keys. Creating a
+	// placeholder value would change their meaning; preserve truly empty keys.
 	if keys != nil {
 		for i := 0; i < keys.Len(); i++ {
-			path, ok := starlark.AsString(keys.Index(i))
-			if !ok {
-				return nil, fmt.Errorf("patch_hive: keys[%d] is %s, want string", i, keys.Index(i).Type())
+			keyPath, ok := starlark.AsString(keys.Index(i))
+			if !ok || keyPath == "" {
+				return nil, fmt.Errorf("patch_hive: keys[%d] must be a non-empty string", i)
 			}
-			if _, err := hive.ensureKey(path); err != nil {
-				return nil, fmt.Errorf("patch_hive: keys[%d]: %w", i, err)
+			if _, err := hive.ensureKey(keyPath); err != nil {
+				return nil, fmt.Errorf("patch_hive: keys[%d] %s: %w", i, keyPath, err)
 			}
 		}
 	}
@@ -932,15 +936,16 @@ func appendRegistryPathPart(parts []string, part string) []string {
 	return child
 }
 
-func unpackAddRegBehaviorFlags(patch *starlark.Dict, context string) (uint32, error) {
-	var flags uint32
+func unpackAddRegBehaviorFlags(patch *starlark.Dict, context string) (uint64, error) {
+	var flags uint64
 	for _, behavior := range []struct {
 		name string
-		flag uint32
+		flag uint64
 	}{
 		{name: "if_absent", flag: infAddRegNoClobber},
 		{name: "delete", flag: infAddRegDeleteValue},
 		{name: "append", flag: infAddRegAppend},
+		{name: "prepend", flag: registryPrepend},
 		{name: "overwrite_only", flag: infAddRegOverwriteOnly},
 	} {
 		value, found, err := patch.Get(starlark.String(behavior.name))
@@ -957,6 +962,9 @@ func unpackAddRegBehaviorFlags(patch *starlark.Dict, context string) (uint32, er
 		if enabled {
 			flags |= behavior.flag
 		}
+	}
+	if flags&registryPrepend != 0 && flags&(infAddRegAppend|infAddRegDeleteValue|infAddRegNoClobber|infAddRegOverwriteOnly) != 0 {
+		return 0, fmt.Errorf("%s: prepend cannot be combined with other registry operations", context)
 	}
 	return flags, nil
 }
@@ -1051,6 +1059,13 @@ func registryDataFromStarlark(dataType string, value starlark.Value) (registryDa
 		}
 		return registryData{typ: regNone, data: data}, nil
 	default:
+		if typ, ok := assemblyRegistryNumericType(normalizedType); ok {
+			data, err := bytesForValue(value)
+			if err != nil {
+				return registryData{}, err
+			}
+			return registryData{typ: typ, data: data}, nil
+		}
 		const privateTypePrefix = "REG_TYPE_"
 		if strings.HasPrefix(normalizedType, privateTypePrefix) {
 			typ, err := strconv.ParseUint(strings.TrimPrefix(normalizedType, privateTypePrefix), 0, 32)
@@ -1160,8 +1175,11 @@ func (h *mutableHive) patchValue(keyPath, valueName string, value registryData) 
 		}
 		return nil
 	}
-	if oldLengthRaw&0x80000000 != 0 {
-		dataCell, err := h.allocateCell(value.data)
+	// Never reuse a db descriptor as a direct data cell, or write a large
+	// modern value directly into a cell that Windows interprets as a db.
+	modern := binary.LittleEndian.Uint32(h.data[24:28]) >= 4
+	if oldLengthRaw&0x80000000 != 0 || (modern && (len(value.data) > hiveBigDataSegmentSize || oldLengthRaw > hiveBigDataSegmentSize)) {
+		dataCell, err := h.writeValueData(value.data)
 		if err != nil {
 			return err
 		}
@@ -1182,7 +1200,7 @@ func (h *mutableHive) patchValue(keyPath, valueName string, value registryData) 
 		return err
 	}
 	if len(value.data) > len(oldBody) {
-		dataCell, err := h.allocateCell(value.data)
+		dataCell, err := h.writeValueData(value.data)
 		if err != nil {
 			return err
 		}
@@ -1223,7 +1241,10 @@ func (h *mutableHive) setValue(keyPath, valueName string, value registryData) er
 	return h.addValueCell(key, valueCell)
 }
 
-func (h *mutableHive) applyValue(keyPath, valueName string, value registryData, flags uint32) error {
+func (h *mutableHive) applyValue(keyPath, valueName string, value registryData, flags uint64) error {
+	if flags&registryPrepend != 0 && value.typ != regMultiSZ {
+		return fmt.Errorf("prepend requires REG_MULTI_SZ values")
+	}
 	key, lookupErr := h.lookupKey(keyPath)
 	valueExists := false
 	if lookupErr == nil {
@@ -1236,7 +1257,7 @@ func (h *mutableHive) applyValue(keyPath, valueName string, value registryData, 
 			return nil
 		}
 		return h.deleteValue(keyPath, valueName)
-	case flags&infAddRegAppend != 0:
+	case flags&(infAddRegAppend|registryPrepend) != 0:
 		if !valueExists {
 			return h.setValue(keyPath, valueName, value)
 		}
@@ -1244,7 +1265,7 @@ func (h *mutableHive) applyValue(keyPath, valueName string, value registryData, 
 		if err != nil {
 			return err
 		}
-		merged, err := appendRegistryMultiString(existing, value)
+		merged, err := mergeRegistryMultiString(existing, value, flags&registryPrepend != 0)
 		if err != nil {
 			return err
 		}
@@ -1722,7 +1743,7 @@ func (h *mutableHive) writeValue(name string, value registryData) (uint32, error
 		dataCell = binary.LittleEndian.Uint32(inline[:])
 	} else {
 		var err error
-		dataCell, err = h.allocateCell(value.data)
+		dataCell, err = h.writeValueData(value.data)
 		if err != nil {
 			return 0, err
 		}
@@ -1736,6 +1757,46 @@ func (h *mutableHive) writeValue(name string, value registryData) (uint32, error
 	binary.LittleEndian.PutUint16(body[16:18], flags)
 	copy(body[0x14:], nameBytes)
 	return h.allocateCell(body)
+}
+
+func (h *mutableHive) writeValueData(data []byte) (uint32, error) {
+	return writeRegistryValueData(data, binary.LittleEndian.Uint32(h.data[24:28]), h.allocateCell)
+}
+
+// writeRegistryValueData shares the on-disk layout between complete rewrites
+// and in-place hive patches. The allocator owns cell alignment; padding is
+// never counted as value data.
+func writeRegistryValueData(data []byte, minor uint32, allocate func([]byte) (uint32, error)) (uint32, error) {
+	if minor < 4 || len(data) <= hiveBigDataSegmentSize {
+		return allocate(data)
+	}
+	count := (len(data) + hiveBigDataSegmentSize - 1) / hiveBigDataSegmentSize
+	if count > 0xffff {
+		return 0, fmt.Errorf("hive: large value exceeds segment-count limit")
+	}
+	list := make([]byte, count*4)
+	for index := 0; index < count; index++ {
+		start := index * hiveBigDataSegmentSize
+		// Every segment needs full capacity, even when the last payload is
+		// shorter. Windows' hive consistency checker rejects a short final
+		// segment and can remove the entire value during boot-time repair.
+		segment := make([]byte, hiveBigDataSegmentSize)
+		copy(segment, data[start:min(start+hiveBigDataSegmentSize, len(data))])
+		cell, err := allocate(segment)
+		if err != nil {
+			return 0, err
+		}
+		binary.LittleEndian.PutUint32(list[index*4:], cell)
+	}
+	listCell, err := allocate(list)
+	if err != nil {
+		return 0, err
+	}
+	desc := make([]byte, 8)
+	copy(desc, "db")
+	binary.LittleEndian.PutUint16(desc[2:], uint16(count))
+	binary.LittleEndian.PutUint32(desc[4:], listCell)
+	return allocate(desc)
 }
 
 func (h *mutableHive) writeValueList(cells []uint32) (uint32, error) {
@@ -2107,7 +2168,7 @@ func applyAddRegRow(roots map[string]*registryTree, row *starlark.List) error {
 	if hive == "" {
 		return nil
 	}
-	return applyRegistryValue(roots[hive], mapped, valueName, data, flags)
+	return applyRegistryValue(roots[hive], mapped, valueName, data, uint64(flags))
 }
 
 func patchFromINFAddRegRow(row *starlark.List, targetHive string) (*starlark.Dict, bool, error) {
@@ -2182,7 +2243,7 @@ func registryPatchFromINFAddRegRow(row *starlark.List) (string, registryPatch, b
 	if err != nil {
 		return "", registryPatch{}, false, err
 	}
-	return hive, registryPatch{key: mapped, name: valueName, typ: dataType, value: value, addRegFlags: flags}, true, nil
+	return hive, registryPatch{key: mapped, name: valueName, typ: dataType, value: value, addRegFlags: uint64(flags)}, true, nil
 }
 
 func applyTxtSetupRegistry(roots map[string]*registryTree, txtsetup *infFile) {
@@ -2613,12 +2674,15 @@ func setRegistryValueParts(root *registryTree, parts []string, name string, valu
 	key.values[name] = value
 }
 
-func applyRegistryValue(root *registryTree, keyPath, name string, value registryData, flags uint32) error {
+func applyRegistryValue(root *registryTree, keyPath, name string, value registryData, flags uint64) error {
 	parts := strings.Split(strings.Trim(storage.CleanPath(keyPath), "/"), "/")
 	return applyRegistryValueParts(root, parts, name, value, flags)
 }
 
-func applyRegistryValueParts(root *registryTree, parts []string, name string, value registryData, flags uint32) error {
+func applyRegistryValueParts(root *registryTree, parts []string, name string, value registryData, flags uint64) error {
+	if flags&registryPrepend != 0 && value.typ != regMultiSZ {
+		return fmt.Errorf("prepend requires REG_MULTI_SZ values")
+	}
 	key := ensureRegistryKeyParts(root, parts)
 	existingName, existing, found := registryTreeValue(key, name)
 	switch {
@@ -2627,12 +2691,12 @@ func applyRegistryValueParts(root *registryTree, parts []string, name string, va
 			delete(key.values, existingName)
 		}
 		return nil
-	case flags&infAddRegAppend != 0:
+	case flags&(infAddRegAppend|registryPrepend) != 0:
 		if !found {
 			setRegistryValueParts(root, parts, name, value)
 			return nil
 		}
-		merged, err := appendRegistryMultiString(existing, value)
+		merged, err := mergeRegistryMultiString(existing, value, flags&registryPrepend != 0)
 		if err != nil {
 			return err
 		}
@@ -2686,6 +2750,22 @@ func appendRegistryMultiString(existing, addition registryData) (registryData, e
 	return registryMultiString(values), nil
 }
 
+func mergeRegistryMultiString(existing, addition registryData, prepend bool) (registryData, error) {
+	if !prepend {
+		return appendRegistryMultiString(existing, addition)
+	}
+	if existing.typ != regMultiSZ || addition.typ != regMultiSZ {
+		return registryData{}, fmt.Errorf("prepend requires REG_MULTI_SZ values, got types %d and %d", existing.typ, addition.typ)
+	}
+	// Place the contribution first, retaining its order, then existing members.
+	// Both passes use the same case-insensitive duplicate rule as append.
+	front, err := appendRegistryMultiString(registryMultiString(nil), addition)
+	if err != nil {
+		return registryData{}, err
+	}
+	return appendRegistryMultiString(front, existing)
+}
+
 func registryMultiStringValues(value registryData) []string {
 	decoded := strings.TrimRight(decodeUTF16LE(value.data), "\x00")
 	if decoded == "" {
@@ -2707,14 +2787,15 @@ func setRegistryValueIfAbsent(root *registryTree, keyPath, name string, value re
 	key.values[name] = value
 }
 
-func setAddRegBehaviorFields(out *starlark.Dict, flags uint32) error {
+func setAddRegBehaviorFields(out *starlark.Dict, flags uint64) error {
 	for _, behavior := range []struct {
 		name string
-		flag uint32
+		flag uint64
 	}{
 		{name: "if_absent", flag: infAddRegNoClobber},
 		{name: "delete", flag: infAddRegDeleteValue},
 		{name: "append", flag: infAddRegAppend},
+		{name: "prepend", flag: registryPrepend},
 		{name: "overwrite_only", flag: infAddRegOverwriteOnly},
 	} {
 		if flags&behavior.flag == 0 {
@@ -2928,7 +3009,13 @@ func (w *hiveWriter) writeValue(name string, value registryData) (uint32, error)
 		copy(inline[:], value.data)
 		dataCell = binary.LittleEndian.Uint32(inline[:])
 	} else {
-		dataCell = w.writeRawCell(value.data)
+		var err error
+		dataCell, err = writeRegistryValueData(value.data, w.format.minor, func(data []byte) (uint32, error) {
+			return w.writeRawCell(data), nil
+		})
+		if err != nil {
+			return 0, err
+		}
 	}
 	body := make([]byte, 0x14+len(nameBytes))
 	copy(body[0:2], "vk")

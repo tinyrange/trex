@@ -313,6 +313,27 @@ func (s *gdbSessionValue) AttrNames() []string {
 	return []string{"address_space", "architecture", "breakpoint", "close", "continue", "current_thread", "features", "generation", "interrupt", "monitor", "packet", "read_memory", "read_register", "registers", "running", "search_memory", "select_thread", "step", "threads", "wait", "watchpoint", "with_register", "with_state", "write_memory", "write_register"}
 }
 
+// exclusiveScope serializes state-saving callbacks, while allowing nested
+// callbacks on the same Starlark thread to save and restore their own state.
+// sync.RWMutex is not recursive: reacquiring it before checking ownership
+// deadlocks with_register inside another with_register/with_state callback.
+func (s *gdbSessionValue) exclusiveScope(thread *starlark.Thread) func() {
+	key := fmt.Sprintf("trex.gdb.scope.%p", s)
+	if thread != nil && thread.Local(key) == s {
+		return func() {}
+	}
+	s.scope.Lock()
+	if thread == nil {
+		return s.scope.Unlock
+	}
+	previous := thread.Local(key)
+	thread.SetLocal(key, s)
+	return func() {
+		thread.SetLocal(key, previous)
+		s.scope.Unlock()
+	}
+}
+
 func (s *gdbSessionValue) operation(thread *starlark.Thread, timeout float64, run func(context.Context) (starlark.Value, error)) (starlark.Value, error) {
 	key := fmt.Sprintf("trex.gdb.scope.%p", s)
 	owned := thread != nil && thread.Local(key) == s

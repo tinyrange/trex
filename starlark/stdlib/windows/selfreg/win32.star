@@ -329,6 +329,11 @@ _KERNEL_SIGNATURES = {
     "tlsfree": 1,
     "tlsgetvalue": 1,
     "tlssetvalue": 2,
+    "flsalloc": 1,
+    "flsfree": 1,
+    "flsgetvalue": 1,
+    "flssetvalue": 2,
+    "isthreadafiber": 0,
     "unhandledexceptionfilter": 1,
     "unregisterwait": 1,
     "unregisterwaitex": 2,
@@ -4424,7 +4429,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if args[0] == state["current_actctx"] and state["actctx_refs"] > 0:
                 state["actctx_refs"] -= 1
             return None
-        if name == "tlsalloc":
+        if name in ["tlsalloc", "flsalloc"]:
             index = state["next_tls"]
             if index >= 64:
                 state["last_error"] = 8  # ERROR_NOT_ENOUGH_MEMORY
@@ -4434,20 +4439,22 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if state["tls_slots"] and index < 64:
                 machine.write_pointer(state["tls_slots"] + index * machine.pointer_size, 0)
             return index
-        if name == "tlsfree":
+        if name in ["tlsfree", "flsfree"]:
             state["tls"][args[0]] = None
             if state["tls_slots"] and args[0] < 64:
                 machine.write_pointer(state["tls_slots"] + args[0] * machine.pointer_size, 0)
             return 1
-        if name == "tlsgetvalue":
+        if name in ["tlsgetvalue", "flsgetvalue"]:
             if state["tls_slots"] and args[0] < 64:
                 return machine.read_pointer(state["tls_slots"] + args[0] * machine.pointer_size)
             return state["tls"].get(args[0], 0) or 0
-        if name == "tlssetvalue":
+        if name in ["tlssetvalue", "flssetvalue"]:
             state["tls"][args[0]] = args[1]
             if state["tls_slots"] and args[0] < 64:
                 machine.write_pointer(state["tls_slots"] + args[0] * machine.pointer_size, args[1])
             return 1
+        if name == "isthreadafiber":
+            return 0
         if name in ["closehandle", "ntclose"]:
             state["handles"].pop(args[0], None)
             return 0 if name == "ntclose" else 1

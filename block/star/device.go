@@ -439,6 +439,15 @@ func (f *blockDeviceFile) ReadAt(p []byte, off int64) (int, error) {
 func (f *blockDeviceFile) WriteAt(_ []byte, _ int64) (int, error) {
 	return 0, ErrBlockReadOnly
 }
+func (f *blockDeviceFile) Extents(off, length int64) ([]BlockExtent, error) {
+	if extenter, ok := f.device.(blockDeviceExtenter); ok {
+		return extenter.Extents(off, length)
+	}
+	if err := validateBlockRange(f.Size(), off, length); err != nil {
+		return nil, err
+	}
+	return []BlockExtent{{Offset: off, Length: length, Allocated: true}}, nil
+}
 func (f *blockDeviceFile) Size() int64           { return f.device.Geometry().Size }
 func (f *blockDeviceFile) String() string        { return fmt.Sprintf("<file %q>", f.name) }
 func (f *blockDeviceFile) Type() string          { return "file" }

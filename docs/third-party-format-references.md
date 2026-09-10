@@ -12,6 +12,63 @@ Upstream notice retained conservatively: Copyright (c) SAS Institute Inc.
 Licensed under the Apache License, Version 2.0; the full license is included
 in [LICENSE](../LICENSE). No GPL implementation is incorporated.
 
+## Windows kernel dump header
+
+The PAGE/DU64 field layout used by `windows.kernel_dump_header` was checked
+against the `WinDumpHeader64` format declaration in
+[QEMU win_dump_defs.h](https://github.com/qemu/qemu/blob/master/include/qemu/win_dump_defs.h).
+The reader is independently implemented using bounded TinyRangeX file reads;
+no QEMU dump-generation or parsing code is invoked or incorporated.
+
+## jlevere/msdelta
+
+The PA30/PA31 rift grammar, PE source transformations, piecewise mapping
+composition and reversal, LZX-delta match-state behavior, Windows Compression
+API LZMS container framing, serialized CLI metadata/shared-format maps,
+managed signature/index normalization and copy-coordinate overlays,
+and the nested three-control binary-delta grammar
+used by
+`windows/msdelta` were informed by
+[`jlevere/msdelta`](https://github.com/jlevere/msdelta) at commit
+`fb5ab88843e854f3fd32d553984d8685ae643913`. The implementation was adapted
+to trex's bounded Go byte abstractions and verified independently against the
+source and target hashes embedded in real PA31 records. No Microsoft
+binary, symbol map, generated trace, or patent text is included.
+
+The upstream MIT licence is retained:
+
+> MIT License
+>
+> Copyright (c) 2025 Jackson Leverett
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
+
+## Public CLI instruction definitions
+
+The bounded managed-method token normalizer in `windows/msdelta` uses the
+public CLI tiny/fat method layout and instruction operand encodings, checked
+against the MIT-licensed .NET runtime's
+[`opcode.def`](https://github.com/dotnet/runtime/blob/main/src/coreclr/inc/opcode.def).
+Transform-selection bits are documented in the public Windows SDK
+[`msdelta.h`](https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/msdelta.h).
+No native Microsoft delta implementation is used for this normalization.
+
 ## Microsoft MS-DOS 4.0 FDISK MBR
 
 The independently assembled BIOS MBR in `filesystem/mbr` was informed by the

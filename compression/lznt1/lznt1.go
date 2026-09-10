@@ -35,32 +35,36 @@ func Decode(input []byte, expected int) ([]byte, error) {
 		encoded := input[offset : offset+encodedSize]
 		offset += encodedSize
 		remaining := expected - len(output)
-		want := min(chunkSize, remaining)
 		if header&0x8000 == 0 {
-			if len(encoded) < want {
-				return nil, fmt.Errorf("lznt1: short uncompressed chunk: %d bytes, expected %d", len(encoded), want)
-			}
-			output = append(output, encoded[:want]...)
+			output = append(output, encoded[:min(len(encoded), remaining)]...)
 			continue
 		}
-		chunk, err := decodeChunk(encoded, want)
+		chunk, err := decodeChunk(encoded, chunkSize)
 		if err != nil {
 			return nil, err
 		}
-		output = append(output, chunk...)
+		if len(chunk) == 0 {
+			return nil, fmt.Errorf("lznt1: compressed chunk produced no output")
+		}
+		output = append(output, chunk[:min(len(chunk), remaining)]...)
 	}
 	return output, nil
 }
 
-func decodeChunk(input []byte, expected int) ([]byte, error) {
-	output := make([]byte, 0, expected)
-	for offset := 0; offset < len(input) && len(output) < expected; {
+func decodeChunk(input []byte, maximum int) ([]byte, error) {
+	output := make([]byte, 0, maximum)
+	for offset := 0; offset < len(input); {
 		flags := input[offset]
 		offset++
-		for bit := uint(0); bit < 8 && len(output) < expected; bit++ {
+		for bit := uint(0); bit < 8; bit++ {
+			// A final flag group may contain fewer than eight data items. Once
+			// its chunk payload is exhausted, the unused flag bits are ignored.
+			if offset == len(input) {
+				break
+			}
 			if flags&(1<<bit) == 0 {
-				if offset >= len(input) {
-					return nil, fmt.Errorf("lznt1: truncated literal")
+				if len(output) == maximum {
+					return nil, fmt.Errorf("lznt1: chunk output exceeds %d bytes", maximum)
 				}
 				output = append(output, input[offset])
 				offset++
@@ -85,13 +89,13 @@ func decodeChunk(input []byte, expected int) ([]byte, error) {
 			if displacement > len(output) {
 				return nil, fmt.Errorf("lznt1: phrase displacement %d exceeds chunk output %d", displacement, len(output))
 			}
-			for count := 0; count < length && len(output) < expected; count++ {
+			if length > maximum-len(output) {
+				return nil, fmt.Errorf("lznt1: phrase output exceeds %d bytes", maximum)
+			}
+			for count := 0; count < length; count++ {
 				output = append(output, output[len(output)-displacement])
 			}
 		}
-	}
-	if len(output) != expected {
-		return nil, fmt.Errorf("lznt1: chunk produced %d bytes, expected %d", len(output), expected)
 	}
 	return output, nil
 }

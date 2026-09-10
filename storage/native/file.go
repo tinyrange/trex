@@ -1,6 +1,7 @@
 package native
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -35,11 +36,66 @@ type blockDeviceExtenter = blockpkg.Extenter
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
+		"http_file":   starlark.NewBuiltin("http_file", httpFileBuiltin),
 		"mirror_file": starlark.NewBuiltin("mirror_file", mirrorFileBuiltin),
 		"open":        starlark.NewBuiltin("open", openBuiltin),
 		"stdout":      starlark.NewBuiltin("stdout", stdoutBuiltin),
 		"write":       starlark.NewBuiltin("write", writeBuiltin),
 	}
+}
+
+func httpFileBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var urlValues starlark.Iterable
+	var name string
+	var sizeValue starlark.Value = starlark.None
+	chunkBytes, cacheBytes := defaultHTTPRangeChunk, defaultHTTPRangeCache
+	if err := starlark.UnpackArgs("http_file", args, kwargs,
+		"urls", &urlValues, "size?", &sizeValue, "name?", &name,
+		"chunk_bytes?", &chunkBytes, "cache_bytes?", &cacheBytes); err != nil {
+		return nil, err
+	}
+	urls := make([]string, 0)
+	iterator := urlValues.Iterate()
+	defer iterator.Done()
+	var value starlark.Value
+	for iterator.Next(&value) {
+		candidate, ok := starlark.AsString(value)
+		if !ok {
+			return nil, fmt.Errorf("http_file: urls[%d] got %s, want string", len(urls), value.Type())
+		}
+		urls = append(urls, candidate)
+	}
+	if name == "" {
+		name = "HTTP range file"
+	}
+	ctx := context.Background()
+	resources, resourceErr := lifecycle.ForThread(thread)
+	if resourceErr == nil {
+		ctx = resources.Context()
+	}
+	pool, err := NewHTTPRangePool(chunkBytes, cacheBytes, nil)
+	if err != nil {
+		return nil, fmt.Errorf("http_file: %w", err)
+	}
+	var file *HTTPRangeFile
+	if sizeValue == starlark.None {
+		file, err = pool.Discover(ctx, name, urls)
+	} else {
+		var size int64
+		if err := starlark.AsInt(sizeValue, &size); err != nil {
+			return nil, fmt.Errorf("http_file: size must be an integer or None")
+		}
+		file, err = pool.Open(ctx, name, urls, size)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("http_file: %w", err)
+	}
+	if resourceErr == nil {
+		if _, err := resources.Add(file); err != nil {
+			return nil, fmt.Errorf("http_file: register reader: %w", err)
+		}
+	}
+	return file, nil
 }
 
 func readSubfileAt(base File, baseOffset, size int64, p []byte, off int64) (int, error) {
@@ -95,7 +151,7 @@ func writeBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		if err != nil {
 			return nil, err
 		}
-		if err := writeFileTo(out, file); err != nil {
+		if err := writeOutputFileTo(out, file); err != nil {
 			_ = out.Close()
 			return nil, err
 		}
@@ -444,6 +500,40 @@ func writeFileTo(w io.Writer, file File) error {
 		return nil
 	}
 	return writeFileRangeTo(w, file, 0, file.Size())
+}
+
+func writeOutputFileTo(out *os.File, file File) error {
+	if extenter, ok := file.(blockDeviceExtenter); ok {
+		return writeSparseFileTo(out, file, extenter)
+	}
+	return writeFileTo(out, file)
+}
+
+func writeSparseFileTo(out *os.File, file File, extenter blockDeviceExtenter) error {
+	extents, err := extenter.Extents(0, file.Size())
+	if err != nil {
+		return err
+	}
+	position := int64(0)
+	for _, extent := range extents {
+		if extent.Offset != position || extent.Length <= 0 || extent.Length > file.Size()-position {
+			return fmt.Errorf("write: invalid extent map at offset %d", position)
+		}
+		if extent.Allocated {
+			if err := writeFileRangeTo(out, file, extent.Offset, extent.Length); err != nil {
+				return err
+			}
+		} else {
+			if _, err := out.Seek(extent.Length, io.SeekCurrent); err != nil {
+				return err
+			}
+		}
+		position += extent.Length
+	}
+	if position != file.Size() {
+		return fmt.Errorf("write: extent map covers %d bytes, want %d", position, file.Size())
+	}
+	return out.Truncate(file.Size())
 }
 
 func writeFileRangeTo(w io.Writer, file File, off, size int64) error {

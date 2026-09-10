@@ -2,6 +2,7 @@ package cab
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -64,6 +65,22 @@ type fileRecord struct {
 type FileInfo struct {
 	Name string
 	Size int64
+}
+
+// ContentResource is one cabinet member selected by its content SHA-1.
+// Data owns only the selected member bytes, not the decoded cabinet folder.
+type ContentResource struct {
+	Name string
+	SHA1 [20]byte
+	Data []byte
+}
+
+// MemoryBudget bounds concurrently decoded cabinet folder bytes. Implementations
+// must block Acquire until the requested bytes are available and make Release
+// safe to call from another goroutine.
+type MemoryBudget interface {
+	Acquire(bytes int64) error
+	Release(bytes int64)
 }
 
 type dataBlock struct {
@@ -246,6 +263,99 @@ func (c *Archive) Lookup(name string) (*Entry, error) {
 	return value.(*Entry), nil
 }
 
+// ResolveResourcesBySHA1 decodes each relevant cabinet folder once, hashes
+// all members in that folder, and retains only requested content. Both the
+// largest transient folder and the total retained bytes are explicitly
+// bounded; no host files or disk cache are involved.
+func (c *Archive) ResolveResourcesBySHA1(wanted map[[20]byte]struct{}, maximumFolderBytes, maximumResourceBytes int64) ([]ContentResource, error) {
+	if maximumResourceBytes < 0 {
+		return nil, fmt.Errorf("cab: negative resource bound")
+	}
+	var result []ContentResource
+	var retained int64
+	err := c.VisitResourcesBySHA1(wanted, maximumFolderBytes, nil, func(name string, digest [20]byte, data []byte) error {
+		if retained+int64(len(data)) > maximumResourceBytes {
+			return fmt.Errorf("cab: selected resources exceed %d-byte bound", maximumResourceBytes)
+		}
+		owned := bytes.Clone(data)
+		result = append(result, ContentResource{Name: name, SHA1: digest, Data: owned})
+		retained += int64(len(owned))
+		return nil
+	})
+	return result, err
+}
+
+// VisitResourcesBySHA1 decodes each relevant folder once and visits requested
+// members. data is borrowed and remains valid only until visit returns. An
+// optional shared budget bounds folder bytes across concurrent archives.
+func (c *Archive) VisitResourcesBySHA1(wanted map[[20]byte]struct{}, maximumFolderBytes int64, budget MemoryBudget, visit func(name string, digest [20]byte, data []byte) error) error {
+	if maximumFolderBytes < 0 {
+		return fmt.Errorf("cab: negative folder bound")
+	}
+	remaining := make(map[[20]byte]struct{}, len(wanted))
+	for digest := range wanted {
+		remaining[digest] = struct{}{}
+	}
+	for folderIndex := range c.folders {
+		if len(remaining) == 0 {
+			break
+		}
+		folderSize := int64(0)
+		for _, file := range c.files {
+			if int(file.folder) != folderIndex {
+				continue
+			}
+			end := int64(file.uncompressedStart) + int64(file.size)
+			if end > folderSize {
+				folderSize = end
+			}
+		}
+		if folderSize == 0 {
+			continue
+		}
+		if folderSize > maximumFolderBytes {
+			return fmt.Errorf("cab: folder %d size %d exceeds %d-byte bound", folderIndex, folderSize, maximumFolderBytes)
+		}
+		if budget != nil {
+			if err := budget.Acquire(folderSize); err != nil {
+				return fmt.Errorf("cab: folder %d memory: %w", folderIndex, err)
+			}
+		}
+		err := func() error {
+			if budget != nil {
+				defer budget.Release(folderSize)
+			}
+			folder, err := c.folderData(folderIndex)
+			if err != nil {
+				return fmt.Errorf("cab: folder %d: %w", folderIndex, err)
+			}
+			for _, file := range c.files {
+				if int(file.folder) != folderIndex {
+					continue
+				}
+				start := int64(file.uncompressedStart)
+				end := start + int64(file.size)
+				if start < 0 || end < start || end > int64(len(folder)) {
+					return fmt.Errorf("cab: member %q exceeds folder %d", file.name, folderIndex)
+				}
+				digest := sha1.Sum(folder[start:end])
+				if _, found := remaining[digest]; !found {
+					continue
+				}
+				if err := visit(file.name, digest, folder[start:end]); err != nil {
+					return err
+				}
+				delete(remaining, digest)
+			}
+			return nil
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func readCABString(file storage.Reader, offset int64) (string, int, error) {
 	var data []byte
 	buf := make([]byte, 64)
@@ -412,11 +522,10 @@ func (c *Archive) readFolderData(folder folder) ([]byte, error) {
 
 func (c *Archive) readLZXFolderBlocks(folder folder) ([]byte, error) {
 	windowBits := int(folder.compression >> 8)
-	blocks, err := c.readFolderDataBlocks(folder)
+	decoderInput, totalOutput, err := c.readFolderPayload(folder)
 	if err != nil {
 		return nil, err
 	}
-	decoderInput, totalOutput := cabinetBlocksPayload(blocks)
 	if totalOutput == 0 {
 		for _, file := range c.files {
 			if file.folder == 0 {
@@ -425,6 +534,43 @@ func (c *Archive) readLZXFolderBlocks(folder folder) ([]byte, error) {
 		}
 	}
 	return lzx.Decompress(decoderInput, windowBits, totalOutput)
+}
+
+// readFolderPayload joins an LZX bitstream directly while reading CFDATA.
+// Keeping one payload avoids allocating one byte slice per 32 KiB data block
+// and then copying the entire compressed folder into a second slice.
+func (c *Archive) readFolderPayload(folder folder) ([]byte, int, error) {
+	capacity := int(folder.blocks) * (32 << 10)
+	if capacity < 0 || int64(capacity) > c.file.Size() {
+		capacity = int(min(c.file.Size(), int64(^uint(0)>>1)))
+	}
+	payload := make([]byte, 0, capacity)
+	totalOutput := 0
+	offset := int64(folder.dataOffset)
+	var header [8]byte
+	reserved := make([]byte, c.dataReserve)
+	for index := 0; index < int(folder.blocks); index++ {
+		if _, err := c.file.ReadAt(header[:], offset); err != nil {
+			return nil, 0, err
+		}
+		offset += int64(len(header))
+		if len(reserved) != 0 {
+			if _, err := c.file.ReadAt(reserved, offset); err != nil {
+				return nil, 0, err
+			}
+			offset += int64(len(reserved))
+		}
+		compressedSize := int(binary.LittleEndian.Uint16(header[4:6]))
+		uncompressedSize := int(binary.LittleEndian.Uint16(header[6:8]))
+		start := len(payload)
+		payload = append(payload, make([]byte, compressedSize)...)
+		if _, err := c.file.ReadAt(payload[start:], offset); err != nil {
+			return nil, 0, err
+		}
+		offset += int64(compressedSize)
+		totalOutput += uncompressedSize
+	}
+	return payload, totalOutput, nil
 }
 
 func (c *Archive) readFolderBlocks(folder folder, mszip bool) ([]byte, error) {

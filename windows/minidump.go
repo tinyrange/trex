@@ -18,6 +18,7 @@ const (
 	minidumpMemory64List = 9
 	minidumpMaxEntries   = 1 << 20
 	minidumpMaxStack     = 16 << 20
+	minidumpMaxContext   = 1 << 20
 )
 
 type minidumpLocation struct {
@@ -196,9 +197,19 @@ func minidumpExceptionRecord(file starfile.File, location minidumpLocation) (sta
 	for index := range parameters {
 		parameters[index] = starlark.MakeUint64(binary.LittleEndian.Uint64(raw[40+index*8 : 48+index*8]))
 	}
+	context, err := minidumpContext(file, minidumpLocation{
+		size: binary.LittleEndian.Uint32(raw[160:164]),
+		rva:  binary.LittleEndian.Uint32(raw[164:168]),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("minidump: exception context: %w", err)
+	}
 	return starfile.NewRecord(starlark.StringDict{
-		"address":     starlark.MakeUint64(binary.LittleEndian.Uint64(raw[24:32])),
-		"code":        starlark.MakeUint64(uint64(binary.LittleEndian.Uint32(raw[8:12]))),
+		"address": starlark.MakeUint64(binary.LittleEndian.Uint64(raw[24:32])),
+		"code":    starlark.MakeUint64(uint64(binary.LittleEndian.Uint32(raw[8:12]))),
+		// Preserve the exception-associated context independently of the
+		// thread-list context; producers need not capture them at the same site.
+		"context":     starlark.Bytes(context),
 		"flags":       starlark.MakeUint64(uint64(binary.LittleEndian.Uint32(raw[12:16]))),
 		"information": starlark.NewList(parameters),
 		"record":      starlark.MakeUint64(binary.LittleEndian.Uint64(raw[16:24])),
@@ -269,7 +280,7 @@ func minidumpThreads(file starfile.File, location minidumpLocation, architecture
 			return nil, fmt.Errorf("minidump: thread %d stack: %w", index, err)
 		}
 		contextLocation := minidumpLocation{size: binary.LittleEndian.Uint32(raw[40:44]), rva: binary.LittleEndian.Uint32(raw[44:48])}
-		context, err := minidumpRead(file, uint64(contextLocation.rva), uint64(contextLocation.size))
+		context, err := minidumpContext(file, contextLocation)
 		if err != nil {
 			return nil, fmt.Errorf("minidump: thread %d context: %w", index, err)
 		}
@@ -284,6 +295,7 @@ func minidumpThreads(file starfile.File, location minidumpLocation, architecture
 			})
 		}
 		threads = append(threads, starfile.NewRecord(starlark.StringDict{
+			"context":             starlark.Bytes(context),
 			"frame_pointer":       starlark.MakeUint64(fp),
 			"frames":              starlark.NewList(frameValues),
 			"id":                  starlark.MakeUint64(uint64(binary.LittleEndian.Uint32(raw[0:4]))),
@@ -342,6 +354,16 @@ func minidumpFrames(stack []byte, stackStart, pc, sp, fp uint64, architecture ui
 		fp = callerFP
 	}
 	return frames
+}
+
+func minidumpContext(file starfile.File, location minidumpLocation) ([]byte, error) {
+	if location.size == 0 {
+		return nil, nil
+	}
+	if location.size > minidumpMaxContext {
+		return nil, fmt.Errorf("context exceeds %d bytes", minidumpMaxContext)
+	}
+	return minidumpRead(file, uint64(location.rva), uint64(location.size))
 }
 
 func minidumpRegisters(context []byte, architecture uint16) (pc, sp, fp uint64) {

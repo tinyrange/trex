@@ -3,6 +3,7 @@ package cab
 import (
 	"bytes"
 	"compress/flate"
+	"crypto/sha1"
 	"encoding/binary"
 	"io"
 	"testing"
@@ -12,6 +13,33 @@ import (
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
+
+func TestResolveResourcesBySHA1DecodesFolderOnce(t *testing.T) {
+	first := []byte("first cabinet member")
+	second := []byte("second requested member")
+	payload := append(append([]byte(nil), first...), second...)
+	data := appendMSZIPTestDataBlock(nil, mszipTestBlock(t, payload, nil), len(payload))
+	source := &countingCABFile{data: data}
+	archive := &Archive{
+		file:    source,
+		folders: []folder{{blocks: 1, compression: 1}},
+		files: []fileRecord{
+			{name: "/first", size: uint32(len(first)), folder: 0},
+			{name: "/second", size: uint32(len(second)), folder: 0, uncompressedStart: uint32(len(first))},
+		},
+	}
+	digest := sha1.Sum(second)
+	resolved, err := archive.ResolveResourcesBySHA1(map[[20]byte]struct{}{digest: {}}, 1<<20, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 1 || resolved[0].Name != "/second" || !bytes.Equal(resolved[0].Data, second) {
+		t.Fatalf("resolved resources = %#v", resolved)
+	}
+	if source.reads != 2 {
+		t.Fatalf("CAB source reads = %d, want one header and one payload read", source.reads)
+	}
+}
 
 type countingCABFile struct {
 	data  []byte

@@ -292,7 +292,11 @@ func peInfoBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 	default:
 		return nil, fmt.Errorf("pe_info: unsupported optional header %T", image.OptionalHeader)
 	}
-	dict := starlark.NewDict(5)
+	storedChecksum, computedChecksum, err := peChecksums(data)
+	if err != nil {
+		return nil, err
+	}
+	dict := starlark.NewDict(8)
 	fields := []struct {
 		name  string
 		value uint64
@@ -307,6 +311,15 @@ func peInfoBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 		if err := dict.SetKey(starlark.String(field.name), starlark.MakeUint64(field.value)); err != nil {
 			return nil, err
 		}
+	}
+	if err := dict.SetKey(starlark.String("checksum"), starlark.MakeUint(uint(storedChecksum))); err != nil {
+		return nil, err
+	}
+	if err := dict.SetKey(starlark.String("computed_checksum"), starlark.MakeUint(uint(computedChecksum))); err != nil {
+		return nil, err
+	}
+	if err := dict.SetKey(starlark.String("checksum_valid"), starlark.Bool(storedChecksum == computedChecksum)); err != nil {
+		return nil, err
 	}
 	return dict, nil
 }
@@ -540,29 +553,42 @@ func pePatchBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 }
 
 func updatePEChecksum(data []byte) error {
+	_, checksum, err := peChecksums(data)
+	if err != nil {
+		return err
+	}
+	peOffset := int(binary.LittleEndian.Uint32(data[0x3c:0x40]))
+	checksumOffset := peOffset + 4 + 20 + 64
+	binary.LittleEndian.PutUint32(data[checksumOffset:checksumOffset+4], checksum)
+	return nil
+}
+
+func peChecksums(data []byte) (uint32, uint32, error) {
 	if len(data) < 0x40 {
-		return fmt.Errorf("image is too short for a DOS header")
+		return 0, 0, fmt.Errorf("image is too short for a DOS header")
 	}
 	peOffset := int(binary.LittleEndian.Uint32(data[0x3c:0x40]))
 	optionalOffset := peOffset + 4 + 20
 	checksumOffset := optionalOffset + 64
 	if peOffset < 0 || optionalOffset < peOffset || checksumOffset+4 > len(data) {
-		return fmt.Errorf("PE headers exceed the image")
+		return 0, 0, fmt.Errorf("PE headers exceed the image")
 	}
 	if string(data[peOffset:peOffset+4]) != "PE\x00\x00" {
-		return fmt.Errorf("invalid PE signature")
+		return 0, 0, fmt.Errorf("invalid PE signature")
 	}
 	magic := binary.LittleEndian.Uint16(data[optionalOffset : optionalOffset+2])
 	if magic != 0x10b && magic != 0x20b {
-		return fmt.Errorf("unsupported optional-header magic %#x", magic)
+		return 0, 0, fmt.Errorf("unsupported optional-header magic %#x", magic)
 	}
-
-	binary.LittleEndian.PutUint32(data[checksumOffset:checksumOffset+4], 0)
+	stored := binary.LittleEndian.Uint32(data[checksumOffset : checksumOffset+4])
 	var sum uint64
 	for offset := 0; offset < len(data); offset += 2 {
-		word := uint16(data[offset])
-		if offset+1 < len(data) {
-			word |= uint16(data[offset+1]) << 8
+		word := uint16(0)
+		if offset < checksumOffset || offset >= checksumOffset+4 {
+			word = uint16(data[offset])
+			if offset+1 < len(data) {
+				word |= uint16(data[offset+1]) << 8
+			}
 		}
 		sum += uint64(word)
 		sum = (sum & 0xffff) + (sum >> 16)
@@ -570,8 +596,7 @@ func updatePEChecksum(data []byte) error {
 	sum = (sum & 0xffff) + (sum >> 16)
 	sum += sum >> 16
 	checksum := uint32(sum&0xffff) + uint32(len(data))
-	binary.LittleEndian.PutUint32(data[checksumOffset:checksumOffset+4], checksum)
-	return nil
+	return stored, checksum, nil
 }
 
 func peImportsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -960,7 +985,7 @@ type registryPatch struct {
 	name        string
 	typ         string
 	value       starlark.Value
-	addRegFlags uint32
+	addRegFlags uint64
 }
 
 type rgsParser struct {
