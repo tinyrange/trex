@@ -1,6 +1,6 @@
 // Package uefi executes an AArch64 EFI image against a portable firmware
-// environment. It stops at a validated ExitBootServices transition. It does
-// not yet implement a hardware-accelerated continuation backend.
+// environment. It stops at a validated ExitBootServices transition, which can
+// seed an independent hardware-accelerated execution on supported hosts.
 package uefi
 
 import (
@@ -78,6 +78,7 @@ type Result struct {
 	Trace             []uint64
 }
 type Machine struct {
+	runtimeMemory                                      cpu.Memory
 	rewrites                                           map[uint64]Rewrite
 	rewriteCode                                        [4096]byte
 	rewriteFilter                                      [4096]bool

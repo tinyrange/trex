@@ -18,6 +18,9 @@ type observation struct {
 type watchedMemory struct{ machine *Machine }
 
 func (m *Machine) executionMemory() cpu.Memory {
+	if m.runtimeMemory != nil {
+		return m.runtimeMemory
+	}
 	if m.observation == nil || len(m.observation.watches) == 0 {
 		return m.memory
 	}
