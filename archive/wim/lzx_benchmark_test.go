@@ -67,7 +67,11 @@ func BenchmarkLZXMedia(b *testing.B) {
 		if entry.resource.flags&wimResourceCompressed == 0 {
 			continue
 		}
-		for _, chunk := range archive.resourceChunks(entry.resource) {
+		chunks, err := archive.resourceChunks(entry.resource)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, chunk := range chunks {
 			if chunk.inSize == int64(chunk.outputSize) {
 				continue
 			}

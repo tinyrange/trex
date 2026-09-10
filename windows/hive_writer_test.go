@@ -13,7 +13,7 @@ import (
 	"go.starlark.net/starlark"
 )
 
-func TestRegistryHiveReadsSegmentedLargeValues(t *testing.T) {
+func TestRegistryHiveRejectsShortLargeValueSegments(t *testing.T) {
 	data := make([]byte, hiveBaseBlockSize+0x80)
 	putCell := func(offset uint32, body []byte) {
 		start := hiveBaseBlockSize + int(offset)
@@ -32,12 +32,8 @@ func TestRegistryHiveReadsSegmentedLargeValues(t *testing.T) {
 	putCell(0x40, []byte("abcd"))
 	putCell(0x60, []byte("efghi"))
 	hive := &registryHive{file: testHiveFile(data)}
-	got, err := hive.readValueData(9, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, []byte("abcdefghi")) {
-		t.Fatalf("large value = %q", got)
+	if _, err := hive.readValueData(9, 0); err == nil {
+		t.Fatal("accepted invalid segment count/short segments")
 	}
 }
 
@@ -456,6 +452,41 @@ func TestApplyRegistryValueHonorsINFBehaviorFlags(t *testing.T) {
 	}
 	if _, _, found := registryTreeValue(key, "mode"); found {
 		t.Fatal("DELVAL left the value present")
+	}
+}
+
+func TestRegistryMultiStringPrepend(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		existing, addition, want []string
+	}{
+		{"shutdown order", []string{"DeviceInstall", "UsoSvc"}, []string{"vmms"}, []string{"vmms", "DeviceInstall", "UsoSvc"}},
+		{"ordered duplicate contribution", []string{"A", "B"}, []string{"C", "c", "b"}, []string{"C", "b", "A"}},
+		{"empty contribution", []string{"A", "B"}, nil, []string{"A", "B"}},
+		{"empty existing", nil, []string{"A", "B"}, []string{"A", "B"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := mergeRegistryMultiString(registryMultiString(tc.existing), registryMultiString(tc.addition), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if actual := strings.Join(registryMultiStringValues(got), ","); actual != strings.Join(tc.want, ",") {
+				t.Fatalf("prepend = %q, want %v", actual, tc.want)
+			}
+			again, err := mergeRegistryMultiString(got, registryMultiString(tc.addition), true)
+			if err != nil || !bytes.Equal(again.data, got.data) {
+				t.Fatalf("prepend is not idempotent: %v", err)
+			}
+		})
+	}
+	if _, err := mergeRegistryMultiString(registryString(regSZ, "bad"), registryMultiString([]string{"A"}), true); err == nil {
+		t.Fatal("accepted non-multi-string existing value")
+	}
+	patch := starlark.NewDict(2)
+	_ = patch.SetKey(starlark.String("prepend"), starlark.True)
+	_ = patch.SetKey(starlark.String("append"), starlark.True)
+	if _, err := unpackAddRegBehaviorFlags(patch, "test"); err == nil {
+		t.Fatal("accepted conflicting prepend/append operations")
 	}
 }
 

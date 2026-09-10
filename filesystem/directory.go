@@ -29,6 +29,8 @@ type Directory struct {
 	files          map[string]FileRecord
 	attributes     map[string]Attributes
 	metadata       map[string]Metadata
+	hardLinkRefs   map[uint64]uint64
+	nextHardLink   uint64
 	nextWriteOrder uint64
 	revision       uint64
 	fatShortIndex  map[string]string
@@ -126,6 +128,8 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("mkdir", d.mkdirBuiltin), nil
 	case "write":
 		return starlark.NewBuiltin("write", d.writeBuiltin), nil
+	case "hardlink":
+		return starlark.NewBuiltin("hardlink", d.hardlinkBuiltin), nil
 	case "find":
 		return starlark.NewBuiltin("find", d.findBuiltin), nil
 	case "remove":
@@ -134,6 +138,8 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("set_attributes", d.setAttributesBuiltin), nil
 	case "set_security":
 		return starlark.NewBuiltin("set_security", d.setSecurityBuiltin), nil
+	case "get_security":
+		return starlark.NewBuiltin("get_security", d.getSecurityBuiltin), nil
 	case "files":
 		return d.fileList(), nil
 	case "fat_short_path":
@@ -142,7 +148,51 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (d *Directory) AttrNames() []string {
-	return []string{"fat_short_path", "files", "find", "mkdir", "remove", "set_attributes", "set_security", "write"}
+	return []string{"fat_short_path", "files", "find", "get_security", "hardlink", "mkdir", "remove", "set_attributes", "set_security", "write"}
+}
+
+func (d *Directory) hardlinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var source, destination string
+	if err := starlark.UnpackArgs("hardlink", args, kwargs, "source", &source, "destination", &destination); err != nil {
+		return nil, err
+	}
+	if err := d.HardLink(source, destination); err != nil {
+		return nil, err
+	}
+	return starlark.None, nil
+}
+
+// HardLink adds or replaces destination as another directory entry for source.
+func (d *Directory) HardLink(source, destination string) error {
+	source = storage.CleanPath(source)
+	destination = storage.CleanPath(destination)
+	file, ok := d.files[source]
+	if !ok {
+		return fmt.Errorf("hardlink: source file %q does not exist", source)
+	}
+	metadata := d.metadata[source]
+	if metadata.HardLink == 0 {
+		if d.nextHardLink == 0 {
+			d.nextHardLink = 1
+		}
+		metadata.HardLink = d.nextHardLink
+		for {
+			if d.hardLinkRefs[metadata.HardLink] == 0 {
+				break
+			}
+			metadata.HardLink++
+			if metadata.HardLink == 0 {
+				return fmt.Errorf("hardlink: no file identity is available")
+			}
+		}
+		d.nextHardLink = metadata.HardLink
+		d.SetMetadata(source, metadata)
+	}
+	d.PutFile(destination, file)
+	destinationMetadata := d.metadata[destination]
+	destinationMetadata.HardLink = metadata.HardLink
+	d.SetMetadata(destination, destinationMetadata)
+	return nil
 }
 
 func (d *Directory) findBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -170,6 +220,7 @@ func (d *Directory) removeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args 
 		return nil, fmt.Errorf("remove: file %q does not exist", cleaned)
 	}
 	delete(d.files, cleaned)
+	d.SetMetadata(cleaned, Metadata{})
 	delete(d.metadata, cleaned)
 	d.revision++
 	d.fatShortValid = false
@@ -375,7 +426,30 @@ func (d *Directory) SetMetadata(name string, metadata Metadata) {
 	if d.metadata == nil {
 		d.metadata = make(map[string]Metadata)
 	}
-	d.metadata[storage.CleanPath(name)] = metadata
+	cleaned := storage.CleanPath(name)
+	oldID := d.metadata[cleaned].HardLink
+	newID := metadata.HardLink
+	if oldID != newID {
+		// Track imported as well as locally allocated identities. Reference
+		// counts allow a released identity to be reused without aliasing a
+		// surviving link, and avoid scanning the whole tree for each new link.
+		if oldID != 0 {
+			d.hardLinkRefs[oldID]--
+			if d.hardLinkRefs[oldID] == 0 {
+				delete(d.hardLinkRefs, oldID)
+				if oldID < d.nextHardLink {
+					d.nextHardLink = oldID
+				}
+			}
+		}
+		if newID != 0 {
+			if d.hardLinkRefs == nil {
+				d.hardLinkRefs = make(map[uint64]uint64)
+			}
+			d.hardLinkRefs[newID]++
+		}
+	}
+	d.metadata[cleaned] = metadata
 }
 
 func (d *Directory) setAttributesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -409,6 +483,24 @@ func (d *Directory) SetAttributes(name string, attributes Attributes) error {
 	return nil
 }
 
+func (d *Directory) getSecurityBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs("get_security", args, kwargs, "name", &name); err != nil {
+		return nil, err
+	}
+	cleaned := storage.CleanPath(name)
+	if _, isDir := d.dirs[cleaned]; !isDir {
+		if _, isFile := d.files[cleaned]; !isFile {
+			return nil, fmt.Errorf("get_security: path %q does not exist", name)
+		}
+	}
+	descriptor := d.metadata[cleaned].SecurityDescriptor
+	if len(descriptor) == 0 {
+		return starlark.None, nil
+	}
+	return starlark.Bytes(descriptor), nil
+}
+
 func (d *Directory) setSecurityBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name string
 	var descriptor starlark.Bytes
@@ -422,7 +514,8 @@ func (d *Directory) setSecurityBuiltin(_ *starlark.Thread, _ *starlark.Builtin, 
 }
 
 // SetSecurity associates a self-relative Windows security descriptor with an
-// existing path. Filesystem builders which cannot represent it may ignore it.
+// existing object, including every hard-link alias of a file. Filesystem
+// builders which cannot represent it may ignore it.
 func (d *Directory) SetSecurity(name string, descriptor []byte) error {
 	cleaned := storage.CleanPath(name)
 	if _, isDir := d.dirs[cleaned]; !isDir {
@@ -436,6 +529,16 @@ func (d *Directory) SetSecurity(name string, descriptor []byte) error {
 	metadata := d.metadata[cleaned]
 	metadata.SecurityDescriptor = append([]byte(nil), descriptor...)
 	d.SetMetadata(cleaned, metadata)
+	if metadata.HardLink != 0 && d.hardLinkRefs[metadata.HardLink] > 1 {
+		// Security belongs to the file identity, not a directory entry. Keep
+		// link-local metadata (such as short names) while sharing the new SD.
+		for alias, other := range d.metadata {
+			if other.HardLink == metadata.HardLink {
+				other.SecurityDescriptor = metadata.SecurityDescriptor
+				d.metadata[alias] = other
+			}
+		}
+	}
 	return nil
 }
 

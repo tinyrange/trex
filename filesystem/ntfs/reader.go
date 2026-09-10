@@ -225,16 +225,21 @@ func (f *ntfsReadFile) AttrNames() []string {
 }
 
 type ntfsReadNode struct {
-	id         uint64
-	parent     uint64
-	name       string
-	path       string
-	dir        bool
-	securityID uint32
-	file       *ntfsReadFile
-	streams    map[string]*ntfsReadFile
-	links      []ntfsReadLink
-	children   []*ntfsReadLink
+	id               uint64
+	sequence         uint16
+	baseSequence     uint16
+	attributes       []ntfsReadAttribute
+	attributeList    []ntfsReadAttributeListEntry
+	hasAttributeList bool
+	parent           uint64
+	name             string
+	path             string
+	dir              bool
+	securityID       uint32
+	file             *ntfsReadFile
+	streams          map[string]*ntfsReadFile
+	links            []ntfsReadLink
+	children         []*ntfsReadLink
 }
 
 type ntfsReadLink struct {
@@ -246,6 +251,8 @@ type ntfsReadLink struct {
 }
 
 type ntfsVolume struct {
+	mft                 *ntfsReadFile
+	sectorSize          int64
 	file                starfile.File
 	clusterSize         int64
 	recordSize          int64
@@ -256,6 +263,20 @@ type ntfsVolume struct {
 }
 
 func newNTFSVolume(file starfile.File) (*ntfsVolume, error) {
+	volume, err := openNTFSMFT(file)
+	if err != nil {
+		return nil, err
+	}
+	if err := volume.scanMFT(volume.mft, volume.sectorSize); err != nil {
+		return nil, err
+	}
+	return volume, nil
+}
+
+// openNTFSMFT reads the volume geometry and initial MFT mapping without
+// enumerating files. Record inspection must remain usable when an unrelated
+// file's attribute list prevents a complete namespace scan.
+func openNTFSMFT(file starfile.File) (*ntfsVolume, error) {
 	boot := make([]byte, 512)
 	if _, err := file.ReadAt(boot, 0); err != nil {
 		return nil, fmt.Errorf("ntfs: read boot sector: %w", err)
@@ -303,6 +324,8 @@ func newNTFSVolume(file starfile.File) (*ntfsVolume, error) {
 	}
 	mftFile := &ntfsReadFile{name: "$MFT", volume: file, clusterSize: clusterSize, size: mft.size, runs: mft.runs}
 	volume := &ntfsVolume{
+		mft:                 mftFile,
+		sectorSize:          sectorSize,
 		file:                file,
 		clusterSize:         clusterSize,
 		recordSize:          recordSize,
@@ -310,13 +333,11 @@ func newNTFSVolume(file starfile.File) (*ntfsVolume, error) {
 		paths:               make(map[string]*ntfsReadNode),
 		securityDescriptors: make(map[uint32][]byte),
 	}
-	if err := volume.scanMFT(mftFile, sectorSize); err != nil {
-		return nil, err
-	}
 	return volume, nil
 }
 
 type ntfsReadAttribute struct {
+	instance        uint16
 	typ             uint32
 	name            string
 	nonresident     bool
@@ -377,7 +398,7 @@ func parseNTFSReadAttributes(record []byte, clusterSize int64) ([]ntfsReadAttrib
 		if err != nil {
 			return nil, err
 		}
-		attribute := ntfsReadAttribute{typ: typ, name: name, nonresident: raw[8] != 0, flags: binary.LittleEndian.Uint16(raw[12:14])}
+		attribute := ntfsReadAttribute{instance: binary.LittleEndian.Uint16(raw[14:16]), typ: typ, name: name, nonresident: raw[8] != 0, flags: binary.LittleEndian.Uint16(raw[12:14])}
 		if !attribute.nonresident {
 			valueLength := int(binary.LittleEndian.Uint32(raw[16:20]))
 			valueOffset := int(binary.LittleEndian.Uint16(raw[20:22]))
@@ -487,25 +508,8 @@ func readNTFSSigned(raw []byte) int64 {
 func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 	count := mft.Size() / v.recordSize
 	extensions := make(map[uint64][]*ntfsReadNode)
-	for id := int64(0); id < count; id++ {
-		record := make([]byte, v.recordSize)
-		if _, err := mft.ReadAt(record, id*v.recordSize); err != nil && err != io.EOF {
-			return fmt.Errorf("ntfs: read MFT record %d: %w", id, err)
-		}
-		if string(record[:4]) != "FILE" {
-			continue
-		}
-		if err := applyNTFSReadFixup(record, sectorSize, fmt.Sprintf("MFT record %d", id)); err != nil {
-			continue
-		}
-		if binary.LittleEndian.Uint16(record[22:24])&ntfsFileInUse == 0 {
-			continue
-		}
-		attributes, err := parseNTFSReadAttributes(record, v.clusterSize)
-		if err != nil {
-			continue
-		}
-		node := &ntfsReadNode{id: uint64(id), dir: binary.LittleEndian.Uint16(record[22:24])&ntfsFileDir != 0}
+	applyAttributes := func(node *ntfsReadNode, attributes []ntfsReadAttribute) error {
+		var err error
 		for _, attribute := range attributes {
 			switch attribute.typ {
 			case ntfsAttrStandardInformation:
@@ -547,7 +551,7 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 				if attribute.name == "" {
 					node.file, err = mergeNTFSReadFileExtents(node.file, file)
 					if err != nil {
-						return fmt.Errorf("ntfs: merge data extents for record %d: %w", id, err)
+						return fmt.Errorf("ntfs: merge data extents for record %d: %w", node.id, err)
 					}
 				} else {
 					if node.streams == nil {
@@ -555,21 +559,65 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 					}
 					node.streams[attribute.name], err = mergeNTFSReadFileExtents(node.streams[attribute.name], file)
 					if err != nil {
-						return fmt.Errorf("ntfs: merge %s extents for record %d: %w", attribute.name, id, err)
+						return fmt.Errorf("ntfs: merge %s extents for record %d: %w", attribute.name, node.id, err)
 					}
 				}
 			}
+		}
+		return nil
+	}
+	for id := int64(0); id < count; id++ {
+		record := make([]byte, v.recordSize)
+		if _, err := mft.ReadAt(record, id*v.recordSize); err != nil && err != io.EOF {
+			return fmt.Errorf("ntfs: read MFT record %d: %w", id, err)
+		}
+		if string(record[:4]) != "FILE" {
+			continue
+		}
+		if err := applyNTFSReadFixup(record, sectorSize, fmt.Sprintf("MFT record %d", id)); err != nil {
+			continue
+		}
+		if binary.LittleEndian.Uint16(record[22:24])&ntfsFileInUse == 0 {
+			continue
+		}
+		attributes, err := parseNTFSReadAttributes(record, v.clusterSize)
+		if err != nil {
+			continue
+		}
+		node := &ntfsReadNode{
+			id:       uint64(id),
+			sequence: binary.LittleEndian.Uint16(record[16:18]),
+			dir:      binary.LittleEndian.Uint16(record[22:24])&ntfsFileDir != 0,
+		}
+		baseReference := binary.LittleEndian.Uint64(record[32:40])
+		baseID := baseReference & 0x0000ffffffffffff
+		if baseID != 0 {
+			node.baseSequence = uint16(baseReference >> 48)
+			node.attributes = attributes
+			extensions[baseID] = append(extensions[baseID], node)
+			continue
+		}
+		node.attributeList, node.hasAttributeList, err = v.readAttributeList(attributes)
+		if err != nil {
+			return fmt.Errorf("ntfs: record %d attribute list: %w", id, err)
+		}
+		selected := attributes
+		if node.hasAttributeList {
+			selected = nil
+			for _, attribute := range attributes {
+				if attribute.typ == ntfsAttrAttributeList || ntfsReadAttributeListed(node.attributeList, node, attribute) {
+					selected = append(selected, attribute)
+				}
+			}
+		}
+		if err := applyAttributes(node, selected); err != nil {
+			return err
 		}
 		if id == 5 {
 			node.name, node.parent = "", 5
 			node.links = nil
 		} else if len(node.links) > 0 {
 			node.name, node.parent = node.links[0].name, node.links[0].parent
-		}
-		base := binary.LittleEndian.Uint64(record[32:40]) & 0x0000ffffffffffff
-		if base != 0 {
-			extensions[base] = append(extensions[base], node)
-			continue
 		}
 		v.nodes[uint64(id)] = node
 	}
@@ -579,28 +627,26 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 			continue
 		}
 		for _, extension := range records {
-			for _, link := range extension.links {
-				link.node = base
-				mergeNTFSReadLink(base, link)
+			// A file reference includes the target record's sequence number.
+			// Windows can leave an in-use extension record behind after its
+			// former base record is reused; merging it into the new occupant can
+			// manufacture overlapping data extents from unrelated files.
+			if !ntfsReadExtensionMatchesBase(base, extension) {
+				continue
 			}
-			if extension.file != nil {
-				var err error
-				base.file, err = mergeNTFSReadFileExtents(base.file, extension.file)
-				if err != nil {
-					return fmt.Errorf("ntfs: merge extension record for %d: %w", baseID, err)
+			// An extension's backlink alone is not authority: obsolete records
+			// can retain the current base sequence after attribute relocation.
+			if !base.hasAttributeList {
+				continue
+			}
+			var selected []ntfsReadAttribute
+			for _, attribute := range extension.attributes {
+				if ntfsReadAttributeListed(base.attributeList, extension, attribute) {
+					selected = append(selected, attribute)
 				}
 			}
-			if len(extension.streams) != 0 {
-				if base.streams == nil {
-					base.streams = make(map[string]*ntfsReadFile)
-				}
-				for name, stream := range extension.streams {
-					var err error
-					base.streams[name], err = mergeNTFSReadFileExtents(base.streams[name], stream)
-					if err != nil {
-						return fmt.Errorf("ntfs: merge extension stream %s for %d: %w", name, baseID, err)
-					}
-				}
+			if err := applyAttributes(base, selected); err != nil {
+				return fmt.Errorf("ntfs: base %d sequence %d extension %d sequence %d: %w", baseID, base.sequence, extension.id, extension.sequence, err)
 			}
 		}
 	}
@@ -657,6 +703,10 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 	}
 	v.files = starlark.NewList(values)
 	return nil
+}
+
+func ntfsReadExtensionMatchesBase(base, extension *ntfsReadNode) bool {
+	return base != nil && extension != nil && extension.baseSequence == base.sequence
 }
 
 func mergeNTFSReadFileExtents(existing, added *ntfsReadFile) (*ntfsReadFile, error) {

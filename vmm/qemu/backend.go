@@ -164,8 +164,13 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 		if err != nil {
 			return fail(err)
 		}
-		args = append(args, "-bios", firmware.Name())
-		_ = firmware.Close()
+		if firmware.inherited {
+			driver.extra = append(driver.extra, firmware.File)
+			args = append(args, "-bios", qemuInheritedFDPath(2+len(driver.extra)))
+		} else {
+			args = append(args, "-bios", firmware.Name())
+			_ = firmware.Close()
+		}
 	}
 
 	qmpParent, qmpChild, err := inheritedSocket("qmp")
@@ -390,10 +395,17 @@ func fileToMemfd(name string, source starfile.File) (*os.File, error) {
 	return file, nil
 }
 
+type qemuFirmware struct {
+	*os.File
+	inherited bool
+}
+
 // Firmware is an existing immutable backend input, never an intermediate.
 // Use its native filename: QEMU's ROM loader does not load the firmware bytes
 // correctly through Darwin's /dev/fd paths. Generated disks still use NBD.
-func qemuUEFIFirmware(architecture, binaryName string) (*os.File, error) {
+// Split x86 CODE/VARS inputs require a private anonymous flash image whose
+// descriptor remains inherited by QEMU; it has no host pathname.
+func qemuUEFIFirmware(architecture, binaryName string) (*qemuFirmware, error) {
 	candidates := []string{
 		"/usr/share/edk2/x64/OVMF.4m.fd",
 		"/usr/share/OVMF/OVMF.fd",
@@ -417,10 +429,54 @@ func qemuUEFIFirmware(architecture, binaryName string) (*os.File, error) {
 	for _, candidate := range candidates {
 		file, err := os.Open(candidate)
 		if err == nil {
-			return file, nil
+			return &qemuFirmware{File: file}, nil
 		}
 	}
-	return nil, fmt.Errorf("QEMU %s UEFI firmware is not installed (looked for %s)", architecture, strings.Join(candidates, ", "))
+	var source *os.File
+	var variables *os.File
+	var sourceName string
+	if architecture == "x86_64" {
+		// Some distributions ship the raw flash image as separate variable
+		// and code regions. Assemble the emulator's private firmware memfd
+		// directly; do not convert images or create host intermediate files.
+		for _, directory := range []string{"/usr/share/edk2/ovmf", "/usr/share/OVMF"} {
+			code, err := os.Open(directory + "/OVMF_CODE.fd")
+			if err != nil {
+				continue
+			}
+			vars, err := os.Open(directory + "/OVMF_VARS.fd")
+			if err != nil {
+				code.Close()
+				continue
+			}
+			source, variables, sourceName = code, vars, directory
+			break
+		}
+	}
+	if source == nil {
+		return nil, fmt.Errorf("QEMU %s UEFI firmware is not installed (looked for %s and architecture-compatible raw CODE/VARS pairs)", architecture, strings.Join(candidates, ", "))
+	}
+	defer source.Close()
+	if variables != nil {
+		defer variables.Close()
+	}
+	firmware, err := qemuCreateAnonymousFile("trex-ovmf")
+	if err != nil {
+		return nil, fmt.Errorf("load QEMU UEFI firmware %s: %w", sourceName, err)
+	}
+	var contents io.Reader = source
+	if variables != nil {
+		contents = io.MultiReader(variables, source)
+	}
+	if _, err := io.Copy(firmware, contents); err != nil {
+		firmware.Close()
+		return nil, fmt.Errorf("load QEMU UEFI firmware %s: %w", sourceName, err)
+	}
+	if _, err := firmware.Seek(0, io.SeekStart); err != nil {
+		firmware.Close()
+		return nil, err
+	}
+	return &qemuFirmware{File: firmware, inherited: true}, nil
 }
 
 func inheritedSocket(name string) (channelpkg.ByteChannel, *os.File, error) {

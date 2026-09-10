@@ -261,18 +261,7 @@ func decodeEVTXUTF16(raw []byte) string {
 }
 
 func evtxSID(raw []byte) (string, error) {
-	if len(raw) < 8 || raw[0] != 1 || int(raw[1]) > 15 || len(raw) != 8+int(raw[1])*4 {
-		return "", fmt.Errorf("invalid SID")
-	}
-	authority := uint64(0)
-	for _, value := range raw[2:8] {
-		authority = authority<<8 | uint64(value)
-	}
-	parts := []string{fmt.Sprintf("S-1-%d", authority)}
-	for index := 0; index < int(raw[1]); index++ {
-		parts = append(parts, fmt.Sprint(binary.LittleEndian.Uint32(raw[8+index*4:12+index*4])))
-	}
-	return strings.Join(parts, "-"), nil
+	return SIDString(raw)
 }
 
 func evtxUnsigned(value any) (uint64, bool) {

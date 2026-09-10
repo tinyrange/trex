@@ -522,7 +522,9 @@ def _open_command_surface(
         launcher,
         timeout = 5,
         minimum_changed_pixels = 1500,
-        attempts = 3):
+        attempts = 3,
+        confirm = False,
+        deadline = None):
     """Opens a shell command surface without submitting a command.
 
     A launcher shortcut may be dropped while the desktop is still accepting
@@ -545,14 +547,17 @@ def _open_command_surface(
             "image": initial,
             "passed": True,
         }, started_at, reason = "command-surface", inputs = inputs, vm = vm)
-    result = None
+    result = {"before": initial, "command_surface": initial, "image": initial, "passed": False, "detail": "command surface deadline reached"}
     for attempt in range(1, attempts + 1):
+        if deadline != None and clock.monotonic() >= deadline:
+            break
         before = checkpoint(vm)
         inputs.extend(_activate_command_surface(vm, launcher))
+        budget = timeout if deadline == None else min(timeout, max(0.001, deadline - clock.monotonic()))
         result = wait_for_material_change(
             vm,
             before,
-            timeout = timeout,
+            timeout = budget,
             # A command surface is an intermediate modal UI. Legacy display
             # drivers can briefly expose its saved backing frame on a
             # subsequent capture, so require the settled frame only after
@@ -564,8 +569,30 @@ def _open_command_surface(
         result["before"] = before
         result["command_surface"] = result["image"]
         if result["passed"]:
-            result["detail"] = "command surface opened; " + result["detail"]
-            return _finish_action(result, started_at, reason = "command-surface", inputs = inputs, vm = vm)
+            if confirm:
+                # A boot/desktop transition is also a material frame change.
+                # Prove that this is a repeatable modal surface: Escape must
+                # restore the baseline, and the launcher must reopen the same
+                # surface. No command is typed during this confirmation.
+                opened = result["image"]
+                paced_tap(vm, "escape")
+                inputs.append("tap:escape")
+                budget = timeout if deadline == None else min(timeout, max(0.001, deadline - clock.monotonic()))
+                closed = wait_for_frame_match(vm, before, timeout = budget, sample_interval = 0.25, maximum_changed_pixels = min(750, minimum_changed_pixels // 2))
+                result["passed"] = False
+                result["image"] = closed["image"]
+                result["detail"] = "launcher change did not close back to its baseline"
+                if closed["passed"] and (deadline == None or clock.monotonic() < deadline):
+                    inputs.extend(_activate_command_surface(vm, launcher))
+                    budget = timeout if deadline == None else min(timeout, max(0.001, deadline - clock.monotonic()))
+                    reopened = wait_for_frame_match(vm, opened, timeout = budget, sample_interval = 0.25, maximum_changed_pixels = min(750, minimum_changed_pixels // 2))
+                    result["image"] = reopened["image"]
+                    result["command_surface"] = reopened["image"]
+                    result["passed"] = reopened["passed"]
+                    result["detail"] = "launcher closed and reopened consistently" if reopened["passed"] else "launcher did not reopen the confirmed surface"
+            if result["passed"]:
+                result["detail"] = "command surface opened; " + result["detail"]
+                return _finish_action(result, started_at, reason = "command-surface", inputs = inputs, vm = vm)
         if not vm.running:
             return _finish_action(result, started_at, reason = "vm-exited", inputs = inputs, vm = vm)
         # Normalize a partially handled launcher sequence before retrying.
@@ -720,12 +747,15 @@ def wait_for_command_surface(
         minimum_changed_pixels = 1500,
         verify_close = False,
         minimum_width = 0,
-        minimum_height = 0):
+        minimum_height = 0,
+        confirm_launcher = False):
     """Waits for a stable guest frame, then submits the probe exactly once.
 
     Opening an empty command surface can be retried when it produces no visual
     response. Smoke automation never repeats the command itself after an
-    ambiguous response.
+    ambiguous response. confirm_launcher additionally requires an empty modal
+    launcher to close back to the baseline and reopen consistently, preventing
+    a coincident desktop transition from being accepted as an input surface.
     """
     started_at = clock.monotonic()
     deadline = started_at + timeout
@@ -759,6 +789,8 @@ def wait_for_command_surface(
         timeout = surface_timeout,
         minimum_changed_pixels = minimum_changed_pixels,
         attempts = surface_attempts,
+        confirm = confirm_launcher,
+        deadline = deadline,
     )
     if surface["passed"]:
         result = _capture_command_result(

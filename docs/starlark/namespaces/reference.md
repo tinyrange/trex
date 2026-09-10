@@ -493,7 +493,9 @@ Waits for a stable guest frame, then submits the probe exactly once.
 
     Opening an empty command surface can be retried when it produces no visual
     response. Smoke automation never repeats the command itself after an
-    ambiguous response.
+    ambiguous response. confirm_launcher additionally requires an empty modal
+    launcher to close back to the baseline and reopen consistently, preventing
+    a coincident desktop transition from being accepted as an input surface.
 
 ### `wait_for_display_mode`
 
@@ -1869,7 +1871,11 @@ Hashes a file, string or bytes value and returns raw digest bytes, not hexadecim
 
 `directory() -> directory`
 
-Creates an empty, mutable in-memory directory tree. Add files and metadata to it before passing it to a filesystem image builder.
+A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
+
+`get_security(name)` returns the existing path's self-relative Windows security descriptor as immutable bytes, or `None` when no descriptor is assigned. Missing paths are errors. It does not synthesize inherited permissions or modify the tree.
+
+`set_security(name, descriptor)` updates the existing file or directory's security. For a hardlinked file, every alias receives the same descriptor; link-local metadata such as short names is preserved.
 
 ### `error`
 
@@ -1888,6 +1894,12 @@ Prints runtime help for a value, or an overview of available globals when no val
 `hex(value, width=0) -> string`
 
 Formats an integer as signed, 0x-prefixed hexadecimal text with optional digit padding. For file, string or bytes input, returns the raw bytes as unprefixed hexadecimal text; width applies only to integers.
+
+### `http_file`
+
+`http_file(urls, size=None, name='HTTP range file', chunk_bytes=4MiB, cache_bytes=256MiB) -> file; omitted size uses HEAD discovery`
+
+Creates a lazy random-access file over HTTP byte ranges with a bounded in-memory chunk cache. urls supplies alternative source locations; omitted size uses HEAD discovery. This does not extract or convert the remote content.
 
 ### `mirror_file`
 
@@ -2591,6 +2603,27 @@ With a file, parses the MBR and partitions; with a disk size, creates a builder 
 
 Parses an NTFS volume when given a file, or builds one from a directory and size. Construction accepts explicit NTFS generation, boot metadata, log and upcase data so older NT layouts need not inherit modern defaults.
 
+Read-only mounts resolve extension attributes through the base record's
+`$ATTRIBUTE_LIST`, matching record sequences, stream names and starting VCNs.
+An extension backlink alone does not make its data current. Conflicting
+referenced extents remain errors; unreferenced stale records are not merged.
+
+### `filesystem.ntfs_record`
+
+`filesystem.ntfs_record(source, number)`
+
+Inspect one FILE record in a volume file without enumerating its namespace.
+The native reader validates volume geometry, MFT bounds, sector fixups and
+attribute headers. It does not repair malformed attribute values or follow
+extension records. The result exposes `number`, `sequence`, `base_reference`,
+`flags`, `cluster_size`, `record_size`, fixed-up `raw` bytes, and `attributes`.
+Each attribute has `type`, `name`, `instance`, `flags`, `nonresident`, `size`,
+`first_vcn` and `header` bytes. Resident attributes expose `value`; nonresident
+ones expose `allocated_size`, `initialized_size` and `runs` containing
+`cluster`, `count` and `sparse`. These are individual attribute extents, not
+automatically reconstructed streams. This inspection remains usable when an
+unrelated invalid attribute list prevents a complete namespace read.
+
 ### `filesystem.udf`
 
 `filesystem.udf(file) -> UDF filesystem`
@@ -2905,9 +2938,24 @@ Builds a downloadable ZIP response for a directory in a supplied virtual filesys
 
 ### `windows.assembly_manifest`
 
-`windows.assembly_manifest(value) -> record(identity, files)`
+`windows.assembly_manifest(value) -> record(identity, files, references, registry_keys)`
 
-Parses an assembly manifest XML value into identity attribute records and declared file records, including hashes and hash algorithms. It does not install a side-by-side assembly or verify those hashes.
+Parses an assembly manifest XML value into identity attribute records and declared file records, including hashes and hash algorithms. The registry_keys list retains every declared key path, including empty CBS index keys, independently of values. It does not install a side-by-side assembly or verify those hashes.
+
+### `windows.assembly_registry_data`
+
+`windows.assembly_registry_data(value_type, value, variables=None) -> value`
+
+Decodes CBS manifest text into native hive-writer values. Multi-strings use
+quoted comma-separated fields (literal backslashes); QWORDs accept either
+eight little-endian hexadecimal bytes or a `0x` numeric literal. Binary, NONE,
+and resource-list data remain bytes. Eight-hex-digit numeric types (for example
+`FFFF0012` or `00040007`) decode hexadecimal data to raw bytes; the native hive
+writer accepts these type spellings and preserves all 32 type bits unchanged.
+Optional string `variables` expand named
+`$(name)` macros case-insensitively in one pass; unknown used macros are errors.
+Environment-variable strings are unchanged. Runtime path policy is supplied
+by the image recipe, not inferred from the host.
 
 ### `windows.catalog_hash`
 
@@ -2932,6 +2980,15 @@ Parses one DER X.509 certificate and returns its DER bytes, subject, issuer, SHA
 `windows.clone_file_entries(entries) -> dict`
 
 Copies a path-to-metadata dictionary and each entry dictionary, preserving insertion order. The two dictionary layers are independently mutable; file sources and other field values remain shared and are not read.
+
+### `windows.container_index`
+
+`windows.container_index(value, names=None, source_type='', limit=20, target_hash='') -> record`
+
+Returns compact CIX statistics and explicitly selected file records. Names and
+source type select their union; optional `target_hash` (64 hexadecimal SHA-256
+digits) narrows that selection, or selects equal-content aliases by itself.
+At most `limit` records are returned (0–1000); input remains in memory.
 
 ### `windows.creg_compare`
 
@@ -2963,6 +3020,117 @@ Converts values in a Windows 9x CREG registry file into declarative registry pat
 
 Derives CryptoAPI provider-registration arguments from a 32-bit provider DLL without assigning registry paths or defaults. strict=False returns an empty list for unrecognized registration code; malformed input still fails. The provider is not executed.
 
+### `windows.delta_apply`
+
+`windows.delta_apply(source, delta, psf_record=False, maximum=64MiB) -> bytes`
+
+Reconstructs native PA30/PA31 bytes with mandatory source and target hash
+verification. `maximum` bounds each input and the decoded target; an explicit
+value up to 128 MiB supports large Defender definition records without changing
+the default 64 MiB bound.
+
+### `windows.delta_info`
+
+`windows.delta_info(value, psf_record=False, maximum=16MiB) -> record`
+
+Inspects PA30/PA31 headers and bounded preprocessing data. `pe_preprocess`
+contains native address maps and, when present, `managed`: CLI metadata extent,
+streams (`#Strings`, `#US`, `#Blob`, `#GUID`, `#~`), table row counts, and
+heap/table maps. Inspection does not imply that every recorded transform is
+supported by apply. Managed apply supports metadata RVA/index normalization,
+signature-token remapping and heap/table copy-coordinate maps. Nonidentity
+method-body tokens are normalized in bounded tiny/fat IL bodies; metadata
+column-width changes use source-cell copy mappings. `maximum` bounds the record
+read and may be raised explicitly to 128 MiB for large records; it does not bypass
+PSF framing checks.
+
+### `windows.delta_trace`
+
+`windows.delta_trace(source, delta, start, end, psf_record=False, pe_transforms=True, prepared_source_start=-1, prepared_source_end=-1, inspect_signatures=False) -> record`
+
+Inspects the selected reconstructed byte range before PE restoration, without
+enforcing the target digest. Source identity and input bounds remain checked.
+This is a diagnostic API, not an image-construction replacement for
+`windows.delta_apply`. Set `pe_transforms=False` for byte-only inspection of
+LZMS-backed direct or nested binary deltas; these return empty match and PE
+transform lists because LZMS match provenance is not yet implemented.
+Supply both prepared-source bounds to also return `prepared_source`, a copy
+of that source window after preprocessing and before patch matching, plus
+`prepared_source_start`. The window must be nonempty and within the input
+source; it is `None` when omitted. These bytes are diagnostic, not a verified
+target.
+With `inspect_signatures=True`, a prepared-source range is required and
+`source_signatures` lists overlapping original CLI signature consumers in
+normalization order, including shared blobs. Each record contains `table`,
+one-based `row`, `blob_index`, and payload `offset`/`size` excluding the blob
+length prefix. Without this option the list is empty.
+
+### `windows.dmr_alternate_path`
+
+`windows.dmr_alternate_path(value, first_package_family=False) -> file`
+
+Encodes an alternate package path in a DMR section, optionally using the first-package-family form. Paths describe guest package state, not host output files.
+
+### `windows.dmr_application_resources`
+
+`windows.dmr_application_resources(index, display_name, description, square150x150_logo, square44x44_logo, start_page=None) -> file`
+
+Serializes one indexed application's display, description, logo and optional start-page reference files into a DMR resource section. It does not infer resource choices.
+
+### `windows.dmr_applications`
+
+`windows.dmr_applications(applications, capabilities, source_flag) -> file`
+
+Encodes declared application records, capabilities and a source flag into a DMR applications section. This serializes the supported application metadata without executing registration callbacks.
+
+### `windows.dmr_container`
+
+`windows.dmr_container(sections, max_bytes=64MiB) -> file`
+
+Combines ordered section files into a bounded DMR envelope. Format and extent validation do not establish that the caller supplied every section required for a valid Windows package graph.
+
+### `windows.dmr_globalization`
+
+`windows.dmr_globalization(application_id, utf8=False, windows_display_language=False) -> file`
+
+Encodes an application's UTF-8 and Windows-display-language settings into a DMR globalization section. The application identity and policy are supplied by the caller.
+
+### `windows.dmr_graph`
+
+`windows.dmr_graph(nodes) -> file`
+
+Serializes an already selected, ordered package dependency graph into a DMR section with bounded node count. Package identity, paths and flags remain caller-supplied; it does not perform dependency resolution.
+
+### `windows.dmr_mutable_paths`
+
+`windows.dmr_mutable_paths(paths) -> file`
+
+Encodes an ordered, bounded nonempty list of mutable package paths into a DMR section. It does not create directories or change permissions.
+
+### `windows.dmr_package_resources`
+
+`windows.dmr_package_resources(display_name, publisher_display_name, logo, description=None) -> file`
+
+Serializes package resource references into a DMR section. Inputs are bounded encoded reference files; description=None preserves an absent description rather than an empty reference.
+
+### `windows.dmr_package_security`
+
+`windows.dmr_package_security(ari_flags, package_sid, is_inbox, capabilities) -> file | None`
+
+Serializes declared package SID, ARI flags, inbox status and capabilities into a DMR security section. Encoding these fields neither verifies signatures nor establishes package trust.
+
+### `windows.dmr_target_platform`
+
+`windows.dmr_target_platform(target_device_family_name, minimum_version, maximum_version_tested) -> file`
+
+Encodes a target-platform DMR section from a native device-family enum and version bounds. The family value is not a StateRepository database row ID; -1 represents the native unknown enum.
+
+### `windows.dmr_trailer`
+
+`windows.dmr_trailer() -> file`
+
+Returns the fixed native DMR trailer section as an in-memory file for container composition.
+
 ### `windows.empty_event_log`
 
 `windows.empty_event_log(size=5MiB) -> file`
@@ -2986,6 +3154,13 @@ Extracts full font-name strings from supported OpenType/TrueType files, includin
 `windows.hive(file) -> registry hive`
 
 Parses an NT REGF registry hive and returns a read-only key/value inspection object. Use hive_from_patches to construct a hive and patch_hive to produce an edited copy.
+
+Large registry values in hive format 1.4 and later use native `db` descriptors
+and segment lists above 16,344 bytes. Every segment, including the final one,
+has at least 16,344 bytes of capacity; unused capacity and alignment padding
+are excluded from decoded values. Complete hive construction and mutable patches preserve
+this representation; older hive formats retain direct large-value cells.
+Malformed segment counts and truncated segments are rejected.
 
 ### `windows.hive_from_patches`
 
@@ -3047,6 +3222,21 @@ Builds InternetShortcut (.url) bytes for a URL with optional icon location and i
 
 Creates a Windows kernel-debugging protocol session over an existing byte channel. The session exposes packets, events, context and memory operations, bounded by the configured protocol limits.
 
+### `windows.kernel_dump_header`
+
+`windows.kernel_dump_header(file) -> record`
+
+Reads only the fixed 8 KiB Windows PAGE/DU64 kernel dump header, including
+one still stored at the start of a guest pagefile. Returns `bugcheck_code`,
+`bugcheck_parameters`, `dump_type`, `required_size`, `writer_status`,
+`major_version`, `minor_version`, `machine`, `processor_count`,
+`directory_table_base`, `pfn_database`, `loaded_module_list`,
+`active_process_head`, and `debugger_data_block`.
+`extent_available` means the header-declared extent is at least 8 KiB and
+fits inside the input; it does not validate the body or prove that the writer
+completed. Other dump signatures are rejected. No guest execution or host
+debugger is used. This is distinct from the MDMP user-mode minidump reader.
+
 ### `windows.memory_image`
 
 `windows.memory_image(file, ranges=None) -> windows.memory_image`
@@ -3071,6 +3261,24 @@ Indexes a path-to-source dictionary by normalized DLL basename without reading s
 
 Parses Managed Object Format source into a structured document containing its declarations. Pass documents to wmi_repository to construct repository files; parsing alone does not register classes with a running service.
 
+### `windows.mrm_index_reference`
+
+`windows.mrm_index_reference(index) -> file`
+
+Encodes a supplied resource index as an MRM resource-reference file. The caller must resolve the correct index from package metadata.
+
+### `windows.mrm_literal_reference`
+
+`windows.mrm_literal_reference(value) -> file`
+
+Encodes a literal string as a native MRM resource-reference file for composition into DMR resource sections.
+
+### `windows.mrm_missing_file_reference`
+
+`windows.mrm_missing_file_reference(package_path, value) -> file`
+
+Encodes the native missing-file resource-reference form using a package path and value. It represents that condition without inventing or creating the referenced file.
+
 ### `windows.msc_snapins`
 
 `windows.msc_snapins(file) -> list[string]`
@@ -3089,11 +3297,21 @@ Constructs the Windows NE fast-boot binary and overlay from supplied modules, re
 
 Applies declarative registry patches to an NT hive and returns a new file, optionally replacing the root name. `keys` lists registry paths to create without adding values; existing keys and their values remain intact. This preserves the source hive's layout, including legacy REGF 1.1 cells. The input hive is not edited in place.
 
+Each value patch has
+`key`, `name`, `type`, and `value`. Optional `keys` contains registry key paths
+to create, including missing parents; existing keys are preserved. Empty keys
+remain truly empty, so registry indexes represented by child-key names do not
+need placeholder values. New keys inherit their parent's security descriptor.
+
 ### `windows.pdb`
 
 `windows.pdb(file, stream_limit=256MiB)`
 
 Parses a PDB symbol file with bounded stream sizes. Exposes identity and symbols, including lookup of the nearest symbol to an RVA; symbol parsing does not download files automatically.
+
+`guid` and `age` describe the PDB Info stream;
+`dbi_age` is the independently stored symbol-record age in the DBI stream.
+Post-link processing can advance `age` without advancing `dbi_age`.
 
 ### `windows.pe`
 
@@ -3118,6 +3336,24 @@ Signs a PE32 or PE32+ file with RSA/SHA-256 Authenticode entirely in memory and 
 `windows.pkcs7_certificates(value) -> list[certificate record]`
 
 Extracts distinct embedded DER certificates from PKCS#7/CMS input, including legacy catalogs. Returns certificate records; extraction is deliberately separate from signature or trust verification.
+
+### `windows.pri_resource_candidates`
+
+`windows.pri_resource_candidates(file, section_index, resource_indices, max_bytes=256MiB) -> list[dict]`
+
+Returns structural candidate counts and schema information for selected resource indexes in a PRI resource-map section. It does not choose candidates or decode their values.
+
+### `windows.pri_schema`
+
+`windows.pri_schema(file, section_index, max_bytes=256MiB) -> dict`
+
+Parses a selected PRI schema section into its hierarchy and resource item names. The section index is explicit; parsing does not select locale-specific resource candidates.
+
+### `windows.pri_sections`
+
+`windows.pri_sections(file, max_bytes=256MiB) -> list[dict]`
+
+Parses a bounded PRI container envelope and returns section identities, metadata and payload files. Section discovery alone does not resolve or render resources.
 
 ### `windows.reactos_record`
 
@@ -3149,6 +3385,18 @@ Splits a self-registration registry-state dictionary into selected and retained 
 
 Derives registry patches from supported self-registration resources in a PE file or windows.pe object, using module for path substitutions. It does not emulate DllRegisterServer; use the self-registration policy/runner for runtime effects.
 
+### `windows.servicing_graph`
+
+`windows.servicing_graph(psf_index, history_index, psf_payload, targets=None) -> record`
+
+Builds a native cumulative-update dependency graph from PSF and history indexes and a supplied PSF payload. Optional targets restrict inspected nodes; the result describes dependencies rather than applying an update to a running system.
+
+### `windows.servicing_plan`
+
+`windows.servicing_plan(updates, base=None, installed_packages=None, installed_components=None, image='/image3', limit=20) -> record`
+
+Plans cumulative-update assembly stages against a supplied WIM image or declared installed package/component inventory. Returns bounded stage summaries without running Windows servicing or installing the updates.
+
 ### `windows.setver`
 
 `windows.setver(source, name, major, minor, maximum=16MiB) -> file`
@@ -3161,23 +3409,128 @@ Returns a SETVER driver image with the named executable's reported DOS version a
 
 Builds Windows Shell Link (.lnk) bytes for a target with optional arguments, working directory, description and icon metadata. It serializes a shortcut; it does not resolve or launch its target on the host.
 
+### `windows.sid_string`
+
+`windows.sid_string(source) -> string`
+
+Validates one complete revision-1 binary SID (at most 15 subauthorities) and returns its Windows string form, with a hexadecimal authority when it is at least 2^32. Accepts bytes or a file; no host identity resolution is performed.
+
 ### `windows.signing_identity`
 
 `windows.signing_identity(certificate, private_key, chain=[]) -> signing identity`
 
 Loads a DER or PEM X.509 certificate and matching unencrypted PKCS#1/PKCS#8 RSA private key for in-memory PE signing. Optional chain certificates are embedded without establishing trust. The identity exposes only its public certificate; private key material is not printable or exportable.
 
+### `windows.state_repository_dictionary`
+
+`windows.state_repository_dictionary(properties) -> file`
+
+Encodes an ordered dictionary as native SRD1 bytes, returned as an immutable
+file. Values may be strings, nested dictionaries, or lists of dictionaries;
+other types are rejected. These are wire primitives for AppX XML properties,
+not an automatic manifest registration operation. For example,
+`{"LaunchPolicy": {"#text": "1"}}` retains the nested text property.
+
+Limits: 1024 entries per dictionary/list, 32 nesting levels, 65536 aggregate
+nodes/entries during input conversion, 65534 UTF-16 key bytes, 1 MiB per
+string/nested-map payload, and 64 MiB per complete dictionary. Strings are
+terminated UTF-16LE; embedded NULs, invalid Unicode and cycles are rejected.
+
+### `windows.state_repository_hash`
+
+`windows.state_repository_hash(values) -> string`
+
+Computes native StateRepository hash_base32 for a list of NULL, int64, string or bytes values. SHA-256 consumes concatenated LE64 integers, ASCII-lowercased UTF-16LE strings up to their first NUL (without a terminator), and raw bytes; NULL and empty values contribute nothing. Returns 52 unpadded characters using Windows' base32 alphabet. At most 1024 values and 64 MiB of input; floats, booleans and invalid Unicode are rejected.
+
 ### `windows.symbol_server`
 
 `windows.symbol_server(base_url, name, key, guid=None, age=None, maximum=256MiB, timeout=45)`
 
-Retrieves a symbol file from a symbol-server layout using its name and identity key, with optional PDB GUID/age validation. maximum and timeout bound the download; windows.pdb parses the result.
+Retrieves a bounded symbol file from a symbol-server layout using its name and identity key, optionally validating against image debug metadata. The GUID must match exactly. Following Microsoft's `PDB1::OpenValidate4`, the Info age must be at least the requested image age, and DBI age must equal the image age (legacy DBI age zero is accepted). A newer Info age alone does not permit a different set of symbol records. Limits and timeout are validated.
 
 ### `windows.test_signing_identity`
 
 `windows.test_signing_identity(subject, not_before, not_after) -> signing identity`
 
 Generates an ephemeral RSA-2048 key and self-signed code-signing certificate. not_before and not_after are explicit Unix seconds supplied by the caller. Returns an opaque identity with a public certificate attribute; does not install trust or change driver-signing policy.
+
+### `windows.update_catalog`
+
+`windows.update_catalog(device_attributes, caller_attributes, products, locales, user_agent, assume_non_leaf_installed) -> windows_update_catalog`
+
+Synchronizes Windows Update once using explicit device_attributes and caller_attributes string dictionaries, products string, locales list, user_agent, and assume_non_leaf_installed policy. No OS, build, architecture, ring, locale, eligibility or product defaults are supplied. Empty attribute dictionaries are allowed; all arguments are required. Returns an immutable windows_update_catalog with offers (all revisions, including non-leaves), rounds, revision_count and leaf_count. Each offer exposes id, revision, server_id, is_leaf, title, product_release, deployment, update_type, files (name, size, sha1, sha256), prerequisites and bundled_updates. Relationship clauses expose alternatives (id/revision) and is_category. There is no hidden result truncation, preview/client filter or ranking. Select an offer in Starlark and pass it with this catalog to update_media. Catalog discovery downloads metadata only, not payloads or disk images.
+
+### `windows.update_media`
+
+`windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, installed_stage_limit=0) -> update_media`
+
+Prepares an explicitly selected catalog offer as referenced UUP media, not a complete disk image. catalog must come from update_catalog, and offer must be an original offer from that same catalog. architecture, edition, language, metadata_name (exact aggregated metadata payload name) and target_compdb (composition database name/source) are required caller choices. There is no rescan, fallback offer, ranking or client/preview filter. Dependency closure and signed-location renewal retain the original catalog, request profile, selected revision, declared hashes and sizes. Inspection modes expose metadata or plans without full image construction; servicing uses mandatory reconstructed target hashes. TinyRangeX recipes apply those effects and construct the filesystem, registry and bootable disk.
+
+The native backend retains downloaded source-media ranges across runs in
+`<os.UserCacheDir()>/tinyrangex/uup` (normally
+`~/.cache/tinyrangex/uup` on Linux; honors `XDG_CACHE_HOME`). This disk cache
+has no automatic capacity eviction and grows only as source ranges are read.
+The separate 256 MiB RAM hot cache may evict entries without repeating HTTP.
+Decoded source-WIM chunks share a separate lazy 2 GiB RAM ceiling across the
+reference ESDs. Windows 11 uses 64 MiB solid chunks; even its initial font set
+exceeds the generic archive cache. This is independent of the 6 GiB compressed
+serviced-file cache. Initially verified servicing outputs enter that bounded
+cache as immutable compressed bytes; cache hits reuse them, while evicted files
+are reconstructed and hash-verified again on demand.
+Budget these ceilings together with guest memory when
+limiting a native smoke run; unused cache capacity is not allocated eagerly.
+Cache identity includes the declared SHA-256, payload size and byte range,
+not the signed URL or filename. Atomic publication and cross-process locks
+prevent partial cache hits and duplicate simultaneous downloads. Cached ranges
+are checksummed on disk reads; invalid entries or cache I/O failures stop with
+an error instead of silently fetching again. Range checksums do not replace
+mandatory reconstructed-file hash verification. New source ranges, failed
+downloads and update discovery/location renewal can still require network
+requests. Only source bytes are persisted, not parsed or constructed stages.
+
+The returned source exposes `validate_servicing(collect_errors=False,
+error_limit=16, feature_id='', on_error=None, source_names=None)`. It reconstructs and fully reads each planned installed-OS
+servicing file, retaining strict delta hash verification. By default the first
+failure aborts validation. With `collect_errors=True`, validation continues and
+returns per-stage `ok`, `verified_count`, `failed_count`, and a bounded `errors`
+list of `{feature_id, name, error}` records, alongside `feature_id`, `file_count`, and
+successfully verified `bytes`. `error_limit` must be between 1 and 1000; it
+limits reported examples, not the number of files checked. Collection is for
+inspection and does not permit failed bytes into image construction.
+An optional `feature_id` restricts inspection to one installed-OS stage; an
+unknown feature is an error.
+Optional nonempty `source_names` requires `feature_id`, selects exact logical
+source names case-insensitively, and rejects unmatched names. All matching plan
+effects remain in their original order; counts cover only the selected effects.
+With collection enabled, `on_error(record)` optionally receives each retained
+failure immediately (at most `error_limit` calls per stage); callback errors
+abort inspection. It is useful for bounded REPL observations during a long scan.
+`index_only=True` skips canonical CAB resource hydration. Missing bases in
+that mode are not by themselves decoder failures; complete image validation
+requires fully hydrated media (`index_only=False`).
+
+`source.servicing_effects(include_files=False)` inspects planned registry values and key declarations
+without reconstructing or retaining servicing files. Its `files` list is empty;
+the default `include_files=True` retains full construction semantics.
+`registry_keys` contains ordered records with `key`, `architecture`, and
+`feature_id`, independently of `registry_values`. Empty CBS index keys must
+be created as keys, not as invented default values.
+Each registry effect includes `operation_hint` from the manifest (empty when
+absent). Preserve this field when translating effects to hive patches:
+`operationHint="append"` contributes members to an existing `REG_MULTI_SZ`
+through the native patch writer's `append=True`; it must not replace the value.
+`operationHint="prepend"` uses `prepend=True`: contribution members precede
+existing members, preserving contribution order and removing case-insensitive
+duplicates. Reapplying the contribution is idempotent. Both values must be
+`REG_MULTI_SZ`; prepend cannot be combined with another patch operation.
+
+`source.inspect_servicing_files(name="", destination_prefix="", limit=100)`
+returns bounded planned file metadata without opening payloads. Supply an exact
+source/store basename or a destination prefix; both selectors are case-insensitive,
+normalize slash direction, and form a union. Results preserve stage/plan order.
+`files` contains feature ID, architecture, source name/mode, store path and
+destinations; `total` counts all matches and `truncated` reports omitted matches.
+`limit` is 0–1000. This is placement inspection, not reconstruction or hash proof.
 
 ### `windows.utf16_strings`
 
@@ -3208,6 +3561,14 @@ Decodes the supported compressed Windows 9x VxD container into an unpacked file.
 `windows.wmi_repository(files=None, documents=None, default_namespace='root\cimv2', server_name='')`
 
 Either parses supplied repository files or constructs repository files from parsed MOF documents; exactly one input mode is required. Construction uses default_namespace and server_name to resolve repository identities without running WMI.
+
+### `windows.wow64_registry_key`
+
+`windows.wow64_registry_key(key) -> string`
+
+Maps a 32-bit logical key to its physical AMD64 registry path using Windows 7
+and later shared/redirected-key rules. Explicit WOW6432Node paths are not
+redirected again. It does not implement older registry reflection semantics.
 
 ### `ar` value
 
@@ -3297,7 +3658,7 @@ Methods and attributes: `reset()`, `sum()`, `update(value)`.
 
 A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
-Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_security(name, descriptor)`, `write(name, value)`.
+Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_security(name)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_security(name, descriptor)`, `write(name, value)`.
 
 ### `emulator.execution` value
 
@@ -3495,7 +3856,7 @@ Methods and attributes: `address_space(directory_table_base, pae=False)`, `probe
 
 A parsed PDB identity and symbol index. GUID/age or signature identify its build; symbols exposes entries and nearest(rva) finds the nearest applicable symbol for address annotation.
 
-Methods and attributes: `age`, `guid`, `nearest(rva)`, `signature`, `symbols`.
+Methods and attributes: `age`, `dbi_age`, `guid`, `nearest(rva)`, `signature`, `symbols`.
 
 ### `windows.pdb_symbol` value
 
