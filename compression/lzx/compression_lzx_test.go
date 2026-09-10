@@ -39,6 +39,81 @@ func TestLZXWIMFinalUncompressedBlockDoesNotRequirePadding(t *testing.T) {
 	}
 }
 
+func TestLZXMatchUsesUntransformedWindowHistory(t *testing.T) {
+	decoder, err := newLZXDecoder(15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The new decoder retains raw history in its output and defers E8
+	// restoration. Matches must copy absolute operands, not restored ones.
+	output := make([]byte, 32, 64)
+	copy(output[1:], []byte{0xe8, 50, 0, 0, 0})
+	decoder.putMatch(&output, 32, 32)
+	if !bytes.Equal(output[:32], output[32:]) {
+		t.Fatal("match altered raw history")
+	}
+	decoder.intelStarted, decoder.intelSize = true, 10000
+	decoder.undoE8(output[:32], 0)
+	decoder.undoE8(output[32:], 32)
+	if first, second := binary.LittleEndian.Uint32(output[2:6]), binary.LittleEndian.Uint32(output[34:38]); first != 49 || second != 17 {
+		t.Fatalf("restored operands = %d, %d; want 49, 17", first, second)
+	}
+}
+
+func BenchmarkBuildLZXHuffman512(b *testing.B) {
+	lengths := make([]byte, 512)
+	for index := range lengths {
+		lengths[index] = 9
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := newLZXHuffman(lengths); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRebuildLZXHuffman512(b *testing.B) {
+	lengths := make([]byte, 512)
+	for index := range lengths {
+		lengths[index] = 9
+	}
+	tree := &lzxHuffman{}
+	if err := tree.reset(lengths); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := tree.reset(lengths); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkDecodeLZXHuffman256(b *testing.B) {
+	lengths := make([]byte, 256)
+	for index := range lengths {
+		lengths[index] = 8
+	}
+	tree, err := newLZXHuffman(lengths)
+	if err != nil {
+		b.Fatal(err)
+	}
+	data := make([]byte, 64<<10)
+	reader := newLZXBitReader(data)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if reader.remaining() < 4 {
+			reader = newLZXBitReader(data)
+		}
+		if _, err := tree.decode(reader); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func lzxTestUncompressedStream(blocks ...[]byte) []byte {
 	var w lzxTestBitWriter
 	w.writeBits(0, 1)

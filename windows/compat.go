@@ -49,14 +49,8 @@ func bytesForBinaryValue(value starlark.Value) ([]byte, error) {
 }
 
 func bytesForBinaryValueLimited(value starlark.Value, maximum int64) ([]byte, error) {
-	data, err := bytesForValue(value)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maximum {
-		return nil, fmt.Errorf("input size %d exceeds limit %d", len(data), maximum)
-	}
-	return data, nil
+	// Check the declared extent before allocating or reading file contents.
+	return starfile.BytesForValue(value, maximum)
 }
 
 func readBytesAt(file starfile.File, offset, size int64) ([]byte, error) {

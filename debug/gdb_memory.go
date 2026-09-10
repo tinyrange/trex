@@ -62,7 +62,7 @@ func (s *gdbSessionValue) addressSpaceBuiltin(_ *starlark.Thread, _ *starlark.Bu
 	return &gdbAddressSpaceValue{session: s, pageTable: pageTable, kind: kind, generation: s.generation.Load()}, nil
 }
 
-func (v *gdbAddressSpaceValue) readMemoryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (v *gdbAddressSpaceValue) readMemoryBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var address uint64
 	var size int
 	timeout, err := unpackGDBTimeout("address_space.read_memory", args, kwargs, "address", &address, "size", &size)
@@ -85,8 +85,8 @@ func (v *gdbAddressSpaceValue) readMemoryBuiltin(_ *starlark.Thread, _ *starlark
 	if err != nil {
 		return nil, err
 	}
-	v.session.scope.Lock()
-	defer v.session.scope.Unlock()
+	unlock := v.session.exclusiveScope(thread)
+	defer unlock()
 	old, err := v.session.readRegisterInternal(ctx, register)
 	if err != nil {
 		return nil, err
@@ -211,12 +211,8 @@ func (s *gdbSessionValue) withRegisterBuiltin(thread *starlark.Thread, _ *starla
 	if err != nil {
 		return nil, err
 	}
-	key := fmt.Sprintf("trex.gdb.scope.%p", s)
-	s.scope.Lock()
-	defer s.scope.Unlock()
-	previous := thread.Local(key)
-	thread.SetLocal(key, s)
-	defer thread.SetLocal(key, previous)
+	unlock := s.exclusiveScope(thread)
+	defer unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	old, err := s.readRegisterInternal(ctx, register)
@@ -291,12 +287,8 @@ func (s *gdbSessionValue) withStateBuiltin(thread *starlark.Thread, _ *starlark.
 		ranges = append(ranges, memoryRange{address: address, size: size})
 	}
 
-	key := fmt.Sprintf("trex.gdb.scope.%p", s)
-	s.scope.Lock()
-	defer s.scope.Unlock()
-	previous := thread.Local(key)
-	thread.SetLocal(key, s)
-	defer thread.SetLocal(key, previous)
+	unlock := s.exclusiveScope(thread)
+	defer unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(float64(timeout)*float64(time.Second)))
 	defer cancel()
 
@@ -570,12 +562,8 @@ func (p *gdbPointValue) withDisabledBuiltin(thread *starlark.Thread, _ *starlark
 	if p.removed.Load() {
 		return nil, fmt.Errorf("with_disabled: GDB point is already removed")
 	}
-	key := fmt.Sprintf("trex.gdb.scope.%p", p.session)
-	p.session.scope.Lock()
-	defer p.session.scope.Unlock()
-	previous := thread.Local(key)
-	thread.SetLocal(key, p.session)
-	defer thread.SetLocal(key, previous)
+	unlock := p.session.exclusiveScope(thread)
+	defer unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(float64(timeout)*float64(time.Second)))
 	defer cancel()
 	change := func(prefix byte, operation string) error {
@@ -693,7 +681,7 @@ func (s *gdbSessionValue) monitorBuiltin(thread *starlark.Thread, _ *starlark.Bu
 				return nil, false, err
 			}
 			var output []byte
-			for len(reply) > 0 && reply[0] == 'O' {
+			for len(reply) > 0 && reply[0] == 'O' && string(reply) != "OK" {
 				chunk, err := decodeGDBHex(reply[1:], 8<<20-len(output))
 				if err != nil {
 					return nil, false, err

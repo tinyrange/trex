@@ -62,7 +62,11 @@ func windowsSymbolServerBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 	}
 	file := &starfile.Bytes{Name: name, Data: data}
 	if guidValue != starlark.None || ageValue != starlark.None {
-		parsed, err := parsePDB(file, min(maximum, int64(pdbDefaultStreamLimit)))
+		msf, err := parsePDBMSF(file, min(maximum, int64(pdbDefaultStreamLimit)))
+		if err != nil {
+			return nil, fmt.Errorf("symbol_server: validate PDB: %w", err)
+		}
+		parsed, _, err := msf.identity()
 		if err != nil {
 			return nil, fmt.Errorf("symbol_server: validate PDB: %w", err)
 		}
@@ -78,11 +82,11 @@ func windowsSymbolServerBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 		}
 		if ageValue != starlark.None {
 			var age uint64
-			if err := starlark.AsInt(ageValue, &age); err != nil || age > ^uint64(uint32(0)) {
+			if err := starlark.AsInt(ageValue, &age); err != nil || age > uint64(^uint32(0)) {
 				return nil, fmt.Errorf("symbol_server: age must be a 32-bit integer")
 			}
-			if uint32(age) != parsed.age {
-				return nil, fmt.Errorf("symbol_server: PDB age %d does not match %d", parsed.age, age)
+			if err := parsed.validateImageAge(uint32(age)); err != nil {
+				return nil, fmt.Errorf("symbol_server: %w", err)
 			}
 		}
 	}

@@ -27,6 +27,64 @@ func TestGDBResumeRejectsUnconsumedStop(t *testing.T) {
 	}
 }
 
+func TestGDBMonitorDistinguishesOKFromOutput(t *testing.T) {
+	for _, output := range []string{"", "VM status: paused\n"} {
+		t.Run(fmt.Sprint(len(output)), func(t *testing.T) {
+			client, target := net.Pipe()
+			defer target.Close()
+			done := make(chan error, 1)
+			go func() {
+				xml := `<target><architecture>i386</architecture><feature name="core"><reg name="eip" bitsize="32" regnum="0"/></feature></target>`
+				for _, exchange := range []struct{ request, response string }{
+					{"qSupported:multiprocess+;xmlRegisters=i386", "PacketSize=1000;QStartNoAckMode-"},
+					{"qXfer:features:read:target.xml:0,f80", "l" + xml},
+				} {
+					request, err := readGDBTestPacket(target)
+					if err == nil && string(request) != exchange.request {
+						err = fmt.Errorf("unexpected request %q", request)
+					}
+					if err == nil {
+						err = writeGDBTestPacket(target, []byte(exchange.response))
+					}
+					if err != nil {
+						done <- err
+						return
+					}
+				}
+				request, err := readGDBTestPacket(target)
+				if err == nil && string(request) != "qRcmd,"+hex.EncodeToString([]byte("info status")) {
+					err = fmt.Errorf("unexpected monitor request %q", request)
+				}
+				if err == nil && output != "" {
+					err = writeGDBTestPacket(target, []byte("O"+hex.EncodeToString([]byte(output))))
+				}
+				if err == nil {
+					err = writeGDBTestPacket(target, []byte("OK"))
+				}
+				done <- err
+			}()
+			thread := newTestThread(t)
+			value, err := GDBBuiltin(thread, nil, starlark.Tuple{channelstar.New("monitor-test", client)}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session := value.(*gdbSessionValue)
+			defer session.Close()
+			got, err := session.monitorBuiltin(thread, nil, starlark.Tuple{starlark.String("info status")}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text, ok := got.(starlark.Bytes)
+			if !ok || string(text) != output {
+				t.Fatalf("output = %v, want %q", got, output)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestGDBTerminalStopDoesNotReadRegisters(t *testing.T) {
 	session := &gdbSessionValue{}
 	value, err := session.finishStop(context.Background(), parseGDBStop([]byte("W00")))
@@ -133,6 +191,139 @@ func TestGDBWithRegisterRestoresAfterCallbackFailure(t *testing.T) {
 	}
 }
 
+func TestGDBNestedStateScopesRestore(t *testing.T) {
+	for _, outerKind := range []string{"with_register", "with_state", "with_disabled"} {
+		for _, failCallback := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/failure=%t", outerKind, failCallback), func(t *testing.T) {
+				client, target := net.Pipe()
+				defer target.Close()
+				type exchange struct{ request, response string }
+				xml := `<target><architecture>i386</architecture><feature name="core"><reg name="eax" bitsize="32" regnum="0"/><reg name="eip" bitsize="32"/></feature></target>`
+				transcript := []exchange{
+					{"qSupported:multiprocess+;xmlRegisters=i386", "PacketSize=1000;QStartNoAckMode-"},
+					{"qXfer:features:read:target.xml:0,f80", "l" + xml},
+				}
+				outerValue := uint64(0xdeadbeef)
+				outerWire := "efbeadde"
+				if outerKind == "with_disabled" {
+					outerValue, outerWire = 0x12345678, "78563412"
+					transcript = append(transcript, exchange{"Z1,1000,1", "OK"}, exchange{"z1,1000,1", "OK"})
+				} else {
+					transcript = append(transcript, exchange{"p0", "78563412"}, exchange{"P0=efbeadde", "OK"})
+				}
+				transcript = append(transcript,
+					exchange{"p0", outerWire}, exchange{"P0=cefaedfe", "OK"},
+					exchange{"p0", "cefaedfe"}, exchange{"P0=" + outerWire, "OK"},
+					exchange{"p0", outerWire},
+				)
+				if outerKind == "with_disabled" {
+					transcript = append(transcript, exchange{"Z1,1000,1", "OK"})
+				} else {
+					transcript = append(transcript, exchange{"P0=78563412", "OK"})
+				}
+				transcript = append(transcript, exchange{"p0", "78563412"})
+				targetErr := make(chan error, 1)
+				go func() {
+					for _, item := range transcript {
+						request, err := readGDBTestPacket(target)
+						if err != nil {
+							targetErr <- err
+							return
+						}
+						if string(request) != item.request {
+							targetErr <- fmt.Errorf("request=%q, want %q", request, item.request)
+							return
+						}
+						if err := writeGDBTestPacket(target, []byte(item.response)); err != nil {
+							targetErr <- err
+							return
+						}
+					}
+					targetErr <- nil
+				}()
+				thread := newTestThread(t)
+				value, err := GDBBuiltin(thread, nil, starlark.Tuple{channelstar.New("nested-gdb-test", client)}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				gdb := value.(*gdbSessionValue)
+				defer gdb.Close()
+				read, _ := gdb.Attr("read_register")
+				checkRegister := func(thread *starlark.Thread, want uint64) error {
+					value, err := starlark.Call(thread, read.(starlark.Callable), starlark.Tuple{starlark.String("eax")}, nil)
+					if err != nil {
+						return err
+					}
+					var got uint64
+					if err := starlark.AsInt(value, &got); err != nil || got != want {
+						return fmt.Errorf("eax=%v, want %#x (error %v)", value, want, err)
+					}
+					return nil
+				}
+				inner := starlark.NewBuiltin("inner", func(thread *starlark.Thread, _ *starlark.Builtin, _ starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
+					if err := checkRegister(thread, 0xfeedface); err != nil {
+						return nil, err
+					}
+					if failCallback {
+						return nil, fmt.Errorf("intentional nested callback failure")
+					}
+					return starlark.None, nil
+				})
+				withRegister, _ := gdb.Attr("with_register")
+				outer := starlark.NewBuiltin("outer", func(thread *starlark.Thread, _ *starlark.Builtin, _ starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
+					if outerKind == "with_state" {
+						write, _ := gdb.Attr("write_register")
+						if _, err := starlark.Call(thread, write.(starlark.Callable), starlark.Tuple{starlark.String("eax"), starlark.MakeUint64(outerValue)}, nil); err != nil {
+							return nil, err
+						}
+					}
+					_, innerErr := starlark.Call(thread, withRegister.(starlark.Callable), starlark.Tuple{starlark.String("eax"), starlark.MakeUint64(0xfeedface), inner}, nil)
+					if err := checkRegister(thread, outerValue); err != nil {
+						return nil, err
+					}
+					return starlark.None, innerErr
+				})
+				var call starlark.Callable
+				var args starlark.Tuple
+				switch outerKind {
+				case "with_register":
+					call, args = withRegister.(starlark.Callable), starlark.Tuple{starlark.String("eax"), starlark.MakeUint64(outerValue), outer}
+				case "with_state":
+					method, _ := gdb.Attr("with_state")
+					call, args = method.(starlark.Callable), starlark.Tuple{starlark.NewList([]starlark.Value{starlark.String("eax")}), starlark.NewList(nil), outer}
+				case "with_disabled":
+					method, _ := gdb.Attr("breakpoint")
+					point, err := starlark.Call(thread, method.(starlark.Callable), starlark.Tuple{starlark.MakeInt(0x1000)}, []starlark.Tuple{{starlark.String("kind"), starlark.String("hardware")}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					method, _ = point.(starlark.HasAttrs).Attr("with_disabled")
+					call, args = method.(starlark.Callable), starlark.Tuple{outer}
+				}
+				finished := make(chan error, 1)
+				go func() {
+					_, err := starlark.Call(thread, call, args, nil)
+					finished <- err
+				}()
+				select {
+				case err = <-finished:
+					if failCallback != (err != nil) || (err != nil && !strings.Contains(err.Error(), "intentional nested callback failure")) {
+						t.Fatalf("nested callback returned %v", err)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("nested GDB scope deadlocked")
+				}
+				if err := checkRegister(thread, 0x12345678); err != nil {
+					t.Fatal(err)
+				}
+				if err := <-targetErr; err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
 func TestGDBAddressSpaceReadsAndRestoresPageTable(t *testing.T) {
 	client, target := net.Pipe()
 	defer target.Close()
@@ -145,6 +336,13 @@ func TestGDBAddressSpaceReadsAndRestoresPageTable(t *testing.T) {
 			{"p0", "00300000"},
 			{"P0=00500000", "OK"},
 			{"m1000,4", "01020304"},
+			{"P0=00300000", "OK"},
+			{"p0", "00300000"},
+			{"P0=00600000", "OK"},
+			{"p0", "00600000"},
+			{"P0=00500000", "OK"},
+			{"m1000,4", "01020304"},
+			{"P0=00600000", "OK"},
 			{"P0=00300000", "OK"},
 		}
 		for _, exchange := range transcript {
@@ -184,6 +382,26 @@ func TestGDBAddressSpaceReadsAndRestoresPageTable(t *testing.T) {
 	}
 	if data != starlark.Bytes("\x01\x02\x03\x04") {
 		t.Fatalf("address-space data = %v", data)
+	}
+	callback := starlark.NewBuiltin("nested_address_read", func(thread *starlark.Thread, _ *starlark.Builtin, _ starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
+		return starlark.Call(thread, readMethod.(starlark.Callable), starlark.Tuple{starlark.MakeInt(0x1000), starlark.MakeInt(4)}, nil)
+	})
+	withRegister, _ := gdb.Attr("with_register")
+	finished := make(chan error, 1)
+	go func() {
+		value, err := starlark.Call(thread, withRegister.(starlark.Callable), starlark.Tuple{starlark.String("cr3"), starlark.MakeInt(0x6000), callback}, nil)
+		if err == nil && value != data {
+			err = fmt.Errorf("nested address-space data=%v, want %v", value, data)
+		}
+		finished <- err
+	}()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("nested address-space read deadlocked")
 	}
 	if err := <-targetErr; err != nil {
 		t.Fatal(err)
