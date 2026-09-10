@@ -72,6 +72,9 @@ func TestACPICompatibleIDTable(t *testing.T) {
 }
 
 func TestACPIEISAID(t *testing.T) {
+	if got, ok := acpiEISAID("PNP0A08"); !ok || got != 0x080ad041 {
+		t.Fatalf("acpiEISAID(PNP0A08) = %#x, %v", got, ok)
+	}
 	if got, ok := acpiEISAID("PNP0303"); !ok || got != 0x0303d041 {
 		t.Fatalf("acpiEISAID(PNP0303) = %#x, %v", got, ok)
 	}

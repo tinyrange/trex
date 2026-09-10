@@ -5,6 +5,22 @@ import (
 	"fmt"
 )
 
+// ARM64GenericTimer describes always-on, level-triggered active-high physical
+// and virtual EL1 architectural timers. No memory-mapped timer frame is exposed.
+func ARM64GenericTimer(physical, virtual uint32) ([]byte, error) {
+	if physical < 16 || physical > 31 || virtual < 16 || virtual > 31 || physical == virtual {
+		return nil, fmt.Errorf("architectural timers require distinct PPI interrupts")
+	}
+	body := make([]byte, 96-36)
+	binary.LittleEndian.PutUint64(body, ^uint64(0))
+	binary.LittleEndian.PutUint32(body[56-36:], physical)
+	binary.LittleEndian.PutUint32(body[60-36:], 4)
+	binary.LittleEndian.PutUint32(body[64-36:], virtual)
+	binary.LittleEndian.PutUint32(body[68-36:], 4)
+	binary.LittleEndian.PutUint64(body[80-36:], ^uint64(0))
+	return Table("GTDT", body, 2, "TREXOS", "ARM64TMR", 1, "TREX", 1)
+}
+
 // ARM64Interrupts constructs an ACPI 6.0 MADT for a GICv3 distributor and an
 // always-on redistributor range with one 128 KiB frame per supplied MPIDR.
 // These are platform declarations; the caller must provide the named hardware.

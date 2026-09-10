@@ -139,6 +139,7 @@ func acpiEISAID(value string) (uint32, bool) {
 		}
 	}
 	vendor = vendor<<8 | vendor>>8
+	product = product<<8 | product>>8
 	return uint32(product)<<16 | uint32(vendor), true
 }
 

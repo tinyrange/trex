@@ -11,6 +11,56 @@ import (
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
+		"acpi_mcfg": starlark.NewBuiltin("acpi_mcfg", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var base uint64
+			var segment uint16
+			var first, last uint8
+			if err := starlark.UnpackArgs("acpi_mcfg", args, kwargs, "base", &base, "first_bus", &first, "last_bus", &last, "segment?", &segment); err != nil {
+				return nil, err
+			}
+			data, err := acpi.PCIConfiguration(base, segment, first, last)
+			if err != nil {
+				return nil, err
+			}
+			return &starfile.Bytes{Name: "mcfg", Data: data}, nil
+		}),
+		"acpi_pci_root": starlark.NewBuiltin("acpi_pci_root", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var p acpi.PCIRoot
+			var routes *starlark.List
+			if err := starlark.UnpackArgs("acpi_pci_root", args, kwargs, "memory_base", &p.MemoryBase, "memory_size", &p.MemorySize, "routes", &routes, "first_bus?", &p.FirstBus, "last_bus?", &p.LastBus, "segment?", &p.Segment); err != nil {
+				return nil, err
+			}
+			if routes.Len() > 255 {
+				return nil, fmt.Errorf("too many PCI interrupt routes")
+			}
+			for i := 0; i < routes.Len(); i++ {
+				row, ok := routes.Index(i).(starlark.Tuple)
+				if !ok || len(row) != 3 {
+					return nil, fmt.Errorf("route must be (device,pin,interrupt)")
+				}
+				var r acpi.PCIInterrupt
+				if err := starlark.UnpackArgs("route", row, nil, "device", &r.Device, "pin", &r.Pin, "interrupt", &r.Interrupt); err != nil {
+					return nil, err
+				}
+				p.Interrupts = append(p.Interrupts, r)
+			}
+			data, err := p.AML()
+			if err != nil {
+				return nil, err
+			}
+			return &starfile.Bytes{Name: "pci-root.aml", Data: data}, nil
+		}),
+		"acpi_gtdt_arm64": starlark.NewBuiltin("acpi_gtdt_arm64", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var physical, virtual uint32
+			if err := starlark.UnpackArgs("acpi_gtdt_arm64", args, kwargs, "physical_interrupt", &physical, "virtual_interrupt", &virtual); err != nil {
+				return nil, err
+			}
+			data, err := acpi.ARM64GenericTimer(physical, virtual)
+			if err != nil {
+				return nil, err
+			}
+			return &starfile.Bytes{Name: "gtdt", Data: data}, nil
+		}),
 		"acpi_madt_arm64": starlark.NewBuiltin("acpi_madt_arm64", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			var distributor, redistributor uint64
 			var performance, maintenance uint32

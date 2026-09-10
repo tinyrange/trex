@@ -2615,11 +2615,29 @@ Builds a complete SSDT file that assigns an ACPI compatible ID to the selected d
 
 Builds a hardware-reduced ARM64 FADT with an explicit DSDT guest address and PSCI conduit declarations. HVC requires PSCI; the caller supplies the declared platform.
 
+### `firmware.acpi_gtdt_arm64`
+
+`firmware.acpi_gtdt_arm64(physical_interrupt, virtual_interrupt)`
+
+Builds an ARM64 Generic Timer Description Table with distinct physical and virtual timer PPI interrupt IDs.
+
 ### `firmware.acpi_madt_arm64`
 
 `firmware.acpi_madt_arm64(distributor, redistributor, mpidrs, performance_interrupt=0, maintenance_interrupt=0)`
 
 Builds a GICv3 MADT with enabled CPU interfaces for the supplied MPIDRs, a distributor, and an always-on redistributor range with one 128 KiB frame per CPU. Addresses and interrupt IDs are explicit platform inputs.
+
+### `firmware.acpi_mcfg`
+
+`firmware.acpi_mcfg(base, first_bus, last_bus, segment=0)`
+
+Builds a PCI ECAM allocation table for the supplied base address, segment, and inclusive bus range.
+
+### `firmware.acpi_pci_root`
+
+`firmware.acpi_pci_root(memory_base, memory_size, routes, first_bus=0, last_bus=0, segment=0)`
+
+Builds AML for a PCI root with a fixed memory window and INTx routes. Routes are (device, pin, interrupt) tuples; pins use ACPI numbering 0 through 3.
 
 ### `firmware.acpi_rsdp`
 
