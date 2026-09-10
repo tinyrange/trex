@@ -2,11 +2,29 @@ package uefi
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"image"
 	"j5.nz/cc/display"
 	"j5.nz/cc/hypervisor"
 )
+
+var errNativeShutdown = errors.New("guest powered off")
+
+func (n *NativeExecution) advanceDisplay(ctx context.Context) error {
+	ex, err := n.Run(ctx)
+	if err != nil {
+		return err
+	}
+	if ex.Reason == hypervisor.ExitShutdown {
+		return errNativeShutdown
+	}
+	if ex.Reason != hypervisor.ExitCanceled {
+		return fmt.Errorf("native execution stopped: %+v", ex)
+	}
+	return nil
+}
 
 // AttachInput attaches modern virtio PCI keyboard/pointer devices to the native
 // bus. The caller must describe their PCI interrupts in the firmware ACPI _PRT.

@@ -59,11 +59,24 @@ architectural exception; `syndrome`, `pc`, `virtual_address` and
 `physical_address` identify it. Non-exception exits have zeroed syndrome/address
 fields. Native timers continue advancing while stopped for inspection.
 
+Reason `4` is a terminal PSCI power-off request; reason `5` is a terminal reset
+request. Repeated runs return that result without resuming guest execution.
+The native window closes normally on power-off. Reset remains an explicit stop;
+automatic reboot is not implemented.
+
+The backend implements PSCI 1.1 and SMCCC 1.1 discovery. Validation OS 26100's
+PSCI 1.0 platform table disables SYSTEM_OFF and SYSTEM_RESET without querying
+their features; its 1.1 table enables both. The desktop shutdown path was
+verified with `shutdown /s /t 0`, reaching SYSTEM_OFF and closing the window.
+
 With `windows_debug=True`, the adapter recognizes the Windows ARM64 debug
 service ABI, captures symbol load/unload notifications and debug printing, and
 delivers intentional divide breakpoints to the guest's exception vector. An
 ordinary debugger breakpoint still stops. Debug output is bounded at 64 KiB,
 individual messages at 4096 bytes and module observations at 4096 entries.
+
+Symbol unloads do not require a name. An unload notification with an all-ones
+image base clears module observations; it does not itself stop execution.
 
 `mmio_trace` is the maximum retained tail of successful MMIO transactions, from
 0 (disabled) through 4096. Each run clears that tail. `native_mmio()` returns

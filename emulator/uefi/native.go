@@ -22,6 +22,7 @@ type NativeExecution struct {
 	pci                                                         hypervisor.MMIODevice
 	Keyboard, Pointer                                           hypervisor.InputDevice
 	cpu                                                         hypervisor.ARM64
+	stopped                                                     *hypervisor.Exit
 	ram                                                         []byte
 	base                                                        uint64
 	firmware                                                    *Machine
@@ -215,6 +216,9 @@ func (m *Machine) StartNative(ctx context.Context) (*NativeExecution, error) {
 }
 
 func (n *NativeExecution) Run(ctx context.Context) (hypervisor.Exit, error) {
+	if n.stopped != nil {
+		return *n.stopped, nil
+	}
 	for {
 		ex, err := n.cpu.Run(ctx)
 		if err != nil {
@@ -238,6 +242,10 @@ func (n *NativeExecution) Run(ctx context.Context) (hypervisor.Exit, error) {
 				continue
 			}
 			if uint16(ex.Syndrome) == 0 {
+				function, err := n.cpu.Register(0)
+				if err != nil {
+					return ex, err
+				}
 				shutdown, err := n.cpu.HandlePSCI()
 				if err != nil {
 					return ex, err
@@ -245,6 +253,13 @@ func (n *NativeExecution) Run(ctx context.Context) (hypervisor.Exit, error) {
 				if !shutdown {
 					continue
 				}
+				if function == 0x84000008 {
+					ex.Reason = hypervisor.ExitShutdown
+				} else {
+					ex.Reason = hypervisor.ExitReset
+				}
+				n.stopped = &ex
+				return ex, nil
 			}
 		}
 		if ex.Reason == 1 && ex.Syndrome>>26 == 0x18 {
@@ -328,12 +343,23 @@ func (n *NativeExecution) debugSymbols(pc uint64) (bool, error) {
 		}
 		return true, n.cpu.SetRegister(31, pc+8)
 	}
-	var name [16]byte
 	var info [24]byte
-	if err := n.ReadVirtualMemory(arg0, name[:]); err != nil {
+	if err := n.ReadVirtualMemory(arg1, info[:]); err != nil {
 		return false, err
 	}
-	if err := n.ReadVirtualMemory(arg1, info[:]); err != nil {
+	base := binary.LittleEndian.Uint64(info[:])
+	if service == 4 {
+		// Unload notifications need no name. Windows also unloads all symbols
+		// at shutdown using a null name and the all-ones image-base sentinel.
+		if base == ^uint64(0) {
+			clear(n.Modules)
+		} else {
+			delete(n.Modules, base)
+		}
+		return true, n.cpu.SetRegister(31, pc+8)
+	}
+	var name [16]byte
+	if err := n.ReadVirtualMemory(arg0, name[:]); err != nil {
 		return false, err
 	}
 	length := binary.LittleEndian.Uint16(name[:])
@@ -344,15 +370,10 @@ func (n *NativeExecution) debugSymbols(pc uint64) (bool, error) {
 	if err := n.ReadVirtualMemory(binary.LittleEndian.Uint64(name[8:]), text); err != nil {
 		return false, err
 	}
-	base := binary.LittleEndian.Uint64(info[:])
-	if service == 4 {
-		delete(n.Modules, base)
-	} else {
-		if len(n.Modules) >= 4096 {
-			return false, fmt.Errorf("native module observation limit reached")
-		}
-		n.Modules[base] = NativeModule{string(text), base, uint64(binary.LittleEndian.Uint32(info[20:]))}
+	if len(n.Modules) >= 4096 {
+		return false, fmt.Errorf("native module observation limit reached")
 	}
+	n.Modules[base] = NativeModule{string(text), base, uint64(binary.LittleEndian.Uint32(info[20:]))}
 	return true, n.cpu.SetRegister(31, pc+8)
 }
 
