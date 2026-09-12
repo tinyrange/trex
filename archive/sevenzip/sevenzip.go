@@ -594,12 +594,16 @@ type sevenZipFolderData struct {
 	crc               sevenZipDigest
 	maximumDictionary uint64
 
-	mu      sync.Mutex
-	reader  io.Reader
-	data    []byte
-	done    bool
-	err     error
-	entries []*Entry
+	mu         sync.Mutex
+	reader     io.Reader
+	scratch    []byte
+	position   int64
+	pages      map[int64]*sevenZipPage
+	tick       uint64
+	runningCRC uint32
+	done       bool
+	err        error
+	entries    []*Entry
 }
 
 func sevenZipMethodName(method []byte) string {
@@ -644,94 +648,153 @@ func (f *sevenZipFolderData) initialize() error {
 	return nil
 }
 
-func (f *sevenZipFolderData) ensureLocked(end int64) error {
-	if end < 0 || end > f.unpackSize {
-		return fmt.Errorf("7z: folder read end %d is outside unpacked size %d", end, f.unpackSize)
+const sevenZipPageSize = int64(64 << 10)
+const sevenZipCachedPages = 32
+
+type sevenZipPage struct {
+	data []byte
+	used uint64
+}
+
+func (f *sevenZipFolderData) resetLocked() {
+	f.reader = nil
+	f.position = 0
+	f.done = false
+	f.runningCRC = 0
+	for _, entry := range f.entries {
+		entry.runningCRC = 0
 	}
-	if int64(len(f.data)) >= end {
-		return nil
-	}
-	if f.err != nil {
-		return f.err
-	}
-	if err := f.initialize(); err != nil {
-		f.err = err
-		return err
-	}
-	buffer := make([]byte, 128<<10)
-	for int64(len(f.data)) < end {
-		need := end - int64(len(f.data))
-		if need < int64(len(buffer)) {
-			buffer = buffer[:need]
+}
+
+func (f *sevenZipFolderData) checksumLocked(data []byte) error {
+	start, end := f.position, f.position+int64(len(data))
+	f.runningCRC = crc32.Update(f.runningCRC, crc32.IEEETable, data)
+	for _, entry := range f.entries {
+		if entry.verified || !entry.crc.defined {
+			continue
 		}
-		n, err := f.reader.Read(buffer)
-		if n > 0 {
-			f.data = append(f.data, buffer[:n]...)
+		low, high := max(start, entry.offset), min(end, entry.offset+entry.size)
+		if low < high {
+			entry.runningCRC = crc32.Update(entry.runningCRC, crc32.IEEETable, data[low-start:high-start])
 		}
-		if err != nil && err != io.EOF {
-			f.err = fmt.Errorf("7z: decode folder at output offset %d: %w", len(f.data), err)
-			return f.err
-		}
-		if n == 0 {
-			f.err = fmt.Errorf("7z: folder ended at %d bytes, want %d", len(f.data), f.unpackSize)
-			return f.err
-		}
-	}
-	if int64(len(f.data)) == f.unpackSize && !f.done {
-		f.done = true
-		if f.crc.defined {
-			actual := crc32.ChecksumIEEE(f.data)
-			if actual != f.crc.value {
-				f.err = fmt.Errorf("7z: folder CRC is %#08x, want %#08x", actual, f.crc.value)
-				return f.err
+		if end >= entry.offset+entry.size {
+			if entry.runningCRC != entry.crc.value {
+				return fmt.Errorf("7z: entry %q CRC is %#08x, want %#08x", entry.name, entry.runningCRC, entry.crc.value)
 			}
+			entry.verified = true
 		}
-		for _, entry := range f.entries {
-			if err := entry.verifyLocked(); err != nil {
-				f.err = err
-				return err
-			}
-		}
+	}
+	if end == f.unpackSize && f.crc.defined && f.runningCRC != f.crc.value {
+		return fmt.Errorf("7z: folder CRC is %#08x, want %#08x", f.runningCRC, f.crc.value)
 	}
 	return nil
+}
+
+func (f *sevenZipFolderData) pageLocked(start int64) ([]byte, error) {
+	f.tick++
+	if page := f.pages[start]; page != nil {
+		page.used = f.tick
+		return page.data, nil
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	length := min(sevenZipPageSize, f.unpackSize-start)
+	data := make([]byte, length)
+	// LZMA already retains its required dictionary. Use that history before
+	// considering a replay for a backward read outside the small page cache.
+	history := false
+	if model, ok := f.reader.(*lzmaReader); ok {
+		history = model.history(data, uint64(start))
+	}
+	if !history {
+		if start < f.position {
+			f.resetLocked()
+		}
+		if err := f.initialize(); err != nil {
+			f.err = err
+			return nil, err
+		}
+		if f.scratch == nil {
+			f.scratch = make([]byte, 128<<10)
+		}
+		scratch := f.scratch
+		end := start + length
+		for f.position < end {
+			next := min(end, f.position+int64(len(scratch)))
+			n, err := io.ReadFull(f.reader, scratch[:next-f.position])
+			if n > 0 {
+				chunk := scratch[:n]
+				if e := f.checksumLocked(chunk); e != nil {
+					f.err = e
+					return nil, e
+				}
+				low, high := max(f.position, start), min(f.position+int64(n), end)
+				if low < high {
+					copy(data[low-start:high-start], chunk[low-f.position:high-f.position])
+				}
+				f.position += int64(n)
+			}
+			if err != nil {
+				f.err = fmt.Errorf("7z: decode folder at output offset %d: %w", f.position, err)
+				return nil, f.err
+			}
+		}
+		f.done = f.position == f.unpackSize
+	}
+	if f.pages == nil {
+		f.pages = make(map[int64]*sevenZipPage)
+	}
+	if len(f.pages) >= sevenZipCachedPages {
+		var victim int64
+		oldest := ^uint64(0)
+		for key, page := range f.pages {
+			if page.used < oldest {
+				victim, oldest = key, page.used
+			}
+		}
+		delete(f.pages, victim)
+	}
+	f.pages[start] = &sevenZipPage{data: data, used: f.tick}
+	return data, nil
+}
+
+func (f *sevenZipFolderData) readAtLocked(p []byte, off int64) (int, error) {
+	n := 0
+	for n < len(p) {
+		start := off / sevenZipPageSize * sevenZipPageSize
+		page, err := f.pageLocked(start)
+		if err != nil {
+			return n, err
+		}
+		copied := copy(p[n:], page[off-start:])
+		n += copied
+		off += int64(copied)
+	}
+	return n, nil
 }
 
 func (f *sevenZipFolderData) all() ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.ensureLocked(f.unpackSize); err != nil {
-		return nil, err
-	}
-	return f.data, nil
+	// Used for the bounded encoded 7z metadata header, not data-file caching.
+	data := make([]byte, f.unpackSize)
+	_, err := f.readAtLocked(data, 0)
+	return data, err
 }
 
 type Entry struct {
-	archive   *Archive
-	name      string
-	path      string
-	size      int64
-	offset    int64
-	folder    *sevenZipFolderData
-	directory bool
-	anti      bool
-	crc       sevenZipDigest
-	verified  bool
-}
-
-func (f *Entry) verifyLocked() error {
-	if f.verified || !f.crc.defined || f.folder == nil {
-		return nil
-	}
-	end := f.offset + f.size
-	if end > int64(len(f.folder.data)) {
-		return nil
-	}
-	actual := crc32.ChecksumIEEE(f.folder.data[f.offset:end])
-	if actual != f.crc.value {
-		return fmt.Errorf("7z: entry %q CRC is %#08x, want %#08x", f.name, actual, f.crc.value)
-	}
-	f.verified = true
-	return nil
+	archive    *Archive
+	name       string
+	path       string
+	size       int64
+	offset     int64
+	folder     *sevenZipFolderData
+	directory  bool
+	anti       bool
+	crc        sevenZipDigest
+	verified   bool
+	runningCRC uint32
 }
 
 func (f *Entry) ReadAt(p []byte, off int64) (int, error) {
@@ -756,13 +819,10 @@ func (f *Entry) ReadAt(p []byte, off int64) (int, error) {
 	}
 	f.folder.mu.Lock()
 	defer f.folder.mu.Unlock()
-	if err := f.folder.ensureLocked(f.offset + off + int64(len(p))); err != nil {
-		return 0, err
+	n, err := f.folder.readAtLocked(p, f.offset+off)
+	if err != nil {
+		return n, err
 	}
-	if err := f.verifyLocked(); err != nil {
-		return 0, err
-	}
-	n := copy(p, f.folder.data[f.offset+off:f.offset+off+int64(len(p))])
 	if n < requested {
 		return n, io.EOF
 	}

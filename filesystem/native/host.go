@@ -31,10 +31,14 @@ type hostFilesystemEntry struct {
 	children []string
 }
 
-func HostBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func HostBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var root string
-	if err := starlark.UnpackArgs("filesystem.host", args, kwargs, "root", &root); err != nil {
+	lazy := false
+	if err := starlark.UnpackArgs("filesystem.host", args, kwargs, "root", &root, "lazy?", &lazy); err != nil {
 		return nil, err
+	}
+	if lazy {
+		return newLazyHost(thread, root)
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {

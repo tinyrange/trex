@@ -48,3 +48,7 @@ content.
 The `html`, `url`, and `regexp` namespaces provide format-neutral helpers useful
 to web applications. Compiled regular expressions expose `find_all` and
 `replace_all`; each match has `start`, `end`, `text`, and `groups` fields.
+
+For recursive archive and filesystem browsing, use `auto(source)` with
+`web.browse(root, request)`. See [Automatic file views](auto.md) for the Go
+registry, JSON route, range handling, and single-page browser example.

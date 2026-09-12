@@ -81,6 +81,7 @@ func standardLibraryDocumentation() ([]byte, error) {
 }
 
 var nativeStarlarkTypes = map[string][]string{
+	"auto":                     {"name", "metadata", "file", "files", "find(path)", "bytes(offset=0, size=remaining)", "slice(offset=0, size=remaining)"},
 	"windows.signing_identity": {"certificate (DER bytes; private key is not exposed)"},
 	"crypto.hasher":            {"reset()", "sum()", "update(value)"},
 	"emulator.plugin":          {"install(machine)", "name", "state"},

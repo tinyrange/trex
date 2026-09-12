@@ -1853,6 +1853,12 @@ Applies one KD load/unload event to resolver state.
 
 ## Native namespaces and values
 
+### `auto`
+
+`auto(source, name='', maximum=512MiB, maximum_entries=100000, maximum_depth=32) -> auto`
+
+Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Container paths resolve recursively while file preserves the original bytes.
+
 ### `bytes_concat`
 
 `bytes_concat(parts) -> bytes`
@@ -2587,7 +2593,7 @@ With a file, parses GPT partition metadata; with a size, creates a partition-tab
 
 ### `filesystem.host`
 
-`filesystem.host(root) -> host filesystem`
+`filesystem.host(root, lazy=False) -> host filesystem`
 
 Exposes a host directory through the native filesystem backend. This is a host-path boundary, not an image parser or a portable replacement for an in-memory directory.
 
@@ -2896,6 +2902,12 @@ Validates a machine specification against a backend and starts a VM. Returns the
 `vmm.validate(machine, backend)`
 
 Checks whether a backend can implement a machine specification and its required capabilities without launching it. Use this before committing to a boot experiment.
+
+### `web.browse`
+
+`web.browse(root, request) -> response`
+
+Resolves a recursive path against an auto view. json=1 returns entry metadata and paginated children; raw responses use the existing file range handling. Returns structured HTTP errors for missing, malformed and bounded-out inputs.
 
 ### `web.file`
 
@@ -3274,6 +3286,12 @@ Methods and attributes: `entries`, `files`, `find(name, occurrence=0)`.
 One ar member, combining ownership, mode and timestamp metadata with a file view of its payload. Byte reads and slices operate on this member, not on the enclosing archive.
 
 Methods and attributes: `binary`, `bytes`, `gid`, `hex`, `mode`, `mtime`, `name`, `read`, `size`, `slice`, `uid`.
+
+### `auto` value
+
+A lazy standardized file or directory node. metadata describes the selected source, files lists immediate children, and indexed paths or find recursively enter nested containers. file retains the original bytes; compressed containers expose their decoded children without an extra path component.
+
+Methods and attributes: `bytes(offset=0, size=remaining)`, `file`, `files`, `find(path)`, `metadata`, `name`, `slice(offset=0, size=remaining)`.
 
 ### `binary.builder` value
 

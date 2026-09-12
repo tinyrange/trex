@@ -24,6 +24,9 @@ const (
 	cabinetHeaderSize           = int64(36)
 )
 
+// ErrNoPayload distinguishes an ordinary executable from a supported installer.
+var ErrNoPayload = errors.New("installer: no supported payload found")
+
 // Installer is a parsed self-extracting installer payload. The first
 // supported format is a PE launcher containing an embedded Microsoft Cabinet.
 // starfile.File access stays within trex: the cabinet is a byte slice of the input
@@ -242,13 +245,13 @@ func OpenInstaller(file starfile.File, maximumScan int64, cache bool, store *byt
 		if wise, err := wiseinstaller.Open(file, maximumScan); err == nil {
 			return &Installer{format: "wise", offset: 0, size: file.Size(), container: wise, payload: wise}, nil
 		} else {
-			return nil, fmt.Errorf("installer: no supported payload found in the first %d bytes; %v", scanSize, err)
+			return nil, fmt.Errorf("%w in the first %d bytes; %v", ErrNoPayload, scanSize, err)
 		}
 	}
 	if wise, err := wiseinstaller.Open(file, maximumScan); err == nil {
 		return &Installer{format: "wise", offset: 0, size: file.Size(), container: wise, payload: wise}, nil
 	} else {
-		return nil, fmt.Errorf("installer: no supported payload found; %v", err)
+		return nil, fmt.Errorf("%w; %v", ErrNoPayload, err)
 	}
 }
 

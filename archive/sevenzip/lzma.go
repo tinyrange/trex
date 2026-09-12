@@ -182,8 +182,10 @@ func (r *lzmaReader) normalize() error {
 }
 
 func (r *lzmaReader) bit(probability *uint16) (uint32, error) {
-	if err := r.normalize(); err != nil {
-		return 0, err
+	if r.rangeValue < lzmaRangeTop {
+		if err := r.normalize(); err != nil {
+			return 0, err
+		}
 	}
 	bound := (r.rangeValue >> lzmaProbabilityBits) * uint32(*probability)
 	if r.code < bound {
@@ -244,7 +246,10 @@ func (r *lzmaReader) dictionaryByte(distance uint32) (byte, error) {
 	if uint64(distance) >= r.dictionaryFull || uint64(distance) >= r.dictionarySize {
 		return 0, fmt.Errorf("lzma: invalid match distance %d after %d of %d output bytes", uint64(distance)+1, r.produced, r.outputSize)
 	}
-	index := (r.dictionaryPos + uint64(len(r.dictionary)) - uint64(distance) - 1) % uint64(len(r.dictionary))
+	index := r.dictionaryPos + uint64(len(r.dictionary)) - uint64(distance) - 1
+	if index >= uint64(len(r.dictionary)) {
+		index -= uint64(len(r.dictionary))
+	}
 	return r.dictionary[index], nil
 }
 
@@ -527,4 +532,20 @@ func (r *lzmaReader) Read(p []byte) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// history copies bytes still present in the decoder's required dictionary.
+// It does not advance range-coder state or allocate another dictionary.
+func (r *lzmaReader) history(p []byte, off uint64) bool {
+	if off > r.produced || uint64(len(p)) > r.produced-off || r.produced-off > r.dictionaryFull {
+		return false
+	}
+	distance := r.produced - off
+	index := r.dictionaryPos + uint64(len(r.dictionary)) - distance
+	if index >= uint64(len(r.dictionary)) {
+		index -= uint64(len(r.dictionary))
+	}
+	n := copy(p, r.dictionary[index:])
+	copy(p[n:], r.dictionary[:])
+	return true
 }

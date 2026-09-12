@@ -23,6 +23,7 @@ import (
 	"github.com/tinyrange/trex/archive/wim"
 	"github.com/tinyrange/trex/archive/xz"
 	ziparchive "github.com/tinyrange/trex/archive/zip"
+	autostar "github.com/tinyrange/trex/auto/star"
 	binaryapi "github.com/tinyrange/trex/binary"
 	binarystar "github.com/tinyrange/trex/binary/star"
 	databaseese "github.com/tinyrange/trex/database/ese"
@@ -63,6 +64,7 @@ func predeclared() starlark.StringDict {
 	windowsBuiltins := windowsapi.Builtins()
 	windowsBuiltins["kd"] = starlark.NewBuiltin("kd", kd.Builtin)
 	return starlark.StringDict{
+		"auto": starlark.NewBuiltin("auto", autostar.Builtin),
 		"archive": namespace{
 			name: "archive",
 			attrs: starlark.StringDict{
