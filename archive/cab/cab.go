@@ -168,10 +168,11 @@ func OpenWithCache(file storage.Reader, cache bool, store *bytecache.Cache, sour
 	fileIndex := make(map[string]int, len(files)*2)
 	exactIndex := make(map[string]int, len(files))
 	for i, file := range files {
-		if _, found := exactIndex[file.name]; found {
-			return nil, fmt.Errorf("cab: duplicate member %q", file.name)
+		// Cabinets can repeat names (including ReactOS installation media).
+		// Match the existing Windows lookup policy: the first record wins.
+		if _, found := exactIndex[file.name]; !found {
+			exactIndex[file.name] = i
 		}
-		exactIndex[file.name] = i
 		addCABIndexEntry(fileIndex, file.name, i)
 		addCABIndexEntry(fileIndex, strings.TrimPrefix(file.name, "/"), i)
 	}
@@ -254,6 +255,7 @@ func (c *Archive) Lookup(name string) (*Entry, error) {
 
 // LookupExact resolves case-sensitive identifiers such as MSI File table keys.
 // Windows path lookup remains case-insensitive through Lookup.
+// If a name occurs more than once, the first record is returned.
 func (c *Archive) LookupExact(name string) (*Entry, error) {
 	if i, found := c.exactIndex[normalizeCABPath(name)]; found {
 		return &Entry{archive: c, file: c.files[i]}, nil
