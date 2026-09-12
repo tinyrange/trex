@@ -3,12 +3,51 @@ package tararchive
 import (
 	"archive/tar"
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
+
+func TestNestedTruncationIsNotOuterCorruption(t *testing.T) {
+	// An otherwise valid outer archive may contain a truncated tar payload.
+	// Each layer must validate independently; do not pad the missing bytes.
+	var inner bytes.Buffer
+	w := tar.NewWriter(&inner)
+	if err := w.WriteHeader(&tar.Header{Name: "notes.htm", Mode: 0644, Size: 70321}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(make([]byte, 70144)); err != nil {
+		t.Fatal(err)
+	}
+	var outer bytes.Buffer
+	w = tar.NewWriter(&outer)
+	if err := w.WriteHeader(&tar.Header{Name: "nested.tar", Mode: 0644, Size: int64(inner.Len())}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(inner.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(&starfile.Bytes{Data: outer.Bytes()}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.entries) != 1 {
+		t.Fatal("missing nested member")
+	}
+	data, err := starfile.ReadAll(a.entries[0])
+	if err != nil || !bytes.Equal(data, inner.Bytes()) {
+		t.Fatalf("outer payload: %v", err)
+	}
+	if _, err := Open(a.entries[0], 10); err == nil || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Fatalf("expected strict nested truncation error, got %v", err)
+	}
+}
 
 func TestTarArchiveFilesMetadataAndHardLinks(t *testing.T) {
 	var data bytes.Buffer

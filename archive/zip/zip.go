@@ -42,21 +42,22 @@ func (z *Archive) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", z.Type())
 }
 func (z *Archive) Attr(name string) (starlark.Value, error) {
-	if name == "files" {
+	if name == "files" || name == "entries" {
 		return z.files, nil
 	}
 	return nil, nil
 }
 func (z *Archive) AttrNames() []string {
-	return []string{"files"}
+	return []string{"entries", "files"}
 }
 
 type Entry struct {
-	entry  *zip.File
-	mu     sync.Mutex
-	reader io.ReadCloser
-	data   []byte
-	err    error
+	entry    *zip.File
+	mu       sync.Mutex
+	reader   io.ReadCloser
+	data     []byte
+	err      error
+	verified bool
 }
 
 func NewEntry(entry *zip.File) *Entry { return &Entry{entry: entry} }
@@ -68,15 +69,18 @@ func (f *Entry) ReadAt(p []byte, off int64) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if off >= f.Size() {
 		return 0, io.EOF
 	}
-	end := off + int64(len(p))
-	if end > f.Size() {
-		end = f.Size()
-	}
+	end := off + min(int64(len(p)), f.Size()-off)
 	if err := f.cacheUntil(end); err != nil && err != io.EOF {
 		return 0, err
+	}
+	if int64(len(f.data)) < end {
+		return 0, io.ErrUnexpectedEOF
 	}
 
 	n := copy(p, f.data[off:end])
@@ -97,21 +101,50 @@ func (f *Entry) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", f.Type())
 }
 func (f *Entry) Attr(name string) (starlark.Value, error) {
-	if name == "name" {
+	if name == "name" || name == "path" {
 		return starlark.String(f.entry.Name), nil
+	}
+	if name == "entry_type" {
+		if f.entry.FileInfo().IsDir() {
+			return starlark.String("directory"), nil
+		}
+		return starlark.String("file"), nil
+	}
+	if name == "verify" {
+		return starlark.NewBuiltin("verify", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			if err := starlark.UnpackArgs("verify", args, kwargs); err != nil {
+				return nil, err
+			}
+			return starlark.None, f.Verify()
+		}), nil
 	}
 	return starfile.Attr(f, name), nil
 }
 func (f *Entry) AttrNames() []string {
-	return append(starfile.AttrNames(), "name")
+	return append(starfile.AttrNames(), "name", "path", "entry_type", "verify")
+}
+
+// Verify reads the complete payload and checks its ZIP checksum, including for
+// empty entries where a generic zero-length file read need not touch the source.
+func (f *Entry) Verify() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Size() < 0 {
+		return fmt.Errorf("zip: decoded size exceeds file addressing range")
+	}
+	err := f.cacheUntil(f.Size())
+	if err == io.EOF && f.verified {
+		return nil
+	}
+	return err
 }
 
 func (f *Entry) cacheUntil(end int64) error {
-	if int64(len(f.data)) >= end || f.err == io.EOF {
-		return f.err
-	}
 	if f.err != nil {
 		return f.err
+	}
+	if int64(len(f.data)) >= end && (end < f.Size() || f.verified) {
+		return nil
 	}
 	if f.reader == nil {
 		reader, err := f.entry.Open()
@@ -135,9 +168,34 @@ func (f *Entry) cacheUntil(end int64) error {
 		if err != nil {
 			_ = f.reader.Close()
 			f.reader = nil
+			if err == io.EOF {
+				if int64(len(f.data)) != f.Size() {
+					err = io.ErrUnexpectedEOF
+				} else {
+					f.verified = true
+				}
+			}
 			f.err = err
 			return err
 		}
+	}
+	if end == f.Size() && !f.verified {
+		// Stored ZIP readers can return the final requested bytes with nil
+		// error; their CRC check runs only on the next EOF read. Do not let
+		// an exact-sized ReadAt bypass it.
+		var extra [1]byte
+		n, err := f.reader.Read(extra[:])
+		_ = f.reader.Close()
+		f.reader = nil
+		if n != 0 {
+			err = fmt.Errorf("zip: payload exceeds declared size")
+		} else if err == io.EOF {
+			f.verified = true
+		} else if err == nil {
+			err = io.ErrNoProgress
+		}
+		f.err = err
+		return err
 	}
 	return nil
 }
