@@ -1935,7 +1935,7 @@ Decodes Aladdin ADCR01 and ADCR03 resources to in-memory files. Both validate th
 
 `archive.ar(file, maximum_entries=1M, maximum_metadata=64MiB) -> ar`
 
-Parses a Unix ar archive and returns ordered member metadata and file views. find(name, occurrence) distinguishes duplicate member names.
+Parses Unix ar or AIX small indexed ar into ordered member metadata and borrowed file views. find(name, occurrence) distinguishes duplicate names. AIX archives follow double-linked member order rather than physical order, validating first/last endpoints, member-table names and offsets, optional symbol references, free-list links and non-overlapping ranges. Deleted members are not active files. maximum_entries and maximum_metadata bound indexing; no linking, object loading or installation is performed. AIX big indexed archives remain unsupported.
 
 ### `archive.arsenic`
 

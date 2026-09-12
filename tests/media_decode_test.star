@@ -278,7 +278,23 @@ def test_hunk_load():
     equal(len(archive_layers(file, "program")), 1)
     raises(archive.hunk_load, [file.slice(0, file.size - 4)])
 
+def test_aix_small_ar():
+    def decimals(values):
+        return "".join([str(value) + " " * (12 - len(str(value))) for value in values])
+
+    first = binary.concat([decimals([3, 166, 0, 0, 0, 0]), "644         ", "3   ", b"one\x00`\nabc\x00"])
+    table = binary.concat([decimals([28, 0, 68, 0, 0, 0]), "0           ", "0   ", b"`\n", decimals([1, 68]), b"one\x00"])
+    file = binary.concat([b"<aiaff>\n", decimals([166, 0, 68, 68, 0]), first, table])
+    result = archive.ar(file)
+    equal(result.files, ["one"])
+    equal(result.find("one").read(), "abc")
+    equal(auto(file).find("one").file.read(), "abc")
+    equal(len(archive_layers(file, "library")), 1)
+    raises(archive.ar, [file], {"maximum_metadata": 20})
+    raises(archive.ar, [file.slice(0, file.size - 1)])
+
 TEST_SUITE = suite("media_decode", [
+    case("aix_small_ar", test_aix_small_ar),
     case("hunk_load", test_hunk_load),
     case("hunk_objects", test_hunk_objects),
     case("lha", test_lha),

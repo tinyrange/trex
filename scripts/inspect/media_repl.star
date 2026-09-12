@@ -145,7 +145,7 @@ def _archive_container(file, name):
         fail("ADCR requires explicit dictionary selection; decode with archive.adcr before following this payload")
     if header[:4] in [b"PK\x03\x04", b"PK\x05\x06"]:
         return archive.zip(file)
-    if header == b"!<arch>\n":
+    if header in [b"!<arch>\n", b"<aiaff>\n"]:
         return archive.ar(file)
     if header[:6] == b"7z\xbc\xaf\x27\x1c":
         return archive.sevenzip(file)

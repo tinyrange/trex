@@ -66,6 +66,9 @@ func openWithLimits(file File, maximumEntries int, maximumMetadata int64) (*arAr
 	if _, err := file.ReadAt(magic, 0); err != nil {
 		return nil, fmt.Errorf("ar: read signature: %w", err)
 	}
+	if string(magic) == "<aiaff>\n" {
+		return openAIXSmall(file, maximumEntries, maximumMetadata)
+	}
 	if string(magic) != "!<arch>\n" {
 		return nil, fmt.Errorf("ar: invalid global signature")
 	}

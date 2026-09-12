@@ -21,6 +21,18 @@ establish that its members have no additional layers. Inspect names and headers
 of every member, open further containers, and read their files fully too.
 These helpers do not install software, mount filesystems or call host decoders.
 
+## AIX layer boundaries
+
+`archive.ar` also reads AIX small indexed archives (`<aiaff>`), following their
+linked member order and verifying member/symbol tables. Original AIX 4.1.5
+`liblpp.a` files contain additional text, ODM declarations and script members;
+these are decoded bytes, not installation actions. See the
+[ar reader notes](../../archive/ar/README.md).
+
+BFF backup framing/checksums, packed members and XCOFF payloads are still being
+investigated separately. Reading a manually bounded library does not establish
+complete BFF support.
+
 ## VMS layer boundaries
 
 Open Files-11 volumes with `filesystem.ods2(disc)`. File names retain their
