@@ -1891,7 +1891,7 @@ Formats an integer as signed, 0x-prefixed hexadecimal text with optional digit p
 
 ### `mirror_file`
 
-`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600) -> file`
+`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0) -> file`
 
 Opens a cached download or tries the supplied mirror URLs, checking the requested size and SHA-256 when supplied. The cache and key identify persistent native-backend storage; the result is a file, not extracted contents.
 

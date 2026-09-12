@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -199,7 +200,20 @@ func TestCachedFileReaderContract(t *testing.T) {
 
 func TestMirrorFileBuiltin(t *testing.T) {
 	payload := []byte("starlark mirror")
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write(payload) }))
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if calls.Add(1) == 1 {
+			writer.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+			_, _ = writer.Write(payload[:7])
+			return
+		}
+		if got := request.Header.Get("Range"); got != "bytes=7-" {
+			t.Errorf("resumed Range = %q, want bytes=7-", got)
+		}
+		writer.Header().Set("Content-Range", fmt.Sprintf("bytes 7-%d/%d", len(payload)-1, len(payload)))
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(payload[7:])
+	}))
 	defer server.Close()
 	thread := &starlark.Thread{Name: "mirror-test"}
 	resources := lifecycle.Install(thread)
@@ -211,12 +225,62 @@ func TestMirrorFileBuiltin(t *testing.T) {
 		{starlark.String("sha256"), starlark.String(mirrorDigest(payload))},
 		{starlark.String("size"), starlark.MakeInt(len(payload))},
 		{starlark.String("maximum"), starlark.MakeInt(1024)},
+		{starlark.String("retries"), starlark.MakeInt(1)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	file, ok := value.(*CachedFile)
-	if !ok || file.Size() != int64(len(payload)) {
-		t.Fatalf("value = %T, size %d", value, file.Size())
+	if !ok {
+		t.Fatalf("value = %T, want cached file", value)
+	}
+	data := make([]byte, file.Size())
+	if _, err := file.ReadAt(data, 0); err != nil || !bytes.Equal(data, payload) {
+		t.Fatalf("resumed data = %q, %v", data, err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+}
+
+func TestMirrorCacheRetryBoundsAndCancellation(t *testing.T) {
+	var calls atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path == "/cancel" {
+			cancel()
+		}
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	cache, err := NewMirrorCache(t.TempDir(), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := MirrorRequest{URLs: []string{server.URL}, CacheKey: "bounded", Size: -1, MaximumBytes: 1024, Retries: 2}
+	if _, err := cache.Open(context.Background(), request); err == nil {
+		t.Fatal("unavailable server succeeded")
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("requests = %d, want 3", got)
+	}
+	for _, retries := range []int{-1, 4} {
+		request.Retries = retries
+		if _, err := cache.Open(context.Background(), request); err == nil {
+			t.Fatalf("accepted retries=%d", retries)
+		}
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("invalid retry bounds made requests: %d", got)
+	}
+	request.Retries = 2
+	request.URLs = []string{server.URL + "/cancel"}
+	if _, err := cache.Open(ctx, request); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled download = %v", err)
+	}
+	if got := calls.Load(); got != 4 {
+		t.Fatalf("canceled download retried: %d requests", got)
 	}
 }

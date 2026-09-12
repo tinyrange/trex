@@ -22,13 +22,15 @@ import (
 // MirrorRequest identifies one immutable file available from interchangeable
 // HTTP(S) mirrors. CacheKey is opaque and never used as a host path. Size is
 // the exact expected size, or -1 when unknown. SHA256 is an optional lowercase
-// or uppercase hexadecimal digest. MaximumBytes must be positive.
+// or uppercase hexadecimal digest. MaximumBytes must be positive. Retries is
+// the number of additional passes through the mirrors (0 to 3).
 type MirrorRequest struct {
 	URLs         []string
 	CacheKey     string
 	SHA256       string
 	Size         int64
 	MaximumBytes int64
+	Retries      int
 }
 
 // MirrorCache downloads immutable files into a configured local cache and
@@ -116,29 +118,31 @@ func (c *MirrorCache) Open(ctx context.Context, request MirrorRequest) (*CachedF
 	}()
 
 	var failures []error
-	for _, rawURL := range request.URLs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	for attempt := 0; attempt <= request.Retries; attempt++ {
+		for _, rawURL := range request.URLs {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if err := c.downloadFrom(ctx, partial, rawURL, request, digest); err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			if err := partial.Sync(); err != nil {
+				return nil, fmt.Errorf("sync mirror partial file: %w", err)
+			}
+			if err := partial.Close(); err != nil {
+				return nil, fmt.Errorf("close mirror partial file: %w", err)
+			}
+			if err := os.Rename(partialPath, objectPath); err != nil {
+				return nil, fmt.Errorf("publish mirror cache object: %w", err)
+			}
+			keepPartial = false
+			file, err := openVerifiedCacheFile(objectPath, request, digest)
+			if err != nil {
+				return nil, fmt.Errorf("open published mirror cache object: %w", err)
+			}
+			return file, nil
 		}
-		if err := c.downloadFrom(ctx, partial, rawURL, request, digest); err != nil {
-			failures = append(failures, err)
-			continue
-		}
-		if err := partial.Sync(); err != nil {
-			return nil, fmt.Errorf("sync mirror partial file: %w", err)
-		}
-		if err := partial.Close(); err != nil {
-			return nil, fmt.Errorf("close mirror partial file: %w", err)
-		}
-		if err := os.Rename(partialPath, objectPath); err != nil {
-			return nil, fmt.Errorf("publish mirror cache object: %w", err)
-		}
-		keepPartial = false
-		file, err := openVerifiedCacheFile(objectPath, request, digest)
-		if err != nil {
-			return nil, fmt.Errorf("open published mirror cache object: %w", err)
-		}
-		return file, nil
 	}
 	if len(failures) == 0 {
 		return nil, fmt.Errorf("mirror request has no URLs")
@@ -147,6 +151,9 @@ func (c *MirrorCache) Open(ctx context.Context, request MirrorRequest) (*CachedF
 }
 
 func validateMirrorRequest(request MirrorRequest) (MirrorRequest, []byte, error) {
+	if request.Retries < 0 || request.Retries > 3 {
+		return request, nil, fmt.Errorf("mirror retries must be between 0 and 3")
+	}
 	request.CacheKey = strings.TrimSpace(request.CacheKey)
 	if request.CacheKey == "" {
 		return request, nil, fmt.Errorf("mirror cache key must not be empty")

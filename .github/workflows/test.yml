@@ -41,6 +41,11 @@ jobs:
           sudo chown "$(id -u):$(id -g)" /dev/kvm
           sudo chmod 660 /dev/kvm
           test -r /dev/kvm && test -w /dev/kvm
+      - name: Cache verified ReactOS media
+        uses: actions/cache@v4
+        with:
+          path: local/media-cache/objects
+          key: reactos-media-e5851510cf5b79ef51a76b8155dd5ef7faca1155f44d0a1d41c35b77ece4ce2a
       - name: Compile with Renvo and execute in pinned ReactOS
         run: go run ./cmd/trex scripts/smoke/renvo_reactos.star accelerator=kvm
       - name: Publish smoke summary
