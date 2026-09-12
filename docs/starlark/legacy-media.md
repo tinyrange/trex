@@ -29,9 +29,13 @@ linked member order and verifying member/symbol tables. Original AIX 4.1.5
 these are decoded bytes, not installation actions. See the
 [ar reader notes](../../archive/ar/README.md).
 
-BFF backup framing/checksums, packed members and XCOFF payloads are still being
-investigated separately. Reading a manually bounded library does not establish
-complete BFF support.
+`archive.bff` reads the AIX 4.1 extended-name by-name backup generation,
+validating header checksums and decoding packed Huffman bodies in memory.
+Entries retain raw security records and filesystem metadata. `auto()` recognizes
+this container, so its nested libraries can be browsed without manual slicing.
+Other BFF record generations and continuation volumes remain separate gaps;
+XCOFF executable payloads still need their own parser. See the
+[BFF reader notes](../../archive/bff/README.md).
 
 ## VMS layer boundaries
 

@@ -37,11 +37,19 @@ func (r *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func (r *countingReader) Seek(offset int64, whence int) (int64, error) {
+	pos, err := r.reader.(io.Seeker).Seek(offset, whence)
+	if err == nil {
+		r.offset = pos
+	}
+	return pos, err
+}
+
 func Open(file File, maximumEntries int) (*Archive, error) {
 	if maximumEntries <= 0 {
 		return nil, fmt.Errorf("tar: maximum_entries must be positive")
 	}
-	counter := &countingReader{reader: io.NewSectionReader(file, 0, file.Size())}
+	counter := &countingReader{reader: &streamInput{source: file}}
 	reader := tar.NewReader(counter)
 	archive := &Archive{index: make(map[string][]int)}
 	for {
@@ -69,9 +77,6 @@ func Open(file File, maximumEntries int) (*Archive, error) {
 		}
 		archive.index[entry.path] = append(archive.index[entry.path], len(archive.entries))
 		archive.entries = append(archive.entries, entry)
-		if _, err := io.Copy(io.Discard, reader); err != nil {
-			return nil, fmt.Errorf("tar: read entry %q: %w", header.Name, err)
-		}
 	}
 	for _, entry := range archive.entries {
 		if entry.header.Typeflag != tar.TypeLink {

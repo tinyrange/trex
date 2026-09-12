@@ -4,6 +4,7 @@ package imports
 import (
 	_ "github.com/tinyrange/trex/archive/ar"
 	_ "github.com/tinyrange/trex/archive/aws"
+	_ "github.com/tinyrange/trex/archive/bff"
 	_ "github.com/tinyrange/trex/archive/bru"
 	_ "github.com/tinyrange/trex/archive/bsddump"
 	_ "github.com/tinyrange/trex/archive/bzip2"

@@ -154,3 +154,41 @@ navigation and encoding selection. Downloads retain the original bytes.
 `filesystem.host(root, lazy=True)` uses a rooted native backend, skips symlinks
 and special files, and reads directory listings only when requested. Its source
 handle is closed with the Starlark application lifecycle.
+
+### Historical UFS browsing
+
+UFS detection validates the superblock and root inode without walking the whole
+volume. Opening a directory validates its records and child inodes, retaining
+the resulting views for subsequent requests. Entry and block-mapping budgets
+are shared across the volume; directory cycles and malformed visited records
+remain errors. Unvisited directories have not been validated. Use
+`filesystem.ufs(file)` when explicit full-tree enumeration and validation are
+required. This avoids decoding unrelated directory trees merely to browse a
+single path inside a compressed disk image.
+
+### Streaming TAR pages
+
+`node.page(offset=0, limit=100)` returns `entries` (auto nodes),
+`next_offset` (or `None` when finished), `total` (records discovered so far),
+and `complete`. Native `ChildPage` and `web.browse` use the same mechanism.
+The HTTP response marks an incomplete discovered count with `total_exact=false`.
+An unknown decoded size is reported as `-1`; metadata does not force decoding
+merely to determine a stream's total length.
+
+For unknown-length compressed TAR streams, pages expose the stored record order
+with stable one-based numeric names and `original_path` metadata. This retains
+duplicate names, directory records, links and conflicting paths without claiming
+that the incomplete archive is already a complete filesystem tree. Link records
+retain their target names; this view does not restore them as filesystem links.
+The browser displays original paths while using record IDs in request URLs.
+Known-size TARs retain their ordinary path-tree view. `archive.tar(file)` still
+provides explicit full enumeration, named lookup and resolved hard-link views.
+
+A page stops after crossing roughly 8 MiB or before skipping a large payload;
+it may contain fewer records than requested. Continuing past that payload must
+decode enough preceding compressed data to locate the next header. Entry limits,
+decompression limits and errors in visited data still apply. Early pages do not
+prove integrity of unvisited payloads or the final compression checksum. Calling
+`.files` explicitly requests complete enumeration; use `.page()` for bounded
+browsing. TAR headers are validated by the native Go reader, and payloads remain
+borrowed file views without decoded intermediates on the host.

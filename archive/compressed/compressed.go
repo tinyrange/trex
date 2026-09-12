@@ -4,6 +4,7 @@
 package compressed
 
 import (
+	"bufio"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -40,6 +41,20 @@ func OpenPaddedUnix(source storage.Reader, maximum int64) (*File, error) {
 	return open(source, "compress", maximum, true)
 }
 
+// OpenPackBody decodes the Huffman body used by AIX backup records. Unlike a
+// standalone UNIX pack file, the enclosing record supplies its decoded size.
+// Checks the complete code tree, end marker, padding and exact output size.
+func OpenPackBody(source storage.Reader, expected uint32, maximum int64) (*File, error) {
+	if maximum <= 0 || int64(expected) > maximum || source.Size() < 0 {
+		return nil, fmt.Errorf("pack: invalid size limit")
+	}
+	r, err := newPackBodyReader(bufio.NewReader(io.NewSectionReader(source, 0, source.Size())), expected)
+	if err != nil {
+		return nil, err
+	}
+	return decode(r, "pack", maximum)
+}
+
 func open(source storage.Reader, format string, maximum int64, zeroPadding bool) (*File, error) {
 	if maximum <= 0 || source.Size() < 0 {
 		return nil, fmt.Errorf("%s: invalid size limit or input size", format)
@@ -71,6 +86,10 @@ func open(source storage.Reader, format string, maximum int64, zeroPadding bool)
 	default:
 		return nil, fmt.Errorf("unsupported compression %q", format)
 	}
+	return decode(r, format, maximum)
+}
+
+func decode(r io.Reader, format string, maximum int64) (*File, error) {
 	f := &File{format: format}
 	for {
 		// One extra byte distinguishes an exact-limit file from a larger stream.

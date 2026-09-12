@@ -14,10 +14,15 @@ func init() {
 		if len(prefix) < 512 {
 			return nil, auto.ErrNoMatch
 		}
-		_, err := tar.NewReader(bytes.NewReader(prefix[:512])).Next()
+		_, err := tar.NewReader(bytes.NewReader(prefix)).Next()
 		if err != nil {
 			if len(prefix) < 1024 || !bytes.Equal(prefix[:1024], make([]byte, 1024)) {
 				return nil, auto.ErrNoMatch
+			}
+		}
+		if sized, ok := source.(interface{ KnownSize() (int64, bool) }); ok {
+			if _, known := sized.KnownSize(); !known {
+				return newStreamView(source, options.MaxEntries), nil
 			}
 		}
 		value, err := Open(adapter.File(source), options.MaxEntries)

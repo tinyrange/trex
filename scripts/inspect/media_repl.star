@@ -147,6 +147,8 @@ def _archive_container(file, name):
         return archive.zip(file)
     if header in [b"!<arch>\n", b"<aiaff>\n"]:
         return archive.ar(file)
+    if header[:4] in [b"\x09\x00\x6b\xea", b"\x09\x00\x6c\xea"]:
+        return archive.bff(file)
     if header[:6] == b"7z\xbc\xaf\x27\x1c":
         return archive.sevenzip(file)
     if header[2:7] in [b"-lh0-", b"-lh5-"]:

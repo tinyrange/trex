@@ -25,15 +25,23 @@ type packReader struct {
 
 func newPackReader(source storage.Reader) (io.Reader, error) {
 	r := &packReader{input: bufio.NewReader(io.NewSectionReader(source, 0, source.Size()))}
-	var h [7]byte
+	var h [6]byte
 	if _, err := io.ReadFull(r.input, h[:]); err != nil {
 		return nil, err
 	}
 	if h[0] != 0x1f || h[1] != 0x1e {
 		return nil, fmt.Errorf("pack: invalid magic")
 	}
-	r.expected = binary.BigEndian.Uint32(h[2:6])
-	r.levels = int(h[6])
+	return newPackBodyReader(r.input, binary.BigEndian.Uint32(h[2:6]))
+}
+
+func newPackBodyReader(input *bufio.Reader, expected uint32) (io.Reader, error) {
+	r := &packReader{input: input, expected: expected}
+	level, err := input.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+	r.levels = int(level)
 	if r.levels < 1 || r.levels > 24 {
 		return nil, fmt.Errorf("pack: unsupported depth %d", r.levels)
 	}

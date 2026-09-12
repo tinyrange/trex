@@ -169,12 +169,24 @@ func (r *reader) inode(number uint32) (Entry, error) {
 // identities. maximumBlocks bounds total data/indirect mapping work; file
 // contents remain borrowed views, and zero pointers remain sparse zeroes.
 func Open(file starfile.File, maximumEntries, maximumBlocks int) (*Volume, error) {
+	r, root, err := openReader(file, maximumEntries, maximumBlocks)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := Walk(root, r.order, maximumEntries, r.inode)
+	if err != nil {
+		return nil, err
+	}
+	return &Volume{Entries: entries, BlockSize: r.block, FragmentSize: r.fragment, Groups: r.groups}, nil
+}
+
+func openReader(file starfile.File, maximumEntries, maximumBlocks int) (*reader, Entry, error) {
 	if maximumEntries < 1 || maximumBlocks < 1 || file.Size() < 8192+1376 {
-		return nil, fmt.Errorf("ufs: invalid input or limits")
+		return nil, Entry{}, fmt.Errorf("ufs: invalid input or limits")
 	}
 	var sb [1376]byte
 	if _, err := starfile.ReadFullAt(file, sb[:], 8192); err != nil {
-		return nil, err
+		return nil, Entry{}, err
 	}
 	var order binary.ByteOrder
 	switch {
@@ -183,27 +195,26 @@ func Open(file starfile.File, maximumEntries, maximumBlocks int) (*Volume, error
 	case binary.BigEndian.Uint32(sb[1372:]) == 0x11954:
 		order = binary.BigEndian
 	default:
-		return nil, fmt.Errorf("ufs: expected historical UFS1 superblock")
+		return nil, Entry{}, fmt.Errorf("ufs: expected historical UFS1 superblock")
 	}
 	r := reader{file: file, order: order, block: order.Uint32(sb[48:]), fragment: order.Uint32(sb[52:]), groups: order.Uint32(sb[44:]), ipg: order.Uint32(sb[184:]), fpg: order.Uint32(sb[188:]), inodeBase: order.Uint32(sb[16:]), groupOffset: order.Uint32(sb[24:]), groupMask: order.Uint32(sb[28:]), remaining: maximumBlocks, cache: map[uint32]Entry{}}
 	r.limit = uint64(order.Uint32(sb[36:])) * uint64(r.fragment)
 	if r.block < 4096 || r.block > 65536 || r.block&(r.block-1) != 0 || r.fragment < 512 || r.fragment > r.block || r.fragment&(r.fragment-1) != 0 || r.block/r.fragment > 8 || order.Uint32(sb[56:]) != r.block/r.fragment || order.Uint32(sb[116:]) != r.block/4 || order.Uint32(sb[120:]) != r.block/128 || r.groups == 0 || r.ipg == 0 || r.fpg == 0 || r.inodeBase == 0 || r.ipg%(r.block/128) != 0 || r.limit > uint64(file.Size()) || r.limit < 8192+1376 {
-		return nil, fmt.Errorf("ufs: invalid historical geometry")
+		return nil, Entry{}, fmt.Errorf("ufs: invalid historical geometry")
 	}
 	if uint64(r.inodeBase)*uint64(r.fragment)+uint64(r.ipg)*128 > uint64(r.fpg)*uint64(r.fragment) {
-		return nil, fmt.Errorf("ufs: inode table exceeds group")
+		return nil, Entry{}, fmt.Errorf("ufs: inode table exceeds group")
 	}
 	fragments := uint64(order.Uint32(sb[36:]))
 	if uint64(r.groups) != (fragments+uint64(r.fpg)-1)/uint64(r.fpg) || r.groupOffset > r.fpg {
-		return nil, fmt.Errorf("ufs: cylinder groups exceed filesystem geometry")
+		return nil, Entry{}, fmt.Errorf("ufs: cylinder groups exceed filesystem geometry")
 	}
 	root, err := r.inode(2)
 	if err != nil {
-		return nil, err
+		return nil, Entry{}, err
 	}
-	entries, err := Walk(root, order, maximumEntries, r.inode)
-	if err != nil {
-		return nil, err
+	if root.Kind != "directory" {
+		return nil, Entry{}, fmt.Errorf("ufs: root is not a directory")
 	}
-	return &Volume{Entries: entries, BlockSize: r.block, FragmentSize: r.fragment, Groups: r.groups}, nil
+	return &r, root, nil
 }

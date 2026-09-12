@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	starvalue "github.com/tinyrange/trex/script/value"
@@ -125,9 +127,12 @@ func starlarkWebHeaders(headers *starlark.Dict) (map[string]string, error) {
 }
 
 type Application struct {
-	mu      sync.Mutex
-	thread  *starlark.Thread
-	handler starlark.Callable
+	// RequestLogger is optional and must be set before serving requests.
+	RequestLogger *slog.Logger
+	requestID     atomic.Uint64
+	mu            sync.Mutex
+	thread        *starlark.Thread
+	handler       starlark.Callable
 }
 
 func NewApplication(thread *starlark.Thread, handler starlark.Callable) *Application {
@@ -135,14 +140,58 @@ func NewApplication(thread *starlark.Thread, handler starlark.Callable) *Applica
 }
 
 func (a *Application) ServeHTTP(w http.ResponseWriter, request *http.Request) {
+	started := time.Now()
+	id := a.requestID.Add(1)
+	logged := &requestWriter{ResponseWriter: w}
+	w = logged
+	var queue, handler, streaming time.Duration
+	phases := make(map[string]float64)
+	fields := []any{"request_id", id, "method", request.Method, "path", request.URL.Path}
+	// Only browser controls are logged, never arbitrary query values or credentials.
+	for _, key := range []string{"json", "raw", "offset", "limit"} {
+		if v := request.URL.Query().Get(key); v != "" {
+			fields = append(fields, key, v)
+		}
+	}
+	if a.RequestLogger != nil {
+		a.RequestLogger.Info("http.request.start", fields...)
+	}
+	defer func() {
+		if a.RequestLogger == nil {
+			return
+		}
+		status := logged.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		fields = append(fields, "status", status, "bytes", logged.bytes,
+			"duration_ms", milliseconds(time.Since(started)), "queue_ms", milliseconds(queue),
+			"handler_ms", milliseconds(handler), "stream_ms", milliseconds(streaming),
+			"canceled", request.Context().Err() != nil)
+		if len(phases) != 0 {
+			fields = append(fields, "browse_ms", phases)
+		}
+		if logged.err != nil {
+			fields = append(fields, "write_error", logged.err.Error())
+		}
+		a.RequestLogger.Info("http.request.end", fields...)
+	}()
 	value, err := starlarkWebRequest(request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	queued := time.Now()
 	a.mu.Lock()
-	result, err := starlark.Call(a.thread, a.handler, starlark.Tuple{value}, nil)
-	a.mu.Unlock()
+	queue = time.Since(queued)
+	handling := time.Now()
+	result, err := func() (starlark.Value, error) {
+		defer a.mu.Unlock()
+		a.thread.SetLocal(requestPhasesKey, phases)
+		defer a.thread.SetLocal(requestPhasesKey, nil)
+		return starlark.Call(a.thread, a.handler, starlark.Tuple{value}, nil)
+	}()
+	handler = time.Since(handling)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error handling web request: %v\n", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -153,7 +202,9 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	writing := time.Now()
 	writeStarlarkWebResponse(w, request, response)
+	streaming = time.Since(writing)
 }
 
 func starlarkWebRequest(request *http.Request) (starlark.Value, error) {

@@ -6,7 +6,6 @@ import (
 	"github.com/tinyrange/trex/auto/adapter"
 	"github.com/tinyrange/trex/filesystem/ufs"
 	"github.com/tinyrange/trex/storage"
-	"go.starlark.net/starlark"
 )
 
 func init() {
@@ -45,7 +44,7 @@ func init() {
 				// A root filesystem includes the label itself. Parse its filesystem
 				// directly instead of repeatedly treating it as another disk.
 				if isUFS {
-					e.View, err = adapter.Parse(ufs.Builtin, part.Data, o, starlark.Tuple{starlark.String("maximum_entries"), starlark.MakeInt(o.MaxEntries)}, starlark.Tuple{starlark.String("maximum_blocks"), starlark.MakeInt(o.MaxEntries)})
+					e.View, err = ufs.AutoView(part.Data, o)
 					if err != nil {
 						return nil, err
 					}

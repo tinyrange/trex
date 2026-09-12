@@ -1949,6 +1949,12 @@ Decodes one raw StuffIt method-15 fork, not a StuffIt container. Reconstructs ad
 
 Reads an AWS tape image into logical records and tape marks, checking block framing and previous-length links. Each record exposes data, original offset, physical block count and tape_mark; data is None for marks. Does not interpret record payloads such as DDR disk dumps.
 
+### `archive.bff`
+
+`archive.bff(file, maximum_entries=1M, maximum_decoded_bytes=512MiB) -> record`
+
+Reads single-volume AIX by-name backup archives with extended name records (FS_NAME_X=11), checking every header checksum, record and security bounds, declared sizes and end framing. Stored payloads, raw headers and ACL/PCL bytes remain borrowed file views; packed Huffman bodies decode natively using the enclosing logical size and a cumulative decoded-byte limit. Entries preserve original names, paths, modes, inode/link identity, owners, device numbers and timestamps without applying them. The returned trailer retains final unused distribution-block bytes, which may be nonzero. This initial generation handles exact-end or 1KiB-rounded distribution archives; other record generations, continuation volumes and larger physical tails fail explicitly. It does not run scripts, plan installation, interpret XCOFF or validate uncompressed file contents with a nonexistent payload checksum.
+
 ### `archive.bru`
 
 `archive.bru(file, maximum_entries=1M) -> record`

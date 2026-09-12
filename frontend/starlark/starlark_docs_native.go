@@ -9,6 +9,7 @@ import (
 // Each native entry point needs an explicit contract. Do not replace missing
 // descriptions with boilerplate: generation must fail until the API is documented.
 var nativeStarlarkDescriptions = map[string]string{
+	"archive.bff":              "Reads single-volume AIX by-name backup archives with extended name records (FS_NAME_X=11), checking every header checksum, record and security bounds, declared sizes and end framing. Stored payloads, raw headers and ACL/PCL bytes remain borrowed file views; packed Huffman bodies decode natively using the enclosing logical size and a cumulative decoded-byte limit. Entries preserve original names, paths, modes, inode/link identity, owners, device numbers and timestamps without applying them. The returned trailer retains final unused distribution-block bytes, which may be nonzero. This initial generation handles exact-end or 1KiB-rounded distribution archives; other record generations, continuation volumes and larger physical tails fail explicitly. It does not run scripts, plan installation, interpret XCOFF or validate uncompressed file contents with a nonexistent payload checksum.",
 	"auto":                     "Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Container paths resolve recursively while file preserves the original bytes.",
 	"web.browse":               "Resolves a recursive path against an auto view. json=1 returns entry metadata and paginated children; raw responses use the existing file range handling. Returns structured HTTP errors for missing, malformed and bounded-out inputs.",
 	"windows.batch_plan":       "Inspects DOS batch commands and COPY source declarations using portable media files. Labels, branches, media selection, and external commands remain explicit runtime dependencies; it does not execute the script.",
@@ -244,6 +245,7 @@ var nativeStarlarkDescriptions = map[string]string{
 }
 
 var nativeStarlarkAdditionalSignatures = map[string]string{
+	"archive.bff":              "archive.bff(file, maximum_entries=1M, maximum_decoded_bytes=512MiB) -> record",
 	"auto":                     "auto(source, name='', maximum=512MiB, maximum_entries=100000, maximum_depth=32) -> auto",
 	"web.browse":               "web.browse(root, request) -> response",
 	"windows.batch_plan":       "windows.batch_plan(script, media, variables=None) -> dict",

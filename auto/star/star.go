@@ -96,6 +96,26 @@ func (v *Value) Attr(name string) (starlark.Value, error) {
 			out[i] = &Value{c}
 		}
 		return starlark.NewList(out), nil
+	case "page":
+		return starlark.NewBuiltin("auto.page", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			offset, limit := 0, 100
+			if err := starlark.UnpackArgs("auto.page", args, kwargs, "offset?", &offset, "limit?", &limit); err != nil {
+				return nil, err
+			}
+			children, next, total, complete, err := v.Node.ChildPage(offset, limit)
+			if err != nil {
+				return nil, err
+			}
+			values := make([]starlark.Value, len(children))
+			for i, c := range children {
+				values[i] = &Value{c}
+			}
+			cursor := starlark.Value(starlark.None)
+			if !complete {
+				cursor = starlark.MakeInt(next)
+			}
+			return starfile.NewRecord(starlark.StringDict{"entries": starlark.NewList(values), "next_offset": cursor, "total": starlark.MakeInt(total), "complete": starlark.Bool(complete)}), nil
+		}), nil
 	case "find":
 		return starlark.NewBuiltin("auto.find", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			var name string
@@ -115,7 +135,7 @@ func (v *Value) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (*Value) AttrNames() []string {
-	return append(starfile.AttrNames(), "file", "files", "find", "metadata", "name")
+	return append(starfile.AttrNames(), "file", "files", "find", "page", "metadata", "name")
 }
 func Metadata(m auto.Metadata) *starlark.Dict {
 	d := starlark.NewDict(6)

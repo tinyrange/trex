@@ -293,7 +293,30 @@ def test_aix_small_ar():
     raises(archive.ar, [file], {"maximum_metadata": 20})
     raises(archive.ar, [file.slice(0, file.size - 1)])
 
+def test_bff():
+    def seal(parts):
+        header = binary.concat(parts)
+        checksum = 0
+        for i, value in enumerate(header.bytes().elems()):
+            if i not in [4, 5]:
+                checksum += value << (value & 7)
+        return binary.concat([header.slice(0, 4), binary.u16le(checksum & 65535), header.slice(6, header.size - 6)])
+
+    volume = seal([b"\x09\x00", binary.u16le(60011), b"\x00\x00", binary.u16le(1), b"\x00" * 60, binary.u16le(100), b"\x00\x00"])
+    member = seal([b"\x09\x0b", binary.u16le(60012), b"\x00\x00", binary.u16le(1), binary.u32le(42), binary.u32le(0o100644), b"\x00" * 8, binary.u32le(4), b"\x00" * 28, binary.u32le(6), b"\x00" * 4, b"file\x00\x00\x00\x00"])
+    security = binary.concat([binary.u32le(2), binary.u32le(2), binary.u32le(16), b"\x00" * 12, binary.u32le(16), b"\x00" * 12])
+    end = seal([b"\x01\x07", binary.u16le(60011), b"\x00" * 4])
+    file = binary.concat([volume, member, security, b"\x02\x01\x00AB\x85\x00\x00", end])
+    result = archive.bff(file)
+    equal(len(result.entries), 1)
+    equal(result.entries[0].data.read(), "ABBA")
+    equal(result.entries[0].acl.size, 16)
+    true(result.entries[0].packed)
+    equal(auto(file).find("file").file.read(), "ABBA")
+    raises(archive.bff, [file], {"maximum_decoded_bytes": 3})
+
 TEST_SUITE = suite("media_decode", [
+    case("bff", test_bff),
     case("aix_small_ar", test_aix_small_ar),
     case("hunk_load", test_hunk_load),
     case("hunk_objects", test_hunk_objects),

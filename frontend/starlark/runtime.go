@@ -17,6 +17,7 @@ import (
 	ararchive "github.com/tinyrange/trex/archive/ar"
 	"github.com/tinyrange/trex/archive/arsenic"
 	"github.com/tinyrange/trex/archive/aws"
+	"github.com/tinyrange/trex/archive/bff"
 	"github.com/tinyrange/trex/archive/bru"
 	"github.com/tinyrange/trex/archive/bsddump"
 	cabarchive "github.com/tinyrange/trex/archive/cab"
@@ -112,6 +113,7 @@ func predeclared() starlark.StringDict {
 				"aws":              starlark.NewBuiltin("aws", aws.Builtin),
 				"vmsbackup_blocks": starlark.NewBuiltin("vmsbackup_blocks", vmsbackup.BlocksBuiltin),
 				"vmsbackup":        starlark.NewBuiltin("vmsbackup", vmsbackup.FilesBuiltin),
+				"bff":              starlark.NewBuiltin("bff", bff.Builtin),
 				"rms_variable":     starlark.NewBuiltin("rms_variable", rms.VariableBuiltin),
 				"gzip":             starlark.NewBuiltin("gzip", compressed.Builtin),
 				"bzip2":            starlark.NewBuiltin("bzip2", compressed.Builtin),
