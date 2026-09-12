@@ -9,6 +9,8 @@ import (
 // Each native entry point needs an explicit contract. Do not replace missing
 // descriptions with boilerplate: generation must fail until the API is documented.
 var nativeStarlarkDescriptions = map[string]string{
+	"auto":                     "Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Container paths resolve recursively while file preserves the original bytes.",
+	"web.browse":               "Resolves a recursive path against an auto view. json=1 returns entry metadata and paginated children; raw responses use the existing file range handling. Returns structured HTTP errors for missing, malformed and bounded-out inputs.",
 	"windows.batch_plan":       "Inspects DOS batch commands and COPY source declarations using portable media files. Labels, branches, media selection, and external commands remain explicit runtime dependencies; it does not execute the script.",
 	"windows.press_setup_plan": "Plans Microsoft Press SETUP.INI media trees and retains companion SETUP.CMD actions and shortcut dependencies. It does not run the setup executable.",
 
@@ -213,6 +215,8 @@ var nativeStarlarkDescriptions = map[string]string{
 }
 
 var nativeStarlarkAdditionalSignatures = map[string]string{
+	"auto":                     "auto(source, name='', maximum=512MiB, maximum_entries=100000, maximum_depth=32) -> auto",
+	"web.browse":               "web.browse(root, request) -> response",
 	"windows.batch_plan":       "windows.batch_plan(script, media, variables=None) -> dict",
 	"windows.press_setup_plan": "windows.press_setup_plan(inf, media, target=\"\") -> dict",
 
@@ -269,7 +273,7 @@ var nativeStarlarkAdditionalSignatures = map[string]string{
 	"firmware.acpi_rsdp":          "firmware.acpi_rsdp(xsdt, oem_id='TREXOS')",
 	"filesystem.fat":              "filesystem.fat(file) -> FAT filesystem",
 	"filesystem.fat32":            "filesystem.fat32(directory, size, boot_code=None, hidden_sectors=0, label='NO NAME', boot_stage_sector=14, file_order=[], directory_label=True, chs=None) -> file",
-	"filesystem.host":             "filesystem.host(root) -> host filesystem",
+	"filesystem.host":             "filesystem.host(root, lazy=False) -> host filesystem",
 	"filesystem.iso9660":          "filesystem.iso9660(file) -> ISO filesystem",
 	"filesystem.udf":              "filesystem.udf(file) -> UDF filesystem",
 	"filesystem.vhdx":             "filesystem.vhdx(file) -> VHDX disk",

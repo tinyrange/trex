@@ -20,6 +20,7 @@ import (
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
+		"browse":   starlark.NewBuiltin("browse", webBrowseBuiltin),
 		"file":     starlark.NewBuiltin("file", webFileBuiltin),
 		"redirect": starlark.NewBuiltin("redirect", webRedirectBuiltin),
 		"response": starlark.NewBuiltin("response", webResponseBuiltin),
