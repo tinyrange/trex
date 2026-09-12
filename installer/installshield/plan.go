@@ -21,8 +21,9 @@ import (
 func (i *Installer) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	locationsValue := starlark.Value(starlark.None)
 	variablesValue := starlark.Value(starlark.None)
+	localFilesValue := starlark.Value(starlark.None)
 	componentsValue := starlark.Value(starlark.None)
-	if err := starlark.UnpackArgs("installer.plan", args, kwargs, "locations?", &locationsValue, "variables?", &variablesValue, "components?", &componentsValue); err != nil {
+	if err := starlark.UnpackArgs("installer.plan", args, kwargs, "locations?", &locationsValue, "variables?", &variablesValue, "components?", &componentsValue, "local_files?", &localFilesValue); err != nil {
 		return nil, err
 	}
 	variables, err := installPlanStringMap("variables", variablesValue)
@@ -55,9 +56,27 @@ func (i *Installer) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 		if components != nil {
 			return nil, fmt.Errorf("installer.plan: Wise installers do not expose selectable components")
 		}
-		return payload.Plan(locations, variables)
+		localFiles := make(map[string]starfile.File)
+		if localFilesValue != starlark.None {
+			dict, ok := localFilesValue.(*starlark.Dict)
+			if !ok {
+				return nil, fmt.Errorf("installer.plan: local_files must be a dict")
+			}
+			for _, item := range dict.Items() {
+				name, ok := starlark.AsString(item[0])
+				file, fileOK := item[1].(starfile.File)
+				if !ok || !fileOK {
+					return nil, fmt.Errorf("installer.plan: local_files must map guest paths to files")
+				}
+				localFiles[name] = file
+			}
+		}
+		return payload.PlanWithLocalFiles(locations, variables, localFiles)
 	}
 
+	if localFilesValue != starlark.None {
+		return nil, fmt.Errorf("installer.plan: local_files is supported only for Wise")
+	}
 	files := make([]starlark.Value, 0)
 	unresolvedComponents := make(map[string]bool)
 	for _, pkg := range i.installShieldPackages() {

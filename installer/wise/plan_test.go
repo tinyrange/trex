@@ -1,11 +1,45 @@
 package wise
 
 import (
+	"strings"
 	"testing"
 
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
+
+func TestPlanReportsUnmodeledLocalCopies(t *testing.T) {
+	for _, source := range []string{`%TEMP%\program.exe`, `%PREVIOUS_FILE%`, ""} {
+		archive := &Archive{script: &wiseScript{
+			file: &starfile.Bytes{Name: "WiseScript.bin"},
+			actions: []scriptAction{{offset: 0x123, opcode: 0x12,
+				strings: []string{`%MAINDIR%\program.exe`, "", "", source}}},
+		}}
+		plan, err := archive.Plan(map[string]string{"<TARGETDIR>": `C:\Program Files\Example`}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gaps := planValue(t, plan, "unresolved").(*starlark.List)
+		if source == "" {
+			if gaps.Len() != 0 {
+				t.Fatal("empty source cannot produce a copy")
+			}
+		} else if gaps.Len() != 1 || !strings.Contains(gaps.Index(0).String(), "copy_local_file at 0x123") {
+			t.Fatalf("missing copy provenance: %s", gaps)
+		}
+	}
+}
+
+func TestCopySourceIsEvaluatedBeforeLaterAssignments(t *testing.T) {
+	script := &wiseScript{actions: []scriptAction{
+		{opcode: 0x12, strings: []string{`%MAINDIR%\program.exe`, "", "", "%SOURCE%"}},
+		{opcode: 0x09, strings: []string{"", "f16", "", "", "0\x7fSOURCE\x7f"}},
+	}}
+	evaluation := evaluateWiseScript(script, map[string]string{"SOURCE": `C:\TEMP\program.exe`})
+	if evaluation.variables["SOURCE"] != "" || evaluation.states[0]["SOURCE"] != `C:\TEMP\program.exe` {
+		t.Fatal("later assignment erased the reached copy source")
+	}
+}
 
 func TestPlanDerivesPortableModifications(t *testing.T) {
 	program := &starfile.Bytes{Name: "program.exe", Data: []byte("not a PE")}
@@ -108,4 +142,57 @@ func dictString(t *testing.T, dict *starlark.Dict, name string) string {
 		t.Fatalf("%q is %s, want string", name, value.Type())
 	}
 	return output
+}
+
+func TestPlanLocalCopiesKeepActionTimeDestinations(t *testing.T) {
+	program := &starfile.Bytes{Name: "program.exe", Data: []byte("program")}
+	set := func(name, value string) scriptAction {
+		return scriptAction{opcode: 9, strings: []string{"", "f16", "", "", "0\x7f" + name + "\x7f" + value}}
+	}
+	archive := &Archive{script: &wiseScript{file: program, actions: []scriptAction{
+		set("MAINDIR", `C:\Suite\First`),
+		{opcode: 0x12, strings: []string{`%MAINDIR%\program.exe`, "", "", `%TEMP%\program.exe`}},
+		{opcode: 0x0a, fixed: []byte{2, 0}, strings: []string{`Software\First`, `%MAINDIR%\program.exe`, "Path"}},
+		set("MAINDIR", `C:\Suite\Second`),
+		{opcode: 0x12, strings: []string{`%MAINDIR%\program.exe`, "", "", `C:\Suite\First\program.exe`}},
+	}}}
+	plan, err := archive.PlanWithLocalFiles(nil, nil, map[string]starfile.File{`c:/windows/temp/PROGRAM.EXE`: program})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gaps := planValue(t, plan, "unresolved").(*starlark.List); gaps.Len() != 0 {
+		t.Fatal(gaps)
+	}
+	files := planValue(t, plan, "files").(*starlark.List)
+	if files.Len() != 2 {
+		t.Fatal(files)
+	}
+	for index, want := range []string{`C:\Suite\First\program.exe`, `C:\Suite\Second\program.exe`} {
+		entry := files.Index(index).(*starlark.Dict)
+		if got := dictString(t, entry, "destination"); got != want {
+			t.Fatalf("destination=%q want %q", got, want)
+		}
+		if planValue(t, entry, "file") != program {
+			t.Fatal("copy lost its in-memory source")
+		}
+	}
+	writes := planValue(t, plan, "definitive_registry_writes").(*starlark.List)
+	if got := dictString(t, writes.Index(0).(*starlark.Dict), "data"); got != `C:\Suite\First\program.exe` {
+		t.Fatal(got)
+	}
+}
+
+func TestWisePathAndSubstringOperations(t *testing.T) {
+	variables := map[string]string{"MAINDIR": `C:\Suite\CuteFTP`, "COMPONENTS": "AG"}
+	wiseApplyVariableAction(scriptAction{strings: []string{"", "f27", "", "", "0\x7f%MAINDIR%\x7fCuteFTP\x7fHTML_DIR\x7fTRASH"}}, variables)
+	wiseApplyVariableAction(scriptAction{strings: []string{"", "f16", "", "", "12\x7fHTML_DIR\x7f%HTML_DIR%"}}, variables)
+	if variables["HTML_DIR"] != `C:\Suite` {
+		t.Fatal(variables)
+	}
+	if yes, known := wiseCondition(scriptAction{fixed: []byte{2}, strings: []string{"COMPONENTS", "G"}}, variables); !yes || !known {
+		t.Fatal("component substring was not selected")
+	}
+	if yes, known := wiseCondition(scriptAction{fixed: []byte{3}, strings: []string{"HTML_DIR", `\`}}, variables); yes || !known {
+		t.Fatal("path delimiter was not found")
+	}
 }

@@ -3,6 +3,7 @@
 package wise
 
 import (
+	"bufio"
 	"bytes"
 	"compress/flate"
 	"encoding/binary"
@@ -105,19 +106,6 @@ func Open(file starfile.File, maximum int64) (*Archive, error) {
 		}
 		return nil
 	}
-	addOptional := func(name string, compressed uint32) error {
-		if compressed == 0 {
-			return nil
-		}
-		start := cursor
-		value, decodeErr := decode(name, compressed, 0)
-		if decodeErr != nil {
-			value = &starfile.Slice{Name: name + ".compressed", Base: file, Offset: start, Length: int64(compressed)}
-			name += ".compressed"
-		}
-		members = append(members, member{name: "/" + name, file: value})
-		return nil
-	}
 	if err := add("WiseColors.dib", header.dibDeflated, header.dibInflated); err != nil {
 		return nil, err
 	}
@@ -133,20 +121,31 @@ func Open(file starfile.File, maximum int64) (*Archive, error) {
 		return nil, err
 	}
 	members = append(members, member{name: "/WiseScript.bin", file: script})
-	for _, support := range []struct {
-		name       string
-		compressed uint32
-	}{{"WISE0001.DLL", header.wiseDLLDeflated}, {"CTL3D32.DLL", header.ctl3DDeflated}, {"FILE0004", header.data4Deflated}, {"OCXREG32.EXE", header.registerDeflated}, {"PROGRESS.DLL", header.progressDeflated}, {"FILE0007", header.data7Deflated}, {"FILE0008", header.data8Deflated}, {"FILE0009", header.data9Deflated}, {"FILE000A", header.data10Deflated}, {"INSTALL_SCRIPT", header.installDeflated}} {
-		if err := addOptional(support.name, support.compressed); err != nil {
-			return nil, err
-		}
-	}
-	if err := addOptional("FILE00XX.DAT", header.finalDeflated); err != nil {
+	if err := add("WISE0001.DLL", header.wiseDLLDeflated, 0); err != nil {
 		return nil, err
 	}
-	payloadOffset, err := selectPayloadOffset(file, parsedScript, cursor, maximum)
+	payloadOffset, err := selectPayloadOffset(file, parsedScript, cursor, maximum, header)
 	if err != nil {
 		return nil, err
+	}
+	// The first script-declared payload record validates the boundary. Some
+	// runtimes reuse nominal support-size slots for other settings, so their
+	// values must not unconditionally skip source bytes. The actual support
+	// streams are raw Deflate followed by a little-endian CRC32 and must
+	// exactly fill the region between the runtime DLL and validated payload.
+	for supportIndex := 0; cursor < payloadOffset; supportIndex++ {
+		decoded, stored, err := readSupportStream(file, cursor, payloadOffset, maximum)
+		if err != nil {
+			return nil, fmt.Errorf("wise: support stream %d: %w", supportIndex, err)
+		}
+		name := fmt.Sprintf("/support/%04d.bin", supportIndex+1)
+		if stored == int64(header.registerDeflated) && len(decoded) >= 2 && string(decoded[:2]) == "MZ" {
+			name = "/OCXREG32.EXE"
+		} else if cursor+stored == payloadOffset && stored == int64(header.finalDeflated) && len(decoded) == int(header.finalInflated) {
+			name = "/FILE00XX.DAT"
+		}
+		members = append(members, member{name: name, file: &starfile.Bytes{Name: name, Data: decoded}})
+		cursor += stored
 	}
 	for fileIndex, entry := range parsedScript.files {
 		if entry.end <= entry.start || int64(entry.end) > file.Size()-payloadOffset {
@@ -173,17 +172,24 @@ func Open(file starfile.File, maximum int64) (*Archive, error) {
 	return &Archive{header: header, script: parsedScript, members: members, index: index}, nil
 }
 
-func selectPayloadOffset(file starfile.File, script *wiseScript, sequential, maximum int64) (int64, error) {
+func selectPayloadOffset(file starfile.File, script *wiseScript, sequential, maximum int64, header overlayHeader) (int64, error) {
 	if len(script.files) == 0 {
 		return sequential, nil
 	}
 	candidates := []int64{sequential}
 	if script.payloadSize != 0 && int64(script.payloadSize) <= file.Size() {
 		hinted := file.Size() - int64(script.payloadSize)
-		if hinted != sequential {
+		if hinted > sequential {
 			candidates = append(candidates, hinted)
 		}
 	}
+	// Older runtimes do use these slots as lengths. Treat their sum only as
+	// a candidate, not a bounds requirement for every runtime generation.
+	supportBytes := uint64(header.ctl3DDeflated) + uint64(header.data4Deflated) + uint64(header.registerDeflated) + uint64(header.progressDeflated) + uint64(header.data7Deflated) + uint64(header.data8Deflated) + uint64(header.data9Deflated) + uint64(header.data10Deflated) + uint64(header.installDeflated) + uint64(header.finalDeflated)
+	if sequential >= 0 && sequential <= file.Size() && supportBytes <= uint64(file.Size()-sequential) {
+		candidates = append(candidates, sequential+int64(supportBytes))
+	}
+
 	first := script.files[0]
 	for _, candidate := range candidates {
 		if first.end <= first.start || candidate < 0 || int64(first.end) > file.Size()-candidate {
@@ -197,7 +203,7 @@ func selectPayloadOffset(file starfile.File, script *wiseScript, sequential, max
 			return candidate, nil
 		}
 	}
-	return 0, fmt.Errorf("wise: neither sequential nor script-declared payload offset validates the first file")
+	return 0, fmt.Errorf("wise: no sequential, script-declared, or legacy support extent validates the first file")
 }
 
 func peOverlayOffset(file starfile.File) (int64, error) {
@@ -324,7 +330,12 @@ func parseOverlayHeader(file starfile.File, offset, maximum int64) (overlayHeade
 		if header.dibDeflated > header.dibInflated || int64(header.dibInflated) > maximum {
 			return overlayHeader{}, fmt.Errorf("wise: invalid graphics sizes %d/%d", header.dibDeflated, header.dibInflated)
 		}
-		endian := binary.LittleEndian.Uint16(data[cursor : cursor+2])
+		peekEndian, readErr := take(2)
+		if readErr != nil {
+			return overlayHeader{}, fmt.Errorf("wise: endianness: %w", readErr)
+		}
+		cursor -= 2
+		endian := binary.LittleEndian.Uint16(peekEndian)
 		if endian != 0x0008 && endian != 0x0800 {
 			value, readErr = take(4)
 			if readErr != nil {
@@ -354,11 +365,40 @@ func parseOverlayHeader(file starfile.File, offset, maximum int64) (overlayHeade
 		cursor -= 4
 	}
 	header.compressedData = offset + int64(cursor)
-	compressedTotal := uint64(header.dibDeflated) + uint64(header.scriptDeflated) + uint64(header.wiseDLLDeflated) + uint64(header.ctl3DDeflated) + uint64(header.data4Deflated) + uint64(header.registerDeflated) + uint64(header.progressDeflated) + uint64(header.data7Deflated) + uint64(header.data8Deflated) + uint64(header.data9Deflated) + uint64(header.data10Deflated) + uint64(header.installDeflated) + uint64(header.finalDeflated)
+	compressedTotal := uint64(header.dibDeflated) + uint64(header.scriptDeflated) + uint64(header.wiseDLLDeflated)
 	if compressedTotal > uint64(file.Size()-header.compressedData) {
 		return overlayHeader{}, fmt.Errorf("wise: header-defined streams exceed the executable")
 	}
 	return header, nil
+}
+
+// readSupportStream never reads past the validated payload boundary.
+// Supplying a ByteReader prevents flate from consuming the CRC or next stream.
+func readSupportStream(file starfile.File, offset, end, maximum int64) ([]byte, int64, error) {
+	if offset < 0 || end > file.Size() || end-offset < 5 || maximum <= 0 {
+		return nil, 0, fmt.Errorf("invalid support stream bounds")
+	}
+	source := io.NewSectionReader(file, offset, end-offset)
+	buffer := bufio.NewReader(source)
+	reader := flate.NewReader(buffer)
+	decoded, err := io.ReadAll(io.LimitReader(reader, maximum+1))
+	reader.Close()
+	if err != nil {
+		return nil, 0, err
+	}
+	if int64(len(decoded)) > maximum {
+		return nil, 0, fmt.Errorf("support stream exceeds expanded limit %d", maximum)
+	}
+	position, _ := source.Seek(0, io.SeekCurrent)
+	compressed := position - int64(buffer.Buffered())
+	var checksum [4]byte
+	if _, err := io.ReadFull(buffer, checksum[:]); err != nil {
+		return nil, 0, fmt.Errorf("support checksum: %w", err)
+	}
+	if crc32.ChecksumIEEE(decoded) != binary.LittleEndian.Uint32(checksum[:]) {
+		return nil, 0, fmt.Errorf("support checksum mismatch")
+	}
+	return decoded, compressed + 4, nil
 }
 
 func inflate(file starfile.File, offset, compressed, expected, maximum int64) ([]byte, error) {

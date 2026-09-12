@@ -252,6 +252,51 @@ Sygate's outer `Default.dat`, `cltdef.dat`, and `serdef.dat` files are
 application configuration variants, not the InstallShield media database.
 They are intentionally not interpreted as shortcut records.
 
+## Wise overlays
+
+`archive.installer` also decodes supported PE Wise overlays and exposes their
+script records through `installer.payload.actions`. The bitmap, script and
+runtime DLL have bounded header-defined streams. Other nominal support-size
+slots are not unconditional lengths: CuteFTP 4.0 and GetRight 4.2 reuse some of
+them for runtime data. Summing every slot either rejects valid media or invents
+archive members spanning unrelated bytes.
+
+The first script-declared file's expanded size and CRC validate candidate
+payload boundaries. Candidates include the end of the runtime, the script's
+payload extent and the bounded legacy support-length sum. Support records must
+exactly fill the preceding region as raw Deflate streams with little-endian
+CRC32 trailers; malformed checksums and expansion-limit violations are errors.
+Unidentified support records use `/support/NNNN.bin` names. They are decoded
+files, not opaque compressed substitutes.
+
+Synthetic tests cover reused header fields, legacy lengths, support checksums,
+truncation and expansion limits. The optional `TestPCWorldWiseOverlays` test
+reads the August 2000 PCWorld ISO through trex when `TREX_PCWORLD_ISO` is set.
+It verifies exact installer SHA-256 identities for `/essent/getrt420.exe` and
+`/essent/cute4032.exe` and checks their 85 and 4 script payloads respectively.
+The latter contains a CAB self-extractor with another 24 files; opening the
+outer Wise archive is not an installation proof.
+
+Wise planning captures variables at each action, including substring conditions,
+registry-query fallbacks, path splitting and trailing-backslash removal. This
+keeps a bundled second application's directory and Start Menu group from
+changing the first application's files, registry writes and shortcuts.
+
+`installer.plan(local_files = {guest_path: file, ...})` supplies a portable
+in-memory guest source filesystem for Wise `CopyLocalFile` records. Reached
+InstallFile and copy actions update that filesystem in script order. Temporary
+sources are excluded from final image modifications. Missing nonempty sources
+remain explicit unresolved effects with script offsets; an empty resolved
+source cannot produce a copy. Planned files carry a direct `file` value as
+well as source provenance. The Windows installer adapter accepts the same
+`local_files` argument and consumes these values without host staging.
+
+Nested launcher policy remains in the product recipe: CuteFTP 4.0 decodes its
+payload-only CAB directly and supplies its 24 members as guest TEMP sources.
+The Wise copy records select 25 final files for CuteFTP and CuteHTML. This does
+not claim general emulation of arbitrary executable launchers or interactive
+Wise configuration checks.
+
 ## Licensing and provenance
 
 The implementation contains no InstallShield runtime code, installer payloads,

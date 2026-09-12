@@ -16,14 +16,52 @@ import (
 // modifications. Runtime helpers in the temporary directory are retained in
 // the archive for inspection but are intentionally absent from the final plan.
 func (a *Archive) Plan(locations, supplied map[string]string) (*starlark.Dict, error) {
+	return a.PlanWithLocalFiles(locations, supplied, nil)
+}
+
+// PlanWithLocalFiles supplies an in-memory guest filesystem for CopyLocalFile.
+// The caller decodes any product-specific nested payload before planning.
+func (a *Archive) PlanWithLocalFiles(locations, supplied map[string]string, localFiles map[string]starfile.File) (*starlark.Dict, error) {
 	evaluation := evaluateWiseScript(a.script, wiseVariables(locations, supplied))
 	variables := evaluation.variables
-	if target := caseFoldValue(locations, "<targetdir>"); target != "" {
-		variables["MAINDIR"] = target
+	guest := make(map[string]starfile.File)
+	for name, file := range localFiles {
+		guest[strings.ToLower(strings.ReplaceAll(name, "/", `\`))] = file
 	}
+
+	// The primary directory is the first reached permanent installation,
+	// not MAINDIR after a bundled secondary application's assignments.
 	target := variables["MAINDIR"]
+	for index, action := range a.script.actions {
+		if !evaluation.active[index] {
+			continue
+		}
+		destination := ""
+		if action.file != nil {
+			destination = action.file.destination
+		} else if action.opcode == 0x12 && len(action.strings) >= 4 {
+			destination = action.strings[0]
+		}
+		if strings.HasPrefix(strings.ToUpper(destination), `%MAINDIR%\`) {
+			target = evaluation.states[index]["MAINDIR"]
+			break
+		}
+	}
 	if target == "" || !isAbsoluteWindowsPath(target) {
 		return nil, fmt.Errorf("wise: script does not resolve an absolute installation directory")
+	}
+	if requested := caseFoldValue(locations, "<targetdir>"); requested != "" {
+		if !isAbsoluteWindowsPath(requested) {
+			return nil, fmt.Errorf("wise: target must be an absolute Windows path")
+		}
+		for _, state := range evaluation.states {
+			for name, value := range state {
+				if strings.EqualFold(value, target) || strings.HasPrefix(strings.ToLower(value), strings.ToLower(target)+`\`) {
+					state[name] = requested + value[len(target):]
+				}
+			}
+		}
+		target = requested
 	}
 
 	type plannedFile struct {
@@ -34,11 +72,7 @@ func (a *Archive) Plan(locations, supplied map[string]string) (*starlark.Dict, e
 	byDestination := make(map[string]plannedFile)
 	unresolved := make(map[string]bool)
 	for actionIndex, action := range a.script.actions {
-		if action.file == nil {
-			continue
-		}
-		entry := action.file
-		if wiseTemporaryDestination(entry.destination) {
+		if action.file == nil && action.opcode != 0x12 {
 			continue
 		}
 		if evaluation.uncertain[actionIndex] {
@@ -48,17 +82,49 @@ func (a *Archive) Plan(locations, supplied map[string]string) (*starlark.Dict, e
 		if !evaluation.active[actionIndex] {
 			continue
 		}
-		destination, resolved := expandWiseVariables(entry.destination, variables)
+		state := evaluation.states[actionIndex]
+		var destination, source string
+		var file starfile.File
+		var resolved bool
+		if action.file != nil {
+			destination, resolved = expandWiseVariables(action.file.destination, state)
+			if !resolved && wiseTemporaryDestination(action.file.destination) {
+				continue
+			}
+			source = action.file.member
+			var err error
+			file, err = a.Lookup(source)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			if len(action.strings) < 4 {
+				evaluation.unresolved = append(evaluation.unresolved, fmt.Sprintf("malformed WiseScript copy_local_file at %#x", action.offset))
+				continue
+			}
+			copySource, sourceResolved := expandWiseVariables(action.strings[len(action.strings)-1], state)
+			if sourceResolved && copySource == "" {
+				continue
+			}
+			source = copySource
+			file = guest[strings.ToLower(source)]
+			destination, resolved = expandWiseVariables(action.strings[0], state)
+			if !sourceResolved || file == nil {
+				evaluation.unresolved = append(evaluation.unresolved, fmt.Sprintf("unsupported WiseScript copy_local_file at %#x: %s -> %s", action.offset, source, action.strings[0]))
+				continue
+			}
+		}
 		if !resolved || !isAbsoluteWindowsPath(destination) {
-			unresolved[entry.destination] = true
+			unresolved[destination] = true
 			continue
 		}
-		file, err := a.Lookup(entry.member)
-		if err != nil {
-			return nil, err
+		guest[strings.ToLower(destination)] = file
+		if strings.HasPrefix(strings.ToLower(destination), strings.ToLower(state["TEMP"])+`\`) {
+			continue
 		}
-		byDestination[strings.ToLower(destination)] = plannedFile{source: entry.member, destination: destination, file: file}
+		byDestination[strings.ToLower(destination)] = plannedFile{source: source, destination: destination, file: file}
 	}
+
 	keys := make([]string, 0, len(byDestination))
 	for key := range byDestination {
 		keys = append(keys, key)
@@ -69,7 +135,7 @@ func (a *Archive) Plan(locations, supplied map[string]string) (*starlark.Dict, e
 	for _, key := range keys {
 		entry := byDestination[key]
 		files = append(files, stringDict(map[string]starlark.Value{
-			"source": starlark.String(entry.source), "destination": starlark.String(entry.destination),
+			"file": entry.file, "source": starlark.String(entry.source), "destination": starlark.String(entry.destination),
 			"component": starlark.String(""), "resolved": starlark.True, "container": starlark.False,
 		}))
 		kind := ""
@@ -95,7 +161,7 @@ func (a *Archive) Plan(locations, supplied map[string]string) (*starlark.Dict, e
 		}
 		if kind != "" {
 			artifacts = append(artifacts, stringDict(map[string]starlark.Value{
-				"package_root": starlark.String("/"), "source": starlark.String(entry.source),
+				"file": entry.file, "package_root": starlark.String("/"), "source": starlark.String(entry.source),
 				"name":  starlark.String(path.Base(strings.ReplaceAll(entry.destination, `\`, "/"))),
 				"group": starlark.String(""), "kind": starlark.String(kind), "exports": starlark.NewList(exports),
 				"executable_registration": starlark.Bool(kind == "self_registration"),
@@ -123,9 +189,9 @@ func (a *Archive) Plan(locations, supplied map[string]string) (*starlark.Dict, e
 		if len(values) == 4 {
 			values = values[1:]
 		}
-		key, keyResolved := expandWiseVariables(values[0], variables)
-		value, valueResolved := expandWiseVariables(values[1], variables)
-		name, nameResolved := expandWiseVariables(values[2], variables)
+		key, keyResolved := expandWiseVariables(values[0], evaluation.states[actionIndex])
+		value, valueResolved := expandWiseVariables(values[1], evaluation.states[actionIndex])
+		name, nameResolved := expandWiseVariables(values[2], evaluation.states[actionIndex])
 		if !keyResolved || !nameResolved || key == "" {
 			continue
 		}
@@ -173,10 +239,10 @@ func (a *Archive) Plan(locations, supplied map[string]string) (*starlark.Dict, e
 		if len(parts) < 6 {
 			continue
 		}
-		targetPath, targetOK := expandWiseVariables(parts[1], variables)
-		linkPath, linkOK := expandWiseVariables(parts[2], variables)
-		arguments, argumentsOK := expandWiseVariables(parts[3], variables)
-		working, workingOK := expandWiseVariables(parts[4], variables)
+		targetPath, targetOK := expandWiseVariables(parts[1], evaluation.states[actionIndex])
+		linkPath, linkOK := expandWiseVariables(parts[2], evaluation.states[actionIndex])
+		arguments, argumentsOK := expandWiseVariables(parts[3], evaluation.states[actionIndex])
+		working, workingOK := expandWiseVariables(parts[4], evaluation.states[actionIndex])
 		if !targetOK || !linkOK || !argumentsOK || !workingOK || !isAbsoluteWindowsPath(targetPath) || !isAbsoluteWindowsPath(linkPath) {
 			continue
 		}
@@ -185,8 +251,8 @@ func (a *Archive) Plan(locations, supplied map[string]string) (*starlark.Dict, e
 		folder := strings.TrimSuffix(linkPath, linkBase)
 		folder = strings.TrimRight(folder, `\/`)
 		icon := targetPath
-		if len(parts) > 7 && parts[7] != "" {
-			if expanded, ok := expandWiseVariables(parts[7], variables); ok {
+		if len(parts) > 6 && parts[6] != "" {
+			if expanded, ok := expandWiseVariables(parts[6], evaluation.states[actionIndex]); ok {
 				icon = expanded
 			}
 		}

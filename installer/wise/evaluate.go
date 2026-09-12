@@ -2,12 +2,14 @@ package wise
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 )
 
 type wiseEvaluation struct {
 	variables  map[string]string
+	states     []map[string]string
 	active     []bool
 	uncertain  []bool
 	unresolved []string
@@ -29,6 +31,7 @@ type wiseBlock struct {
 func evaluateWiseScript(script *wiseScript, variables map[string]string) wiseEvaluation {
 	result := wiseEvaluation{
 		variables: variables,
+		states:    make([]map[string]string, len(script.actions)),
 		active:    make([]bool, len(script.actions)),
 		uncertain: make([]bool, len(script.actions)),
 	}
@@ -83,6 +86,7 @@ func evaluateWiseScript(script *wiseScript, variables map[string]string) wiseEva
 			continue
 		}
 
+		result.states[index] = maps.Clone(variables)
 		result.active[index] = active
 		result.uncertain[index] = uncertain
 		if active && action.opcode == 0x09 {
@@ -111,9 +115,13 @@ func wiseCondition(action scriptAction, variables map[string]string) (bool, bool
 		return false, false
 	}
 	switch action.fixed[0] & 0x0f {
-	case 0, 2:
+	case 2:
+		return strings.Contains(left, right), true
+	case 3:
+		return !strings.Contains(left, right), true
+	case 0:
 		return left == right, true
-	case 1, 3:
+	case 1:
 		return left != right, true
 	case 4:
 		return strings.EqualFold(left, right), true
@@ -146,9 +154,17 @@ func wiseApplyVariableAction(action scriptAction, variables map[string]string) {
 	case "f9":
 		if len(parts) >= 5 && parts[1] != "" {
 			name := strings.ToUpper(parts[1])
-			if _, found := variables[name]; !found {
-				value, _ := expandWiseVariables(parts[3], variables)
-				variables[name] = value
+			value, _ := expandWiseVariables(parts[3], variables)
+			variables[name] = value
+		}
+	case "f27":
+		if len(parts) >= 5 {
+			value, ok := expandWiseVariables(parts[1], variables)
+			delimiter, delimiterOK := expandWiseVariables(parts[2], variables)
+			if ok && delimiterOK && delimiter != "" {
+				before, after, _ := strings.Cut(value, delimiter)
+				variables[strings.ToUpper(parts[3])] = before
+				variables[strings.ToUpper(parts[4])] = after
 			}
 		}
 	case "f16":
@@ -166,6 +182,13 @@ func wiseApplyVariableAction(action scriptAction, variables map[string]string) {
 			}
 		}
 		value, _ := expandWiseVariables(parts[2], variables)
+		switch flags & 0x1c {
+		case 12:
+			value = strings.TrimRight(value, `\`)
+		case 16, 20:
+			// Native image construction accepts long paths. DOS aliases are assigned
+			// by the target filesystem, not guessed while evaluating the script.
+		}
 		if validWiseVariableValue(value) {
 			variables[name] = value
 		}
