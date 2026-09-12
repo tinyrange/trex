@@ -17,7 +17,7 @@ import (
 
 // web.browse is a route primitive, not a server. Applications keep control of
 // routing and HTML while recursive resolution uses the portable Go auto API.
-func webBrowseBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func webBrowseBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var root *autostar.Value
 	var request starlark.Value
 	if err := starlark.UnpackArgs("web.browse", args, kwargs, "root", &root, "request", &request); err != nil {
@@ -44,7 +44,9 @@ func webBrowseBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		s, _ := starlark.AsString(v)
 		return s
 	}
+	finish := requestPhase(thread, "resolve")
 	node, err := root.Node.Resolve(name)
+	finish()
 	if err != nil {
 		status := http.StatusUnprocessableEntity
 		switch {
@@ -60,7 +62,9 @@ func webBrowseBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if q("json") != "1" && node.Reader() != nil {
 		return &starlarkWebResponse{kind: "file", status: 200, body: nil, file: adapter.File(node.Reader()), name: path.Base(name), headers: map[string]string{"Content-Type": "application/octet-stream", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"}}, nil
 	}
+	finish = requestPhase(thread, "metadata")
 	metadata, err := node.Metadata()
+	finish()
 	if err != nil {
 		status := http.StatusUnprocessableEntity
 		if errors.Is(err, auto.ErrLimit) {
@@ -83,7 +87,9 @@ func webBrowseBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 				return browseError(400, "limit must be between 1 and 1000"), nil
 			}
 		}
-		children, err := node.Children()
+		finish = requestPhase(thread, "children")
+		children, next, total, complete, err := node.ChildPage(offset, limit)
+		finish()
 		if err != nil {
 			status := 422
 			if errors.Is(err, auto.ErrLimit) {
@@ -91,17 +97,16 @@ func webBrowseBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 			}
 			return browseError(status, err.Error()), nil
 		}
-		start := min(offset, len(children))
-		end := start + min(limit, len(children)-start)
-		entries := make([]auto.Metadata, 0, end-start)
-		for _, child := range children[start:end] {
+		entries := make([]auto.Metadata, 0, len(children))
+		for _, child := range children {
 			entries = append(entries, child.Summary())
 		}
 		result["children"] = entries
-		result["total"] = len(children)
-		result["offset"] = start
-		if end < len(children) {
-			result["next_offset"] = end
+		result["total"] = total
+		result["total_exact"] = complete
+		result["offset"] = min(offset, total)
+		if !complete {
+			result["next_offset"] = next
 		}
 	}
 	data, err := json.Marshal(result)

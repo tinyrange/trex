@@ -19,6 +19,30 @@ import (
 const helloHex = "425a68393141592653594eece83600000251800010400006449080200031064c4101a7a9a580bb9431f8bb9229c28482776741b0"
 const zerosHex = "425a683931415926535938571ce50008084000c0040008200030cc0529a60806c4201e2ee48a70a12070ae39ca"
 
+func TestOversizedBlockCacheWindow(t *testing.T) {
+	data := bytes.Repeat([]byte{7}, 3*cacheBytes)
+	r := NewReader(nil, int64(len(data)))
+	r.once.Do(func() {})
+	r.blocks = []block{{size: int64(len(data))}}
+	r.indexed = 1
+	r.length = int64(len(data))
+	r.retainAt(0, data, cacheBytes+123)
+	if r.cached != cacheBytes || r.blocks[0].dataOffset != cacheBytes {
+		t.Fatal("window not cached", r.cached)
+	}
+	for i := 0; i < 10; i++ {
+		var got [6]byte
+		if _, err := r.ReadAt(got[:], cacheBytes+int64(i*100)); err != nil || got[0] != 7 {
+			t.Fatal(got, err)
+		}
+	}
+	// The retained window owns only its bounded copy.
+	data[cacheBytes] = 9
+	if r.blocks[0].data[0] != 7 {
+		t.Fatal("retained full backing allocation")
+	}
+}
+
 func vector(t *testing.T, s string) []byte {
 	t.Helper()
 	b, e := hex.DecodeString(s)

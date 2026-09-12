@@ -156,7 +156,7 @@ func Tree(entries []Entry, options Options) (View, error) {
 	n := Directory("", nil, options)
 	items := make([]item, len(entries))
 	for i, e := range entries {
-		items[i] = item{name: e.Name, kind: e.Kind, reader: e.Reader, attributes: e.Attributes}
+		items[i] = item{name: e.Name, kind: e.Kind, reader: e.Reader, view: e.View, attributes: e.Attributes}
 	}
 	children, err := n.tree(items)
 	if err != nil {
@@ -168,8 +168,8 @@ func nodeView(nodes []*Node) View {
 	return ViewFunc(func() ([]Entry, error) {
 		out := make([]Entry, len(nodes))
 		for i, n := range nodes {
-			out[i] = Entry{Name: n.name, Kind: n.kind, Reader: n.reader, Attributes: n.attributes}
-			if n.kind == "directory" {
+			out[i] = Entry{Name: n.name, Kind: n.kind, Reader: n.reader, View: n.view, Attributes: n.attributes}
+			if n.kind == "directory" && n.view == nil {
 				out[i].View = ViewFunc(func() ([]Entry, error) {
 					children, err := n.Children()
 					if err != nil {
@@ -231,6 +231,7 @@ func (n *Node) expand(depth int) ([]*Node, error) {
 		node.attributes = e.Attributes
 		if e.View != nil {
 			node.view = e.View
+			node.detectOnce.Do(func() {}) // Explicit context takes precedence over raw-byte detection.
 			node.loader = func() ([]*Node, error) { v := &Node{view: e.View, options: n.options}; return v.expand(depth + 1) }
 		}
 		out[i] = node

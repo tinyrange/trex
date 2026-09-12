@@ -2,6 +2,7 @@ package starlarkfrontend
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -47,5 +48,7 @@ func serveStarlarkWeb(addr, script string, arguments []string) error {
 		return fmt.Errorf("%s main returned %s, want a request handler", script, result.Type())
 	}
 	fmt.Fprintf(os.Stderr, "Serving Starlark application %s at %s\n", script, webDisplayURL(addr))
-	return http.ListenAndServe(addr, webstar.NewApplication(thread, handler))
+	app := webstar.NewApplication(thread, handler)
+	app.RequestLogger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	return http.ListenAndServe(addr, app)
 }

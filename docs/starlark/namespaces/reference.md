@@ -1925,11 +1925,53 @@ Writes the supplied value to the runtime's standard output and returns None. It 
 
 Writes a binary value to the named host output file, subject to max_bytes. This materializes an explicit output; use in-memory files to connect construction stages.
 
+### `archive.adcr`
+
+`archive.adcr(file, dictionary=None, maximum_decoded_bytes=256MiB) -> file`
+
+Decodes Aladdin ADCR01 and ADCR03 resources to in-memory files. Both validate the header, 24-bit decoded size, copy ranges and complete compressed-byte consumption. Version1 validates its additional stored-length framing and decodes control words with a 4096-entry phrase table and rolling insertion counter. Its optional dictionary supplies the first 18 bytes as an initial seed phrase; unobserved framing flags are rejected. Version3 validates recursively encoded Huffman tables and uses the last 65535 dictionary bytes as preceding history. Missing referenced history is always an error, never zero-filled. maximum_decoded_bytes bounds output and stored payload bytes. These wrappers have no checksum; verify decoded structures or independent hashes. The decoder never locates or executes loader code or selects an installation variant. Other ADCR versions remain unsupported.
+
 ### `archive.ar`
 
 `archive.ar(file, maximum_entries=1M, maximum_metadata=64MiB) -> ar`
 
-Parses a Unix ar archive and returns ordered member metadata and file views. find(name, occurrence) distinguishes duplicate member names.
+Parses Unix ar or AIX small indexed ar into ordered member metadata and borrowed file views. find(name, occurrence) distinguishes duplicate names. AIX archives follow double-linked member order rather than physical order, validating first/last endpoints, member-table names and offsets, optional symbol references, free-list links and non-overlapping ranges. Deleted members are not active files. maximum_entries and maximum_metadata bound indexing; no linking, object loading or installation is performed. AIX big indexed archives remain unsupported.
+
+### `archive.arsenic`
+
+`archive.arsenic(file, maximum_decoded_bytes=256MiB, maximum_block_bytes=16MiB) -> file`
+
+Decodes one raw StuffIt method-15 fork, not a StuffIt container. Reconstructs adaptive arithmetic-coded MTF tokens, reverses BWT and optional block randomization, expands final runs, and validates the in-stream IEEE CRC32 for nonempty streams before returning an immutable in-memory file. maximum_decoded_bytes bounds logical output and stored input; maximum_block_bytes bounds each intermediate BWT block. Truncated input, invalid indices and exceeded limits fail explicitly. Use the enclosing container's declared fork length as an additional check; resource maps and nested archives require separate decoders.
+
+### `archive.aws`
+
+`archive.aws(file, maximum_records=1M) -> record`
+
+Reads an AWS tape image into logical records and tape marks, checking block framing and previous-length links. Each record exposes data, original offset, physical block count and tape_mark; data is None for marks. Does not interpret record payloads such as DDR disk dumps.
+
+### `archive.bff`
+
+`archive.bff(file, maximum_entries=1M, maximum_decoded_bytes=512MiB) -> record`
+
+Reads single-volume AIX by-name backup archives with extended name records (FS_NAME_X=11), checking every header checksum, record and security bounds, declared sizes and end framing. Stored payloads, raw headers and ACL/PCL bytes remain borrowed file views; packed Huffman bodies decode natively using the enclosing logical size and a cumulative decoded-byte limit. Entries preserve original names, paths, modes, inode/link identity, owners, device numbers and timestamps without applying them. The returned trailer retains final unused distribution-block bytes, which may be nonzero. This initial generation handles exact-end or 1KiB-rounded distribution archives; other record generations, continuation volumes and larger physical tails fail explicitly. It does not run scripts, plan installation, interpret XCOFF or validate uncompressed file contents with a nonexistent payload checksum.
+
+### `archive.bru`
+
+`archive.bru(file, maximum_entries=1M) -> record`
+
+Reads classic uncompressed BRU backups, validating each 2 KiB record's signed-byte checksum, archive identity, sequence and member name. Returns ordered entries with type, mode, ownership, link target and data file views assembled across record headers. Checks the end record and trailing buffer padding, including padding-block checksums. Compressed/extended members and incomplete multivolume inputs fail explicitly; no restore commands are executed.
+
+### `archive.bsd_dump`
+
+`archive.bsd_dump(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
+
+Reads full, single-volume historical BSD dumps with 1024-byte records, magic60012 and old 128-byte UFS inodes, in either byte order. Validates header checksums, tape positions, record identity, address flags, complete inode payloads and directory structure. Returns entries, paths in files, find(path), dump date and raw allocated_map/dumped_map file views. Entries expose the same inode metadata and data views as filesystem.ufs; holes read as zeroes, hard links share data, symlinks are not followed and device nodes are metadata only. maximum_entries bounds both inode records and reachable paths; maximum_decoded_bytes bounds input size and cumulative logical inode bytes. Incremental dumps require a base image and are rejected, as are other dump generations and multi-volume streams. Dumped inode bitmap membership is checked against recovered records and the allocation map. Nested payloads require separate decoders.
+
+### `archive.bzip2`
+
+`archive.bzip2(file, maximum_bytes=2GiB) -> file`
+
+Decodes all concatenated bzip2 streams, including legacy randomized blocks, into an immutable in-memory file. Validates block and stream checksums and enforces maximum_bytes on decoded output. Randomization is reversed after inverse BWT and before run expansion, with independent state per block. Does not interpret a filesystem or archive inside the stream.
 
 ### `archive.cab`
 
@@ -1948,6 +1990,36 @@ Opens related Cabinet files as one set, resolving files and compressed data that
 `archive.cfb(file) -> cfb`
 
 Reads an OLE compound file through bounded FAT, DIFAT, and mini-stream chains, exposing member file views without host extraction.
+
+### `archive.compactpro`
+
+`archive.compactpro(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
+
+Decodes a single-volume CompactPro archive, including self-extractors whose data fork contains the archive. Validates catalog CRC, directory descendant counts, payload ranges and the combined CRC of each file's decoded resource and data forks. Supports RLE and block-based LZH followed by RLE, retaining both forks and their stored views. Returns entries with reversible percent-escaped paths, raw name bytes, file type/creator, Finder flags, Mac-epoch dates, compression flags, CRC, data/resource and their sizes. maximum_decoded_bytes bounds total decoded fork bytes and each stored fork. Encrypted and multi-volume archives fail explicitly; no self-extractor code runs. Nested archives and resource payload formats remain separate layers.
+
+### `archive.compress`
+
+`archive.compress(file, maximum_bytes=2GiB, zero_padding=False) -> file`
+
+Decodes a UNIX compress (.Z) stream with 9–16-bit LZW codes, legacy or block mode and packing realignment at width changes or resets. Enforces maximum_bytes; the format has no checksum, so enclosing size/checksum metadata should be validated separately. zero_padding=True explicitly accepts a final incomplete all-zero code after at least one decoded literal, for fixed-block media packages such as Ultrix setld subsets. It does not trim input bytes, suppress nonzero truncated codes or strip decoded zeroes. Use this option only with independent container and inventory validation; the default retains strict incomplete-code checks.
+
+### `archive.gzip`
+
+`archive.gzip(file, maximum_bytes=2GiB) -> file`
+
+Decodes all concatenated gzip streams into an immutable in-memory file, validating checksums and enforcing maximum_bytes on decoded output. Does not interpret an archive inside the stream.
+
+### `archive.hunk_load`
+
+`archive.hunk_load(file, maximum_records=1M) -> record`
+
+Reads one non-overlaid Amiga HUNK_HEADER load module without loading or executing its code. Returns header (raw bytes, padded resident library name views, table_size, first, last and allocation sizes in bytes), one unnamed element in units containing the record stream, and entries for code/data/debug payloads. Uses the same record fields as hunk_objects. Checks header ranges, section count, section payload bounds and declared allocation capacity; BSS remains metadata. maximum_records bounds header items, blocks, symbols and relocation groups. Only ordinary longword RELOC32 load relocations are accepted; compact encodings, overlays and extended memory attributes remain explicit gaps. Resident libraries are listed, not resolved; no relocation is applied and no guest memory is allocated.
+
+### `archive.hunk_objects`
+
+`archive.hunk_objects(file, maximum_records=1M) -> record`
+
+Reads concatenated classic Amiga and EHF HUNK_UNIT object libraries, preserving unit names and complete raw unit views in units. The entries list exposes code, data and debug payloads under unique unit/record paths for nested inspection. Each unit's records expose tag, flags, absolute offset, raw bytes, optional payload, memory_size, symbols and relocations. Names retain longword padding. Code, data, debug bytes and big-endian relocation offset arrays remain borrowed files; BSS has a declared memory_size and no payload. Checks record boundaries, section ordering and END markers. maximum_records bounds blocks, symbols and relocation groups together. Does not link, apply relocations, resolve symbols or allocate BSS; reference targets and offsets are metadata, not a validated linked program. Supports EHF PPC_CODE, RELRELOC26 and EXT_RELREF26 framing without applying relocations. Load modules require hunk_load; indexed libraries and overlays remain rejected rather than silently skipped.
 
 ### `archive.installer`
 
@@ -1979,6 +2051,24 @@ Parses compiled InstallShield InstallScript into functions, callbacks, calls and
 
 Combines an InstallShield header, cabinet files and optional externally supplied files into an archive view. Exposes file groups, components and shortcuts needed for installation planning.
 
+### `archive.irix_idb`
+
+`archive.irix_idb(file, maximum_entries=1M) -> record`
+
+Parses an IRIX installation database into ordered items, preserving duplicates and non-file records. Each item exposes kind, path, source, mode, owner, group and attributes. Use the logical subsystem attributes to pair renamed overlay images with archive.irix_image; inspecting an index does not select a machine variant or execute installation actions. Validates quoting, numeric modes, entry limits and zero tape padding.
+
+### `archive.irix_image`
+
+`archive.irix_image(file, idb, image_name, maximum_entries=1M) -> record`
+
+Opens an IRIX inst software image with its IDB index and explicit image name, such as 4Dwm.sw. Returns files in physical record order, retaining duplicate paths, source names, IDB attributes, modes, owners and groups. Reads unwrap indexed .Z payloads and validate decoded sizes and BSD checksums. Supports headerless tape images and indexes without offsets, matching repeated names by IDB occurrence order; explicit offsets take precedence. Checks all tape padding is zero and block-aligned. Does not select subsystems or execute installation actions.
+
+### `archive.irix_tape`
+
+`archive.irix_tape(file) -> record`
+
+Reads an SGI standalone tape directory after checking its header checksum and member ranges. Returns entries with path, size, offset and data file views; use filesystem.efs on an mr member to inspect the nested miniroot. This is the standalone archive format, not an inst software image or raw tape-record framing.
+
 ### `archive.kwaj`
 
 `archive.kwaj(file, maximum=512MiB) -> file`
@@ -1990,6 +2080,30 @@ Decodes a Microsoft KWAJ-compressed input into a file, enforcing the decoded-siz
 `archive.kwaj_info(file, maximum=512MiB) -> record(file, name, method, decoded_size, compressed_size)`
 
 Returns the decoded KWAJ file together with its original name, method and compressed/decoded sizes. This preserves wrapper metadata that archive.kwaj omits.
+
+### `archive.lha`
+
+`archive.lha(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
+
+Reads level-0 LHA headers and stored lh0 or Huffman/LZSS lh5 payloads. Checks header byte sums, file CRC-16, declared sizes, terminal marker, path components and duplicate paths. Returns entries, files and find(path). Entries preserve raw name/header bytes, the packed DOS timestamp, DOS attributes, method, CRC, decoded data and a borrowed stored view. Backslashes become path separators; parent traversal and empty components are rejected. maximum_entries bounds records; maximum_decoded_bytes bounds total decoded bytes and each stored payload. Other header levels, directory records, compression methods and self-extractors are explicit gaps. Nested containers are not automatically decoded.
+
+### `archive.mac_resource`
+
+`archive.mac_resource(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
+
+Parses a classic Macintosh resource fork, checking map, reference, name and payload bounds and repeated type groups. Duplicate IDs retain every record in map order; duplicate_ids reports collisions, occurrence is one-based, and later occurrences have ordinal path suffixes. Returns fork attributes and entries with resource_type (four raw bytes), signed id, name (raw bytes or None), attributes, offset, size and data. Uncompressed data is a borrowed view; supported Apple dcmp 0/1/2/3 compressed resources are decoded and validated in memory. Compression requires both attribute bit0 and the a89f6572 payload tag, matching Resource Manager; raw attributes remain available when the bit is set on ordinary data. compressed reports actual decoding, while stored_data and stored_size preserve the original representation. maximum_decoded_bytes bounds total decoded compressed payload bytes and each stored compressed input. Unknown codecs and unsupported token variants fail explicitly. The synthetic path uses hexadecimal type and signed ID without interpreting names as host paths. Payload-specific formats remain separate layers.
+
+### `archive.pack`
+
+`archive.pack(file, maximum_bytes=2GiB) -> file`
+
+Decodes a UNIX pack (1f1e) Huffman stream, checking its symbol tree, end marker, padding and declared output size. Enforces maximum_bytes and returns a file; useful for compressed IRIX manual pages nested inside inst images.
+
+### `archive.rms_variable`
+
+`archive.rms_variable(file, attributes, maximum_records=1M) -> record`
+
+Decodes sequential RMS variable-length (VAR) and variable-with-fixed-control (VFC) records using the 32-byte attributes from an ODS-2 header or BACKUP attribute52. Returns records with original offset and borrowed control/data file views. Removes length words, odd-length alignment bytes and FFFF end-of-block padding from those views, but does not translate text or interpret printer controls. Validates EOF, control size, declared maximum data length and no-span block boundaries; rejects indexed/relative organizations, other record formats and extended record flags. maximum_records bounds returned records. Metadata alone is not proof that arbitrary file bytes actually use RMS framing; mismatches remain errors.
 
 ### `archive.sevenzip`
 
@@ -2003,6 +2117,12 @@ Parses a 7-Zip archive into member file views with bounded entry count, metadata
 
 Parses an SFP installer archive and exposes member paths, timestamps, stored sizes and payload file views. It does not install the contents.
 
+### `archive.stuffit`
+
+`archive.stuffit(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
+
+Reads the classic 22-byte/112-byte StuffIt archive generation, including self-extractors with an archive data fork. Validates declared archive size, header CRC-16/ARC, nested directory markers and each decoded fork CRC. Classic top-level counts are checked; STi2/ST46/ST50/ST60/ST65 installer counts are preserved separately as declared_count/top_level_count with root_count_verified=False because their selection semantics are not interpreted. STi2 repeated directory records remain in order. ST46 preserves repeated STcp/STde/STal/DIFF records with creator STin, exposing installer_record, one-based occurrence and raw declared fork sizes; copy/delete/alias metadata bytes are retained even when their logical data size is zero. ST60/ST65 additionally preserve STda/STmv metadata, including metadata naming existing directories without replacing them. No installation operations or patches are applied. ST60 alternative ordinary files are also retained as separate occurrences; other variants reject ordinary duplicate files, and ordinary file/directory conflicts still fail. Supports stored forks, method13 LZSS/Huffman with embedded or predefined tables, and method14 installer blocks with recursive Huffman tables and retained 256KiB history. Method14 validates block framing, decoded sizes and final fork CRCs; unavailable history is never invented. Returns version and entries preserving raw name bytes, reversible percent-escaped paths, file type/creator, Finder flags, Mac-epoch dates, resource/data methods and CRCs, separate data/resource files and original stored views. maximum_decoded_bytes bounds total decoded fork bytes and each stored fork. Also reads the StuffIt5 banner container with method15 (Arsenic) forks, validating the global, record and metadata CRC16 fields, parent/previous/file-next links, directory child counts and in-stream fork CRC32. StuffIt5 fork CRC16 attributes are None because integrity comes from the method15 stream. Other StuffIt5 fork methods, other compression methods, encryption and StuffItX remain explicit gaps; executable self-extractor code never runs. Nested containers and resource payloads require their own decoders.
+
 ### `archive.szdd`
 
 `archive.szdd(file, maximum=512MiB) -> file`
@@ -2014,6 +2134,24 @@ Decodes the legacy Microsoft SZDD single-file compression format and returns a f
 `archive.tar(directory, compress='') -> bytes; archive.tar(file, maximum_entries=1M) -> tar`
 
 With a directory, serializes its entries into tar bytes, optionally compressed. With a file, parses a tar archive and preserves ordered entries, metadata and duplicate-name occurrences.
+
+### `archive.tome`
+
+`archive.tome(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
+
+Reads classic kc0001 Apple installer Tome catalogs and decodes both forks using chunked InstaCompOne in memory. Validates catalog counts, unique IDs, payload ranges, nonoverlap, exact fork sizes, both decoded-fork checksums and complete compressed-input consumption. Returns entries with ID, raw name bytes, reversible ID-qualified paths, file type/creator, Finder flags, version, Mac-epoch dates, decoded data/resource files and original stored views. maximum_decoded_bytes bounds total decoded output and each stored fork. Catalog checksum values are preserved as data_checksum and resource_checksum; checksums_verified is True after validation. Supports the observed 00010000 binary and 00000000 seven-bit-text chunk framing, plus stored chunks selected by a leading 01 byte, with retained 32KiB history and command-aligned 64KiB blocks; other encodings fail explicitly. Resource maps and nested archives require separate decoders. Installer code never runs. catalog_kind distinguishes file catalogs (1) from individual-resource catalogs (2). Kind2 exposes resource_type and signed resource_id, with the decoded resource payload in data and an empty resource fork; file-only metadata is omitted. Unknown catalog kinds are rejected.
+
+### `archive.vmsbackup`
+
+`archive.vmsbackup(file, maximum_blocks=1M, maximum_records=1M, maximum_block_size=16MiB, maximum_files=1M, maximum_attributes=256) -> record`
+
+Reconstructs VMS BACKUP file-data chains after the same block, CRC and redundancy validation as vmsbackup_blocks. Returns entries with raw name bytes, flags, declared logical size, stored_size, attributes (kind/data records), missing_contents and data. Data borrows source ranges, excludes allocation slack, and is None when a nonempty file has metadata but no stored payload bytes. missing_contents reports absence without inferring its cause or accepting a partially stored file. Empty files have an empty data view. Rejects discontinuous virtual block addresses, partial data, missing or duplicate name/RMS fields and unsupported record kinds. Retains file attributes without translating RMS records or applying host path rules. Volume/file-ID record interpretation remains outside this API; inspect them with vmsbackup_blocks. Source bytes must remain unchanged while data views are used.
+
+### `archive.vmsbackup_blocks`
+
+`archive.vmsbackup_blocks(file, maximum_blocks=1M, maximum_records=1M, maximum_block_size=16MiB) -> record`
+
+Reads a complete single-volume VMS BACKUP block stream, validating header CRC-16, whole-block CRC-32, sequence numbers, record boundaries and each encountered XOR redundancy payload. Returns blocks with offset, sequence, raw header, parity and records. Records expose offset, kind, flags, address, reserved and a borrowed data file. Unknown record kinds and flags are preserved. Does not repair damaged blocks, require final-group redundancy, join file data records, interpret RMS attributes, or decode nested file contents. The source must remain unchanged while borrowed views are used. Limits independently bound block count, total record count and block size before allocation.
 
 ### `archive.wim`
 
@@ -2031,7 +2169,7 @@ Decodes an XZ stream into a file, rejecting decoder dictionaries above max_dicti
 
 `archive.zip(file) -> zip`
 
-Parses a ZIP archive and exposes its member files. Reads decompress the selected entries without extracting them into a host directory.
+Parses a ZIP archive and exposes member files through files or entries. Members expose name/path and entry_type; complete reads validate decoded size and CRC, including exact-sized reads. Call entry.verify() to force complete validation, including empty entries. Data stays in memory rather than being extracted into a host directory.
 
 ### `binary.annotate`
 
@@ -2561,6 +2699,18 @@ Loads an ARM64 EFI image into a configurable in-process interpreter. Runs stop a
 
 Creates a bounded 32-bit x86 execution context from a PE image or raw code. Exposes guest registers, memory, hooks and snapshots; unsupported behavior returns structured stops rather than executing host code.
 
+### `filesystem.apm`
+
+`filesystem.apm(file, block_size=512, maximum_entries=1M) -> record`
+
+Reads an Apple Partition Map as portable partition file views. block_size explicitly selects the 512-, 1024- or 2048-byte logical map; device_block_size and device_blocks retain independent driver-descriptor geometry. This distinction matters for CDs containing overlapping maps. Each partition exposes its effective block_size: a CDvr-tagged Apple_Driver43_CD record with a matching block-zero driver descriptor uses 2048-byte device units even in a 512-byte map; other records use the selected map units. Validates ER/PM signatures, consistent entry counts, allocated-partition bounds and nonoverlap. Returns partitions with index, raw name/type/processor bytes, start_block, blocks, logical data-range fields, status and boot metadata. data is the complete physical partition view; no inner filesystem is inferred. An out-of-image Apple_Free descriptor retains its declared geometry with data=None and complete=False; allocated partitions must fit fully. Boot metadata is not executed and boot checksums are not verified.
+
+### `filesystem.efs`
+
+`filesystem.efs(file, maximum_entries=1M) -> record`
+
+Reads an IRIX EFS volume into entries and case-sensitive paths, resolving direct and indirect extents without mounting. find(path) returns an entry or None; entries expose data, entry_type, size, inode, mode, uid, gid and modified. Accepts a trimmed free tail only when the allocation bitmap proves the omitted region is free and all referenced extents fit the original input. Symlink data remains the link target and is never followed; device entries have no data.
+
 ### `filesystem.fat`
 
 `filesystem.fat(file) -> FAT filesystem`
@@ -2591,6 +2741,12 @@ Builds a FAT32 volume from a directory and requested layout options. It produces
 
 With a file, parses GPT partition metadata; with a size, creates a partition-table builder. Populate the builder with partition contents to produce a complete disk layout.
 
+### `filesystem.hfs`
+
+`filesystem.hfs(file, maximum_entries=1M) -> record`
+
+Reads a classic HFS volume's catalog and extent-overflow records without mounting. Returns raw volume name, entries, paths and exact find(path) lookup. Every regular entry exposes separate data and resource fork views, their sizes, raw name bytes, catalog/parent IDs, Finder information, flags and Mac-epoch timestamps. Path components percent-escape non-ASCII/control bytes, slash and percent, keeping legacy names reversible without assuming a script encoding. HFS Plus and fragmented extents-file bootstrap are not yet supported; compressed resources require a separate resource decoder. Aliases are not followed.
+
 ### `filesystem.host`
 
 `filesystem.host(root, lazy=False) -> host filesystem`
@@ -2615,17 +2771,47 @@ With a file, parses the MBR and partitions; with a disk size, creates a builder 
 
 Parses an NTFS volume when given a file, or builds one from a directory and size. Construction accepts explicit NTFS generation, boot metadata, log and upcase data so older NT layouts need not inherit modern defaults.
 
+### `filesystem.ods2`
+
+`filesystem.ods2(file, maximum_entries=1M, maximum_depth=64) -> record`
+
+Reads Files-11 ODS-2 version1 home blocks, index headers and versioned directory trees. Verifies home/header checksums, primary and backup index maps, file identities, allocation bounds, EOF fields, directory records and traversal limits. Returns entries, files, exact-path find(path), raw home bytes and padded volume_name. Entries retain raw names, version, file_number, sequence, header, record_attributes, characteristics, data and size. Names include ;version, with unsafe bytes percent-escaped; the root self-reference is a directory_link and is not followed. Data is a borrowed read-only extent view; RMS records are not translated and allocation slack is excluded. Supports retrieval formats1/2/3. Extension chains, placement-control pointers, alternate-volume resolution and other ODS generations remain explicit gaps. Opening an ODS-2 view does not validate any enclosing CD-image trailer or decode nested backup savesets.
+
+### `filesystem.sgi`
+
+`filesystem.sgi(file) -> record`
+
+Validates an SGI volume-header checksum and returns partition and boot-directory file views. Partitions expose index, partition_type, start_block, blocks, data and complete; addresses are 512-byte basic blocks. A whole-volume descriptor may exceed a CD image: its declared blocks are retained, data covers only available bytes, and complete is false. Filesystem partitions and boot files must fit in full. Does not infer an inner filesystem from a filename.
+
 ### `filesystem.udf`
 
 `filesystem.udf(file) -> UDF filesystem`
 
 Parses a UDF filesystem into directory and file views. Reads resolve the filesystem's on-disk structures without mounting it.
 
+### `filesystem.ufs`
+
+`filesystem.ufs(file, maximum_entries=1M, maximum_blocks=1M) -> record`
+
+Reads the historical UFS1 filesystem layout used by Ultrix, with a superblock at byte8192 and either byte order. Checks fragment/cylinder-group geometry, inode and data ranges, 512-byte directory records, dot entries, duplicate names and directory cycles. Returns entries, paths, find(path), block_size, fragment_size and groups. Entries preserve inode identity, mode, link count, old 16-bit uid/gid, timestamps, flags, device number and borrowed data views. Reads 12 direct blocks and single/double/triple indirect pointers; zero pointers remain sparse zeroes. maximum_blocks bounds total mapping work, including indirect pointers; maximum_entries bounds reachable paths. Hard-linked files share inode data, symlinks are exposed but not followed, and no device nodes are created. This is the old directory/inode layout, not UFS2 or modern UFS1 extensions; inline symlinks, extended attributes and journal replay are not implemented. Nested archives require separate decoders.
+
+### `filesystem.ultrix_label`
+
+`filesystem.ultrix_label(file) -> record`
+
+Reads the eight-slot DEC/Ultrix disk label at byte16312, validating magic, active-table flag, signed 512-byte sector geometry and nonempty partition bounds. Returns block_size=512 and partitions with index, conventional a-h name, start_block, blocks and borrowed data. Empty slots remain present with data=None. Overlaps are preserved because the whole-disk slot overlaps individual filesystems; no partition is silently selected or treated as a duplicate. The label has no checksum or filesystem-type field, so inspect each selected partition with its own format reader. Does not scan for alternate labels, mount filesystems or execute boot code.
+
 ### `filesystem.vhdx`
 
 `filesystem.vhdx(file) -> VHDX disk`
 
 Parses a VHDX container and exposes its logical disk contents. This unwraps the virtual-disk format; parse the returned disk's partitions/filesystems separately.
+
+### `filesystem.xfs`
+
+`filesystem.xfs(file, maximum_entries=1M) -> record`
+
+Reads a legacy version-4 XFS directory tree using borrowed file extents, without mounting or replaying the journal. Returns entries and paths; find(path) returns an entry or None. Entries expose data, entry_type, inode, mode, uid, gid, modified and size. Supports local forks and inode-resident extent lists, sparse and unwritten data, and version-1/version-2 directories (including version-1 directory btrees). Symlinks are not followed. Version-5 metadata, extent btrees, realtime data and file-type directory extensions are currently rejected explicitly.
 
 ### `firmware.acpi_compatible_id`
 

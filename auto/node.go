@@ -55,6 +55,9 @@ type Node struct {
 	options                  Options
 	attributes               map[string]any
 	detectOnce, childrenOnce sync.Once
+	streamOnce               sync.Once
+	streamView               View
+	streamErr                error
 	view                     View
 	caseInsensitive          bool
 	format                   string
@@ -77,7 +80,15 @@ func (n *Node) Name() string           { return n.name }
 func (n *Node) Summary() Metadata {
 	size := int64(0)
 	if n.reader != nil {
-		size = n.reader.Size()
+		if stream, ok := n.reader.(interface{ KnownSize() (int64, bool) }); ok {
+			var known bool
+			size, known = stream.KnownSize()
+			if !known {
+				size = -1
+			}
+		} else {
+			size = n.reader.Size()
+		}
 	}
 	return Metadata{Inspected: n.kind == "directory", Name: n.name, Kind: n.kind, Size: size, Container: n.kind == "directory", Readable: n.reader != nil, Attributes: n.attributes}
 }
@@ -108,8 +119,9 @@ func (n *Node) Metadata() (Metadata, error) {
 			m.Attributes = merged
 		}
 		m.Format = n.format
-		m.Container = n.format != ""
+		m.Container = n.view != nil
 	}
+	m.Container = m.Container || n.view != nil
 	return m, n.detectErr
 }
 func (n *Node) Children() ([]*Node, error) {
@@ -173,7 +185,39 @@ func (n *Node) Resolve(name string) (*Node, error) {
 		if part == "" || part == "." || part == ".." {
 			return nil, fs.ErrInvalid
 		}
-		children, err := current.Children()
+		var children []*Node
+		view, err := current.pagingView()
+		if err != nil {
+			return nil, err
+		}
+		if lookup, ok := view.(EntryLookup); ok {
+			entry, e := lookup.Lookup(part)
+			if e != nil {
+				return nil, e
+			}
+			children = current.pageNodes([]Entry{entry})
+		} else if _, ok := view.(PagedView); ok {
+			for offset := 0; ; {
+				page, next, _, complete, e := current.ChildPage(offset, 100)
+				if e != nil {
+					return nil, e
+				}
+				found := false
+				for _, child := range page {
+					if child.name == part {
+						children = []*Node{child}
+						found = true
+						break
+					}
+				}
+				if found || complete {
+					break
+				}
+				offset = next
+			}
+		} else {
+			children, err = current.Children()
+		}
 		if errors.Is(err, ErrNotContainer) {
 			return nil, fs.ErrNotExist
 		}
@@ -211,6 +255,7 @@ func (n *Node) Resolve(name string) (*Node, error) {
 type item struct {
 	name, kind string
 	reader     storage.Reader
+	view       View
 	attributes map[string]any
 }
 
@@ -262,15 +307,23 @@ func (n *Node) tree(items []item) ([]*Node, error) {
 				if child.reader == nil && child.kind == "directory" {
 					child.kind = it.kind
 					child.reader = it.reader
+					child.view = it.view
 					child.attributes = it.attributes
 					delete(maps, child)
 				}
 			}
 			parent = child
+			if last && it.kind == "directory" {
+				child.attributes = it.attributes
+				child.view = it.view
+			}
 		}
 	}
 	for node := range maps {
 		children := node.children
+		if node.view != nil && len(children) != 0 {
+			return nil, fmt.Errorf("explicit directory view conflicts with indexed children at %q", node.name)
+		}
 		node.loader = func() ([]*Node, error) { return children, nil }
 	}
 	return root.children, nil

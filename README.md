@@ -5,6 +5,10 @@ decoding, manipulating, and debugging historical software formats. Its core
 APIs operate on caller-owned files, byte channels, events, and clocks so they
 can be used without host mounting, extraction, or format-conversion tools.
 
+The [automatic file views](docs/starlark/auto.md) also recognize legacy archive,
+filesystem and partition formats. They share recursive browsing with
+`web.browse`, preserving Macintosh forks and archive-record occurrences.
+
 Product and project names mentioned in this repository are the property of
 their respective owners. Their use identifies interoperable formats and
 systems and does not imply endorsement or affiliation.
@@ -24,6 +28,10 @@ Start with the [quickstart](docs/starlark/quickstart.md), executable
 `trex -stdlib-docs`; `help()` provides discovery inside the REPL.
 
 ## Capabilities
+
+[Legacy-media inspection](docs/starlark/legacy-media.md) composes native
+filesystem, archive and compression readers in the Starlark REPL. Layered
+inputs remain in memory; decoding does not imply installation planning.
 
 [Offline memory inspection](docs/starlark/memory.md) combines read-only physical
 captures and i386 paging in Go with declarative Starlark structure/list readers.
@@ -64,6 +72,10 @@ encrypted variant is supported.
 
 | Component | Read support | Build and write support | Important limits |
 | --- | --- | --- | --- |
+| SGI volume header | Validates the header checksum and exposes partition ranges and boot-directory files as views. | Read-only. | Does not infer inner filesystem types; addresses use 512-byte basic blocks. |
+| IRIX EFS | Reads inode metadata, directory trees, direct/indirect extents and inline symbolic links. Accepts trimmed miniroots only after checking the omitted tail is marked free. | Read-only. | Symlinks are exposed, not followed; no filesystem repair or builder. |
+| Legacy XFS | Reads version-4 local and extent forks, sparse files, version-1/version-2 directories and symlink targets. | Read-only. | No extent btrees, version-5 metadata, realtime-device data or journal replay. |
+| Classic HFS | Reads catalog trees, separate data/resource forks and extent-overflow records; preserves Finder metadata and raw names. | Read-only. | HFS Plus and fragmented extents-file bootstrap remain unsupported. Paths use reversible byte escapes; no host mount or alias resolution. |
 | In-memory directory | Logical directories and files backed by bytes or lazy files; normalized portable paths and DOS attributes. | Mutable logical tree; creates parents, replaces files, sets metadata and attributes, and emits TAR or gzip-compressed TAR. | It is a construction tree, not a mounted host filesystem. Metadata is consumed only by builders that can represent it. |
 | FAT | FAT12, FAT16, and FAT32 BPBs, allocation chains, directories, VFAT long names, case-insensitive lookup, and raw boot/FAT metadata views. | Builds complete FAT12, FAT16, and FAT32 images with VFAT names, DOS attributes, labels, file ordering, hidden-sector/CHS geometry, and caller-supplied boot code. | Mounted FAT is read-only. Builders use 512-byte sectors; they do not update an existing volume or preserve timestamps and extended metadata. |
 | NTFS | Reads resident and non-resident unnamed data, fragmented and sparse runs, multi-record attribute extents, NTFS-compressed data through LZNT1, directories and large indexes, hard links, named data streams, per-file security descriptors from `$Secure`, variable sector/cluster geometry, and variable MFT-record sizes. Path lookup is case-insensitive. | Builds complete NTFS **1.1**, **3.0**, and **3.1** on-disk formats. All include boot/MFT metadata, allocation bitmaps, directory indexes, hard links, ordered attribute lists for extension records, DOS short names, timestamps, and labels. The 3.x builders also emit canonical `$Secure`/`$Extend` metadata, preserve supplied security descriptors, and can preserve caller-supplied reparse tags and raw reparse buffers in `$REPARSE_POINT` attributes and the `$R` index. Boot code, hidden sectors, `$LogFile`, and an exact `$UpCase` can be supplied; the Windows 8.1 profile emits its Unicode 6.2 table and uses that same table for index collation. | Mounted NTFS is read-only; there is no in-place editor. These are on-disk version claims, not blanket compatibility claims for every Windows release that used NTFS. The reader is structurally compatible rather than version-gated, but automated coverage is for generated 1.1, 3.0, and 3.1 images. EFS encryption, transactional-log replay, interpretation of reparse-point payloads, quotas, object IDs, and mutation of existing volumes are not implemented. The builder uses 512-byte sectors and clusters and does not create compressed, encrypted, sparse, or named-stream files. |
@@ -81,6 +93,23 @@ encrypted variant is supported.
 
 | Component | Implemented support | Important limits |
 | --- | --- | --- |
+| gzip / bzip2 | Decodes concatenated streams in memory with checksum validation and a decoded-size bound. | Decoder APIs do not interpret nested archives. |
+| UNIX compress / pack | Decodes 9–16-bit `.Z` LZW and `1f1e` pack Huffman streams, including width/reset alignment and pack size/end validation. | Read-only; `.Z` has no checksum or size field, so enclosing metadata must supply integrity checks. |
+| AWS tape | Validates physical framing and previous-length links, joins segmented logical records and preserves tape marks. | Does not interpret DDR or other record payloads. |
+| AIX BFF | Reads extended-name by-name backups, validates header checksums and security bounds, and decodes packed Huffman bodies in memory. Preserves names, ownership, device identity and raw ACL/PCL records. | Single-volume FS_NAME_X=11 generation with exact-end or 1KiB distribution rounding; no install actions or XCOFF interpretation. |
+| IRIX inst images | Reads headerless tape and versioned image payloads using an IDB and explicit image name; preserves duplicate occurrences, validates record boundaries, zero tape padding, decoded sizes and BSD checksums. | No subsystem selection or installation actions. |
+| SGI standalone tape archives | Validates directory checksums and exposes named member views, including nested EFS miniroots. | Does not boot the standalone programs. |
+| Classic BRU backups | Validates record checksums and sequences; exposes file data across record headers and retains ownership/link metadata. | Uncompressed records only; no restore actions or incomplete multivolume fallback. |
+| Macintosh resource forks | Reads resource maps, preserves stored payloads and metadata, and decodes Apple dcmp 0/1/2/3 resource compression in memory. | Unknown codecs and unsupported token variants are explicit errors; payload formats remain separate layers. |
+| Aladdin ADCR resources | Decodes observed ADCR01 and ADCR03 Huffman/LZ payloads with explicit dictionary file views, size checks and bounded memory. | Required loader-code dictionaries are selected by the caller, never executed or replaced with zeroes. No embedded checksum. |
+| CompactPro | Validates catalogs and combined-fork CRCs; decodes RLE and block LZH into separate data/resource forks with raw names and Macintosh metadata. | Single-volume, unencrypted archives; self-extractor code is never run. |
+| StuffIt | Validates classic archive/header/fork boundaries and CRCs; decodes stored, method13 and method14 forks, plus observed StuffIt5 method15 (Arsenic) forks. Retains data/resource forks and Macintosh metadata. | Other compression methods, encryption and StuffItX remain unsupported. Self-extractor code is never run. |
+| LHA | Validates level0 headers and CRC16; decodes stored lh0 and Huffman/LZSS lh5 entries. | Other header levels and methods remain unsupported. |
+| VMS BACKUP | Validates block/header CRCs, sequences and XOR redundancy; joins file records into borrowed views while preserving attributes and metadata-only entries. | No missing-data synthesis, repair, or indexed RMS interpretation. |
+| RMS VAR/VFC | Separates sequential variable records and fixed control areas with length, EOF and block-span checks. | Does not translate printer controls or decode other organizations and formats. |
+| Amiga Hunk | Reads observed object/load/EHF sections, symbols and relocations as metadata and payload views. | Does not execute, link or apply relocations; overlays and several extended forms remain unsupported. |
+| Apple installer Tome | Reads classic catalogs and both forks with chunked binary/seven-bit-text InstaCompOne decoding, retained history, verified checksums and ID-qualified names. | Other chunk encodings fail explicitly. Installer code never runs. |
+| Apple Partition Map | Exposes complete partition views and raw names, types, geometry and boot metadata; supports explicit 512/1024/2048-byte map views. | Out-of-image free-space descriptors remain metadata; allocated partitions must fit fully. No mounting or boot-code execution. |
 | AR | Reads System V/GNU archives, GNU filename tables, BSD extended filenames, duplicate names, and member timestamp/UID/GID/mode metadata. | Read-only; symbol tables are ignored as non-payload metadata. |
 | Microsoft CAB | Reads single cabinets and ordered cabinet sets, including continued files/folders. Decodes stored, MSZIP, Quantum, and LZX folders with dictionary/history handling and optional bounded caching. | Read-only; no cabinet writer. |
 | KWAJ | Reads original-name metadata and decodes methods 0–4: stored, XOR, LZSS, LZH, and MSZIP. | Produces a bounded decoded file; no encoder. |
