@@ -86,7 +86,9 @@ def analyze(installer, plan = None, execute_registration = True, environment = {
     guest_files = {}
     modules = {}
     for entry in plan["files"]:
-        source = installer.container.find(entry["source"]) if entry.get("container", False) else installer.find(entry["source"])
+        source = entry.get("file")
+        if source == None:
+            source = installer.container.find(entry["source"]) if entry.get("container", False) else installer.find(entry["source"])
         if source == None:
             continue
         destination = entry["destination"] if entry["resolved"] else entry["source"]
@@ -100,7 +102,9 @@ def analyze(installer, plan = None, execute_registration = True, environment = {
     for artifact in plan["artifacts"]:
         if artifact["kind"] not in ["self_registration", "self_registration_metadata"]:
             continue
-        source = installer.find(artifact["source"])
+        source = artifact.get("file")
+        if source == None:
+            source = installer.find(artifact["source"])
         if source == None or source.size == 0:
             continue
         module = _installed_artifact_module(plan["files"], artifact["source"], artifact["name"])
@@ -1642,7 +1646,7 @@ def _nested_installers(package, plan, resolved_locations, target, system_root, s
         ))
     return output
 
-def installer(source, target = None, components = None, locations = {}, variables = {}, system_root = r"C:\WINDOWS", additional_files = [], directories = [], registry_values = [], custom_actions = [], system_time = None, nested_installers = True, version = {}):
+def installer(source, target = None, components = None, locations = {}, variables = {}, system_root = r"C:\WINDOWS", additional_files = [], directories = [], registry_values = [], custom_actions = [], system_time = None, nested_installers = True, version = {}, local_files = None):
     """Returns declarative modifications and requirements for one installer.
 
     The result contains no host paths or staged files. Package members remain
@@ -1696,7 +1700,7 @@ def installer(source, target = None, components = None, locations = {}, variable
             for name, destination in inferred_uninstall.items():
                 if _casefold_get(resolved_locations, name) == None:
                     resolved_locations[name] = destination
-    plan = package.plan(locations = resolved_locations, variables = resolved_variables, components = selected)
+    plan = package.plan(locations = resolved_locations, variables = resolved_variables, components = selected, local_files = local_files)
     if plan["unresolved"]:
         fail("installer modification plan is incomplete: " + repr(plan["unresolved"]))
     ieval_files, ieval_actions, package_clock = _ieval_support(package, plan, target, system_time)
@@ -1732,7 +1736,9 @@ def installer(source, target = None, components = None, locations = {}, variable
             "path": _expand_location(directory, resolved_locations),
         })
     for entry in plan["files"]:
-        member = package.container.find(entry["source"]) if entry.get("container", False) else package.find(entry["source"])
+        member = entry.get("file")
+        if member == None:
+            member = package.container.find(entry["source"]) if entry.get("container", False) else package.find(entry["source"])
         if member == None or type(member) != "file":
             fail("installer payload member is missing: " + entry["source"])
         file_version = windows.pe(member).version if _versioned_image_name(entry["destination"]) else None
