@@ -79,6 +79,26 @@ func kwajFixedLiteralFixture(payload []byte) []byte {
 	return writer.data
 }
 
+func TestUnknownSizeLZHPadding(t *testing.T) {
+	payload := kwajFixedLiteralFixture([]byte("abcd"))
+	for _, expected := range []int64{-1, 4} {
+		decoded, err := decompressKWAJLZH(payload, expected, 100)
+		if err != nil || string(decoded) != "abcd" {
+			t.Fatal(string(decoded), err)
+		}
+	}
+	if _, err := decompressKWAJLZH(payload[:len(payload)-1], -1, 100); err == nil {
+		t.Fatal("truncated literal accepted as padding")
+	}
+	if _, err := decompressKWAJLZH(payload, 5, 100); err == nil {
+		t.Fatal("truncated fifth byte accepted")
+	}
+	empty, err := decompressKWAJLZH(nil, -1, 100)
+	if err != nil || len(empty) != 0 {
+		t.Fatal(empty, err)
+	}
+}
+
 func TestKWAJMethodsDecodeOriginalFixtures(t *testing.T) {
 	tests := []struct {
 		name    string

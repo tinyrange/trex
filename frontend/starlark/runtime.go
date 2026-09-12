@@ -15,6 +15,7 @@ import (
 
 	ararchive "github.com/tinyrange/trex/archive/ar"
 	cabarchive "github.com/tinyrange/trex/archive/cab"
+	"github.com/tinyrange/trex/archive/cfb"
 	"github.com/tinyrange/trex/archive/kwaj"
 	"github.com/tinyrange/trex/archive/sevenzip"
 	"github.com/tinyrange/trex/archive/sfp"
@@ -40,6 +41,7 @@ import (
 	acpistar "github.com/tinyrange/trex/firmware/acpi/star"
 	"github.com/tinyrange/trex/installer/installshield"
 	"github.com/tinyrange/trex/installer/installshield/installscript"
+	"github.com/tinyrange/trex/installer/msi"
 	imagestar "github.com/tinyrange/trex/media/image/star"
 	"github.com/tinyrange/trex/renvostar"
 	starcrypto "github.com/tinyrange/trex/script/crypto"
@@ -66,9 +68,11 @@ func predeclared() starlark.StringDict {
 			attrs: starlark.StringDict{
 				"ar":              starlark.NewBuiltin("ar", ararchive.Builtin),
 				"cab":             starlark.NewBuiltin("cab", cabarchive.Builtin),
+				"cfb":             starlark.NewBuiltin("cfb", cfb.Builtin),
 				"cab_set":         starlark.NewBuiltin("cab_set", cabarchive.SetBuiltin),
 				"installer":       starlark.NewBuiltin("installer", installshield.InstallerBuiltin),
 				"installer_probe": starlark.NewBuiltin("installer_probe", installshield.ProbeBuiltin),
+				"installer_media": starlark.NewBuiltin("installer_media", installshield.MediaBuiltin),
 				"installscript":   starlark.NewBuiltin("installscript", installscript.Builtin),
 				"installshield":   starlark.NewBuiltin("installshield", installshield.Builtin),
 				"kwaj":            starlark.NewBuiltin("kwaj", kwaj.Builtin),
@@ -85,6 +89,7 @@ func predeclared() starlark.StringDict {
 		"binary": namespace{name: "binary", attrs: binarystar.Builtins()},
 		"database": namespace{name: "database", attrs: starlark.StringDict{
 			"ese":          starlark.NewBuiltin("ese", databaseese.Builtin),
+			"msi":          starlark.NewBuiltin("msi", msi.Builtin),
 			"ese_build":    starlark.NewBuiltin("ese_build", databaseese.BuildBuiltin),
 			"sqlite":       starlark.NewBuiltin("sqlite", databasesqlite.Builtin),
 			"sqlite_build": starlark.NewBuiltin("sqlite_build", databasesqlite.BuildBuiltin),

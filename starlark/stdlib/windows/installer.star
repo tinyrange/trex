@@ -340,33 +340,10 @@ def _acme_csv(value):
 
 def _acme_stf(file):
     """Returns the header and object rows from an ACME Setup Table File."""
-    header = {}
-    objects = {}
-    in_objects = False
-    for line in binary.text(file, encoding = "ascii").split("\r\n"):
-        fields = line.split("\t")
-        if not fields or not fields[0]:
-            continue
-        if fields[0] == "ObjID":
-            in_objects = True
-            continue
-        if not in_objects:
-            if len(fields) >= 2:
-                header[fields[0].strip()] = fields[1].strip()
-            continue
-        if not fields[0].isdigit():
-            continue
-        while len(fields) < 15:
-            fields.append("")
-        objects[fields[0]] = {
-            "id": fields[0],
-            "batch": fields[1].lower() == "yes",
-            "title": fields[2],
-            "type": fields[4],
-            "data": fields[5],
-            "destination": fields[10].strip(),
-        }
-    return {"header": header, "objects": objects}
+    parsed = windows.acme_table(file)
+    # Preserve the established adapter shape; native callers can request the
+    # additional provenance and source fields directly.
+    return {"header": parsed["header"], "objects": {key: {field: row[field] for field in ["id", "batch", "title", "type", "data", "destination"]} for key, row in parsed["objects"].items()}}
 
 def _acme_section_value(section, name, default = ""):
     value = _inf_value(section, name)

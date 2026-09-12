@@ -78,9 +78,19 @@ func (i *Installer) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 		return nil, fmt.Errorf("installer.plan: local_files is supported only for Wise")
 	}
 	files := make([]starlark.Value, 0)
+	staticGaps := []starlark.Value{}
 	unresolvedComponents := make(map[string]bool)
 	for _, pkg := range i.installShieldPackages() {
 		packageArchive := pkg.payload
+		missing, err := packageArchive.Attr("unresolved")
+		if err != nil {
+			return nil, err
+		}
+		if list, ok := missing.(*starlark.List); ok {
+			for index := 0; index < list.Len(); index++ {
+				staticGaps = append(staticGaps, starlarkStringDict(map[string]starlark.Value{"package_root": starlark.String(pkg.root), "source": list.Index(index)}))
+			}
+		}
 		groupTargets := make(map[string]string, len(packageArchive.groups))
 		for _, group := range packageArchive.groups {
 			groupTargets[strings.ToLower(group.name)] = group.target
@@ -234,8 +244,17 @@ func (i *Installer) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 			}
 		}
 	}
+	dependencies := []starlark.Value{}
+	for _, value := range unresolved {
+		dependencies = append(dependencies, starlarkStringDict(map[string]starlark.Value{"kind": starlark.String("script_value"), "expression": value, "script": scriptValue}))
+	}
+	if scriptValue != starlark.None {
+		dependencies = append(dependencies, starlarkStringDict(map[string]starlark.Value{"kind": starlark.String("script_policy"), "script": scriptValue}))
+	}
 	return starlarkStringDict(map[string]starlark.Value{
-		"format": starlark.String(i.format), "files": starlark.NewList(files),
+		"installer": i, "static_unresolved": starlark.NewList(staticGaps),
+		"runtime_dependencies": starlark.NewList(dependencies),
+		"format":               starlark.String(i.format), "files": starlark.NewList(files),
 		"registry": registry, "registry_writes": registryWrites, "definitive_registry_writes": definitiveRegistryWrites,
 		"shortcuts": starlark.NewList(shortcuts), "shortcut_calls": shortcutCalls, "script": scriptValue,
 		"script_evaluation": scriptEvaluation, "custom_actions": customActions, "artifacts": artifacts, "target_defaults": defaults,

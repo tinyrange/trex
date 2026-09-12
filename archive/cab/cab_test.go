@@ -62,6 +62,52 @@ func TestCABUncachedEntryDecompressesOnce(t *testing.T) {
 	}
 }
 
+func TestCABExactIdentifierLookup(t *testing.T) {
+	data := make([]byte, 44)
+	copy(data, "MSCF")
+	data[24] = 3
+	data[25] = 1
+	binary.LittleEndian.PutUint32(data[16:], 44)
+	binary.LittleEndian.PutUint16(data[26:], 1)
+	binary.LittleEndian.PutUint16(data[28:], 2)
+	binary.LittleEndian.PutUint16(data[40:], 1)
+	for i, name := range []string{"resource.h", "Resource.h"} {
+		record := make([]byte, 16)
+		binary.LittleEndian.PutUint32(record, uint32(i+1))
+		binary.LittleEndian.PutUint32(record[4:], uint32(i))
+		data = append(data, record...)
+		data = append(data, []byte(name)...)
+		data = append(data, 0)
+	}
+	binary.LittleEndian.PutUint32(data[36:], uint32(len(data)))
+	block := make([]byte, 8)
+	binary.LittleEndian.PutUint16(block[4:], 3)
+	binary.LittleEndian.PutUint16(block[6:], 3)
+	data = append(data, block...)
+	data = append(data, []byte("ABB")...)
+	binary.LittleEndian.PutUint32(data[8:], uint32(len(data)))
+	a, err := Open(&starfile.Bytes{Data: data}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, name := range []string{"resource.h", "Resource.h"} {
+		f, err := a.LookupExact(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := starfile.ReadAll(f)
+		if err != nil || string(b) != []string{"A", "BB"}[i] {
+			t.Fatal(string(b), err)
+		}
+	}
+	if _, err := a.LookupExact("RESOURCE.H"); err == nil {
+		t.Fatal("exact lookup folded case")
+	}
+	if _, err := a.Lookup("RESOURCE.H"); err != nil {
+		t.Fatal("Windows lookup regressed", err)
+	}
+}
+
 func TestCABFolderCacheSharesDecodingAcrossEntries(t *testing.T) {
 	payload := []byte("firstsecond")
 	data := appendMSZIPTestDataBlock(nil, mszipTestBlock(t, payload, nil), len(payload))

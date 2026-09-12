@@ -435,6 +435,9 @@ func readKWAJCodeLengths(reader *kwajBitReader, encoding, symbols int) ([]byte, 
 }
 
 func decompressKWAJLZH(data []byte, expected, maximum int64) ([]byte, error) {
+	if len(data) == 0 && expected <= 0 {
+		return []byte{}, nil
+	}
 	reader := &kwajBitReader{data: data}
 	types := make([]int, 6)
 	for index := range types {
@@ -473,26 +476,32 @@ func decompressKWAJLZH(data []byte, expected, maximum int64) ([]byte, error) {
 		return nil
 	}
 	for expected < 0 || int64(len(out)) < expected {
+		tokenStart, outputStart := reader.bit, len(out)
+		finish := func(err error) ([]byte, error) {
+			// With no size field, the stream ends with at most seven padding
+			// bits. Accept only an incomplete token that emitted no bytes.
+			if expected < 0 && err == io.ErrUnexpectedEOF && len(data)*8-tokenStart <= 7 && len(out) == outputStart {
+				return out, nil
+			}
+			return nil, fmt.Errorf("LZH at bit %d/%d, output %d, expected %d: %w", reader.bit, len(data)*8, len(out), expected, err)
+		}
 		matchTree := trees[0]
 		if literalRun {
 			matchTree = trees[1]
 		}
 		length, err := matchTree.decode(reader)
 		if err != nil {
-			if expected < 0 && err == io.ErrUnexpectedEOF {
-				break
-			}
-			return nil, err
+			return finish(err)
 		}
 		if length > 0 {
 			literalRun = false
 			upper, err := trees[3].decode(reader)
 			if err != nil {
-				return nil, err
+				return finish(err)
 			}
 			lower, err := reader.read(6)
 			if err != nil {
-				return nil, err
+				return finish(err)
 			}
 			offset := upper<<6 | int(lower)
 			for count := 0; count < length+2; count++ {
@@ -500,14 +509,14 @@ func decompressKWAJLZH(data []byte, expected, maximum int64) ([]byte, error) {
 					return nil, fmt.Errorf("match exceeds declared size")
 				}
 				if err := appendByte(window[(position+4096-offset)&4095]); err != nil {
-					return nil, err
+					return finish(err)
 				}
 			}
 			continue
 		}
 		length, err = trees[2].decode(reader)
 		if err != nil {
-			return nil, err
+			return finish(err)
 		}
 		literalRun = length != 31
 		for count := 0; count < length+1; count++ {
@@ -516,10 +525,10 @@ func decompressKWAJLZH(data []byte, expected, maximum int64) ([]byte, error) {
 			}
 			literal, err := trees[4].decode(reader)
 			if err != nil {
-				return nil, err
+				return finish(err)
 			}
 			if err := appendByte(byte(literal)); err != nil {
-				return nil, err
+				return finish(err)
 			}
 		}
 	}
