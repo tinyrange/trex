@@ -109,7 +109,7 @@ def main(args):
     prefix = options["output"]
     report = {"passed": False, "phase": "download", "detail": "Smoke did not finish; see the action log.", "media_version": MEDIA_VERSION, "media_sha256": MEDIA_SHA256}
     write_report(prefix, report)
-    media = open(options["media"]) if "media" in options else mirror_file([MEDIA_URL], cache = options["cache"], key = MEDIA_NAME, sha256 = MEDIA_SHA256, maximum = 256 << 20, timeout = 300)
+    media = open(options["media"]) if "media" in options else mirror_file([MEDIA_URL], cache = options["cache"], key = MEDIA_NAME, sha256 = MEDIA_SHA256, maximum = 256 << 20, timeout = 300, retries = 2)
     if hex(crypto.hash("sha256", media)) != MEDIA_SHA256:
         fail("ReactOS media SHA-256 mismatch")
     report["phase"] = "compile-and-build"

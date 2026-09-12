@@ -16,9 +16,10 @@ func mirrorFileBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starla
 	size := int64(-1)
 	maximum := int64(64 << 30)
 	timeout := 3600
+	retries := 0
 	if err := starlark.UnpackArgs("mirror_file", args, kwargs,
 		"urls", &urlValues, "cache", &cacheDirectory, "key", &cacheKey,
-		"sha256?", &digest, "size?", &size, "maximum?", &maximum, "timeout?", &timeout); err != nil {
+		"sha256?", &digest, "size?", &size, "maximum?", &maximum, "timeout?", &timeout, "retries?", &retries); err != nil {
 		return nil, err
 	}
 	if timeout <= 0 || timeout > 24*60*60 {
@@ -45,7 +46,7 @@ func mirrorFileBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starla
 		ctx = resources.Context()
 	}
 	file, err := cache.Open(ctx, MirrorRequest{
-		URLs: urls, CacheKey: cacheKey, SHA256: digest, Size: size, MaximumBytes: maximum,
+		URLs: urls, CacheKey: cacheKey, SHA256: digest, Size: size, MaximumBytes: maximum, Retries: retries,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mirror_file: %w", err)

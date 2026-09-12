@@ -1,5 +1,56 @@
 # Third-party format references
 
+## Legacy Microsoft setup media
+
+Office media supplied the fixtures for the native SZ/KWAJ adaptations. The
+older `SZ` wrapper has a 12-byte header and starts its LZSS window at 4096−18;
+normal SZDD uses its existing 14-byte header and 4096−16 origin. Only these
+format facts were checked against the published
+[SZDD/KWAJ format description](https://fossies.org/linux/clamav/libclammspack/doc/szdd_kwaj_format.html).
+No external decoder implementation was copied or linked.
+
+The Office 2.5 corpus also establishes two distinct split-file constructions:
+PowerPoint joins numbered compressed-stream fragments, while Excel joins
+independently compressed pieces declared with first/continuation flags. Empty
+KWAJ LZH files contain no entropy tables. Size-less LZH byte padding is accepted
+only when an incomplete final token emits no bytes and consumes at most the
+remaining seven padding bits. Focused tests preserve these distinctions.
+
+## MSI database stream encoding
+
+The MIT-licensed string-pool and packed stream-name descriptions in
+[`abemedia/go-msi`](https://github.com/abemedia/go-msi/tree/5dcc3553b5f9d81feb6689c1059982e6a0bf3f2e)
+were consulted while implementing the native MSI reader. No dependency or
+external extraction command is used. The notice is retained conservatively:
+
+> MIT License
+>
+> Copyright (c) 2026 Adam Bouqdib
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
+
+The compound-file layout follows Microsoft's
+[MS-CFB specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/53989ce4-7b05-4f8d-829b-d08d6148375b).
+Installer conditions and source selection follow Microsoft's
+[condition syntax](https://learn.microsoft.com/en-us/windows/win32/msi/conditional-statement-syntax)
+and [Word Count Summary property](https://learn.microsoft.com/en-us/windows/win32/msi/word-count-summary).
+
 ## Authenticode page hashes
 
 The SHA-256 page-hash wire layout and padding rules were cross-checked against

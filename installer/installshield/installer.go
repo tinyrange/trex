@@ -82,6 +82,34 @@ func InstallerBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	return OpenInstaller(file, maximumScan, cache, bytecache.New(bytecache.DefaultBytes), 1)
 }
 
+// MediaBuiltin plans ordinary disc/diskette InstallShield layouts using the
+// same package discovery as self-extracting cabinets. Files stay on the caller's
+// portable backend; the mapping is an explicit media namespace, not host paths.
+func MediaBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var files *starlark.Dict
+	if err := starlark.UnpackArgs("installer_media", args, kwargs, "files", &files); err != nil {
+		return nil, err
+	}
+	copy := starlark.NewDict(files.Len())
+	for _, pair := range files.Items() {
+		name, ok := starlark.AsString(pair[0])
+		file, valid := pair[1].(starfile.File)
+		if !ok || !valid {
+			return nil, fmt.Errorf("installer_media: files must map relative names to files")
+		}
+		name = path.Clean("/" + strings.ReplaceAll(name, `\`, "/"))
+		if _, found, _ := copy.Get(starlark.String(name)); found {
+			return nil, fmt.Errorf("installer_media: duplicate path %s", name)
+		}
+		_ = copy.SetKey(starlark.String(name), file)
+	}
+	payload, packages, format, err := installerNestedPayload(copy)
+	if err != nil {
+		return nil, err
+	}
+	return &Installer{format: format, container: copy, payload: payload, packages: packages}, nil
+}
+
 // ProbeBuiltin applies the same bounded parser as archive.installer,
 // but reports unrecognized or malformed inputs as data. This is useful when
 // inventorying mixed-media collections: one unknown installer must not abort
@@ -157,6 +185,15 @@ func OpenInstaller(file starfile.File, maximumScan int64, cache bool, store *byt
 	if !bytes.Equal(magic, []byte("MZ")) {
 		return nil, fmt.Errorf("installer: input is not a DOS or PE executable")
 	}
+	if offset, ok := peOverlayOffset(file); ok {
+		outer, recognized, err := openSFX(file, offset)
+		if err != nil {
+			return nil, err
+		}
+		if recognized {
+			return &Installer{format: "installshield_sfx", offset: offset, size: outer.size, container: outer, payload: outer}, nil
+		}
+	}
 
 	scanSize := file.Size()
 	if scanSize > maximumScan {
@@ -222,6 +259,22 @@ type installerContainerFile struct {
 
 func installerContainerFiles(container starlark.Value) ([]installerContainerFile, error) {
 	switch value := container.(type) {
+	case *sfxArchive:
+		output := []installerContainerFile{}
+		for _, name := range value.names {
+			file := value.files[strings.ToLower(name)]
+			output = append(output, installerContainerFile{Name: name, Size: file.Size()})
+		}
+		return output, nil
+	case *starlark.Dict:
+		output := []installerContainerFile{}
+		for _, pair := range value.Items() {
+			name, _ := starlark.AsString(pair[0])
+			file := pair[1].(starfile.File)
+			output = append(output, installerContainerFile{Name: name, Size: file.Size()})
+		}
+		sort.Slice(output, func(i, j int) bool { return output[i].Name < output[j].Name })
+		return output, nil
 	case *cabarchive.Archive:
 		files := value.Files()
 		output := make([]installerContainerFile, len(files))
@@ -243,6 +296,24 @@ func installerContainerFiles(container starlark.Value) ([]installerContainerFile
 
 func installerContainerLookup(container starlark.Value, name string) (starfile.File, error) {
 	switch value := container.(type) {
+	case *sfxArchive:
+		file, found, err := value.Get(starlark.String(name))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, fmt.Errorf("installer: missing SFX file %s", name)
+		}
+		return file.(starfile.File), nil
+	case *starlark.Dict:
+		file, found, err := value.Get(starlark.String(name))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, fmt.Errorf("installer: missing media file %s", name)
+		}
+		return file.(starfile.File), nil
 	case *cabarchive.Archive:
 		return value.Lookup(name)
 	case *wiseinstaller.Archive:
@@ -252,7 +323,7 @@ func installerContainerLookup(container starlark.Value, name string) (starfile.F
 	}
 }
 
-func installerNestedPayload(container *cabarchive.Archive) (installerPayload, []installerPackage, string, error) {
+func installerNestedPayload(container starlark.Value) (installerPayload, []installerPackage, string, error) {
 	type memberFile struct {
 		name  string
 		lower string
@@ -265,11 +336,14 @@ func installerNestedPayload(container *cabarchive.Archive) (installerPayload, []
 		inline    bool
 		primary   bool
 	}
-	containerFiles := container.Files()
+	containerFiles, err := installerContainerFiles(container)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	members := make([]memberFile, 0, len(containerFiles))
 	headers := make([]headerFile, 0)
 	for _, member := range containerFiles {
-		value, err := container.Lookup(member.Name)
+		value, err := installerContainerLookup(container, member.Name)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -289,14 +363,19 @@ func installerNestedPayload(container *cabarchive.Archive) (installerPayload, []
 			if _, err := io.ReadFull(io.NewSectionReader(value, 0, 8), common); err != nil {
 				return nil, nil, "", fmt.Errorf("installer: read nested cabinet header %q: %w", name, err)
 			}
-			if binary.LittleEndian.Uint32(common[:4]) == installShieldSignature && binary.LittleEndian.Uint32(common[4:]) == 0x01000004 {
+			rawVersion := binary.LittleEndian.Uint32(common[4:])
+			inlineV5 := base == "data1.cab" && rawVersion>>24 == 1 && (rawVersion>>12)&15 == 5
+			if binary.LittleEndian.Uint32(common[:4]) == installShieldSignature && (rawVersion == 0x01000004 || inlineV5) {
 				directory := strings.ToLower(path.Dir(name))
 				headers = append(headers, headerFile{memberFile: entry, directory: directory, root: directory, inline: true, primary: base == "data1.cab"})
 			}
 		}
 	}
 	if len(headers) == 0 {
-		return container, nil, "embedded_cab", nil
+		if payload, ok := container.(*cabarchive.Archive); ok {
+			return payload, nil, "embedded_cab", nil
+		}
+		return nil, nil, "", fmt.Errorf("installer_media: no supported InstallShield package found")
 	}
 	sort.Slice(headers, func(i, j int) bool {
 		if headers[i].primary != headers[j].primary {
@@ -375,7 +454,10 @@ func installerNestedPayload(container *cabarchive.Archive) (installerPayload, []
 		packages = append(packages, installerPackage{root: header.root, headerPath: header.name, payload: payload, scriptPath: scriptPath, script: script})
 	}
 	if len(packages) == 0 {
-		return container, nil, "embedded_cab", nil
+		if payload, ok := container.(*cabarchive.Archive); ok {
+			return payload, nil, "embedded_cab", nil
+		}
+		return nil, nil, "", fmt.Errorf("installer_media: no supported InstallShield package found")
 	}
 	return packages[0].payload, packages, fmt.Sprintf("installshield%d", packages[0].payload.version), nil
 }

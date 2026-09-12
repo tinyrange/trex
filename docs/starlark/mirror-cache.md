@@ -27,3 +27,9 @@ encoding, completed files are checked and atomically renamed into the object
 store, and existing objects are revalidated before reuse. The cache backend is
 native because it owns HTTP and host paths; returned objects implement the same
 portable random-access file interface as `open`.
+
+`retries` (default 0, maximum 3) adds bounded passes through the mirror list
+when every mirror fails. Each attempt resumes the retained partial download
+when byte ranges are supported, and still verifies the complete size and digest.
+`timeout` limits each HTTP request, including reading its body; cancellation
+of the calling context stops further attempts.

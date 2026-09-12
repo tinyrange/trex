@@ -9,6 +9,17 @@ import (
 // Each native entry point needs an explicit contract. Do not replace missing
 // descriptions with boilerplate: generation must fail until the API is documented.
 var nativeStarlarkDescriptions = map[string]string{
+	"windows.batch_plan":       "Inspects DOS batch commands and COPY source declarations using portable media files. Labels, branches, media selection, and external commands remain explicit runtime dependencies; it does not execute the script.",
+	"windows.press_setup_plan": "Plans Microsoft Press SETUP.INI media trees and retains companion SETUP.CMD actions and shortcut dependencies. It does not run the setup executable.",
+
+	"archive.cfb":             "Reads an OLE compound file through bounded FAT, DIFAT, and mini-stream chains, exposing member file views without host extraction.",
+	"archive.installer_media": "Discovers InstallShield packages, including nested packages, from a dictionary mapping portable relative media names to files.",
+	"database.msi":            "Reads a Windows Installer database and its embedded streams. plan resolves static payloads and table effects for supplied target properties, retaining custom actions and runtime dependencies without execution.",
+	"windows.acme_table":      "Parses an ACME setup table into headers, objects, arguments, annotations, and source provenance.",
+	"windows.acme_plan":       "Joins an ACME STF object graph with its INF file catalogue and portable media files. Unknown choices and runtime destinations remain explicit; no installer code is executed.",
+	"windows.sdk_inf_plan":    "Plans Windows 3.x SDK disk catalogues from INF declarations, retaining group and environment actions. Sources are decoded natively from supplied media handles.",
+	"windows.setup_inf":       "Parses command-oriented Microsoft setup INF sections with source locations. plan expands known copy catalogues and branches while retaining runtime queries and unknown loops.",
+
 	"windows.memory_image":              "Borrows a file as a read-only physical capture. Optional ranges map (physical_start, file_offset, size); omitted ranges cover the whole file, while an empty list captures nothing. Gaps remain unavailable, not zero-filled. Keep the source unchanged while views exist; this does not parse crash dumps or discover RAM ranges.",
 	"windows.icon":                      "Selects an icon image from an ICO, PE or NE file using its index and requested dimensions. Returns image bytes with actual dimensions, bit depth and resource identity; it does not launch or render the executable.",
 	"archive.ar":                        "Parses a Unix ar archive and returns ordered member metadata and file views. find(name, occurrence) distinguishes duplicate member names.",
@@ -202,6 +213,16 @@ var nativeStarlarkDescriptions = map[string]string{
 }
 
 var nativeStarlarkAdditionalSignatures = map[string]string{
+	"windows.batch_plan":       "windows.batch_plan(script, media, variables=None) -> dict",
+	"windows.press_setup_plan": "windows.press_setup_plan(inf, media, target=\"\") -> dict",
+
+	"archive.cfb":                 "archive.cfb(file) -> cfb",
+	"archive.installer_media":     "archive.installer_media(files) -> installer",
+	"database.msi":                "database.msi(file) -> msi",
+	"windows.acme_table":          "windows.acme_table(file) -> dict",
+	"windows.acme_plan":           "windows.acme_plan(table, inf, media, target=\"\", system_root=\"C:\\\\WINDOWS\", root=\"\", predicates=None) -> dict",
+	"windows.sdk_inf_plan":        "windows.sdk_inf_plan(inf, media, target=\"\", sections=None, locations=None) -> dict",
+	"windows.setup_inf":           "windows.setup_inf(file) -> setup_inf",
 	"archive.cab":                 "archive.cab(file, cache=True) -> cab",
 	"archive.wim":                 "archive.wim(file) -> wim",
 	"archive.zip":                 "archive.zip(file) -> zip",

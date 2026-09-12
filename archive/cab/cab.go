@@ -35,6 +35,7 @@ type Archive struct {
 	file        storage.Reader
 	files       []fileRecord
 	fileIndex   map[string]int
+	exactIndex  map[string]int
 	folders     []folder
 	dataReserve int
 	flags       uint16
@@ -165,12 +166,18 @@ func OpenWithCache(file storage.Reader, cache bool, store *bytecache.Cache, sour
 		})
 	}
 	fileIndex := make(map[string]int, len(files)*2)
+	exactIndex := make(map[string]int, len(files))
 	for i, file := range files {
+		// Cabinets can repeat names (including ReactOS installation media).
+		// Match the existing Windows lookup policy: the first record wins.
+		if _, found := exactIndex[file.name]; !found {
+			exactIndex[file.name] = i
+		}
 		addCABIndexEntry(fileIndex, file.name, i)
 		addCABIndexEntry(fileIndex, strings.TrimPrefix(file.name, "/"), i)
 	}
 	return &Archive{
-		file: file, files: files, fileIndex: fileIndex, folders: folders,
+		file: file, files: files, fileIndex: fileIndex, exactIndex: exactIndex, folders: folders,
 		dataReserve: dataReserve, flags: flags, setID: setID, cabinet: cabinet,
 		previous: previous, next: next, cache: cache, cacheStore: store, cacheSource: source,
 	}, nil
@@ -244,6 +251,16 @@ func (c *Archive) Lookup(name string) (*Entry, error) {
 		return nil, err
 	}
 	return value.(*Entry), nil
+}
+
+// LookupExact resolves case-sensitive identifiers such as MSI File table keys.
+// Windows path lookup remains case-insensitive through Lookup.
+// If a name occurs more than once, the first record is returned.
+func (c *Archive) LookupExact(name string) (*Entry, error) {
+	if i, found := c.exactIndex[normalizeCABPath(name)]; found {
+		return &Entry{archive: c, file: c.files[i]}, nil
+	}
+	return nil, fmt.Errorf("cab: exact member %q not found", name)
 }
 
 func readCABString(file storage.Reader, offset int64) (string, int, error) {

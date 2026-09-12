@@ -1891,7 +1891,7 @@ Formats an integer as signed, 0x-prefixed hexadecimal text with optional digit p
 
 ### `mirror_file`
 
-`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600) -> file`
+`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0) -> file`
 
 Opens a cached download or tries the supplied mirror URLs, checking the requested size and SHA-256 when supplied. The cache and key identify persistent native-backend storage; the result is a file, not extracted contents.
 
@@ -1937,11 +1937,23 @@ Parses a Microsoft Cabinet file and exposes its members as file views. Folder de
 
 Opens related Cabinet files as one set, resolving files and compressed data that span cabinet boundaries. The caller supplies the cabinet files; the parser does not search host directories.
 
+### `archive.cfb`
+
+`archive.cfb(file) -> cfb`
+
+Reads an OLE compound file through bounded FAT, DIFAT, and mini-stream chains, exposing member file views without host extraction.
+
 ### `archive.installer`
 
 `archive.installer(file, maximum_scan=256MiB, cache=True) -> installer`
 
 Recognizes a supported installer container, including supported embedded payloads, and returns an inspection object with files and a declarative installation plan. It does not run the installer or apply that plan.
+
+### `archive.installer_media`
+
+`archive.installer_media(files) -> installer`
+
+Discovers InstallShield packages, including nested packages, from a dictionary mapping portable relative media names to files.
 
 ### `archive.installer_probe`
 
@@ -2483,6 +2495,12 @@ Parses an Extensible Storage Engine database into inspectable tables and records
 
 Builds an ESE database file from declarative tables, optionally controlling database page allocation and sort data. Construction stays in memory.
 
+### `database.msi`
+
+`database.msi(file) -> msi`
+
+Reads a Windows Installer database and its embedded streams. plan resolves static payloads and table effects for supplied target properties, retaining custom actions and runtime dependencies without execution.
+
 ### `database.sqlite`
 
 `database.sqlite(file, wal=None) -> SQLite database`
@@ -2903,11 +2921,29 @@ Builds an HTTP response from body, status and headers for the web runtime to sen
 
 Builds a downloadable ZIP response for a directory in a supplied virtual filesystem. Packaging is handled in-process rather than by a host archiver.
 
+### `windows.acme_plan`
+
+`windows.acme_plan(table, inf, media, target="", system_root="C:\\WINDOWS", root="", predicates=None) -> dict`
+
+Joins an ACME STF object graph with its INF file catalogue and portable media files. Unknown choices and runtime destinations remain explicit; no installer code is executed.
+
+### `windows.acme_table`
+
+`windows.acme_table(file) -> dict`
+
+Parses an ACME setup table into headers, objects, arguments, annotations, and source provenance.
+
 ### `windows.assembly_manifest`
 
 `windows.assembly_manifest(value) -> record(identity, files)`
 
 Parses an assembly manifest XML value into identity attribute records and declared file records, including hashes and hash algorithms. It does not install a side-by-side assembly or verify those hashes.
+
+### `windows.batch_plan`
+
+`windows.batch_plan(script, media, variables=None) -> dict`
+
+Inspects DOS batch commands and COPY source declarations using portable media files. Labels, branches, media selection, and external commands remain explicit runtime dependencies; it does not execute the script.
 
 ### `windows.catalog_hash`
 
@@ -3119,6 +3155,12 @@ Signs a PE32 or PE32+ file with RSA/SHA-256 Authenticode entirely in memory and 
 
 Extracts distinct embedded DER certificates from PKCS#7/CMS input, including legacy catalogs. Returns certificate records; extraction is deliberately separate from signature or trust verification.
 
+### `windows.press_setup_plan`
+
+`windows.press_setup_plan(inf, media, target="") -> dict`
+
+Plans Microsoft Press SETUP.INI media trees and retains companion SETUP.CMD actions and shortcut dependencies. It does not run the setup executable.
+
 ### `windows.reactos_record`
 
 `windows.reactos_record(kind, fields) -> bytes`
@@ -3143,11 +3185,23 @@ Selects direct children from a self-registration registry-state dictionary. valu
 
 Splits a self-registration registry-state dictionary into selected and retained dictionaries for a hive subtree. values selects the value-identity layout; ordering and payload identity are preserved, and neither result aliases the input dictionary.
 
+### `windows.sdk_inf_plan`
+
+`windows.sdk_inf_plan(inf, media, target="", sections=None, locations=None) -> dict`
+
+Plans Windows 3.x SDK disk catalogues from INF declarations, retaining group and environment actions. Sources are decoded natively from supplied media handles.
+
 ### `windows.selfreg_patches`
 
 `windows.selfreg_patches(file, module) -> list[dict]`
 
 Derives registry patches from supported self-registration resources in a PE file or windows.pe object, using module for path substitutions. It does not emulate DllRegisterServer; use the self-registration policy/runner for runtime effects.
+
+### `windows.setup_inf`
+
+`windows.setup_inf(file) -> setup_inf`
+
+Parses command-oriented Microsoft setup INF sections with source locations. plan expands known copy catalogues and branches while retaining runtime queries and unknown loops.
 
 ### `windows.setver`
 

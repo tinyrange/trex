@@ -35,7 +35,7 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 }
 
 func decodeSZDD(file File, maximum int64) ([]byte, error) {
-	if file.Size() < 14 {
+	if file.Size() < 12 {
 		return nil, fmt.Errorf("szdd: truncated header")
 	}
 	if file.Size() > maximum {
@@ -44,6 +44,16 @@ func decodeSZDD(file File, maximum int64) ([]byte, error) {
 	data, err := starfile.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("szdd: read: %w", err)
+	}
+	if bytes.Equal(data[:8], []byte{'S', 'Z', ' ', 0x88, 0xf0, 0x27, 0x33, 0xd1}) {
+		expected := int64(binary.LittleEndian.Uint32(data[8:12]))
+		if expected > maximum {
+			return nil, fmt.Errorf("szdd: decoded size exceeds maximum")
+		}
+		return decompressSZDDWindow(data[12:], expected, 4096-18)
+	}
+	if len(data) < 14 {
+		return nil, fmt.Errorf("szdd: truncated header")
 	}
 	if !bytes.Equal(data[:8], szddSignature) {
 		return nil, fmt.Errorf("szdd: invalid signature")
@@ -63,11 +73,14 @@ func decodeSZDD(file File, maximum int64) ([]byte, error) {
 }
 
 func decompressSZDDLZSS(data []byte, expected int64) ([]byte, error) {
+	return decompressSZDDWindow(data, expected, 4096-16)
+}
+
+func decompressSZDDWindow(data []byte, expected int64, position int) ([]byte, error) {
 	window := [4096]byte{}
 	for index := range window {
 		window[index] = ' '
 	}
-	position := 4096 - 16
 	out := make([]byte, 0, expected)
 	input := 0
 	appendByte := func(value byte) {

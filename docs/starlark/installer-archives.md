@@ -1,5 +1,88 @@
 # Installer archives
 
+## Static Microsoft installer plans
+
+These APIs inspect media without launching installers. A static plan retains
+machine queries, custom actions, prerequisites, conditional destinations, and
+their source declarations. `runtime_dependencies` describes those deferred
+answers; it does not grant permission to execute code. `unresolved` in the new
+Microsoft planners identifies construction gaps such as missing payloads.
+Neither a complete static plan nor an empty `unresolved` list proves that an
+application installs or runs in a guest.
+
+- `archive.cfb(file)` reads OLE compound files, including mini streams and
+  chained FAT/DIFAT storage. Its files remain native, lazy file handles.
+- `database.msi(file)` exposes `tables`, `schema`, `table(name)`, and
+  `plan(properties={}, features=[], media={})`. Omit `features` for the default
+  install level; pass `["ALL"]` for all enabled features. Supply target-machine
+  properties explicitly. `media` maps package-relative names to files.
+- MSI plans retain the `database`, declared `registry_writes`, resolved
+  `definitive_registry_writes`, file metadata, other table `effects`, and custom
+  actions with conditions and sequence information. They describe a fresh
+  installation under the supplied inputs. Search-dependent conditions remain
+  dependencies and their possible actions are retained. The database preserves
+  all alternate feature, UI, maintenance, and custom table declarations.
+  These plans are not executable modification lists: file version replacement,
+  registry merge policies, and target-machine actions still apply at execution.
+- `windows.acme_table(stf)` reads ACME setup tables. Use
+  `windows.acme_plan(stf, windows.inf(inf), media, target=..., root=...)`
+  for Office STF/INF plans. Optional `predicates` supplies known object-query
+  results. Unknown choices retain conditional branches; custom DLL entry
+  points and non-copy INF policies remain visible. `objects` and `inf` preserve
+  the complete source declarations, including initialization objects.
+- `windows.sdk_inf_plan(windows.inf(file), media, target=..., sections=...,
+  locations=...)` handles Windows 3.1 and Windows for Workgroups SDK catalogues.
+  Numbered floppy files use keys such as `1/INC/WINDOWS.H_`. Source signatures
+  select native SZDD/KWAJ decoding; no extracted intermediate files are needed.
+- `windows.setup_inf(file)` parses command-oriented Microsoft setup INF files.
+  `plan(section, media, variables={}, initialize=[])` expands static sections,
+  copy catalogues, literal loops, and known conditions. Unknown branches remain
+  conditional; runtime commands and unknown loops retain their source section
+  and line. The plan keeps `script` so deferred bodies can be inspected.
+  `catalogue_plan(media, target=...)` handles earlier Office option catalogues,
+  preserving OS-specific section variants and every configuration declaration.
+  Numbered PowerPoint floppy fragments are joined in memory. KWAJ decoding
+  handles size-less KWAJ end padding and verifies complete joined file sizes.
+- `windows.batch_plan(script, media, variables={})` retains DOS batch control
+  flow, media selection and external commands as runtime dependencies. COPY
+  records identify available sources and destination expressions. Parameter
+  keys are `"1"`, `"2"`, or environment names such as `"System"`; values come
+  from the caller. A COPY record is conditional on the retained control flow.
+- `windows.press_setup_plan(windows.inf(setup_ini), media, target=...)` plans
+  Microsoft Press book media using `CodeDir` and `DestDir`, with the companion
+  command file and shortcut policy retained explicitly.
+- `archive.installer_media(files)` discovers InstallShield packages from a
+  portable media dictionary, including nested packages. InstallShield plans
+  also expose `runtime_dependencies` and `static_unresolved` construction
+  gaps; their existing `unresolved` execution
+  gate is retained for compatibility. The InstallShield SFX envelope reader
+  exposes packaged MSIs without mistaking an embedded prerequisite CAB for
+  the application package.
+
+Use `scripts/inspect/installer_repl.star` with an installer file, or an optical
+image and member path. It also opens ISO or FAT floppy media inside 7z archives.
+`media_files(disc, directory)` and `floppy_files(images)` construct portable
+media maps. `plan_summary(plan)` prints bounded counts and construction gaps
+without dumping binary payloads or installer properties.
+
+Office 4.3's existing-template branch needs product policy: its `MoveFile`
+custom action supplies the source for a subsequent `MYMEMO2.DOT` copy. The
+repository recipe `scripts/software_plans/office_43.star` retains this source
+as a runtime dependency instead of substituting a same-named CD file.
+
+```python
+def main(args):
+    disc = filesystem.iso9660(open(args[0]))
+    package = database.msi(disc["/setup/PSDK-x86.msi"])
+    # Build media with file handles relative to /setup, then:
+    plan = package.plan(properties={
+        "ROOTDRIVE": "C:\\", "WindowsFolder": "C:\\WINDOWS\\",
+        "SystemFolder": "C:\\WINDOWS\\system32\\",
+        "ProgramFilesFolder": "C:\\Program Files\\",
+        "VersionNT": "501", "ALLUSERS": "1",
+    }, media=media)
+```
+
 `archive.installer(file)` opens a supported self-extracting installer without
 launching it or copying its payload through the host filesystem. The returned
 value behaves like the underlying archive: `.files` lists paths, indexed access
