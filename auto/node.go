@@ -108,8 +108,9 @@ func (n *Node) Metadata() (Metadata, error) {
 			m.Attributes = merged
 		}
 		m.Format = n.format
-		m.Container = n.format != ""
+		m.Container = n.view != nil
 	}
+	m.Container = m.Container || n.view != nil
 	return m, n.detectErr
 }
 func (n *Node) Children() ([]*Node, error) {
@@ -211,6 +212,7 @@ func (n *Node) Resolve(name string) (*Node, error) {
 type item struct {
 	name, kind string
 	reader     storage.Reader
+	view       View
 	attributes map[string]any
 }
 
@@ -262,15 +264,23 @@ func (n *Node) tree(items []item) ([]*Node, error) {
 				if child.reader == nil && child.kind == "directory" {
 					child.kind = it.kind
 					child.reader = it.reader
+					child.view = it.view
 					child.attributes = it.attributes
 					delete(maps, child)
 				}
 			}
 			parent = child
+			if last && it.kind == "directory" {
+				child.attributes = it.attributes
+				child.view = it.view
+			}
 		}
 	}
 	for node := range maps {
 		children := node.children
+		if node.view != nil && len(children) != 0 {
+			return nil, fmt.Errorf("explicit directory view conflicts with indexed children at %q", node.name)
+		}
 		node.loader = func() ([]*Node, error) { return children, nil }
 	}
 	return root.children, nil

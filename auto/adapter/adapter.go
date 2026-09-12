@@ -21,8 +21,8 @@ func File(r storage.Reader) starfile.File { return &readFile{r} }
 
 type Builtin func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error)
 
-func Parse(fn Builtin, r storage.Reader, options auto.Options) (auto.View, error) {
-	value, err := fn(nil, nil, starlark.Tuple{File(r)}, nil)
+func Parse(fn Builtin, r storage.Reader, options auto.Options, kwargs ...starlark.Tuple) (auto.View, error) {
+	value, err := fn(nil, nil, starlark.Tuple{File(r)}, kwargs)
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +52,9 @@ func textAttr(v starlark.Value, name string) string {
 	if s, ok := starlark.AsString(value); ok {
 		return s
 	}
+	if b, ok := value.(starlark.Bytes); ok {
+		return string(b)
+	}
 	return ""
 }
 func values(v starlark.Value) []starlark.Value {
@@ -69,12 +72,9 @@ func values(v starlark.Value) []starlark.Value {
 
 func Parsed(value starlark.Value, options auto.Options) (auto.View, error) {
 	n := &adapter{options: options, folded: value.Type() == "fat" || value.Type() == "ntfs" || value.Type() == "iso" || value.Type() == "udf"}
-	mapping, ok := value.(starlark.Mapping)
-	if !ok {
-		return nil, fmt.Errorf("%s has no file mapping", value.Type())
-	}
 	entries := attr(value, "entries")
 	if entries != nil {
+		_, mapped := value.(starlark.Mapping)
 		var items []auto.Entry
 		for _, v := range values(entries) {
 			original := textAttr(v, "name")
@@ -92,24 +92,62 @@ func Parsed(value starlark.Value, options auto.Options) (auto.View, error) {
 				kind = "file"
 			}
 			reader, _ := v.(storage.Reader)
-			if kind != "file" && kind != "hardlink" {
+			if reader == nil {
+				reader, _ = attr(v, "data").(storage.Reader)
+			}
+			if kind == "directory" || (mapped && kind != "file" && kind != "hardlink") {
 				reader = nil
 			}
 			attributes := map[string]any{}
-			for _, key := range []string{"link", "mode", "uid", "gid", "mtime", "crc32", "stored_size"} {
+			for _, key := range []string{"link", "mode", "uid", "gid", "mtime", "crc32", "stored_size", "size", "missing_contents", "occurrence", "installer_record", "directory_link", "resource_size", "compressed", "resource_type", "id", "name", "flags", "offset", "attributes", "file_type", "creator", "created", "modified", "finder_flags", "data_checksum", "resource_checksum", "version"} {
 				a := attr(v, key)
 				switch a := a.(type) {
 				case starlark.String:
 					attributes[key] = string(a)
+				case starlark.Bytes:
+					attributes[key] = []byte(a)
+				case starlark.Bool:
+					attributes[key] = bool(a)
 				case starlark.Int:
 					if x, ok := a.Int64(); ok {
 						attributes[key] = x
 					}
+				case *starlark.List:
+					// BACKUP attribute records carry the RMS layout required by
+					// subsequent explicit decoders; retain their kinds and bytes.
+					var records []map[string]any
+					for _, record := range values(a) {
+						kind, kindOK := attr(record, "kind").(starlark.Int)
+						data, dataOK := attr(record, "data").(starlark.Bytes)
+						if kindOK && dataOK {
+							if k, ok := kind.Int64(); ok {
+								records = append(records, map[string]any{"kind": k, "data": []byte(data)})
+							}
+						}
+					}
+					if records != nil {
+						attributes[key] = records
+					}
 				}
 			}
-			items = append(items, auto.Entry{Name: name, Kind: kind, Reader: reader, Attributes: attributes})
+			entry := auto.Entry{Name: name, Kind: kind, Reader: reader, Attributes: attributes}
+			if resource, ok := attr(v, "resource").(storage.Reader); ok && kind != "directory" {
+				forks := []auto.Entry{{Name: "resource", Kind: "file", Reader: resource}}
+				if reader != nil {
+					forks = append(forks, auto.Entry{Name: "data", Kind: "file", Reader: reader})
+				}
+				entry.View = auto.ViewFunc(func() ([]auto.Entry, error) { return forks, nil })
+			}
+			items = append(items, entry)
 		}
-		return auto.Tree(items, n.options)
+		if mapped {
+			return auto.Tree(items, n.options)
+		}
+		return recordTree(items, n.options)
+	}
+	mapping, ok := value.(starlark.Mapping)
+	if !ok {
+		return nil, fmt.Errorf("%s has no file mapping", value.Type())
 	}
 	root, found, err := mapping.Get(starlark.String("/"))
 	if err != nil {

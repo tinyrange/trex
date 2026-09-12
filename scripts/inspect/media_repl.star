@@ -320,6 +320,7 @@ def main(args):
     if len(args) != 1:
         fail("usage: media_repl.star ORIGINAL_MEDIA")
     source = open(args[0])
+    browser = auto(source)
     describe_file = describe
     inspect_signatures = signatures
     list_members = members
@@ -329,4 +330,5 @@ def main(args):
     verify_files = verify_entries
     print(describe_file(source))
     print("source, describe_file, inspect_signatures and list_members are available; open layers with archive/filesystem APIs")
+    print("browser = auto(source): inspect browser.metadata, browser.files, or browser.find(path); contextual readers remain explicit")
     repl()

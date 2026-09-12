@@ -2,6 +2,7 @@ package sgi
 
 import (
 	"encoding/binary"
+	"github.com/tinyrange/trex/auto"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"testing"
 )
@@ -32,6 +33,10 @@ func TestHeader(t *testing.T) {
 	data, err := starfile.ReadAll(h.Files[0].Data)
 	if err != nil || string(data) != "abc" {
 		t.Fatalf("%q %v", data, err)
+	}
+	node, err := auto.Open(&starfile.Bytes{Data: b}, "", auto.Options{}).Resolve("boot/sash")
+	if err != nil || node.Reader().Size() != 3 {
+		t.Fatal(node, err)
 	}
 	b[6] ^= 1
 	if _, err := Open(&starfile.Bytes{Data: b}); err == nil {

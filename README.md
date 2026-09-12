@@ -5,6 +5,10 @@ decoding, manipulating, and debugging historical software formats. Its core
 APIs operate on caller-owned files, byte channels, events, and clocks so they
 can be used without host mounting, extraction, or format-conversion tools.
 
+The [automatic file views](docs/starlark/auto.md) also recognize legacy archive,
+filesystem and partition formats. They share recursive browsing with
+`web.browse`, preserving Macintosh forks and archive-record occurrences.
+
 Product and project names mentioned in this repository are the property of
 their respective owners. Their use identifies interoperable formats and
 systems and does not imply endorsement or affiliation.

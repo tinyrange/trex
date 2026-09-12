@@ -2,8 +2,8 @@ package bzip2
 
 import (
 	"bytes"
-	"compress/bzip2"
 	"fmt"
+	"github.com/tinyrange/trex/archive/internal/bzip2"
 	"io"
 	"sort"
 	"sync"
@@ -25,6 +25,7 @@ type block struct {
 	size        int64
 	crc         uint32
 	data        []byte
+	dataOffset  int64
 	used        uint64
 	level       byte
 	streamEnd   bool
@@ -233,15 +234,23 @@ func (r *Reader) decode(i int, keep bool) ([]byte, uint32, int64, error) {
 	return data, crc, int64(len(data)), err
 }
 func (r *Reader) retain(i int, data []byte) {
+	r.retainAt(i, data, 0)
+}
+
+// RLE can expand one bzip2 block beyond the cache budget. Retain a window
+// around the requested offset instead of decoding that block for every tiny
+// archive-header read. Copy the window so it does not retain the whole block.
+func (r *Reader) retainAt(i int, data []byte, offset int64) {
+	start := int64(0)
 	if len(data) > cacheBytes {
-		return
+		start = offset / cacheBytes * cacheBytes
+		data = bytes.Clone(data[start:min(int64(len(data)), start+cacheBytes)])
 	}
 	r.tick++
 	r.blocks[i].used = r.tick
-	if r.blocks[i].data != nil {
-		return
-	}
+	r.cached -= int64(len(r.blocks[i].data))
 	r.blocks[i].data = data
+	r.blocks[i].dataOffset = start
 	r.cached += int64(len(data))
 	for r.cached > cacheBytes {
 		victim := -1
@@ -287,7 +296,7 @@ func (r *Reader) ensure(end int64) {
 				r.err = result.err
 				return
 			}
-			if result.size > int64(^uint64(0)>>1)-r.length {
+			if result.size > r.maximum-r.length {
 				r.err = auto.ErrLimit
 				return
 			}
@@ -336,18 +345,22 @@ func (r *Reader) ReadAt(p []byte, off int64) (int, error) {
 		end := start + b.size
 		if off < end {
 			data := b.data
-			if data == nil {
+			local := off - start
+			need := min(int64(len(p)-n), end-off)
+			dataOffset := b.dataOffset
+			if data == nil || local < dataOffset || local+need > dataOffset+int64(len(data)) {
 				var err error
 				data, _, _, err = r.decode(i, true)
 				if err != nil {
 					return n, err
 				}
-				r.retain(i, data)
+				r.retainAt(i, data, local)
+				dataOffset = 0
 			} else {
 				r.tick++
 				b.used = r.tick
 			}
-			copied := copy(p[n:], data[off-start:])
+			copied := copy(p[n:n+int(need)], data[local-dataOffset:])
 			n += copied
 			off += int64(copied)
 		}

@@ -1,6 +1,9 @@
 # Inspecting legacy media
 
-Keep each layer as a file view and open it explicitly in the REPL:
+Keep each layer as a file view. The REPL's `browser = auto(source)` follows
+recognized containers using the same API as `web.browse`; see
+[automatic file views](auto.md) for fork paths, partition views and limits.
+Use explicit readers when a layer requires additional context:
 
 ```starlark
 bundle = archive.sevenzip(open("original-media.7z"))

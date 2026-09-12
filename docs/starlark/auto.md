@@ -37,6 +37,42 @@ An archive node's `Reader()` always returns its original archive bytes.
 
 Built-in detectors cover ZIP, tar, gzip, bzip2, XZ, 7z, ar, CAB, CFB (including
 MSI storage), WIM, SFP, SZDD, KWAJ, FAT, NTFS, ISO9660, UDF, MBR, GPT, and VHDX.
+Legacy detectors add UNIX compress/pack, LHA, StuffIt (including version 5),
+CompactPro, Tome, Macintosh resource forks, BSD dump, BRU, SGI standalone tape,
+VMS BACKUP, Amiga Hunk objects/load modules, HFS, EFS, historical UFS, XFS v4,
+ODS-2, Apple partition maps, SGI disk headers and Ultrix partition labels.
+AWS detection requires the observed VM/370 volume-header record; other AWS
+tapes remain available through `archive.aws` explicitly.
+
+Macintosh file nodes retain their data fork as the raw downloadable reader and
+expose `data` and `resource` children. Both children participate in recursive
+detection. Repeated records appear under their original path as numbered
+occurrences (`name/1`, `name/2`), each retaining its forks. If installer metadata
+shares a directory path, or resource occurrences have overlapping paths,
+the archive instead exposes its numbered record
+sequence with `original_path` metadata. Missing BACKUP contents stay non-readable
+entries, not empty files. Byte-valued metadata is encoded as base64 in JSON.
+
+Apple maps expose every present logical-block view under `blocks-512`,
+`blocks-1024` or `blocks-2048`; partitions use `partition-N` and retain their
+original names/types as metadata. SGI headers expose `boot` and `partition-N`.
+Slots containing their own header use explicit boot-directory context to avoid
+self-recursion. Ultrix uses slots `a` through `h`; zero-start UFS slots open their
+filesystem directly. Other zero-start slots retain raw bytes and an empty view
+marked `contains_label`.
+Standalone UFS volumes can retain their parent disk's label: if its partition
+ranges extend beyond this source, detection opens the independently recognized
+UFS volume rather than claiming the input is the complete disk.
+
+Recognition is not installation support or exhaustive nested-format coverage.
+Unsupported confirmed generations and damaged archives report parser errors.
+IRIX image/IDB pairs, RMS attributes and ADCR seed dictionaries require explicit
+context; `auto()` does not guess it. Decode those with their explicit APIs first,
+then pass the resulting bytes or entry-based view to `auto()`. Arsenic is decoded
+within StuffIt 5, not guessed as a standalone stream. Entry, depth and decoded-byte
+limits are forwarded to applicable parsers; borrowed filesystem extents are not
+copied or counted as decompressed bytes.
+
 MZ executables are checked with the existing installer recognizers for embedded
 CABs, InstallShield packages and SFX envelopes, and Wise overlays. Confirmed
 installers expose their payload files and specific format, plus payload offset
