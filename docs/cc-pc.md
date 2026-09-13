@@ -1,8 +1,8 @@
 # CrumbleCracker PC backend
 
 `cc.backend()` implements `vmm.Backend` in process on Linux/amd64 with KVM.
-The initial supported guest is x86 Windows NT 3.1 build 511. Its original MBR,
-volume boot sector, NTLDR, NTDETECT and kernel execute on the native CPU.
+It runs an existing BIOS-bootable disk supplied through the VMM block interface.
+Guest image construction and operating-system setup belong to the caller.
 Go constructs the BIOS data areas and supplies interrupt services through
 small OUT/IRET firmware entrypoints. No firmware binary or external process
 is used.
@@ -33,13 +33,9 @@ result = vm.wait(timeout = 2)
 vm.close()
 ```
 
-The enclosing TinyRangeX recipe `scripts/smoke/windows_cc.star` constructs a
-fresh NT 3.1 image from original media, boots to Program Manager and checks
-the Windows NT Security caption after Ctrl+Alt+Del. It writes both PNGs and
-requires a clean lifecycle stop. Caption glyph comparisons identify the actual
-successful surfaces instead of accepting an arbitrary framebuffer change.
-It uses interactive Administrator logon to avoid the observed automatic-logon
-startup race described in [browser display](vnc.md).
+TinyRangeX supplies the NT 3.1 image recipes, guest drivers and integration
+smokes in [tinyrangex](https://github.com/tinyrange/tinyrangex). Those are
+consumer-level validation of this backend, not image-building features of trex.
 
 ## Inspection and limitations
 
@@ -105,53 +101,21 @@ NT desktop dialog measurements, without a browser, improved from 2.1–2.4 secon
 to 1.0–1.1 seconds for roughly 305,000 VGA byte accesses. These timings include
 input and screenshot caption checks, and are not general application speedups.
 
-`go test ./trex/vmm/cc -run '^$' -bench BenchmarkVGAExit` exercises the native
+`go test ./vmm/cc -run '^$' -bench BenchmarkVGAExit` exercises the native
 aperture path. VGA tests cover masked writes and latches; native CPU tests check
 repeated cancellation followed by resumed IO.
 
-### Renvo NT 3.1 display driver
-
-The browser recipe compiles `vmm/ramfb/driver/display.go` and `miniport.go`
-using unmodified Renvo's existing `linux/386` relocatable-object output.
-This supplies cdecl machine code, not a Linux process or runtime.
-`windows.pe32_link` then constructs the PE image using trex's Go PE builder,
-resolves ELF relocations, and emits stdcall import/export/callback adapters.
-The recipe declares the NT ABI's DLL names and argument counts. There is no
-NT-specific Renvo target or compiler modification, and all stages stay in memory.
+### RAM framebuffer protocol
 
 The host maps an additional 8 MiB of ordinary RAM at physical `0xe0000000`,
 outside the RAM advertised by the BIOS. Six little-endian words describe the
 TRF1 protocol: magic `0x31465254`, active, width, height, stride, and format
-(`1` = BGRX). Pixels begin at offset 4096. The miniport verifies the magic,
-selects 1024×768×32, and maps the aperture into CSRSS. GDI renders directly into
-an unhooked engine bitmap over this allocation. Captures copy it while the
-guest CPU is stopped, falling back to emulated VGA before mode activation.
+(`1` = BGRX). Pixels begin at offset 4096. A guest driver activates a mode
+and renders into this allocation. Captures validate its dimensions and stride,
+copy pixels while the guest CPU is stopped, and fall back to emulated VGA
+before mode activation. The protocol and decoder live in `vmm/ramfb`.
 
-NT 3.1 hosts the graphics engine in WINSRV and requires both DrvEnableDriver
-and DrvDisableDriver exports. It also loads desktop metrics and OEM images
-from the display DLL. The recipe builds a resource section from the original
-media's VGA resources, excluding VGA version metadata; all executable code
-in the custom driver remains Renvo-generated. `windows.pe(...).with_resources`
-performs the portable PE resource construction and updates its checksum.
-
-NTVDM needs a separate `VgaCompatible` video device even for windowed Win16
-applications. The recipe retains the original VGA miniport but deletes its
-`InstalledDisplayDrivers` value, leaving the Renvo driver as the desktop
-display. An empty multi-string is insufficient: NT 3.1 attempts to load an
-empty DLL name. Disabling VGA instead makes `RegisterConsoleVDM` fail with
-error 6 (`ERROR_INVALID_HANDLE`). Legacy VGA accesses during initialization
-are expected; desktop rendering still uses the RAM aperture.
-
-The NT 3.1 image also applies INITIAL.INF's x86 WOW setup step: select
-`krnl386` in `Control/WOW/wowcmdline`. The seed hive names `krnl286`, which
-the setup script selects only for MIPS. Keeping that default prevents Write
-from reaching the Win16 desktop. `scripts/smoke/nt31_write.star` verifies a
-fresh Write title and typed document text, with no VGA accesses during typing.
-
-The fresh `scripts/smoke/nt31_framebuffer.star` smoke verifies Notepad text and
-the Security dialog, at 1024×768, with zero VGA accesses during desktop redraw.
-The Security caption appeared in 51 ms on the i7-1165G7 host, including the
-50 ms chord hold. This check reads the RAM caption directly; the older VGA
-timing above also included repeated PNG decoding. It is not a general CPU or
-application speedup measurement. Mouse input remains relative PS/2, with a
-GDI software cursor; absolute pointer support is separate work.
+Guest-specific driver implementations and installation policy belong to the
+image recipe. TinyRangeX provides the NT 3.1 implementation. Trex supplies
+`windows.pe32_link` for in-memory i386 object linking and stdcall adapters,
+and `windows.pe(...).with_resources` for PE resource construction.

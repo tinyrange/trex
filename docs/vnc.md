@@ -5,18 +5,19 @@ with the portable `vmm.DisplaySource` capability. cc supplies owned RGBA frames
 and serialized keyboard/pointer input. A callable result still serves a regular
 Starlark web application.
 
-From the enclosing TinyRangeX checkout:
+From a trex checkout, pass a recipe whose `main(args)` returns a running VM:
 
 ```sh
-go run ./trex/cmd/trex -serve 127.0.0.1:8080 scripts/run/windows_cc.star \
-  '/path/to/Microsoft Windows NT 3.1 Workstation (3.10.511.1) (ISO).7z'
+go run ./cmd/trex -serve 127.0.0.1:8080 /path/to/vm.star
 ```
 
-Open the complete session URL printed in the terminal. At the NT welcome screen,
-use the Ctrl+Alt+Delete toolbar button, then log on as **Administrator** with an
-empty password. The image is constructed
-in memory from original media. Disk changes live in the VM's memory overlay;
-closing the browser leaves the VM running, while stopping trex discards them.
+The recipe supplies the guest disk and backend configuration. Trex does not
+construct or configure an operating system through this frontend. TinyRangeX
+provides an NT 3.1 browser recipe and guest drivers in
+[tinyrangex](https://github.com/tinyrange/tinyrangex).
+
+Open the complete session URL printed in the terminal. Closing the browser
+leaves the VM running. Disk persistence follows the recipe's attachment policy.
 Only one browser can control the VM at a time. Disconnect to hand over control.
 
 Click the canvas to capture keyboard and mouse; Esc releases mouse capture.
@@ -24,16 +25,7 @@ The toolbar sends Ctrl+Alt+Delete without invoking the browser/host shortcut.
 Keyboard input uses US physical key positions. Clipboard, wheel, touch, audio,
 and file transfer are not supported. PS/2 input is relative, so mouse capture
 avoids confusing host/guest cursor alignment. Absolute
-pointer devices require additional guest/backend support. The NT 3.1 browser
-recipe now uses the Renvo RAM framebuffer driver at 1024×768 with 32-bit color;
-see [the driver protocol and smoke](cc-pc.md#renvo-nt-31-display-driver).
-
-The browser recipe deliberately uses interactive logon. Automatic logon in this
-NT 3.1 image can race SPOOLSS initialization and fault in NTDLL's critical-section
-wait path; the same error was captured before any browser connection. Interactive
-logon reached Program Manager and accepted keyboard and mouse input. The general
-image recipe retains its existing automatic-logon default and now accepts
-`auto_logon = False`; this is a guest startup limitation, not a VNC protocol error.
+pointer devices require additional guest/backend support.
 
 The Go RFB 3.8 implementation is in `vmm/rfb`, over `channel.ByteChannel`.
 It supports RGB888 raw rectangles, incremental requests and DesktopSize.
@@ -52,8 +44,8 @@ remote deployment needs HTTPS to protect the bearer token and guest traffic.
 Validation:
 
 ```sh
-go test -race ./trex/vmm/rfb ./trex/vmm/vncweb ./trex/vmm/cc ./trex/vmm/star
-node --test trex/vmm/vncweb/client_test.mjs
+go test -race ./vmm/rfb ./vmm/vncweb ./vmm/cc ./vmm/star
+node --test vmm/vncweb/client_test.mjs
 ```
 
 Protocol references: [RFB 3.8](https://www.rfc-editor.org/rfc/rfc6143) and
