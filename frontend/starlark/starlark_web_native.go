@@ -5,7 +5,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
+	"github.com/tinyrange/trex/vmm"
+	"github.com/tinyrange/trex/vmm/vncweb"
 	webstar "github.com/tinyrange/trex/web/star"
 	"go.starlark.net/starlark"
 )
@@ -42,6 +45,20 @@ func serveStarlarkWeb(addr, script string, arguments []string) error {
 	result, err := starlark.Call(thread, mainCallable, starlark.Tuple{starlark.Tuple(values)}, nil)
 	if err != nil {
 		return err
+	}
+	if vm, ok := result.(interface {
+		VMMDisplay() (vmm.DisplaySource, error)
+	}); ok {
+		display, err := vm.VMMDisplay()
+		if err != nil {
+			return err
+		}
+		app, err := vncweb.New(display)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Open VM in your browser: %s/#%s\n", strings.TrimRight(webDisplayURL(addr), "/"), app.Token)
+		return http.ListenAndServe(addr, app)
 	}
 	handler, ok := result.(starlark.Callable)
 	if !ok {

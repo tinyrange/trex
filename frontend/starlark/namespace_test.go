@@ -7,7 +7,7 @@ import (
 
 func TestPublicNamespaces(t *testing.T) {
 	environment := predeclared()
-	for _, name := range []string{"archive", "binary", "block", "crypto", "debug", "filesystem", "firmware", "qemu", "vmm", "windows"} {
+	for _, name := range []string{"archive", "binary", "block", "cc", "crypto", "debug", "filesystem", "firmware", "qemu", "vmm", "windows"} {
 		if _, ok := environment[name]; !ok {
 			t.Errorf("missing public namespace %q", name)
 		}

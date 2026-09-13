@@ -2541,6 +2541,12 @@ Creates a bounded writable copy-on-write layer over a base block device. Writes 
 
 Returns a read-only file view of a live block device. Later device changes remain visible through the view; it is not an immutable snapshot.
 
+### `cc.backend`
+
+`cc.backend() -> vmm_backend`
+
+Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The initial i386 platform provides Go BIOS services, one ATA disk, VGA capture and keyboard input. vmm.start creates the guest from portable memory and disk intent.
+
 ### `clock.monotonic`
 
 `clock.monotonic() -> elapsed seconds`
@@ -4148,7 +4154,7 @@ Methods and attributes: `kind`, `name`, `rva`.
 
 A lazy PE32/PE32+ inspection value. Metadata attributes expose headers, sections, imports, exports, resources, strings and debug/type-library data from an owned snapshot. read/disasm use RVAs; patch returns modified file bytes without changing the original. data provides the shared immutable source snapshot.
 
-Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `typelibs`, `version`.
+Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `typelibs`, `version`, `with_resources(resources)`.
 
 ### `windows.signing_identity` value
 

@@ -164,6 +164,7 @@ var nativeStarlarkDescriptions = map[string]string{
 	"path.from_windows":                   "Converts a Windows-style path into the library's logical slash-separated path representation. It does not translate it into a host path or access a drive.",
 	"path.join":                           "Joins logical path components and normalizes the result. The operation is independent of the host operating system's path rules.",
 	"qemu.acpi_table":                     "Creates a QEMU backend descriptor for an ACPI table file. The table is supplied through the backend when the VM starts.",
+	"cc.backend":                          "Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The initial i386 platform provides Go BIOS services, one ATA disk, VGA capture and keyboard input. vmm.start creates the guest from portable memory and disk intent.",
 	"qemu.audiodev":                       "Creates a QEMU audio-backend descriptor from its name and properties. It is configuration data; creating it does not start audio or launch QEMU.",
 	"qemu.backend":                        "Creates a QEMU implementation of the portable VMM backend with selected machine, acceleration, devices and transport policies. A separate vmm.start call launches the guest.",
 	"qemu.chardev":                        "Creates a QEMU character-device backend descriptor from a backend name and properties. Use it in qemu.backend configuration.",

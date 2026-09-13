@@ -28,7 +28,7 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	webAddr := fs.String("web", "", "serve a web archive browser on this address")
 	webPublic := fs.Bool("web-public", false, "allow the archive browser to bind a non-loopback address")
-	serveAddr := fs.String("serve", "", "serve a Starlark web application on this address")
+	serveAddr := fs.String("serve", "", "serve a Starlark web application or VM browser display on this address")
 	stdlibDocs := fs.Bool("stdlib-docs", false, "write embedded Starlark API documentation to stdout")
 	replMode := fs.Bool("repl", false, "start an interactive Starlark session without a script")
 	cpuProfile := fs.String("cpuprofile", "", "write a Go CPU profile to this path")
