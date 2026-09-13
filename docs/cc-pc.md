@@ -111,11 +111,13 @@ repeated cancellation followed by resumed IO.
 
 ### Renvo NT 3.1 display driver
 
-The browser recipe installs the original Renvo sources in
-`vmm/ramfb/driver/display.go` and `miniport.go`. The freestanding
-`windows-nt31/386` RTG target builds the display DLL and video miniport in
-memory, including PE exports, DLL imports, relocations and stdcall callbacks.
-No external compiler or extracted driver intermediates are used.
+The browser recipe compiles `vmm/ramfb/driver/display.go` and `miniport.go`
+using unmodified Renvo's existing `linux/386` relocatable-object output.
+This supplies cdecl machine code, not a Linux process or runtime.
+`windows.pe32_link` then constructs the PE image using trex's Go PE builder,
+resolves ELF relocations, and emits stdcall import/export/callback adapters.
+The recipe declares the NT ABI's DLL names and argument counts. There is no
+NT-specific Renvo target or compiler modification, and all stages stay in memory.
 
 The host maps an additional 8 MiB of ordinary RAM at physical `0xe0000000`,
 outside the RAM advertised by the BIOS. Six little-endian words describe the

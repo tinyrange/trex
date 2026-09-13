@@ -16,7 +16,7 @@ import (
 	"github.com/tinyrange/trex/vmm/rfb"
 )
 
-//go:embed index.html client.js
+//go:embed index.html client.js app.js
 var assets embed.FS
 
 // Server serves a self-contained client and one controlling RFB connection.
@@ -56,8 +56,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		case "/client.js":
-			name = "client.js"
+		case "/client.js", "/app.js":
+			name = strings.TrimPrefix(r.URL.Path, "/")
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		default:
 			http.NotFound(w, r)

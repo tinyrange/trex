@@ -47,7 +47,15 @@ type driver struct {
 
 func newDriver(ctx context.Context, p *pc, paused bool) *driver {
 	ctx, cancel := context.WithCancel(ctx)
-	d := &driver{pc: p, ctx: ctx, cancel: cancel, requests: make(chan request, 16), events: make(chan vmm.Event, 32), ready: make(chan struct{}, 1), done: make(chan struct{}), finished: make(chan struct{}), state: vmm.State{Name: "running", Running: !paused}}
+	d := &driver{
+		pc: p, ctx: ctx, cancel: cancel,
+		requests: make(chan request, 16),
+		events:   make(chan vmm.Event, 32),
+		ready:    make(chan struct{}, 1),
+		done:     make(chan struct{}),
+		finished: make(chan struct{}),
+		state:    vmm.State{Name: "running", Running: !paused},
+	}
 	if paused {
 		d.state.Name = "paused"
 	}
@@ -264,7 +272,11 @@ func (d *driver) NextEvent(ctx context.Context) (vmm.Event, error) {
 }
 func (d *driver) Capture(ctx context.Context) (*image.RGBA, error) {
 	var frame *image.RGBA
-	err := d.call(ctx, func() error { var err error; frame, err = d.pc.capture(); return err })
+	err := d.call(ctx, func() error {
+		var err error
+		frame, err = d.pc.capture()
+		return err
+	})
 	return frame, err
 }
 
@@ -272,23 +284,17 @@ func (d *driver) Screenshot(ctx context.Context, format string) (starfile.File, 
 	if format != "png" {
 		return nil, &vmm.Error{Code: vmm.ErrorUnsupported, Message: "cc screenshots require PNG"}
 	}
-	var result starfile.File
-	err := d.call(ctx, func() error {
-		img, err := d.pc.capture()
-		if err != nil {
-			return err
-		}
-		var buf bytes.Buffer
-		if err = png.Encode(&buf, img); err != nil {
-			return err
-		}
-		result = &starfile.Bytes{Name: "cc-vga.png", Data: buf.Bytes()}
-		return nil
-	})
+	// Capture owns its pixels. Only copying guest memory requires stopping
+	// the CPU; PNG compression can run after the serialized request returns.
+	img, err := d.Capture(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return result, nil
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, err
+	}
+	return &starfile.Bytes{Name: "cc-vga.png", Data: buf.Bytes()}, nil
 }
 
 func (p *pc) capture() (*image.RGBA, error) {

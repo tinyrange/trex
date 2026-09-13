@@ -34,6 +34,7 @@ func Builtins() starlark.StringDict {
 		"icon":                        windowsIconBuiltin,
 		"pe":                          peObjectBuiltin,
 		"pe32_executable":             pe32ExecutableBuiltin,
+		"pe32_link":                   pe32LinkBuiltin,
 		"hive_from_patches":           hiveFromPatchesBuiltin,
 		"creg_from_patches":           cregFromPatchesBuiltin,
 		"creg_compare":                cregCompareBuiltin,

@@ -62,7 +62,7 @@ func (s *session) read(n int) ([]byte, error) {
 	return b, err
 }
 func (s *session) write(b []byte) error { return channel.WriteAll(s.ch, b) }
-func (s *session) run() error {
+func (s *session) handshake() error {
 	if err := s.write([]byte("RFB 003.008\n")); err != nil {
 		return err
 	}
@@ -107,107 +107,151 @@ func (s *session) run() error {
 	if err = s.write(append(init, []byte(name)...)); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (s *session) run() error {
+	if err := s.handshake(); err != nil {
+		return err
+	}
 	for {
-		b, err = s.read(1)
-		if err != nil {
+		if err := s.message(); err != nil {
 			return err
-		}
-		switch b[0] {
-		case 0:
-			b, err = s.read(19)
-			if err != nil {
-				return err
-			}
-			p := b[3:]
-			if err = validFormat(p); err != nil {
-				return err
-			}
-			s.format = p
-			s.previous = nil
-		case 2:
-			b, err = s.read(3)
-			if err != nil {
-				return err
-			}
-			n := int(be.Uint16(b[1:]))
-			if n > 256 {
-				return fmt.Errorf("too many encodings")
-			}
-			b, err = s.read(n * 4)
-			if err != nil {
-				return err
-			}
-			s.resize = false
-			for i := 0; i < n; i++ {
-				if int32(be.Uint32(b[i*4:])) == -223 {
-					s.resize = true
-				}
-			}
-		case 3:
-			b, err = s.read(9)
-			if err != nil {
-				return err
-			}
-			if err = s.update(b); err != nil {
-				return err
-			}
-		case 4:
-			b, err = s.read(7)
-			if err != nil {
-				return err
-			}
-			key := keyName(be.Uint32(b[3:]))
-			if key != "" {
-				down := b[0] != 0
-				if err = s.display.Input(s.ctx, vmm.Input{Kind: "key", Key: key, Down: down}); err != nil {
-					return err
-				}
-				if down {
-					s.keys[key] = true
-				} else {
-					delete(s.keys, key)
-				}
-			}
-		case 5:
-			b, err = s.read(5)
-			if err != nil {
-				return err
-			}
-			x, y := int(be.Uint16(b[1:])), int(be.Uint16(b[3:]))
-			dx, dy := 0, 0
-			if s.pointer {
-				dx = int(int16(uint16(x - s.px)))
-				dy = int(int16(uint16(y - s.py)))
-			}
-			s.px = x
-			s.py = y
-			s.pointer = true
-			buttons := []string{}
-			for i, name := range []string{"left", "middle", "right"} {
-				if b[0]&(1<<i) != 0 {
-					buttons = append(buttons, name)
-				}
-			}
-			if err = s.display.Input(s.ctx, vmm.Input{Kind: "pointer", X: float64(dx), Y: float64(dy), Buttons: buttons}); err != nil {
-				return err
-			}
-		case 6:
-			b, err = s.read(7)
-			if err != nil {
-				return err
-			}
-			n := be.Uint32(b[3:])
-			if n > 1<<20 {
-				return fmt.Errorf("clipboard too large")
-			}
-			if _, err = io.CopyN(io.Discard, s.ch, int64(n)); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("unsupported RFB message %d", b[0])
 		}
 	}
 }
+
+func (s *session) message() error {
+	typeByte, err := s.read(1)
+	if err != nil {
+		return err
+	}
+	switch typeByte[0] {
+	case 0:
+		return s.setPixelFormat()
+	case 2:
+		return s.setEncodings()
+	case 3:
+		return s.requestUpdate()
+	case 4:
+		return s.keyEvent()
+	case 5:
+		return s.pointerEvent()
+	case 6:
+		return s.discardClipboard()
+	default:
+		return fmt.Errorf("unsupported RFB message %d", typeByte[0])
+	}
+}
+
+func (s *session) setPixelFormat() error {
+	b, err := s.read(19)
+	if err != nil {
+		return err
+	}
+	p := b[3:]
+	if err = validFormat(p); err != nil {
+		return err
+	}
+	s.format = p
+	s.previous = nil
+	return nil
+}
+
+func (s *session) setEncodings() error {
+	b, err := s.read(3)
+	if err != nil {
+		return err
+	}
+	n := int(be.Uint16(b[1:]))
+	if n > 256 {
+		return fmt.Errorf("too many encodings")
+	}
+	b, err = s.read(n * 4)
+	if err != nil {
+		return err
+	}
+	s.resize = false
+	for i := 0; i < n; i++ {
+		if int32(be.Uint32(b[i*4:])) == -223 {
+			s.resize = true
+		}
+	}
+	return nil
+}
+
+func (s *session) requestUpdate() error {
+	b, err := s.read(9)
+	if err != nil {
+		return err
+	}
+	if err = s.update(b); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *session) keyEvent() error {
+	b, err := s.read(7)
+	if err != nil {
+		return err
+	}
+	key := keyName(be.Uint32(b[3:]))
+	if key != "" {
+		down := b[0] != 0
+		if err = s.display.Input(s.ctx, vmm.Input{Kind: "key", Key: key, Down: down}); err != nil {
+			return err
+		}
+		if down {
+			s.keys[key] = true
+		} else {
+			delete(s.keys, key)
+		}
+	}
+	return nil
+}
+
+func (s *session) pointerEvent() error {
+	b, err := s.read(5)
+	if err != nil {
+		return err
+	}
+	x, y := int(be.Uint16(b[1:])), int(be.Uint16(b[3:]))
+	dx, dy := 0, 0
+	if s.pointer {
+		dx = int(int16(uint16(x - s.px)))
+		dy = int(int16(uint16(y - s.py)))
+	}
+	s.px = x
+	s.py = y
+	s.pointer = true
+	buttons := []string{}
+	for i, name := range []string{"left", "middle", "right"} {
+		if b[0]&(1<<i) != 0 {
+			buttons = append(buttons, name)
+		}
+	}
+	if err = s.display.Input(s.ctx, vmm.Input{Kind: "pointer", X: float64(dx), Y: float64(dy), Buttons: buttons}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *session) discardClipboard() error {
+	b, err := s.read(7)
+	if err != nil {
+		return err
+	}
+	n := be.Uint32(b[3:])
+	if n > 1<<20 {
+		return fmt.Errorf("clipboard too large")
+	}
+	if _, err = io.CopyN(io.Discard, s.ch, int64(n)); err != nil {
+		return err
+	}
+	return nil
+}
+
 func validFrame(f *image.RGBA) error {
 	if f == nil || f.Rect.Min != (image.Point{}) || f.Rect.Dx() < 1 || f.Rect.Dy() < 1 || f.Rect.Dx() > 4096 || f.Rect.Dy() > 4096 {
 		return fmt.Errorf("invalid framebuffer")
