@@ -834,6 +834,35 @@ func TestNTFS31ReaderExposesSecurityDescriptorMetadata(t *testing.T) {
 	}
 }
 
+func TestLegacyNTFSPreservesExplicitSecurity(t *testing.T) {
+	for _, minor := range []uint8{0, 1} {
+		root := filesystemapi.New()
+		root.Mkdir("/secured")
+		descriptor := ntfsSecurityDescriptor(ntfsSID(5, 18), ntfsSID(5, 18), 0x001200a9, ntfsSID(1, 0))
+		root.SetMetadata("/secured", filesystemapi.Metadata{SecurityDescriptor: descriptor})
+		image, err := buildNTFSImageWithOptions(root, 64<<20, nil, 0, "SECURITY", 1, minor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		volume, err := newNTFSVolume(image)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attribute, err := volume.Attr("metadata")
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := starlark.Call(&starlark.Thread{Name: "test"}, attribute, starlark.Tuple{starlark.String("/secured")}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := value.(interface{ Get(string) starlark.Value })
+		if got := []byte(record.Get("security_descriptor").(starlark.Bytes)); !bytes.Equal(got, descriptor) {
+			t.Fatalf("NTFS 1.%d security descriptor = %x, want %x", minor, got, descriptor)
+		}
+	}
+}
+
 func TestNTFSReaderMergesNonresidentExtentsByVCN(t *testing.T) {
 	volume := &starfile.Bytes{Name: "volume", Data: make([]byte, 16*ntfsCluster)}
 	late := &ntfsReadFile{

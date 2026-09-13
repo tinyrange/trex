@@ -1068,7 +1068,7 @@ func ntfsIndexRootLimit(node *ntfsNode, allocated bool, bitmapBytes int, modern 
 	if modern && node.id == 5 {
 		used += len(ntfsNonResidentAttr(ntfsAttrSecurityDescriptor, "", 1<<24, int64(len(ntfsRootSecurityDescriptor()))))
 	} else if legacySecurity {
-		used += len(ntfsResidentAttr(ntfsAttrSecurityDescriptor, "", ntfsLegacySecurityDescriptor()))
+		used += len(ntfsResidentAttr(ntfsAttrSecurityDescriptor, "", ntfsNodeLegacySecurityDescriptor(node)))
 	}
 	if allocated {
 		used += len(ntfsNonResidentAttr(ntfsAttrIndexAllocation, "$I30", 1<<24, ntfsIndexSize))
@@ -1480,7 +1480,7 @@ func (b *ntfsBuild) mftRecord(node *ntfsNode) ([]byte, error) {
 	if b.modern() && node.id == 5 {
 		attrs = append(attrs, ntfsNonResidentAttr(ntfsAttrSecurityDescriptor, "", b.rootSecurityLCN, int64(len(b.rootSecurity))))
 	} else if !b.modern() || legacySecurity {
-		descriptor := ntfsLegacySecurityDescriptor()
+		descriptor := ntfsNodeLegacySecurityDescriptor(node)
 		if node.systemKind == "reserved" {
 			descriptor = ntfsMetadataSecurityDescriptor(0x0012019f)
 		}
@@ -2064,6 +2064,13 @@ func ntfsDefaultSecurityDescriptor() []byte {
 		{flags: 0x0a, mask: 0x00000002, sid: users},
 		{mask: 0x001200a9, sid: everyone},
 	}, 0)
+}
+
+func ntfsNodeLegacySecurityDescriptor(node *ntfsNode) []byte {
+	if len(node.metadata.SecurityDescriptor) != 0 {
+		return node.metadata.SecurityDescriptor
+	}
+	return ntfsLegacySecurityDescriptor()
 }
 
 func ntfsLegacySecurityDescriptor() []byte {

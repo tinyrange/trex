@@ -3128,7 +3128,7 @@ Creates a portable machine specification from architecture, memory, CPUs, storag
 
 ### `vmm.network`
 
-`vmm.network(kind, name='net0', required=True)`
+`vmm.network(kind, name='net0', required=True, switch=None, mac='')`
 
 Describes a named guest network connection and whether its requested kind is required. The selected backend implements the transport.
 
@@ -3137,6 +3137,12 @@ Describes a named guest network connection and whether its requested kind is req
 `vmm.start(machine, backend)`
 
 Validates a machine specification against a backend and starts a VM. Returns the live VM handle used for input, screenshots, events and lifecycle control.
+
+### `vmm.switch`
+
+`vmm.switch()`
+
+Creates an isolated in-memory Ethernet switch. Attach guests with vmm.network('ethernet', switch=lan, mac='02:00:00:00:00:01'), using a distinct unicast MAC for each NIC. Ports have bounded receive queues and disconnect when their VM closes.
 
 ### `vmm.validate`
 

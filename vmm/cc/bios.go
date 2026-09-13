@@ -17,6 +17,7 @@ const biosPort = 0xf1
 // Each IVT entry points to an OUT/IRET trampoline; native execution retains
 // all mode switches and executes the original boot sector and loader.
 type pc struct {
+	nic         *ne2000
 	framebuffer []byte
 	cpu         hypervisor.X86
 	ram         []byte

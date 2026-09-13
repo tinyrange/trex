@@ -225,21 +225,22 @@ func (f *ntfsReadFile) AttrNames() []string {
 }
 
 type ntfsReadNode struct {
-	id               uint64
-	sequence         uint16
-	baseSequence     uint16
-	attributes       []ntfsReadAttribute
-	attributeList    []ntfsReadAttributeListEntry
-	hasAttributeList bool
-	parent           uint64
-	name             string
-	path             string
-	dir              bool
-	securityID       uint32
-	file             *ntfsReadFile
-	streams          map[string]*ntfsReadFile
-	links            []ntfsReadLink
-	children         []*ntfsReadLink
+	id                 uint64
+	sequence           uint16
+	baseSequence       uint16
+	attributes         []ntfsReadAttribute
+	attributeList      []ntfsReadAttributeListEntry
+	hasAttributeList   bool
+	parent             uint64
+	name               string
+	path               string
+	dir                bool
+	securityID         uint32
+	securityDescriptor *ntfsReadFile
+	file               *ntfsReadFile
+	streams            map[string]*ntfsReadFile
+	links              []ntfsReadLink
+	children           []*ntfsReadLink
 }
 
 type ntfsReadLink struct {
@@ -512,6 +513,8 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 		var err error
 		for _, attribute := range attributes {
 			switch attribute.typ {
+			case ntfsAttrSecurityDescriptor:
+				node.securityDescriptor = &ntfsReadFile{name: "$SECURITY_DESCRIPTOR", volume: v.file, clusterSize: v.clusterSize, size: attribute.size, firstVCN: attribute.firstVCN, resident: attribute.value, runs: attribute.runs}
 			case ntfsAttrStandardInformation:
 				// NTFS 3.0 and later store the $Secure descriptor ID at
 				// offset 52 in the extended $STANDARD_INFORMATION value.
@@ -866,6 +869,18 @@ func (v *ntfsVolume) Attr(name string) (starlark.Value, error) {
 			}
 			descriptor := starlark.Value(starlark.None)
 			if raw, ok := v.securityDescriptors[node.securityID]; ok {
+				descriptor = starlark.Bytes(raw)
+			}
+			if node.securityDescriptor != nil {
+				if node.securityDescriptor.Size() < 20 || node.securityDescriptor.Size() > 1<<20 {
+					return nil, fmt.Errorf("invalid NTFS security descriptor size")
+				}
+				raw := make([]byte, node.securityDescriptor.Size())
+				if n, err := node.securityDescriptor.ReadAt(raw, 0); err != nil && err != io.EOF {
+					return nil, err
+				} else if n != len(raw) {
+					return nil, io.ErrUnexpectedEOF
+				}
 				descriptor = starlark.Bytes(raw)
 			}
 			return starfile.NewRecord(starlark.StringDict{

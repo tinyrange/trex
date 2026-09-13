@@ -189,6 +189,7 @@ var nativeStarlarkDescriptions = map[string]string{
 	"vmm.display":                         "Describes the requested guest display mode and whether support is mandatory. This is part of a portable machine specification.",
 	"vmm.machine":                         "Creates a portable machine specification from architecture, memory, CPUs, storage, networking and channels. It does not start a VM.",
 	"vmm.network":                         "Describes a named guest network connection and whether its requested kind is required. The selected backend implements the transport.",
+	"vmm.switch":                          "Creates an isolated in-memory Ethernet switch. Attach guests with vmm.network('ethernet', switch=lan, mac='02:00:00:00:00:01'), using a distinct unicast MAC for each NIC. Ports have bounded receive queues and disconnect when their VM closes.",
 	"vmm.start":                           "Validates a machine specification against a backend and starts a VM. Returns the live VM handle used for input, screenshots, events and lifecycle control.",
 	"vmm.validate":                        "Checks whether a backend can implement a machine specification and its required capabilities without launching it. Use this before committing to a boot experiment.",
 	"web.file":                            "Builds an HTTP response that serves a file, optionally with a download name, status and headers. Constructing the response does not start a web server.",

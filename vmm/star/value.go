@@ -64,6 +64,7 @@ func Builtins() starlark.StringDict {
 		"display":  starlark.NewBuiltin("display", vmmDisplayBuiltin),
 		"machine":  starlark.NewBuiltin("machine", vmmMachineBuiltin),
 		"network":  starlark.NewBuiltin("network", vmmNetworkBuiltin),
+		"switch":   starlark.NewBuiltin("switch", switchBuiltin),
 		"start":    starlark.NewBuiltin("start", vmmStartBuiltin),
 		"validate": starlark.NewBuiltin("validate", vmmValidateBuiltin),
 	}
@@ -324,10 +325,26 @@ func vmmNetworkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	var kind string
 	name := "net0"
 	required := true
-	if err := starlark.UnpackArgs("network", args, kwargs, "kind", &kind, "name?", &name, "required?", &required); err != nil {
+	var lan *switchValue
+	mac := ""
+	if err := starlark.UnpackArgs("network", args, kwargs, "kind", &kind, "name?", &name, "required?", &required, "switch?", &lan, "mac?", &mac); err != nil {
 		return nil, err
 	}
-	return &vmmNetworkValue{network: VMMNetwork{Kind: kind, Name: name, Required: required}}, nil
+	network := VMMNetwork{Kind: kind, Name: name, Required: required}
+	if lan != nil {
+		if kind != "ethernet" {
+			return nil, fmt.Errorf("switch requires ethernet network kind")
+		}
+		network.Switch = lan.switcher
+		address, err := parseMAC(mac)
+		if err != nil {
+			return nil, err
+		}
+		network.MAC = address
+	} else if kind == "ethernet" || mac != "" {
+		return nil, fmt.Errorf("ethernet network requires switch and mac")
+	}
+	return &vmmNetworkValue{network: network}, nil
 }
 
 func vmmDisplayBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

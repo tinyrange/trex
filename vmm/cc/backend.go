@@ -18,7 +18,7 @@ type Backend struct{}
 
 func Available() bool { return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" }
 func Capabilities() []string {
-	return []string{"disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1"}
+	return []string{"disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet"}
 }
 func (*Backend) ID() string             { return "cc.v1" }
 func (*Backend) Capabilities() []string { return Capabilities() }
@@ -65,8 +65,13 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 			add(field, "writable disk or snapshot overlay is required")
 		}
 	}
-	if len(m.Networks) != 0 {
-		add("networks", "cc PC has no network device")
+	if len(m.Networks) > 1 {
+		add("networks", "cc PC supports one ISA NE2000")
+	}
+	for _, network := range m.Networks {
+		if network.Kind != "ethernet" || network.Switch == nil || network.MAC == [6]byte{} || network.MAC[0]&1 != 0 {
+			add("networks", "NE2000 requires an Ethernet switch and a unicast MAC")
+		}
 	}
 	if len(m.Channels) != 0 {
 		add("channels", "cc PC has no channel devices")
@@ -115,5 +120,9 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	}
 	platform.framebuffer = ram[m.Memory:]
 	binary.LittleEndian.PutUint32(platform.framebuffer, ramfb.Magic)
+	if len(m.Networks) == 1 {
+		network := m.Networks[0]
+		platform.nic = newNE2000(network.Switch.Connect(), network.MAC, func(level bool) error { return cpu.SetIRQ(9, level) })
+	}
 	return newDriver(ctx, platform, m.StartPaused), nil
 }

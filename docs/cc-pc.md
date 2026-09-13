@@ -51,11 +51,19 @@ releases KVM and RAM and is idempotent; stopping preserves inspection until
 close. Events support `debug.select` and the portable automation helpers.
 
 This initial platform supports one IDE disk, BIOS modes 03h/12h, PNG capture,
-keyboard transitions, chords and relative PS/2 pointer input. Network, text injection,
+keyboard transitions, chords and relative PS/2 pointer input. Text injection,
 interactive host windows, ACPI powerdown, reset, guest snapshots and debugger
 channels are not advertised capabilities. ARM64 UEFI continuation remains
 available through its existing emulator interface. Other host platforms return
 an explicit unsupported-backend error for cc PC execution.
+
+An optional ISA NE2000 at I/O 300h and IRQ 9 connects to an in-memory Ethernet
+switch. Create one `lan = vmm.switch()` and attach each guest with
+`vmm.network("ethernet", switch=lan, mac="02:00:00:00:00:01")`, using a distinct
+MAC for each guest. The switch learns unicast destinations, floods broadcasts
+and multicasts, and bounds each port's receive queue. It requires no host
+network configuration. Guest NIC drivers and protocol bindings belong to the
+image recipe. `cc.v1.state().network` reports device state and frame counts.
 
 `vm.extension("cc.v1").disk()` takes an immutable, in-memory snapshot of a
 snapshot-attached disk for inspection with trex filesystem readers. It preserves
