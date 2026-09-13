@@ -51,11 +51,19 @@ releases KVM and RAM and is idempotent; stopping preserves inspection until
 close. Events support `debug.select` and the portable automation helpers.
 
 This initial platform supports one IDE disk, BIOS modes 03h/12h, PNG capture,
-keyboard transitions, chords and relative PS/2 pointer input. Network, text injection,
+keyboard transitions, chords and relative PS/2 pointer input. Text injection,
 interactive host windows, ACPI powerdown, reset, guest snapshots and debugger
 channels are not advertised capabilities. ARM64 UEFI continuation remains
 available through its existing emulator interface. Other host platforms return
 an explicit unsupported-backend error for cc PC execution.
+
+An optional ISA NE2000 at I/O 300h and IRQ 9 connects to an in-memory Ethernet
+switch. Create one `lan = vmm.switch()` and attach each guest with
+`vmm.network("ethernet", switch=lan, mac="02:00:00:00:00:01")`, using a distinct
+MAC for each guest. The switch learns unicast destinations, floods broadcasts
+and multicasts, and bounds each port's receive queue. It requires no host
+network configuration. Guest NIC drivers and protocol bindings belong to the
+image recipe. `cc.v1.state().network` reports device state and frame counts.
 
 `vm.extension("cc.v1").disk()` takes an immutable, in-memory snapshot of a
 snapshot-attached disk for inspection with trex filesystem readers. It preserves
@@ -104,6 +112,24 @@ input and screenshot caption checks, and are not general application speedups.
 `go test ./vmm/cc -run '^$' -bench BenchmarkVGAExit` exercises the native
 aperture path. VGA tests cover masked writes and latches; native CPU tests check
 repeated cancellation followed by resumed IO.
+
+### Shared-memory byte channel
+
+`vmm.channel("shared-memory", name="agent")` attaches one optional 4 KiB
+aperture at physical `0xe1000000`, outside BIOS-advertised RAM. Open the host
+endpoint using `vm.channel("agent")`; it implements the ordinary byte-channel
+read/write/deadline contract. Closing a handle leaves the VM running.
+
+The guest maps this aperture using its own OS driver/API. Bytes 0–3 contain
+`TRCH`, followed by little-endian version 1. Host-to-guest producer/consumer
+counters are at offsets 32/36, with a 1024-byte ring at offset 64. Guest-to-host
+counters are at 40/44, with its ring at 1088. Counters are monotonically
+increasing uint32 values; unsigned producer-minus-consumer must be at most
+1024. Index the payload modulo 1024. Each producer writes payload before
+publishing its counter; each consumer advances its own counter after reading.
+Host operations run with the vCPU stopped and preserve the other side's
+counters. Backpressure and deadlines bound host operations. Guest provisioning
+protocols remain in their owning recipes.
 
 ### RAM framebuffer protocol
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tinyrange/trex/block"
+	"github.com/tinyrange/trex/vmm/ethernet"
 )
 
 type ErrorCode string
@@ -57,6 +58,8 @@ type CHSGeometry struct{ Cylinders, Heads, Sectors int }
 type Network struct {
 	Kind, Name string
 	Required   bool
+	Switch     *ethernet.Switch
+	MAC        [6]byte
 }
 type Display struct {
 	Mode     string

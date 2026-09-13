@@ -10,10 +10,11 @@ func pe32LinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 	var object starlark.Value
 	var imports, exports, callbacks *starlark.Dict
 	entry := ""
+	executable := false
 	subsystem, major, minor, imageBase := uint32(3), uint32(3), uint32(10), uint32(0x62000000)
 	if err := starlark.UnpackArgs("pe32_link", args, kwargs,
 		"object", &object, "imports", &imports, "exports", &exports, "callbacks?", &callbacks,
-		"entry?", &entry, "subsystem?", &subsystem, "version_major?", &major, "version_minor?", &minor, "image_base?", &imageBase); err != nil {
+		"entry?", &entry, "subsystem?", &subsystem, "version_major?", &major, "version_minor?", &minor, "image_base?", &imageBase, "executable?", &executable); err != nil {
 		return nil, err
 	}
 	if subsystem != 1 && subsystem != 3 || major > 65535 || minor > 65535 {
@@ -24,6 +25,7 @@ func pe32LinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 		return nil, err
 	}
 	opts := PE32LinkOptions{Entry: entry, Subsystem: uint16(subsystem), VersionMajor: uint16(major), VersionMinor: uint16(minor), ImageBase: imageBase, Imports: make(map[string]map[string]int)}
+	opts.Executable = executable
 	if opts.Exports, err = peStackWords(exports); err != nil {
 		return nil, err
 	}

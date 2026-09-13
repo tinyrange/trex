@@ -3128,7 +3128,7 @@ Creates a portable machine specification from architecture, memory, CPUs, storag
 
 ### `vmm.network`
 
-`vmm.network(kind, name='net0', required=True)`
+`vmm.network(kind, name='net0', required=True, switch=None, mac='')`
 
 Describes a named guest network connection and whether its requested kind is required. The selected backend implements the transport.
 
@@ -3138,11 +3138,23 @@ Describes a named guest network connection and whether its requested kind is req
 
 Validates a machine specification against a backend and starts a VM. Returns the live VM handle used for input, screenshots, events and lifecycle control.
 
+### `vmm.switch`
+
+`vmm.switch()`
+
+Creates an isolated in-memory Ethernet switch. Attach guests with vmm.network('ethernet', switch=lan, mac='02:00:00:00:00:01'), using a distinct unicast MAC for each NIC. Ports have bounded receive queues and disconnect when their VM closes.
+
 ### `vmm.validate`
 
 `vmm.validate(machine, backend)`
 
 Checks whether a backend can implement a machine specification and its required capabilities without launching it. Use this before committing to a boot experiment.
+
+### `vmm.workspace`
+
+`vmm.workspace(vms, create=None)`
+
+Groups a name-to-VM dictionary for the browser frontend. The optional zero-argument create callback returns (name, vm); calls are serialized and successful creations appear as new tabs. Switching tabs leaves every VM running. Guest construction and provisioning remain recipe-owned.
 
 ### `web.browse`
 
@@ -3589,9 +3601,9 @@ Links a labeled section, fixups and optional imports into a minimal PE32 executa
 
 ### `windows.pe32_link`
 
-`windows.pe32_link(object, imports, exports, callbacks=None, entry='', subsystem=3, version_major=3, version_minor=10, image_base=0x62000000) -> bytes`
+`windows.pe32_link(object, imports, exports, callbacks=None, entry='', subsystem=3, version_major=3, version_minor=10, image_base=0x62000000, executable=False) -> bytes`
 
-Links an in-memory ELF32/i386 cdecl object into a PE32 DLL or native driver. Imports map DLLs to symbol/stack-word dictionaries; exports and callbacks map symbols to stack-word counts. Explicit stdcall adapters bridge the object ABI. Supports R_386_32 and R_386_PC32 relocations; rejects unresolved symbols and unsupported relocations. No OS runtime is linked.
+Links an in-memory ELF32/i386 cdecl object into a PE32 DLL, executable, or native driver. executable=True requires an entry point and emits an EXE instead of a DLL. Imports map DLLs to symbol/stack-word dictionaries; exports and callbacks map symbols to stack-word counts. Explicit stdcall adapters bridge the object ABI. Supports R_386_32 and R_386_PC32 relocations; rejects unresolved symbols and unsupported relocations. No OS runtime is linked.
 
 ### `windows.pe_sign`
 

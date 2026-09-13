@@ -18,7 +18,7 @@ type Backend struct{}
 
 func Available() bool { return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" }
 func Capabilities() []string {
-	return []string{"disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1"}
+	return []string{"disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
 }
 func (*Backend) ID() string             { return "cc.v1" }
 func (*Backend) Capabilities() []string { return Capabilities() }
@@ -65,11 +65,21 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 			add(field, "writable disk or snapshot overlay is required")
 		}
 	}
-	if len(m.Networks) != 0 {
-		add("networks", "cc PC has no network device")
+	if len(m.Networks) > 1 {
+		add("networks", "cc PC supports one ISA NE2000")
 	}
-	if len(m.Channels) != 0 {
-		add("channels", "cc PC has no channel devices")
+	for _, network := range m.Networks {
+		if network.Kind != "ethernet" || network.Switch == nil || network.MAC == [6]byte{} || network.MAC[0]&1 != 0 {
+			add("networks", "NE2000 requires an Ethernet switch and a unicast MAC")
+		}
+	}
+	if len(m.Channels) > 1 {
+		add("channels", "cc PC supports one shared-memory channel")
+	}
+	for _, channel := range m.Channels {
+		if channel.Kind != "shared-memory" || channel.Name == "" {
+			add("channels", "cc PC requires a named shared-memory channel")
+		}
 	}
 	if m.Display.Mode != "" && m.Display.Mode != "none" && m.Display.Mode != "capturable" {
 		add("display", "cc PC supports headless VGA capture")
@@ -103,7 +113,13 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	if err != nil {
 		return nil, err
 	}
-	ram, err := cpu.MapRAMRegions(uint64(m.Memory)+ramfb.Size, []hypervisor.RAMRegion{{Address: 0, Offset: 0, Size: 0xa0000}, {Address: 0xc0000, Offset: 0xc0000, Size: uint64(m.Memory) - 0xc0000}, {Address: ramfb.Address, Offset: uint64(m.Memory), Size: ramfb.Size}})
+	regions := []hypervisor.RAMRegion{{Address: 0, Offset: 0, Size: 0xa0000}, {Address: 0xc0000, Offset: 0xc0000, Size: uint64(m.Memory) - 0xc0000}, {Address: ramfb.Address, Offset: uint64(m.Memory), Size: ramfb.Size}}
+	total := uint64(m.Memory) + ramfb.Size
+	if len(m.Channels) == 1 {
+		regions = append(regions, hypervisor.RAMRegion{Address: channelAddress, Offset: total, Size: channelSize})
+		total += channelSize
+	}
+	ram, err := cpu.MapRAMRegions(total, regions)
 	if err != nil {
 		cpu.Close()
 		return nil, err
@@ -113,7 +129,16 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		cpu.Close()
 		return nil, err
 	}
-	platform.framebuffer = ram[m.Memory:]
+	platform.framebuffer = ram[m.Memory : uint64(m.Memory)+ramfb.Size]
+	if len(m.Channels) == 1 {
+		platform.channelMemory = ram[uint64(m.Memory)+ramfb.Size:]
+		platform.channelName = m.Channels[0].Name
+		copy(platform.channelMemory, []byte("TRCH\x01\x00\x00\x00"))
+	}
 	binary.LittleEndian.PutUint32(platform.framebuffer, ramfb.Magic)
+	if len(m.Networks) == 1 {
+		network := m.Networks[0]
+		platform.nic = newNE2000(network.Switch.Connect(), network.MAC, func(level bool) error { return cpu.SetIRQ(9, level) })
+	}
 	return newDriver(ctx, platform, m.StartPaused), nil
 }

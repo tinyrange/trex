@@ -131,8 +131,13 @@ func (p *pc) inspectState() (starlark.Value, error) {
 		"esi": int64(r.Rsi), "edi": int64(r.Rdi), "esp": int64(r.Rsp), "ebp": int64(r.Rbp),
 		"eip": int64(r.Rip), "eflags": int64(r.Rflags),
 	}
+	var network any
+	if n := p.nic; n != nil {
+		network = map[string]any{"tx": int64(n.tx), "rx": int64(n.rx), "command": int(n.command), "isr": int(n.isr), "imr": int(n.imr), "start": int(n.start), "stop": int(n.stop), "current": int(n.current), "boundary": int(n.boundary), "mac": fmt.Sprintf("%x", n.physical)}
+	}
 	return starvalue.Starlark(map[string]any{
-		"pc": int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
+		"network": network,
+		"pc":      int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
 		"registers": registers, "idt_base": int64(s.Idt.Base),
 		"last_bios": p.lastService, "ata_commands": int64(p.ide.commands),
 		"ata_task": fmt.Sprintf("%x", p.ide.task), "vga_accesses": int64(p.vga.accesses),

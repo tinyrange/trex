@@ -16,6 +16,11 @@ func (p *pc) run(ctx context.Context) (hypervisor.X86Exit, error) {
 			return hypervisor.X86Exit{}, err
 		}
 		now := p.now()
+		if p.nic != nil {
+			if err := p.nic.poll(); err != nil {
+				return hypervisor.X86Exit{}, err
+			}
+		}
 		rate := p.cmos[0xa] & 15
 		if p.cmos[0xb]&0x40 == 0 || rate < 3 {
 			p.rtcNext = time.Time{}
@@ -46,6 +51,9 @@ func (p *pc) run(ctx context.Context) (hypervisor.X86Exit, error) {
 }
 
 func (p *pc) handleIO(ex hypervisor.X86Exit) error {
+	if p.nic != nil && ex.Port >= 0x300 && ex.Port <= 0x31f {
+		return p.nic.io(ex)
+	}
 	if (ex.Port == 0x60 || ex.Port == 0x64) && ex.Write {
 		p.inputTrace = append(p.inputTrace, fmt.Sprintf("%04x <- %x", ex.Port, ex.Data))
 		if len(p.inputTrace) > 64 {

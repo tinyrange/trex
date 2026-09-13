@@ -94,6 +94,9 @@ func (d *driver) finish(reason, detail string, clean bool) {
 	close(d.finished)
 }
 func (d *driver) loop() {
+	if d.pc.nic != nil {
+		defer d.pc.nic.port.Close()
+	}
 	defer close(d.done)
 	defer close(d.events)
 	defer func() { d.mu.Lock(); d.closeErr = d.pc.cpu.Close(); d.mu.Unlock() }()
