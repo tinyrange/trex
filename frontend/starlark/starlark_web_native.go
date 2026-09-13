@@ -46,6 +46,14 @@ func serveStarlarkWeb(addr, script string, arguments []string) error {
 	if err != nil {
 		return err
 	}
+	if workspace, ok := result.(interface{ VMMWorkspace() vmm.Workspace }); ok {
+		app, err := vncweb.NewWorkspace(workspace.VMMWorkspace())
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Open VM workspace in your browser: %s/#%s\n", strings.TrimRight(webDisplayURL(addr), "/"), app.Token)
+		return http.ListenAndServe(addr, app)
+	}
 	if vm, ok := result.(interface {
 		VMMDisplay() (vmm.DisplaySource, error)
 	}); ok {

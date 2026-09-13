@@ -57,6 +57,27 @@ func linkFixtureOptions() PE32LinkOptions {
 	}
 }
 
+func TestPE32ExecutableHeader(t *testing.T) {
+	options := linkFixtureOptions()
+	options.Executable = true
+	if _, err := LinkPE32(linkObjectFixture(), options); err == nil {
+		t.Fatal("accepted executable without entry")
+	}
+	options.Entry = "Callback"
+	data, err := LinkPE32(linkObjectFixture(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := pe.NewFile(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer image.Close()
+	if image.Characteristics&pe.IMAGE_FILE_DLL != 0 || image.OptionalHeader.(*pe.OptionalHeader32).AddressOfEntryPoint == 0 {
+		t.Fatal("not an executable PE")
+	}
+}
+
 func TestPE32LinkRelocationsAndABIBoundaries(t *testing.T) {
 	object, options := linkObjectFixture(), linkFixtureOptions()
 	out, err := LinkPE32(object, options)

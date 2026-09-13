@@ -113,6 +113,24 @@ input and screenshot caption checks, and are not general application speedups.
 aperture path. VGA tests cover masked writes and latches; native CPU tests check
 repeated cancellation followed by resumed IO.
 
+### Shared-memory byte channel
+
+`vmm.channel("shared-memory", name="agent")` attaches one optional 4 KiB
+aperture at physical `0xe1000000`, outside BIOS-advertised RAM. Open the host
+endpoint using `vm.channel("agent")`; it implements the ordinary byte-channel
+read/write/deadline contract. Closing a handle leaves the VM running.
+
+The guest maps this aperture using its own OS driver/API. Bytes 0–3 contain
+`TRCH`, followed by little-endian version 1. Host-to-guest producer/consumer
+counters are at offsets 32/36, with a 1024-byte ring at offset 64. Guest-to-host
+counters are at 40/44, with its ring at 1088. Counters are monotonically
+increasing uint32 values; unsigned producer-minus-consumer must be at most
+1024. Index the payload modulo 1024. Each producer writes payload before
+publishing its counter; each consumer advances its own counter after reading.
+Host operations run with the vCPU stopped and preserve the other side's
+counters. Backpressure and deadlines bound host operations. Guest provisioning
+protocols remain in their owning recipes.
+
 ### RAM framebuffer protocol
 
 The host maps an additional 8 MiB of ordinary RAM at physical `0xe0000000`,

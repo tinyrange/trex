@@ -5,11 +5,15 @@ const context = canvas.getContext('2d');
 const status = document.querySelector('#status');
 const button = document.querySelector('#connect');
 const cad = document.querySelector('#cad');
+const tabs = document.querySelector('#tabs');
+const create = document.querySelector('#create');
+const title = document.querySelector('#vm-name');
 const token = location.hash.slice(1) || sessionStorage.getItem('trex-vnc-token');
 if (token) sessionStorage.setItem('trex-vnc-token', token);
 history.replaceState(null, '', location.pathname);
 
 let socket, rfb, active = false, buttons = 0;
+let selected, machines = [], creating = false, cadTimer;
 let x = 32768, y = 32768;
 const held = new Set();
 const buttonMask = button => [1, 2, 4][button] || 0;
@@ -24,11 +28,13 @@ function release() {
 }
 
 function stop() {
+  clearTimeout(cadTimer);
   release();
   active = false;
   cad.disabled = true;
   rfb?.close();
   socket?.close();
+  socket = null;
   button.textContent = 'Connect';
   if (document.pointerLockElement === canvas) document.exitPointerLock();
 }
@@ -50,7 +56,8 @@ function connect() {
   status.textContent = 'Connecting…';
   button.textContent = 'Disconnect';
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${scheme}://${location.host}/rfb?token=${encodeURIComponent(token)}`);
+  if (!selected) return;
+  const ws = new WebSocket(`${scheme}://${location.host}/rfb?token=${encodeURIComponent(token)}&vm=${encodeURIComponent(selected)}`);
   socket = ws;
   ws.binaryType = 'arraybuffer';
   const client = new RFB(
@@ -141,6 +148,65 @@ cad.onclick = () => {
     held.add(key);
     rfb.key(key, true);
   }
-  setTimeout(release, 100);
+  cadTimer = setTimeout(release, 100);
 };
-if (token) connect();
+
+function renderTabs() {
+  tabs.replaceChildren(...machines.map(vm => {
+    const tab = document.createElement('button');
+    tab.textContent = vm.name;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(vm.id === selected));
+    tab.onclick = () => select(vm.id);
+    return tab;
+  }));
+}
+function select(id) {
+  if (id === selected) return;
+  stop();
+  selected = id;
+  sessionStorage.setItem('trex-vnc-vm', id);
+  title.textContent = machines.find(vm => vm.id === id)?.name || 'VM';
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  renderTabs();
+  connect();
+}
+async function api(method = 'GET') {
+  const response = await fetch('/api/vms', {method, headers: {Authorization: `Bearer ${token}`}});
+  if (!response.ok) throw new Error((await response.text()).trim());
+  return response.json();
+}
+async function refresh() {
+  const result = await api();
+  machines = result.vms;
+  create.hidden = !result.canCreate;
+  create.disabled = creating || result.creating;
+  renderTabs();
+  return result;
+}
+create.onclick = async () => {
+  if (creating) return;
+  creating = true;
+  create.disabled = true;
+  create.textContent = 'Creating VM…';
+  try {
+    const vm = await api('POST');
+    await refresh();
+    select(vm.id);
+  } catch (error) {
+    status.textContent = `Could not create VM: ${error.message}`;
+  } finally {
+    creating = false;
+    create.disabled = false;
+    create.textContent = '+ New VM';
+  }
+};
+if (token) {
+  refresh().then(() => {
+    const previous = sessionStorage.getItem('trex-vnc-vm');
+    select(machines.some(vm => vm.id === previous) ? previous : machines[0]?.id);
+  }).catch(error => { status.textContent = error.message; });
+}
+window.addEventListener('focus', () => {
+  if (token) refresh().catch(error => { status.textContent = error.message; });
+});

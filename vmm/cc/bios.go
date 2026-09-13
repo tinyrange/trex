@@ -17,28 +17,30 @@ const biosPort = 0xf1
 // Each IVT entry points to an OUT/IRET trampoline; native execution retains
 // all mode switches and executes the original boot sector and loader.
 type pc struct {
-	nic         *ne2000
-	framebuffer []byte
-	cpu         hypervisor.X86
-	ram         []byte
-	disk        vmm.Disk
-	geometry    vmm.CHSGeometry
-	now         func() time.Time
-	started     time.Time
-	console     []byte
-	cursor      uint16
-	mode        byte
-	ports       map[uint16]byte
-	cmos        [128]byte
-	cmosIndex   byte
-	lastService string
-	rtcNext     time.Time
-	rtcIRQ      bool
-	ide         *ide
-	vga         *vga
-	inputTrace  []string
-	keyboard    *keyboard
-	rtcTrace    []any
+	nic           *ne2000
+	framebuffer   []byte
+	channelMemory []byte
+	channelName   string
+	cpu           hypervisor.X86
+	ram           []byte
+	disk          vmm.Disk
+	geometry      vmm.CHSGeometry
+	now           func() time.Time
+	started       time.Time
+	console       []byte
+	cursor        uint16
+	mode          byte
+	ports         map[uint16]byte
+	cmos          [128]byte
+	cmosIndex     byte
+	lastService   string
+	rtcNext       time.Time
+	rtcIRQ        bool
+	ide           *ide
+	vga           *vga
+	inputTrace    []string
+	keyboard      *keyboard
+	rtcTrace      []any
 }
 
 func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) (*pc, error) {

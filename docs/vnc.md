@@ -3,7 +3,26 @@
 The native `-serve` frontend accepts a script whose `main(args)` returns a VM
 with the portable `vmm.DisplaySource` capability. cc supplies owned RGBA frames
 and serialized keyboard/pointer input. A callable result still serves a regular
-Starlark web application.
+Starlark web application. To expose several VMs, return a workspace:
+
+```python
+def main(args):
+    # The recipe supplies running VMs and owns any guest coordination.
+    return vmm.workspace({"Controller": controller, "Client": client}, create=create_vm)
+```
+
+The optional zero-argument factory returns `(name, vm)`. The frontend lists
+VMs as tabs and displays a **New VM** button when a factory is available.
+Creation calls are serialized; an error leaves the current tab connected.
+VMs retain their state when switching tabs. Input is released on the old VM,
+and the new connection requests its current framebuffer. Each VM permits one
+browser controller, so different browsers can use different VMs concurrently.
+The workspace retains all VM sessions until the serving process closes.
+
+`GET /api/vms` lists IDs/names; `POST /api/vms` invokes the factory and returns
+the new ID/name. Both require the session bearer token. POST also requires a
+matching Origin and rejects concurrent creation with HTTP 409. RFB connections
+select an ID using `/rfb?vm=...`; omitting the ID retains single-VM compatibility.
 
 From a trex checkout, pass a recipe whose `main(args)` returns a running VM:
 
@@ -18,7 +37,7 @@ provides an NT 3.1 browser recipe and guest drivers in
 
 Open the complete session URL printed in the terminal. Closing the browser
 leaves the VM running. Disk persistence follows the recipe's attachment policy.
-Only one browser can control the VM at a time. Disconnect to hand over control.
+Only one browser can control each VM at a time. Disconnect to hand over control.
 
 Click the canvas to capture keyboard and mouse; Esc releases mouse capture.
 The toolbar sends Ctrl+Alt+Delete without invoking the browser/host shortcut.
@@ -45,7 +64,7 @@ Validation:
 
 ```sh
 go test -race ./vmm/rfb ./vmm/vncweb ./vmm/cc ./vmm/star
-node --test vmm/vncweb/client_test.mjs
+node --test vmm/vncweb/*_test.mjs
 ```
 
 Protocol references: [RFB 3.8](https://www.rfc-editor.org/rfc/rfc6143) and

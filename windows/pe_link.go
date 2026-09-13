@@ -20,11 +20,15 @@ type PE32LinkOptions struct {
 	Subsystem                  uint16
 	VersionMajor, VersionMinor uint16
 	ImageBase                  uint32
+	Executable                 bool // emit an EXE instead of a DLL for a user subsystem
 }
 
 // LinkPE32 links one in-memory ELF32/i386 relocatable object into a PE image.
 // R_386_32 and R_386_PC32 are supported; other relocation semantics are rejected.
 func LinkPE32(object []byte, options PE32LinkOptions) ([]byte, error) {
+	if options.Executable && options.Entry == "" {
+		return nil, fmt.Errorf("executable requires an entry point")
+	}
 	if len(object) > 16<<20 {
 		return nil, fmt.Errorf("ELF object exceeds link bounds")
 	}
@@ -133,7 +137,7 @@ func LinkPE32(object []byte, options PE32LinkOptions) ([]byte, error) {
 	if entry == "" {
 		binary.LittleEndian.PutUint32(optional[16:], 0)
 	}
-	if options.Subsystem != 1 {
+	if options.Subsystem != 1 && !options.Executable {
 		binary.LittleEndian.PutUint16(out[0x96:], 0x2102)
 	}
 	binary.LittleEndian.PutUint32(optional[96:], exportRVA)

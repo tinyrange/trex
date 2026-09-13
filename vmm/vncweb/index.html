@@ -19,11 +19,20 @@
     canvas:focus { outline-color: #75baff; }
     p { margin: 8px 20px; color: #bcc5d1; }
     #status { flex: 1; }
+    nav { display: flex; align-items: center; gap: 8px; padding: 12px 20px 0; flex-wrap: wrap; }
+    #tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+    [role=tab] { background: #303844; color: inherit; border: 1px solid #596575; border-radius: 6px 6px 0 0; cursor: pointer; }
+    [role=tab][aria-selected=true] { background: #75baff; color: #102033; border-color: #75baff; }
+    #create { margin-left: auto; }
   </style>
 </head>
 <body>
+  <nav aria-label="Virtual machines">
+    <div id="tabs" role="tablist" aria-label="Virtual machines"></div>
+    <button id="create" hidden>+ New VM</button>
+  </nav>
   <header>
-    <strong>trex VM</strong>
+    <strong id="vm-name">trex VM</strong>
     <span id="status">Disconnected</span>
     <button id="connect">Connect</button>
     <button id="cad" disabled>Ctrl + Alt + Delete</button>

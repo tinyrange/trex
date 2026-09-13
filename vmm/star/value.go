@@ -58,15 +58,16 @@ func RegisterBackend(id string, capabilities []string) {
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
-		"backends": starlark.NewBuiltin("backends", vmmBackendsBuiltin),
-		"channel":  starlark.NewBuiltin("channel", vmmChannelBuiltin),
-		"disk":     starlark.NewBuiltin("disk", vmmDiskBuiltin),
-		"display":  starlark.NewBuiltin("display", vmmDisplayBuiltin),
-		"machine":  starlark.NewBuiltin("machine", vmmMachineBuiltin),
-		"network":  starlark.NewBuiltin("network", vmmNetworkBuiltin),
-		"switch":   starlark.NewBuiltin("switch", switchBuiltin),
-		"start":    starlark.NewBuiltin("start", vmmStartBuiltin),
-		"validate": starlark.NewBuiltin("validate", vmmValidateBuiltin),
+		"backends":  starlark.NewBuiltin("backends", vmmBackendsBuiltin),
+		"channel":   starlark.NewBuiltin("channel", vmmChannelBuiltin),
+		"disk":      starlark.NewBuiltin("disk", vmmDiskBuiltin),
+		"display":   starlark.NewBuiltin("display", vmmDisplayBuiltin),
+		"machine":   starlark.NewBuiltin("machine", vmmMachineBuiltin),
+		"network":   starlark.NewBuiltin("network", vmmNetworkBuiltin),
+		"switch":    starlark.NewBuiltin("switch", switchBuiltin),
+		"workspace": starlark.NewBuiltin("workspace", workspaceBuiltin),
+		"start":     starlark.NewBuiltin("start", vmmStartBuiltin),
+		"validate":  starlark.NewBuiltin("validate", vmmValidateBuiltin),
 	}
 }
 

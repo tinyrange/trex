@@ -254,6 +254,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"vmm.machine":                       "vmm.machine(architecture, memory, cpus=1, disks=[], networks=[], display=vmm.display('none'), channels=[], start_paused=False, required_capabilities=[])",
 	"vmm.network":                       "vmm.network(kind, name='net0', required=True, switch=None, mac='')",
 	"vmm.switch":                        "vmm.switch()",
+	"vmm.workspace":                     "vmm.workspace(vms, create=None)",
 	"vmm.start":                         "vmm.start(machine, backend)",
 	"vmm.validate":                      "vmm.validate(machine, backend)",
 	"windows.kd":                        "windows.kd(channel, architecture='i386', packet_limit=65535, memory_limit=64MiB, event_queue=512)",

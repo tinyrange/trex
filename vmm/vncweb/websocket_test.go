@@ -52,7 +52,7 @@ func TestRejectUnmaskedAndText(t *testing.T) {
 	}
 }
 func TestHTTPGuards(t *testing.T) {
-	s, _ := New(nil)
+	s, _ := New(displayStub{})
 	for _, test := range []struct {
 		path, origin string
 		status       int
