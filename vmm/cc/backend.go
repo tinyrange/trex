@@ -113,6 +113,10 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	if err != nil {
 		return nil, err
 	}
+	if err = configureCPU(cpu); err != nil {
+		cpu.Close()
+		return nil, err
+	}
 	regions := []hypervisor.RAMRegion{{Address: 0, Offset: 0, Size: 0xa0000}, {Address: 0xc0000, Offset: 0xc0000, Size: uint64(m.Memory) - 0xc0000}, {Address: ramfb.Address, Offset: uint64(m.Memory), Size: ramfb.Size}}
 	total := uint64(m.Memory) + ramfb.Size
 	if len(m.Channels) == 1 {

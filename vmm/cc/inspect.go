@@ -138,6 +138,7 @@ func (p *pc) inspectState() (starlark.Value, error) {
 	return starvalue.Starlark(map[string]any{
 		"network": network,
 		"pc":      int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
+		"cr2": int64(s.Cr2), "cr4": int64(s.Cr4),
 		"registers": registers, "idt_base": int64(s.Idt.Base),
 		"last_bios": p.lastService, "ata_commands": int64(p.ide.commands),
 		"ata_task": fmt.Sprintf("%x", p.ide.task), "vga_accesses": int64(p.vga.accesses),
