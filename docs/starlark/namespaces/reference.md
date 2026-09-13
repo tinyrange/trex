@@ -3653,6 +3653,18 @@ Selects direct children from a self-registration registry-state dictionary. valu
 
 Splits a self-registration registry-state dictionary into selected and retained dictionaries for a hive subtree. values selects the value-identity layout; ordering and payload identity are preserved, and neither result aliases the input dictionary.
 
+### `windows.sam_alias_members`
+
+`windows.sam_alias_members(source) -> list`
+
+Decodes the binary SID vector in an NT5 SAM alias C value supplied as bytes or a portable file, bounded to 16 MiB. Validates header and payload extents, SID encodings and member counts. Does not resolve host accounts or select membership policy.
+
+### `windows.sam_alias_with_members`
+
+`windows.sam_alias_with_members(source, members) -> bytes`
+
+Returns an NT5 SAM alias C value with its member SID vector replaced, preserving unrelated record fields. Accepts a source value bounded to 16 MiB and a list of checked binary SIDs; rejects duplicates. The caller must update the SAM reverse-membership indexes and counts in the same hive construction operation.
+
 ### `windows.sdk_inf_plan`
 
 `windows.sdk_inf_plan(inf, media, target="", sections=None, locations=None) -> dict`

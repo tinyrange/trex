@@ -50,6 +50,7 @@ type Attributes struct {
 // Metadata contains optional Windows filesystem metadata used by image
 // builders that can represent it.
 type Metadata struct {
+	NamedStreams       map[string]starfile.File
 	FileAttributes     uint32
 	HasFileAttributes  bool
 	SecurityDescriptor []byte
@@ -109,6 +110,13 @@ func (d *Directory) Snapshot() Snapshot {
 	metadata := make(map[string]Metadata, len(d.metadata))
 	for name, value := range d.metadata {
 		value.SecurityDescriptor = append([]byte(nil), value.SecurityDescriptor...)
+		if value.NamedStreams != nil {
+			streams := make(map[string]starfile.File, len(value.NamedStreams))
+			for key, file := range value.NamedStreams {
+				streams[key] = file
+			}
+			value.NamedStreams = streams
+		}
 		metadata[name] = value
 	}
 	sort.Strings(directories)

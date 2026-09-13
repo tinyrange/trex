@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -12,6 +13,58 @@ import (
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
+
+func TestNTFSBuildNamedStreams(t *testing.T) {
+	root := filesystemapi.New()
+	root.PutFile("/file.txt", filesystemapi.FileRecord{Data: []byte("main"), Size: 4})
+	root.SetMetadata("/file.txt", filesystemapi.Metadata{NamedStreams: map[string]starfile.File{
+		"Zone.Identifier": &starfile.Bytes{Name: "zone", Data: bytes.Repeat([]byte("named-stream"), 500)},
+		"Empty😀":          &starfile.Bytes{Name: "empty"},
+		"Data😀":           &starfile.Bytes{Name: "unicode", Data: []byte("unicode")},
+	}})
+	image, err := buildNTFSImageWithOptions(root, 64<<20, nil, 0, "STREAM", 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume, err := newNTFSVolume(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := volume.paths["/file.txt"]
+	if node == nil {
+		t.Fatal("missing file")
+	}
+	file := node.file
+	stream := file.streams["Zone.Identifier"]
+	if stream == nil {
+		t.Fatal("missing stream")
+	}
+	got, err := io.ReadAll(io.NewSectionReader(stream, 0, stream.Size()))
+	if err != nil || !bytes.Equal(got, bytes.Repeat([]byte("named-stream"), 500)) {
+		t.Fatalf("stream data mismatch: %v", err)
+	}
+	for name, expected := range map[string]string{"Empty😀": "", "Data😀": "unicode"} {
+		stream := file.streams[name]
+		if stream == nil {
+			t.Fatalf("missing Unicode stream %q", name)
+		}
+		data, err := io.ReadAll(io.NewSectionReader(stream, 0, stream.Size()))
+		if err != nil || string(data) != expected {
+			t.Fatalf("stream %q = %q, %v", name, data, err)
+		}
+	}
+}
+
+func TestNTFSRejectsCaseAliasedStreams(t *testing.T) {
+	root := filesystemapi.New()
+	root.PutFile("/file", filesystemapi.FileRecord{})
+	root.SetMetadata("/file", filesystemapi.Metadata{NamedStreams: map[string]starfile.File{
+		"Stream": &starfile.Bytes{}, "stream": &starfile.Bytes{},
+	}})
+	if _, err := buildNTFSImageWithOptions(root, 64<<20, nil, 0, "STREAM", 3, 1); err == nil {
+		t.Fatal("accepted duplicate stream names")
+	}
+}
 
 func TestNTFSBuiltinAcceptsVolumesLargerThanTwoGiB(t *testing.T) {
 	root := filesystemapi.New()

@@ -69,6 +69,7 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 }
 
 type Archive struct {
+	legacyIDs       map[uint32][20]byte
 	file            storage.Reader
 	flags           uint32
 	chunkSize       int
@@ -122,6 +123,7 @@ type wimLookupEntry struct {
 }
 
 type entry struct {
+	namedStreams   map[string]starfile.File
 	name           string
 	path           string
 	shortName      string
@@ -363,6 +365,9 @@ func openWithCache(file storage.Reader, store *bytecache.Cache, source uint64, r
 		return nil, fmt.Errorf("wim: invalid MSWIM signature")
 	}
 	headerSize := binary.LittleEndian.Uint32(header[8:12])
+	if headerSize == 96 && binary.LittleEndian.Uint32(header[12:16]) == 0x010a00 {
+		return openLegacyWIM(file, header[:96], store, source, readImages)
+	}
 	if headerSize < wimHeaderSize {
 		return nil, fmt.Errorf("wim: unsupported header size %d", headerSize)
 	}
@@ -1089,6 +1094,7 @@ func (w *Archive) applyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 
 func (image *image) virtualMetadata(entry entry, preserveHardLinks bool) virtualfs.Metadata {
 	metadata := virtualfs.Metadata{
+		NamedStreams:      entry.namedStreams,
 		FileAttributes:    entry.attrs,
 		HasFileAttributes: true,
 		CreationTime:      entry.creationTime,
@@ -1196,6 +1202,9 @@ func (w *Archive) readWIMDir(image *image, dir entry) ([]entry, error) {
 	key := strings.ToLower(dir.path)
 	if entries, ok := image.dirs[key]; ok {
 		return entries, nil
+	}
+	if w.legacyIDs != nil {
+		return w.readLegacyDir(image, dir)
 	}
 	data := image.metadata
 	var entries []entry
@@ -1540,6 +1549,9 @@ type File struct {
 }
 
 func (w *Archive) newFile(entry entry) *File {
+	if w.legacyIDs != nil && entry.hash == ([20]byte{}) && entry.size == 0 {
+		return &File{archive: w, entry: entry, reader: &starfile.Bytes{Name: entry.path}}
+	}
 	location, ok := w.byHash[string(entry.hash[:])]
 	if !ok {
 		return &File{archive: w, entry: entry}
@@ -1581,6 +1593,14 @@ func (f *File) Hash() (uint32, error) {
 }
 func (f *File) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "streams":
+		streams := starlark.NewDict(len(f.entry.namedStreams))
+		for key, file := range f.entry.namedStreams {
+			if err := streams.SetKey(starlark.String(key), file); err != nil {
+				return nil, err
+			}
+		}
+		return streams, nil
 	case "metadata":
 		return starfile.NewRecord(starlark.StringDict{
 			"creation_time":    starlark.MakeUint64(f.entry.creationTime),
@@ -1694,7 +1714,7 @@ func wimResourceLocationRecord(location wimResourceLocation) starlark.Value {
 	})
 }
 func (f *File) AttrNames() []string {
-	return append(starfile.AttrNames(), "metadata", "resource", "verify", "verify_locations")
+	return append(starfile.AttrNames(), "metadata", "resource", "streams", "verify", "verify_locations")
 }
 
 func wimCompressionName(archive *Archive, resource wimResource) string {
