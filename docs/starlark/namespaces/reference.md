@@ -2541,6 +2541,12 @@ Creates a bounded writable copy-on-write layer over a base block device. Writes 
 
 Returns a read-only file view of a live block device. Later device changes remain visible through the view; it is not an immutable snapshot.
 
+### `cc.backend`
+
+`cc.backend() -> vmm_backend`
+
+Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The initial i386 platform provides Go BIOS services, one ATA disk, VGA capture and keyboard input. vmm.start creates the guest from portable memory and disk intent.
+
 ### `clock.monotonic`
 
 `clock.monotonic() -> elapsed seconds`
@@ -3581,6 +3587,12 @@ Creates a lazy inspection object for a PE32 or PE32+ file. Metadata and data sha
 
 Links a labeled section, fixups and optional imports into a minimal PE32 executable. The caller supplies instruction bytes and policy; the builder lays out headers, RVAs and imports and checks fixup bounds.
 
+### `windows.pe32_link`
+
+`windows.pe32_link(object, imports, exports, callbacks=None, entry='', subsystem=3, version_major=3, version_minor=10, image_base=0x62000000) -> bytes`
+
+Links an in-memory ELF32/i386 cdecl object into a PE32 DLL or native driver. Imports map DLLs to symbol/stack-word dictionaries; exports and callbacks map symbols to stack-word counts. Explicit stdcall adapters bridge the object ABI. Supports R_386_32 and R_386_PC32 relocations; rejects unresolved symbols and unsupported relocations. No OS runtime is linked.
+
 ### `windows.pe_sign`
 
 `windows.pe_sign(file, identity, replace=False, page_hashes=False) -> bytes`
@@ -4148,7 +4160,7 @@ Methods and attributes: `kind`, `name`, `rva`.
 
 A lazy PE32/PE32+ inspection value. Metadata attributes expose headers, sections, imports, exports, resources, strings and debug/type-library data from an owned snapshot. read/disasm use RVAs; patch returns modified file bytes without changing the original. data provides the shared immutable source snapshot.
 
-Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `typelibs`, `version`.
+Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `typelibs`, `version`, `with_resources(resources)`.
 
 ### `windows.signing_identity` value
 

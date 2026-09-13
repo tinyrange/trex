@@ -73,6 +73,7 @@ import (
 	starcrypto "github.com/tinyrange/trex/script/crypto"
 	starjson "github.com/tinyrange/trex/script/json"
 	storagenative "github.com/tinyrange/trex/storage/native"
+	ccapi "github.com/tinyrange/trex/vmm/cc"
 	qemuapi "github.com/tinyrange/trex/vmm/qemu"
 	vmmstar "github.com/tinyrange/trex/vmm/star"
 	webstar "github.com/tinyrange/trex/web/star"
@@ -83,6 +84,9 @@ import (
 
 func predeclared() starlark.StringDict {
 	nativeIO := storagenative.Builtins()
+	if ccapi.Available() {
+		vmmstar.RegisterBackend("cc.v1", ccapi.Capabilities())
+	}
 	if qemuapi.Available() {
 		vmmstar.RegisterBackend("qemu.v1", qemuapi.Capabilities())
 	}
@@ -183,6 +187,7 @@ func predeclared() starlark.StringDict {
 		},
 		"firmware": namespace{name: "firmware", attrs: acpistar.Builtins()},
 		"image":    namespace{name: "image", attrs: imagestar.Builtins()},
+		"cc":       namespace{name: "cc", attrs: ccapi.Builtins()},
 		"qemu":     namespace{name: "qemu", attrs: qemuapi.Builtins()},
 		"runtime":  runtimeNamespace(),
 		"vmm":      namespace{name: "vmm", attrs: vmmstar.Builtins()},

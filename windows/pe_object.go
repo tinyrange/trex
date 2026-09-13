@@ -83,7 +83,7 @@ func (p *windowsPE) Freeze()               {}
 func (p *windowsPE) Truth() starlark.Bool  { return starlark.True }
 func (p *windowsPE) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: %s", p.Type()) }
 func (p *windowsPE) AttrNames() []string {
-	return []string{"amd64_unwind", "codeview", "data", "disasm", "exports", "imports", "info", "messages", "patch", "pointer_string_tables", "read", "resources", "sections", "typelibs", "version"}
+	return []string{"amd64_unwind", "codeview", "data", "disasm", "exports", "imports", "info", "messages", "patch", "pointer_string_tables", "read", "resources", "sections", "typelibs", "version", "with_resources"}
 }
 func (p *windowsPE) Attr(name string) (starlark.Value, error) {
 	if value, ok := p.cache[name]; ok {
@@ -142,6 +142,8 @@ func (p *windowsPE) Attr(name string) (starlark.Value, error) {
 		method = p.disasmBuiltin
 	case "patch":
 		method = p.patchBuiltin
+	case "with_resources":
+		method = p.withResourcesBuiltin
 	case "pointer_string_tables":
 		method = p.pointerStringTablesBuiltin
 	case "read":

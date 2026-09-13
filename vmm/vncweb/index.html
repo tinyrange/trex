@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>trex VM</title>
+  <style>
+    body { margin: 0; background: #20242b; color: #edf0f5; font: 15px system-ui; }
+    header { display: flex; gap: 16px; align-items: center; padding: 12px 20px; flex-wrap: wrap; }
+    button { padding: 7px 12px; }
+    main { display: flex; justify-content: center; padding: 12px; }
+    canvas {
+      background: black;
+      max-width: 100%;
+      height: auto;
+      image-rendering: pixelated;
+      outline: 2px solid #596575;
+    }
+    canvas:focus { outline-color: #75baff; }
+    p { margin: 8px 20px; color: #bcc5d1; }
+    #status { flex: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>trex VM</strong>
+    <span id="status">Disconnected</span>
+    <button id="connect">Connect</button>
+    <button id="cad" disabled>Ctrl + Alt + Delete</button>
+  </header>
+  <p>Click the display to capture keyboard and mouse. Press Esc to release the mouse. The VM keeps running when you disconnect.</p>
+  <main>
+    <canvas id="screen" width="640" height="480" tabindex="0" aria-label="Virtual machine display"></canvas>
+  </main>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

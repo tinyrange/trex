@@ -80,6 +80,15 @@ func (v *vmmSessionValue) VMMExtension(name string) (starlark.Value, error) {
 	return driver.Extension(v.ctx, name)
 }
 
+// VMMDisplay exposes the portable display capability to native frontends.
+func (v *vmmSessionValue) VMMDisplay() (vmmapi.DisplaySource, error) {
+	d, ok := v.driver.(vmmapi.DisplaySource)
+	if !ok {
+		return nil, unsupportedVMM("framebuffer display")
+	}
+	return d, nil
+}
+
 func newVMMSession(machine VMMMachine, backend VMMBackend, driver VMMDriver) *vmmSessionValue {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &vmmSessionValue{machine: machine, backend: backend, driver: driver, ctx: ctx, cancel: cancel}
