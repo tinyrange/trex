@@ -74,6 +74,17 @@ func webBrowseBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlar
 	}
 	result := map[string]any{"path": name, "entry": metadata}
 	if metadata.Container {
+		finish = requestPhase(thread, "plans")
+		plans, e := node.Plans()
+		finish()
+		if e != nil {
+			return browseError(422, e.Error()), nil
+		}
+		if len(plans) > 0 {
+			result["plans"] = plans
+		}
+	}
+	if metadata.Container {
 		offset, limit := 0, 500
 		if s := q("offset"); s != "" {
 			offset, err = strconv.Atoi(s)

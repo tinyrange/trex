@@ -27,6 +27,13 @@ type Entry struct {
 // View is the shared read-only directory interface returned by every detector.
 type View interface{ Entries() ([]Entry, error) }
 
+// MetadataView decodes structured metadata only when a node is inspected.
+// Listing a parent uses Entry.Attributes and does not invoke this method.
+type MetadataView interface {
+	View
+	Metadata() (format string, attributes map[string]any, err error)
+}
+
 // FoldedView marks directory names as case-insensitive, preserving Windows filesystem semantics.
 type FoldedView struct{ View }
 
@@ -226,13 +233,13 @@ func (n *Node) expand(depth int) ([]*Node, error) {
 	}
 	out := make([]*Node, len(entries))
 	for i, e := range entries {
-		node := Open(e.Reader, e.Name, n.options)
+		node := Open(e.Reader, e.Name, n.childOptions(e.Name))
 		node.kind = e.Kind
 		node.attributes = e.Attributes
 		if e.View != nil {
 			node.view = e.View
 			node.detectOnce.Do(func() {}) // Explicit context takes precedence over raw-byte detection.
-			node.loader = func() ([]*Node, error) { v := &Node{view: e.View, options: n.options}; return v.expand(depth + 1) }
+			node.loader = func() ([]*Node, error) { return node.expand(depth + 1) }
 		}
 		out[i] = node
 	}
@@ -241,6 +248,7 @@ func (n *Node) expand(depth int) ([]*Node, error) {
 
 // FromView wraps an already-open directory using the same recursive node API.
 func FromView(view View, name string, options Options) *Node {
+	options.Source = &SourceContext{Tree: view}
 	n := Directory(name, nil, options)
 	n.view = view
 	n.loader = func() ([]*Node, error) { return n.expand(0) }

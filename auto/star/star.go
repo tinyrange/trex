@@ -2,6 +2,7 @@
 package star
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +10,7 @@ import (
 	"github.com/tinyrange/trex/auto"
 	"github.com/tinyrange/trex/auto/adapter"
 	_ "github.com/tinyrange/trex/auto/imports"
+	jsonstar "github.com/tinyrange/trex/script/json"
 	"github.com/tinyrange/trex/storage"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
@@ -16,17 +18,34 @@ import (
 
 type Value struct{ Node *auto.Node }
 
-func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func Builtin(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var source starlark.Value
+	var tree starlark.Value = starlark.None
+	var sourcePath string
 	name := ""
 	options := auto.Options{MaxExpandedBytes: 512 << 20, MaxEntries: 100000, MaxDepth: 32}
-	if err := starlark.UnpackArgs("auto", args, kwargs, "source", &source, "name?", &name, "maximum?", &options.MaxExpandedBytes, "maximum_entries?", &options.MaxEntries, "maximum_depth?", &options.MaxDepth); err != nil {
+	if err := starlark.UnpackArgs("auto", args, kwargs, "source", &source, "name?", &name, "maximum?", &options.MaxExpandedBytes, "maximum_entries?", &options.MaxEntries, "maximum_depth?", &options.MaxDepth, "tree?", &tree, "path?", &sourcePath); err != nil {
 		return nil, err
 	}
 	if options.MaxExpandedBytes <= 0 || options.MaxEntries <= 0 || options.MaxDepth <= 0 {
 		return nil, fmt.Errorf("auto: limits must be positive")
 	}
+	if tree != starlark.None {
+		root, err := Builtin(thread, builtin, starlark.Tuple{tree}, nil)
+		if err != nil {
+			return nil, err
+		}
+		options.Source, err = root.(*Value).Node.SourceTree(sourcePath)
+		if err != nil {
+			return nil, err
+		}
+	} else if sourcePath != "" {
+		return nil, fmt.Errorf("auto: path requires tree")
+	}
 	if v, ok := source.(*Value); ok {
+		if options.Source != nil {
+			return nil, fmt.Errorf("auto: supply a raw file to attach tree context")
+		}
 		return v, nil
 	}
 	if reader, ok := source.(storage.Reader); ok {
@@ -73,6 +92,8 @@ func (v *Value) Get(key starlark.Value) (starlark.Value, bool, error) {
 }
 func (v *Value) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "plans":
+		return v.plans()
 	case "name":
 		return starlark.String(v.Node.Name()), nil
 	case "file":
@@ -85,7 +106,21 @@ func (v *Value) Attr(name string) (starlark.Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		return Metadata(m), nil
+		out := Metadata(m)
+		if m.Attributes != nil {
+			data, err := json.Marshal(m.Attributes)
+			if err != nil {
+				return nil, err
+			}
+			attributes, err := jsonstar.Decode(data)
+			if err != nil {
+				return nil, err
+			}
+			if err := out.SetKey(starlark.String("attributes"), attributes); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
 	case "files":
 		children, err := v.Node.Children()
 		if err != nil {
@@ -135,7 +170,7 @@ func (v *Value) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (*Value) AttrNames() []string {
-	return append(starfile.AttrNames(), "file", "files", "find", "page", "metadata", "name")
+	return append(starfile.AttrNames(), "file", "files", "find", "page", "metadata", "name", "plans")
 }
 func Metadata(m auto.Metadata) *starlark.Dict {
 	d := starlark.NewDict(6)

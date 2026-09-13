@@ -36,6 +36,12 @@ func jsonDecodeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if err != nil {
 		return nil, fmt.Errorf("json.decode: %w", err)
 	}
+	return Decode(data)
+}
+
+// Decode converts a caller-bounded JSON document to Starlark, preserving
+// integer precision and rejecting trailing data.
+func Decode(data []byte) (starlark.Value, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	var decoded any

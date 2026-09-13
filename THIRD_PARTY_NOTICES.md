@@ -9,6 +9,7 @@ licences:
 | `go.starlark.net` | BSD-3-Clause |
 | `golang.org/x/arch` | BSD-3-Clause |
 | `golang.org/x/sys` | BSD-3-Clause |
+| `golang.org/x/text` | BSD-3-Clause |
 
 The copyright and licence notices required for compiled trex binaries are
 reproduced in [docs/dependency-licenses.md](docs/dependency-licenses.md).

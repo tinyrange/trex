@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf16"
 
 	"go.starlark.net/starlark"
@@ -487,26 +488,86 @@ func (d *fatMetadataDirectory) files() (*starlark.List, error) {
 }
 
 type fatFile struct {
-	image *fatImage
-	entry fatDirEntry
+	image    *fatImage
+	entry    fatDirEntry
+	mu       sync.Mutex
+	clusters []uint32
+	seen     map[uint32]bool
 }
 
 func (f *fatFile) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("negative offset")
 	}
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if off >= f.Size() {
 		return 0, io.EOF
 	}
-	data, err := f.image.readClusterChain(f.entry.cluster, f.entry.size)
-	if err != nil {
-		return 0, err
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	clusterSize := f.image.bytesPerSector * f.image.sectorsPerCluster
+	want := min(int64(len(p)), f.entry.size-off)
+	n := 0
+	for int64(n) < want {
+		position := off + int64(n)
+		index := position / clusterSize
+		for int64(len(f.clusters)) <= index {
+			cluster := f.entry.cluster
+			if len(f.clusters) > 0 {
+				var err error
+				cluster, err = f.image.nextCluster(f.clusters[len(f.clusters)-1])
+				if err != nil {
+					return n, err
+				}
+				if f.image.isEndCluster(cluster) {
+					return n, io.ErrUnexpectedEOF
+				}
+			}
+			if err := f.image.validDataCluster(cluster); err != nil {
+				return n, err
+			}
+			if f.seen[cluster] {
+				return n, fmt.Errorf("fat: cyclic file cluster chain")
+			}
+			if f.seen == nil {
+				f.seen = make(map[uint32]bool)
+			}
+			f.seen[cluster] = true
+			f.clusters = append(f.clusters, cluster)
+		}
+		within := position % clusterSize
+		count := min(want-int64(n), clusterSize-within)
+		read, err := starfile.ReadFullAt(f.image.file, p[n:int64(n)+count], f.image.clusterOffset(f.clusters[index])+within)
+		n += read
+		if err != nil {
+			return n, err
+		}
 	}
-	n := copy(p, data[off:])
 	if n < len(p) {
 		return n, io.EOF
 	}
 	return n, nil
+}
+
+func (i *fatImage) validDataCluster(cluster uint32) error {
+	clusterSize := i.bytesPerSector * i.sectorsPerCluster
+	limit := i.totalSectors * i.bytesPerSector
+	reserved := uint32(0x0ffffff0)
+	if i.fatType == 12 {
+		reserved = 0xff0
+	} else if i.fatType == 16 {
+		reserved = 0xfff0
+	}
+	if cluster < 2 || cluster >= reserved || clusterSize <= 0 {
+		return fmt.Errorf("fat: invalid data cluster %d", cluster)
+	}
+	off := i.clusterOffset(cluster)
+	if off < i.dataOffset || off > limit || clusterSize > limit-off {
+		return fmt.Errorf("fat: cluster outside volume")
+	}
+	return nil
 }
 func (f *fatFile) WriteAt(_ []byte, _ int64) (int, error) {
 	return 0, fmt.Errorf("fat entry %q is read-only", f.entry.path)

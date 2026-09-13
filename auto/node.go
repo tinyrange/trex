@@ -19,6 +19,9 @@ var ErrLimit = errors.New("auto limit exceeded")
 // Options bounds decompression, entry indexing and recursive container traversal.
 // Zero fields use the defaults. No host paths or processes are used by this API.
 type Options struct {
+	plans bool
+	// Source optionally supplies raw companion files from the containing tree.
+	Source               *SourceContext
 	MaxExpandedBytes     int64
 	MaxEntries, MaxDepth int
 }
@@ -50,6 +53,9 @@ type Metadata struct {
 // Node retains raw file bytes even when they also represent a container.
 // Children are opened once, on demand. A failed parse is retained as an error.
 type Node struct {
+	planOnce                 sync.Once
+	proposals                []*Plan
+	planErr                  error
 	name, kind               string
 	reader                   storage.Reader
 	options                  Options
@@ -122,6 +128,23 @@ func (n *Node) Metadata() (Metadata, error) {
 		m.Container = n.view != nil
 	}
 	m.Container = m.Container || n.view != nil
+	if described, ok := n.view.(MetadataView); ok {
+		format, attributes, err := described.Metadata()
+		if err != nil {
+			return m, err
+		}
+		if format != "" {
+			m.Format = format
+		}
+		merged := make(map[string]any, len(m.Attributes)+len(attributes))
+		for k, v := range m.Attributes {
+			merged[k] = v
+		}
+		for k, v := range attributes {
+			merged[k] = v
+		}
+		m.Attributes = merged
+	}
 	return m, n.detectErr
 }
 func (n *Node) Children() ([]*Node, error) {
@@ -184,6 +207,16 @@ func (n *Node) Resolve(name string) (*Node, error) {
 	for _, part := range parts {
 		if part == "" || part == "." || part == ".." {
 			return nil, fs.ErrInvalid
+		}
+		if part == "$plans" && current.options.plans {
+			planned, e := current.planDirectory()
+			if e == nil {
+				current = planned
+				continue
+			}
+			if !errors.Is(e, fs.ErrNotExist) {
+				return nil, e
+			}
 		}
 		var children []*Node
 		view, err := current.pagingView()

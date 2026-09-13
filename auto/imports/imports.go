@@ -14,6 +14,7 @@ import (
 	_ "github.com/tinyrange/trex/archive/compressed"
 	_ "github.com/tinyrange/trex/archive/gzip"
 	_ "github.com/tinyrange/trex/archive/hunk"
+	_ "github.com/tinyrange/trex/archive/ibmisave"
 	_ "github.com/tinyrange/trex/archive/irix"
 	_ "github.com/tinyrange/trex/archive/kwaj"
 	_ "github.com/tinyrange/trex/archive/lha"

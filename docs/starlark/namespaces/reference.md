@@ -1861,9 +1861,15 @@ Applies one KD load/unload event to resolver state.
 
 ### `auto`
 
-`auto(source, name='', maximum=512MiB, maximum_entries=100000, maximum_depth=32) -> auto`
+`auto(source, name='', maximum=512MiB, maximum_entries=100000, maximum_depth=32, tree=None, path='') -> auto`
 
-Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Container paths resolve recursively while file preserves the original bytes.
+Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Container paths resolve recursively while file preserves the original bytes. Detectors receive containing-tree context for companion files across directories. For an isolated file, tree and its tree-relative path attach that context explicitly. Companion lookup reads raw entries within the supplied tree without following links or recursively detecting files; dot segments and host paths are not accepted.
+
+### `auto_plan`
+
+`auto_plan(source, name='', maximum=512MiB, maximum_entries=100000, maximum_depth=32, tree=None, path='') -> auto`
+
+Like auto, but also proposes named virtual filesystems from directory listings. The plans attribute returns id, title, description and a relative path under $plans. Following that path constructs the selected read-only view on demand; discovery does not read member payloads. Ordinary files remain accessible, plain auto is unchanged, and a real $plans entry takes precedence. Plans preserve input provenance and distinguish variants rather than overwriting duplicate objects. A proposal is a candidate: content validation can report unsupported or malformed inputs when opened.
 
 ### `bytes_concat`
 
@@ -2036,6 +2042,12 @@ Reads one non-overlaid Amiga HUNK_HEADER load module without loading or executin
 `archive.hunk_objects(file, maximum_records=1M) -> record`
 
 Reads concatenated classic Amiga and EHF HUNK_UNIT object libraries, preserving unit names and complete raw unit views in units. The entries list exposes code, data and debug payloads under unique unit/record paths for nested inspection. Each unit's records expose tag, flags, absolute offset, raw bytes, optional payload, memory_size, symbols and relocations. Names retain longword padding. Code, data, debug bytes and big-endian relocation offset arrays remain borrowed files; BSS has a declared memory_size and no payload. Checks record boundaries, section ordering and END markers. maximum_records bounds blocks, symbols and relocation groups together. Does not link, apply relocations, resolve symbols or allocate BSS; reference targets and offsets are metadata, not a validated linked program. Supports EHF PPC_CODE, RELRELOC26 and EXT_RELREF26 framing without applying relocations. Load modules require hunk_load; indexed libraries and overlays remain rejected rather than silently skipped.
+
+### `archive.ibmi_save`
+
+`archive.ibmi_save(file, maximum_entries=100000) -> record`
+
+Reads IBM i 7.5 optical save streams: save groups, EBCDIC object names, descriptor types, raw headers and stored sections. Preserves logical sizes, opaque addresses and uninterpreted object trailers without inventing restored contents. Validates page framing and section bounds; standalone 528-byte SAVF transport and other release layouts are not supported. Auto browsing exposes named object directories and downloadable stored bytes; this is structural decoding, not object restoration.
 
 ### `archive.installer`
 
@@ -3846,9 +3858,9 @@ Methods and attributes: `binary`, `bytes`, `gid`, `hex`, `mode`, `mtime`, `name`
 
 ### `auto` value
 
-A lazy standardized file or directory node. metadata describes the selected source, files lists immediate children, and indexed paths or find recursively enter nested containers. file retains the original bytes; compressed containers expose their decoded children without an extra path component.
+A lazy standardized file or directory node. metadata describes the selected source, files lists immediate children, and indexed paths or find recursively enter nested containers. file retains the original bytes; compressed containers expose their decoded children without an extra path component. page reads a bounded child listing. Nodes created by auto_plan expose directory-derived proposals through plans; follow a proposal's path to open its virtual filesystem. Plain auto returns no plans.
 
-Methods and attributes: `bytes(offset=0, size=remaining)`, `file`, `files`, `find(path)`, `metadata`, `name`, `slice(offset=0, size=remaining)`.
+Methods and attributes: `bytes(offset=0, size=remaining)`, `file`, `files`, `find(path)`, `metadata`, `name`, `page(offset=0, limit=100)`, `plans`, `slice(offset=0, size=remaining)`.
 
 ### `binary.builder` value
 
