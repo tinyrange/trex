@@ -25,6 +25,7 @@ type pc struct {
 	ram           []byte
 	disk          vmm.Disk
 	geometry      vmm.CHSGeometry
+	biosGeometry  vmm.CHSGeometry
 	now           func() time.Time
 	started       time.Time
 	console       []byte
@@ -50,10 +51,14 @@ func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) 
 	if disk.CHS != nil {
 		p.geometry = *disk.CHS
 	}
-	if p.geometry.Cylinders > 1024 {
-		p.geometry.Cylinders = 1024
+	if p.geometry.Cylinders > 16383 {
+		p.geometry.Cylinders = 16383
 	}
 	p.ide = newIDE(disk, p.geometry, cpu.SetIRQ)
+	p.biosGeometry = p.geometry
+	if disk.CHS == nil {
+		p.biosGeometry = translatedGeometry(uint64(disk.Device.Geometry().Size / 512))
+	}
 	p.vga = newVGA(ram[0xb8000:0xc0000])
 	p.keyboard = newKeyboard(cpu.SetIRQ)
 	p.initializeCMOS()
@@ -281,12 +286,13 @@ func (p *pc) bios() error {
 		case 0, 1, 0x0c, 0x10:
 			setAH(&r.Rax, 0)
 		case 2, 3:
+			g := p.biosGeometry
 			c := int(byte(r.Rcx>>8)) | int(byte(r.Rcx)&0xc0)<<2
 			h := int(byte(r.Rdx >> 8))
 			sec := int(byte(r.Rcx) & 63)
 			count := int(al)
-			lba := (c*p.geometry.Heads+h)*p.geometry.Sectors + sec - 1
-			if count == 0 || c >= p.geometry.Cylinders || h >= p.geometry.Heads || sec < 1 || sec > p.geometry.Sectors {
+			lba := (c*g.Heads+h)*g.Sectors + sec - 1
+			if count == 0 || c >= g.Cylinders || h >= g.Heads || sec < 1 || sec > g.Sectors {
 				carry = true
 				setAH(&r.Rax, 4)
 				break
@@ -312,15 +318,36 @@ func (p *pc) bios() error {
 				setAH(&r.Rax, 0)
 			}
 		case 8:
-			c := p.geometry.Cylinders - 1
-			setLow(&r.Rcx, uint16((c&255)<<8|(c>>8)<<6|p.geometry.Sectors))
-			setLow(&r.Rdx, uint16((p.geometry.Heads-1)<<8|1))
+			c := p.biosGeometry.Cylinders - 1
+			setLow(&r.Rcx, uint16((c&255)<<8|(c>>8)<<6|p.biosGeometry.Sectors))
+			setLow(&r.Rdx, uint16((p.biosGeometry.Heads-1)<<8|1))
 			setAH(&r.Rax, 0)
 		case 0x15:
 			setAH(&r.Rax, 3)
 			count := uint32(p.disk.Device.Geometry().Size / 512)
 			setLow(&r.Rcx, uint16(count>>16))
 			setLow(&r.Rdx, uint16(count))
+		case 0x41:
+			if uint16(r.Rbx) != 0x55aa {
+				carry = true
+				setAH(&r.Rax, 1)
+				break
+			}
+			setLow(&r.Rbx, 0xaa55)
+			setLow(&r.Rcx, 1) // Fixed-disk access subset; no removable media.
+			setAH(&r.Rax, 0x21)
+		case 0x42, 0x43:
+			status := p.extendedDiskTransfer(s.Ds.Base+uint64(uint16(r.Rsi)), ah == 0x43, al)
+			carry = status != 0
+			setAH(&r.Rax, status)
+		case 0x44, 0x47:
+			status := p.extendedDiskPosition(s.Ds.Base+uint64(uint16(r.Rsi)), ah == 0x44)
+			carry = status != 0
+			setAH(&r.Rax, status)
+		case 0x48:
+			status := p.extendedDiskParameters(s.Ds.Base + uint64(uint16(r.Rsi)))
+			carry = status != 0
+			setAH(&r.Rax, status)
 		default:
 			carry = true
 			setAH(&r.Rax, 1)

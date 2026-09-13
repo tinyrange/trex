@@ -7,6 +7,13 @@ Go constructs the BIOS data areas and supplies interrupt services through
 small OUT/IRET firmware entrypoints. No firmware binary or external process
 is used.
 
+Fixed-disk BIOS services include EDD probing, extended reads/writes, verification,
+seek and drive parameters. Larger disks use translated BIOS CHS independently
+of ATA's 16-head task-file geometry. Explicit caller-supplied CHS remains intact.
+The single-CPU model exposes basic CPUID leaves through 3 with supported legacy
+features, without SMT or XSAVE/AVX enumeration. CPUID policy uses the portable
+accelerator interface rather than patching guest instructions.
+
 The PC contains one CPU, KVM PIC/PIT, a CMOS RTC with periodic IRQ8, one primary
 ATA PIO disk, standard planar VGA and i8042 keyboard/mouse. The disk uses the
 portable block interface; snapshot attachments use bounded memory overlays.
@@ -42,7 +49,7 @@ consumer-level validation of this backend, not image-building features of trex.
 `vm.extension("cc.v1").state()` returns a serialized observation containing
 PC, CR0/CR3, last BIOS service, ATA task registers and command count, VGA
 access count, PIC/PIT state, and bounded keyboard/CMOS transaction tails.
-It also exposes integer registers and the IDT base. `read_physical(address,
+It also exposes integer registers, CR2/CR4 and the IDT base. `read_physical(address,
 size)` returns an owned snapshot of at most 64 KiB of RAM, including the display
 aperture. `breakpoint(address)` installs a debugger-owned execution breakpoint;
 zero disables it. A hit pauses execution and `resume()` skips that occurrence.
