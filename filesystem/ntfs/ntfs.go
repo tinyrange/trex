@@ -143,6 +143,7 @@ func NTFSBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, k
 }
 
 type ntfsNode struct {
+	streams            []ntfsNamedStream
 	id                 uint64
 	name               string
 	names              []ntfsName
@@ -172,6 +173,12 @@ type ntfsNode struct {
 	dataAttributeID    uint16
 	attributeListLCN   int64
 	indexRootRecordID  uint64
+}
+
+type ntfsNamedStream struct {
+	name string
+	file starfile.File
+	lcn  int64
 }
 
 type ntfsDirectoryLink struct {
@@ -395,6 +402,10 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 		}
 	}
 	for _, node := range b.nodes {
+		for index := range node.streams {
+			stream := &node.streams[index]
+			stream.lcn = b.allocate(fsinternal.CeilDiv(stream.file.Size(), ntfsCluster))
+		}
 		if node.dir || node.size == 0 || node.id < 12 {
 			continue
 		}
@@ -440,6 +451,11 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 		}
 	}
 	for _, node := range b.nodes {
+		for _, stream := range node.streams {
+			if stream.file.Size() > 0 {
+				extents = append(extents, filesystemapi.ExtentSpec{Start: stream.lcn * ntfsCluster, Size: stream.file.Size(), File: stream.file})
+			}
+		}
 		if len(node.index.blocks) > 0 {
 			extents = append(extents, filesystemapi.ExtentSpec{Start: node.indexLCN * ntfsCluster, Size: int64(len(node.index.blocks)), Data: node.index.blocks})
 		}
@@ -698,6 +714,19 @@ func (b *ntfsBuild) importDirectory(dir *filesystemapi.Directory) error {
 		}
 	}
 	for _, node := range b.nodes {
+		streamNames := make(map[string]bool)
+		for name, file := range node.metadata.NamedStreams {
+			if name == "" || strings.ContainsAny(name, "\\/:\x00") || len(utf16.Encode([]rune(name))) > 255 || file == nil || file.Size() < 0 {
+				return fmt.Errorf("ntfs: invalid named stream for %s", node.fullPath)
+			}
+			identity := string(utf16.Decode(ntfsNameSortKey(name, b.upCase)))
+			if streamNames[identity] {
+				return fmt.Errorf("ntfs: duplicate named stream for %s", node.fullPath)
+			}
+			streamNames[identity] = true
+			node.streams = append(node.streams, ntfsNamedStream{name: name, file: file})
+		}
+		sort.Slice(node.streams, func(i, j int) bool { return node.streams[i].name < node.streams[j].name })
 		for _, link := range node.children {
 			link.sortKey = ntfsNameSortKey(link.name, b.upCase)
 		}
@@ -909,6 +938,9 @@ func ntfsNodeRecordSize(node *ntfsNode, names []ntfsName, attributeList bool) in
 		used += len(ntfsNonResidentAttr(ntfsAttrData, "", 1, node.size))
 	} else {
 		used += len(ntfsResidentAttr(ntfsAttrData, "", nil))
+	}
+	for _, stream := range node.streams {
+		used += len(ntfsStreamAttr(stream, 1))
 	}
 	return align8(used + 4)
 }
@@ -1540,6 +1572,9 @@ func (b *ntfsBuild) mftRecord(node *ntfsNode) ([]byte, error) {
 		}
 	}
 
+	for _, stream := range node.streams {
+		attrs = append(attrs, ntfsStreamAttr(stream, stream.lcn))
+	}
 	offset := attrOff
 	nextAttributeID := uint16(0)
 	nextExtendedID := node.dataAttributeID
@@ -1645,7 +1680,7 @@ func ntfsResidentAttr(typ uint32, name string, value []byte) []byte {
 	binary.LittleEndian.PutUint32(attr[4:8], uint32(total))
 	binary.LittleEndian.PutUint16(attr[10:12], nameOff)
 	if len(nameBytes) > 0 {
-		attr[9] = byte(len([]rune(name)))
+		attr[9] = byte(len(nameBytes) / 2)
 		copy(attr[nameOff:], nameBytes)
 	}
 	binary.LittleEndian.PutUint32(attr[16:20], uint32(len(value)))
@@ -1659,6 +1694,13 @@ func ntfsResidentAttr(typ uint32, name string, value []byte) []byte {
 
 func ntfsResidentFileNameAttr(node *ntfsNode, name ntfsName) []byte {
 	return ntfsResidentAttr(ntfsAttrFileName, "", ntfsFileNameAttribute(node, name))
+}
+
+func ntfsStreamAttr(stream ntfsNamedStream, lcn int64) []byte {
+	if stream.file.Size() == 0 {
+		return ntfsResidentAttr(ntfsAttrData, stream.name, nil)
+	}
+	return ntfsNonResidentAttr(ntfsAttrData, stream.name, lcn, stream.file.Size())
 }
 
 func ntfsNonResidentAttr(typ uint32, name string, lcn, size int64) []byte {
@@ -1675,7 +1717,7 @@ func ntfsNonResidentAttr(typ uint32, name string, lcn, size int64) []byte {
 	binary.LittleEndian.PutUint32(attr[4:8], uint32(total))
 	attr[8] = 1
 	if len(nameBytes) > 0 {
-		attr[9] = byte(len([]rune(name)))
+		attr[9] = byte(len(nameBytes) / 2)
 		binary.LittleEndian.PutUint16(attr[10:12], uint16(nameOff))
 		copy(attr[nameOff:], nameBytes)
 	}
@@ -2559,6 +2601,9 @@ func (b *ntfsBuild) volumeBitmap() []byte {
 	}
 	mark(b.bitmapLCN, fsinternal.CeilDiv(b.bitmapSize, ntfsCluster))
 	for _, node := range b.nodes {
+		for _, stream := range node.streams {
+			mark(stream.lcn, fsinternal.CeilDiv(stream.file.Size(), ntfsCluster))
+		}
 		if node.attributeListLCN > 0 && len(node.attributeList) > 0 {
 			mark(node.attributeListLCN, fsinternal.CeilDiv(int64(len(node.attributeList)), ntfsCluster))
 		}
