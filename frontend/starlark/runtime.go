@@ -25,6 +25,7 @@ import (
 	"github.com/tinyrange/trex/archive/compactpro"
 	"github.com/tinyrange/trex/archive/compressed"
 	"github.com/tinyrange/trex/archive/hunk"
+	"github.com/tinyrange/trex/archive/ibmisave"
 	"github.com/tinyrange/trex/archive/irix"
 	"github.com/tinyrange/trex/archive/kwaj"
 	"github.com/tinyrange/trex/archive/lha"
@@ -88,7 +89,8 @@ func predeclared() starlark.StringDict {
 	windowsBuiltins := windowsapi.Builtins()
 	windowsBuiltins["kd"] = starlark.NewBuiltin("kd", kd.Builtin)
 	return starlark.StringDict{
-		"auto": starlark.NewBuiltin("auto", autostar.Builtin),
+		"auto":      starlark.NewBuiltin("auto", autostar.Builtin),
+		"auto_plan": starlark.NewBuiltin("auto_plan", autostar.PlanBuiltin),
 		"archive": namespace{
 			name: "archive",
 			attrs: starlark.StringDict{
@@ -114,6 +116,7 @@ func predeclared() starlark.StringDict {
 				"vmsbackup_blocks": starlark.NewBuiltin("vmsbackup_blocks", vmsbackup.BlocksBuiltin),
 				"vmsbackup":        starlark.NewBuiltin("vmsbackup", vmsbackup.FilesBuiltin),
 				"bff":              starlark.NewBuiltin("bff", bff.Builtin),
+				"ibmi_save":        starlark.NewBuiltin("ibmi_save", ibmisave.Builtin),
 				"rms_variable":     starlark.NewBuiltin("rms_variable", rms.VariableBuiltin),
 				"gzip":             starlark.NewBuiltin("gzip", compressed.Builtin),
 				"bzip2":            starlark.NewBuiltin("bzip2", compressed.Builtin),

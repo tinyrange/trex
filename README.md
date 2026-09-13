@@ -8,6 +8,9 @@ can be used without host mounting, extraction, or format-conversion tools.
 The [automatic file views](docs/starlark/auto.md) also recognize legacy archive,
 filesystem and partition formats. They share recursive browsing with
 `web.browse`, preserving Macintosh forks and archive-record occurrences.
+`auto_plan` additionally proposes directory-derived virtual filesystems on
+demand, including a combined IBM i saved-library view with separate language
+variants and retained source provenance.
 
 Product and project names mentioned in this repository are the property of
 their respective owners. Their use identifies interoperable formats and

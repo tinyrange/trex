@@ -87,6 +87,38 @@ format's explicit multi-volume API.
 
 ## Starlark
 
+### Directory-derived plans
+
+`auto_plan` accepts the same arguments as `auto`, but also detects candidate
+virtual filesystems from directory listings. It never replaces the raw view.
+
+```python
+root = auto_plan(filesystem.udf(media))
+for plan in root.plans:
+    print(plan.id, plan.title, plan.description)
+combined = root.find("$plans/ibmi-libraries")
+```
+
+Proposals are metadata-only: payload parsing is deferred until the selected
+view needs its contents. `web.browse` includes a `plans` array in directory
+JSON for the application to render as navigation links to `$plans/<id>`.
+A real `$plans` entry takes precedence and suppresses proposals at that node.
+Incomplete streaming listings are not forced to their end for discovery.
+Malformed or unsupported contents can fail when the proposed view is opened.
+
+Go integrations register a `PlanDetector` with `RegisterPlan`. It receives a
+bounded listing, its raw `View`, and limits; it must use listing metadata only
+when proposing plans. A plan's deferred `Build` returns a portable read-only
+`View`. `Node.WithPlans` enables this behavior without mutating a plain node.
+
+The IBM i library plan recognizes `QLANGID` and `QUSRLIBS`, indexes by library,
+release/level and language, and combines save groups into named object views.
+Duplicate object/type pairs remain separate occurrences with source-path and
+save-group metadata. This currently covers saved libraries, not the QSYS
+product streams containing unsupported LD_TRS records or a complete media set.
+
+### Ordinary file views
+
 The `auto` builtin imports the Go registrations and accepts bytes, strings as
 byte contents, files, `binary.view(...)`, in-memory directories, and existing
 filesystem values:
@@ -98,6 +130,13 @@ root.files                    # immediate child auto nodes
 root["etc/package.zip/readme.txt"].file.bytes(0, 64)
 root.find("missing")          # None
 ```
+
+`root.metadata["attributes"]` retains format-specific structured metadata,
+including nested records and exact integers. Go views can implement
+`auto.MetadataView` to decode these attributes only when that node is inspected;
+listing its parent does not inspect every child's structures. IBM i object
+views use this for verified header and body fields, with explicit incomplete
+decoding flags. Larger contents remain separately readable child files.
 
 Bzip2 uses an in-memory block index and a 2 MiB decoded-block cache. Its first
 open scans compressed block boundaries; the first seek to a decoded offset

@@ -53,7 +53,10 @@ func (n *Node) pagingView() (View, error) {
 func (n *Node) pageNodes(entries []Entry) []*Node {
 	out := make([]*Node, len(entries))
 	for i, e := range entries {
-		child := Open(e.Reader, e.Name, n.options)
+		child := Open(e.Reader, e.Name, n.childOptions(e.Name))
+		if n.reader != nil && n.streamView != nil {
+			child.options.Source = &SourceContext{Tree: n.streamView, Path: e.Name}
+		}
 		child.kind = e.Kind
 		child.attributes = e.Attributes
 		if e.View != nil {
