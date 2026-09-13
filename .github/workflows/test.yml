@@ -18,6 +18,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Enable KVM for the runner
+        run: |
+          sudo chown "$(id -u):$(id -g)" /dev/kvm
+          sudo chmod 660 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
       - run: go test ./...
       - run: go vet ./...
       - run: go build ./cmd/trex
