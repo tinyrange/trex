@@ -29,13 +29,14 @@ def _string_table(machine, address):
     count = machine.read_u32le(address)
     if count > 4096:
         return None
-    entries = machine.read_u32le(address + 4)
+    width = machine.pointer_size
+    entries = machine.read_pointer(address + width)
     if count and not entries:
         return None
     for index in range(count):
-        entry = entries + index * 8
-        name = machine.read_u32le(entry)
-        value = machine.read_u32le(entry + 4)
+        entry = entries + index * 2 * width
+        name = machine.read_pointer(entry)
+        value = machine.read_pointer(entry + width)
         if not name or not value:
             return None
         output[machine.read_cstring(name).upper()] = machine.read_cstring(value)

@@ -62,6 +62,7 @@ func Builtins() starlark.StringDict {
 		"empty_event_log":             emptyEventLogBuiltin,
 		"event_log":                   eventLogBuiltin,
 		"sid_string":                  sidStringBuiltin,
+		"acl_entries":                 aclEntriesBuiltin,
 		"selfreg_patches":             selfregPatchesBuiltin,
 		"shortcut":                    shortcutBuiltin,
 		"internet_shortcut":           internetShortcutBuiltin,

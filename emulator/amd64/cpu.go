@@ -416,6 +416,21 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			if err == nil {
 				err = c.setMXCSR(value)
 			}
+		case x86asm.XCHG:
+			// Memory XCHG is implicitly locked. A scheduler step is atomic.
+			left, readErr := read(inst.Args[0], width)
+			if readErr != nil {
+				err = readErr
+				break
+			}
+			right, readErr := read(inst.Args[1], width)
+			if readErr != nil {
+				err = readErr
+				break
+			}
+			if err = write(right); err == nil {
+				err = c.writeOperand(memory, inst.Args[1], inst, next, width, left)
+			}
 		case x86asm.CMPXCHG:
 			// An instruction step is indivisible in the execution scheduler,
 			// including LOCKed read/modify/write operations. CMPXCHG performs
@@ -450,6 +465,27 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 					reg = x86asm.EAX
 				}
 				err = c.setReg(reg, destination)
+			}
+		case x86asm.XADD:
+			// A scheduler step is the atomic boundary for the LOCKed memory form.
+			// Write the destination before replacing a source register that may
+			// contribute to the destination's effective address.
+			destination, readErr := read(inst.Args[0], width)
+			if readErr != nil {
+				err = readErr
+				break
+			}
+			source, readErr := read(inst.Args[1], width)
+			if readErr != nil {
+				err = readErr
+				break
+			}
+			result := (destination + source) & mask(width)
+			if err = write(result); err != nil {
+				break
+			}
+			if err = c.writeOperand(memory, inst.Args[1], inst, next, width, destination); err == nil {
+				c.arithmetic(destination, source, width, false, false)
 			}
 		case x86asm.CBW:
 			err = c.setReg(x86asm.AX, uint64(int64(int8(c.registers[0]))))
@@ -608,7 +644,7 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			if err = c.setReg(low, quotient); err == nil {
 				err = c.setReg(high, remainder)
 			}
-		case x86asm.BT, x86asm.BTC:
+		case x86asm.BT, x86asm.BTC, x86asm.BTS, x86asm.BTR:
 			var value, index uint64
 			var memoryAddress uint64
 			memoryOperand := false
@@ -634,11 +670,20 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			if err == nil {
 				bit := uint64(1) << (index % uint64(width*8))
-				if inst.Op == x86asm.BTC {
+				if inst.Op != x86asm.BT {
+					updated := value
+					switch inst.Op {
+					case x86asm.BTC:
+						updated ^= bit
+					case x86asm.BTS:
+						updated |= bit
+					case x86asm.BTR:
+						updated &^= bit
+					}
 					if memoryOperand {
-						err = writeWord(memory, memoryAddress, width, value^bit)
+						err = writeWord(memory, memoryAddress, width, updated)
 					} else {
-						err = write(value ^ bit)
+						err = write(updated)
 					}
 				}
 				if err == nil {
@@ -727,6 +772,126 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			c.resultFlags(value, width)
 			err = write(value)
+		case x86asm.XORPS:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid XORPS destination %v", inst.Args[0])
+				break
+			}
+			var value [16]byte
+			switch source := inst.Args[1].(type) {
+			case x86asm.Reg:
+				if source < x86asm.X0 || source > x86asm.X15 {
+					err = fmt.Errorf("invalid XORPS source %s", source)
+				} else {
+					value = c.xmm[source-x86asm.X0]
+				}
+			case x86asm.Mem:
+				var address uint64
+				address, err = c.address(source, next, inst.AddrSize)
+				if err == nil && address&15 != 0 {
+					err = fmt.Errorf("unaligned vector read at %#x", address)
+				}
+				if err == nil {
+					err = memory.ReadMemory(address, value[:], cpu.Read)
+				}
+			default:
+				err = fmt.Errorf("invalid XORPS source %v", source)
+			}
+			if err == nil {
+				for i := range value {
+					c.xmm[destination-x86asm.X0][i] ^= value[i]
+				}
+			}
+		case x86asm.MOVSD_XMM, x86asm.MOVSS:
+			scalarWidth := 8
+			if inst.Op == x86asm.MOVSS {
+				scalarWidth = 4
+			}
+			var value [16]byte
+			sourceMemory := false
+			switch source := inst.Args[1].(type) {
+			case x86asm.Reg:
+				if source < x86asm.X0 || source > x86asm.X15 {
+					err = fmt.Errorf("invalid scalar vector source %s", source)
+					break
+				}
+				value = c.xmm[source-x86asm.X0]
+			case x86asm.Mem:
+				sourceMemory = true
+				var address uint64
+				address, err = c.address(source, next, inst.AddrSize)
+				if err == nil {
+					err = memory.ReadMemory(address, value[:scalarWidth], cpu.Read)
+				}
+			default:
+				err = fmt.Errorf("invalid scalar vector source %v", source)
+			}
+			if err != nil {
+				break
+			}
+			switch destination := inst.Args[0].(type) {
+			case x86asm.Reg:
+				if destination < x86asm.X0 || destination > x86asm.X15 {
+					err = fmt.Errorf("invalid scalar vector destination %s", destination)
+					break
+				}
+				register := &c.xmm[destination-x86asm.X0]
+				// Legacy register moves preserve the upper lanes; memory
+				// loads clear them. Stores touch only the scalar extent.
+				if sourceMemory {
+					*register = [16]byte{}
+				}
+				copy(register[:scalarWidth], value[:scalarWidth])
+			case x86asm.Mem:
+				var address uint64
+				address, err = c.address(destination, next, inst.AddrSize)
+				if err == nil {
+					err = memory.WriteMemory(address, value[:scalarWidth])
+				}
+			default:
+				err = fmt.Errorf("invalid scalar vector destination %v", destination)
+			}
+		case x86asm.MOVD:
+			if destination, ok := inst.Args[0].(x86asm.Reg); ok && destination >= x86asm.X0 && destination <= x86asm.X15 {
+				var value uint64
+				value, err = read(inst.Args[1], 4)
+				if err == nil {
+					register := &c.xmm[destination-x86asm.X0]
+					*register = [16]byte{}
+					binary.LittleEndian.PutUint32(register[:4], uint32(value))
+				}
+				break
+			}
+			source, ok := inst.Args[1].(x86asm.Reg)
+			if !ok || source < x86asm.X0 || source > x86asm.X15 {
+				err = fmt.Errorf("invalid MOVD vector source %v", inst.Args[1])
+				break
+			}
+			value := uint64(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]))
+			err = c.writeOperand(memory, inst.Args[0], inst, next, 4, value)
+		case x86asm.PSRLDQ:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid PSRLDQ vector destination %v", inst.Args[0])
+				break
+			}
+			immediate, ok := inst.Args[1].(x86asm.Imm)
+			if !ok {
+				err = fmt.Errorf("invalid PSRLDQ shift %v", inst.Args[1])
+				break
+			}
+			register := &c.xmm[destination-x86asm.X0]
+			shift := int(uint8(immediate))
+			if shift >= len(register) {
+				*register = [16]byte{}
+			} else if shift != 0 {
+				copy(register[:], register[shift:])
+				clear(register[len(register)-shift:])
+			}
+		case x86asm.LFENCE:
+			// Guest memory operations are completed synchronously by the
+			// portable address space, so there is no older load to order here.
 		case x86asm.MOVDQA, x86asm.MOVDQU, x86asm.MOVAPS, x86asm.MOVUPS:
 			var value [16]byte
 			aligned := inst.Op == x86asm.MOVDQA || inst.Op == x86asm.MOVAPS
@@ -773,16 +938,18 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 		case x86asm.SCASB, x86asm.SCASW, x86asm.SCASD, x86asm.SCASQ,
 			x86asm.STOSB, x86asm.STOSW, x86asm.STOSD, x86asm.STOSQ,
-			x86asm.CMPSB, x86asm.CMPSW, x86asm.CMPSD, x86asm.CMPSQ:
+			x86asm.CMPSB, x86asm.CMPSW, x86asm.CMPSD, x86asm.CMPSQ,
+			x86asm.MOVSB, x86asm.MOVSW, x86asm.MOVSD, x86asm.MOVSQ:
 			store := inst.Op == x86asm.STOSB || inst.Op == x86asm.STOSW || inst.Op == x86asm.STOSD || inst.Op == x86asm.STOSQ
 			compareStrings := inst.Op == x86asm.CMPSB || inst.Op == x86asm.CMPSW || inst.Op == x86asm.CMPSD || inst.Op == x86asm.CMPSQ
+			moveStrings := inst.Op == x86asm.MOVSB || inst.Op == x86asm.MOVSW || inst.Op == x86asm.MOVSD || inst.Op == x86asm.MOVSQ
 			width = 1
 			switch inst.Op {
-			case x86asm.SCASW, x86asm.STOSW, x86asm.CMPSW:
+			case x86asm.SCASW, x86asm.STOSW, x86asm.CMPSW, x86asm.MOVSW:
 				width = 2
-			case x86asm.SCASD, x86asm.STOSD, x86asm.CMPSD:
+			case x86asm.SCASD, x86asm.STOSD, x86asm.CMPSD, x86asm.MOVSD:
 				width = 4
-			case x86asm.SCASQ, x86asm.STOSQ, x86asm.CMPSQ:
+			case x86asm.SCASQ, x86asm.STOSQ, x86asm.CMPSQ, x86asm.MOVSQ:
 				width = 8
 			}
 			repeat, whileEqual := false, false
@@ -805,6 +972,12 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			address, _ := c.reg(indexReg)
 			if store {
 				err = writeWord(memory, address, width, c.registers[0])
+			} else if moveStrings {
+				var value uint64
+				value, err = read(inst.Args[1], width)
+				if err == nil {
+					err = c.writeOperand(memory, inst.Args[0], inst, next, width, value)
+				}
 			} else {
 				var value uint64
 				value, err = readWord(memory, address, width)
@@ -827,7 +1000,7 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			if err = c.setReg(indexReg, address); err != nil {
 				break
 			}
-			if compareStrings {
+			if compareStrings || moveStrings {
 				sourceReg := x86asm.RSI
 				if inst.AddrSize == 32 {
 					sourceReg = x86asm.ESI
@@ -849,10 +1022,28 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				}
 				// One element consumes one execution step. Retaining RIP
 				// makes long repeats budgeted and resumable without hidden state.
-				if count != 0 && (store || (c.flags&flagZero != 0) == whileEqual) {
+				if count != 0 && (store || moveStrings || (c.flags&flagZero != 0) == whileEqual) {
 					next = c.rip
 				}
 			}
+		case x86asm.CPUID:
+			leaf := uint32(c.registers[0])
+			var eax, ebx, ecx, edx uint32
+			switch leaf {
+			case 0:
+				eax = 1
+				ebx = 0x756e6547 // "Genu"
+				edx = 0x49656e69 // "ineI"
+				ecx = 0x6c65746e // "ntel"
+			case 1:
+				eax = 0x00000663
+				edx = 1<<0 | 1<<4 | 1<<8 | 1<<15 | 1<<23 | 1<<24 | 1<<25 | 1<<26
+			case 0x80000000:
+				eax = 0x80000001
+			case 0x80000001:
+				edx = 1 << 29 // Long mode.
+			}
+			c.registers[0], c.registers[3], c.registers[1], c.registers[2] = uint64(eax), uint64(ebx), uint64(ecx), uint64(edx)
 		case x86asm.NOP:
 		case x86asm.BSWAP:
 			var value uint64

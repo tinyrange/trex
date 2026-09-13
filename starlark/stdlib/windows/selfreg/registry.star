@@ -56,6 +56,8 @@ _CALLS = {
     "regsetvaluea": 5,
     "regsetvalueexw": 6,
     "regsetvalueexa": 6,
+    "regsetkeyvaluew": 6,
+    "regsetkeyvaluea": 6,
     "regclosekey": 1,
     "regflushkey": 1,
     "regdeletekeyw": 2,
@@ -1060,8 +1062,9 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
                 return 6
             target = join_key(parent, _cstring(event.machine, args[1], wide)) if args[1] else parent
             value_name = _cstring(event.machine, args[2], wide) if args[2] else "(default)"
-            registry_type = args[3]
-            raw = event.machine.read(args[4], args[5]) if args[5] else b""
+            registry_type = args[3] & 0xffffffff
+            size = args[5] & 0xffffffff
+            raw = event.machine.read(args[4], size) if size else b""
             symbolic = _TYPES.get(registry_type)
             if symbolic == None:
                 return 87
@@ -1117,6 +1120,29 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             # DWORD arguments occupy only the low half of a Win64 argument
             # slot. Native callers may leave unrelated bytes in the high half
             # of stack-passed cbData; pointers and handles remain full-width.
+            registry_type = args[3] & 0xffffffff
+            size = args[5] & 0xffffffff
+            raw = event.machine.read(args[4], size) if size else b""
+            value = _decode_value(raw, registry_type, wide)
+            identity = _identity(target[0], target[1], value_name)
+            state["deleted_values"].pop(identity, None)
+            state["values"][identity] = {
+                "type": registry_type,
+                "raw": _encoded_value(_TYPES.get(registry_type, registry_type), value),
+            }
+            state["patches"].append({
+                "hive": target[0], "key": target[1], "name": value_name,
+                "type": _TYPES.get(registry_type, registry_type), "value": value,
+            })
+            return 0
+        if name.startswith("regsetkeyvalue"):
+            parent = key_for(args[0])
+            if parent == None:
+                return 6
+            target = join_key(parent, _cstring(event.machine, args[1], wide)) if args[1] else parent
+            if not _key_exists(state, target):
+                return 2
+            value_name = _cstring(event.machine, args[2], wide) if args[2] else "(default)"
             registry_type = args[3] & 0xffffffff
             size = args[5] & 0xffffffff
             raw = event.machine.read(args[4], size) if size else b""
@@ -1298,6 +1324,16 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             def wrapped(event, function = function):
                 return callback(event, function)
             machine.provide_export(wrapped, module = "shlwapi.dll", name = name, argc = argc)
+        for imported in machine.imports:
+            if imported.module.lower() != "api-ms-win-core-registryuserspecific-l1-1-0.dll":
+                continue
+            binding = _SHLWAPI_NAMED_REGISTRY_WRAPPERS.get(imported.name.lower())
+            if binding == None:
+                continue
+            function, argc = binding
+            def wrapped(event, function = function):
+                return callback(event, function)
+            machine.hook(wrapped, address = imported.address, argc = argc)
 
     def patches():
         return list(state["patches"])

@@ -7,6 +7,30 @@ import (
 	"go.starlark.net/starlark"
 )
 
+func TestPlannedServicingFile(t *testing.T) {
+	first := uup.StageFileEffect{SourceName: "base/ieuinit.inf", SourceMode: "installed", StorePath: "/Windows/WinSxS/component/ieuinit.inf"}
+	second := first
+	second.SourceName = "updated/ieuinit.inf"
+	plans := []uup.StageEffectPlan{{Files: []uup.StageFileEffect{first}}, {Files: []uup.StageFileEffect{second}}}
+	features := []string{"first", "second"}
+	stage, got, err := plannedServicingFile(plans, features, "SECOND", `\Windows\WinSxS\COMPONENT\IEUINIT.INF`)
+	if err != nil || stage != 1 || got.SourceName != second.SourceName || got.SourceMode != "installed" {
+		t.Fatalf("selected %d %+v: %v", stage, got, err)
+	}
+	for _, selection := range [][2]string{{"missing", first.StorePath}, {"first", "ieuinit.inf"}, {"first", "/Windows/WinSxS/component/../component/ieuinit.inf"}} {
+		if _, _, err := plannedServicingFile(plans, features, selection[0], selection[1]); err == nil {
+			t.Fatalf("accepted non-declared selection %v", selection)
+		}
+	}
+	if _, _, err := plannedServicingFile(plans, nil, "first", first.StorePath); err == nil {
+		t.Fatal("accepted mismatched metadata")
+	}
+	plans[0].Files = append(plans[0].Files, first)
+	if _, _, err := plannedServicingFile(plans, features, "first", first.StorePath); err == nil {
+		t.Fatal("accepted ambiguous path")
+	}
+}
+
 func TestInspectServicingFilesMetadataOnly(t *testing.T) {
 	plans := []uup.StageEffectPlan{{Files: []uup.StageFileEffect{
 		{SourceName: `component\BOOT.STL`, SourceMode: "payload", StorePath: "/Windows/WinSxS/boot.stl"},

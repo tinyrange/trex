@@ -5,6 +5,7 @@ import (
 	"hash/crc32"
 	"testing"
 
+	blockpkg "github.com/tinyrange/trex/block"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	fsinternal "github.com/tinyrange/trex/filesystem/internal"
 	starfile "github.com/tinyrange/trex/storage/star"
@@ -104,5 +105,56 @@ func TestGPTGeneratedImageCanBeMounted(t *testing.T) {
 	got := volume.partitions[0]
 	if got.name != "Data" || got.startLBA != 2048 || got.attributes != 7 || got.file.Size() != partition.Size() {
 		t.Fatalf("partition = %+v", got)
+	}
+}
+
+func TestGPTPropagatesPartitionSparseExtents(t *testing.T) {
+	diskGUID, _ := fsinternal.ParseGUID("{01234567-89AB-CDEF-8123-456789ABCDEF}")
+	typeGUID, _ := fsinternal.ParseGUID(gptBasicDataType)
+	partitionGUID, _ := fsinternal.ParseGUID("{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}")
+	partition := filesystemapi.NewGeneratedImage("sparse", 2<<20, []filesystemapi.ExtentSpec{
+		{Start: 4096, Size: 4, Data: []byte("data")},
+	})
+	builder := &gptBuilder{size: 16 << 20, diskGUID: diskGUID}
+	builder, err := builder.withPartition(partition, typeGUID, partitionGUID, "Data", 2048, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	device, err := blockpkg.NewFileDevice(builder, blockpkg.FileDeviceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !device.Capabilities().Extents {
+		t.Fatal("GPT block device did not advertise sparse extents")
+	}
+	extents, err := device.Extents(0, builder.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := int64(0)
+	allocated := int64(0)
+	partitionData := int64(2048*512 + 4096)
+	foundPartitionData := false
+	for _, extent := range extents {
+		if extent.Offset != position || extent.Length <= 0 {
+			t.Fatalf("non-canonical extent at %d: %+v", position, extent)
+		}
+		if extent.Allocated {
+			allocated += extent.Length
+			if extent.Offset <= partitionData && partitionData+4 <= extent.Offset+extent.Length {
+				foundPartitionData = true
+			}
+		}
+		position += extent.Length
+	}
+	if position != builder.Size() {
+		t.Fatalf("extent map covers %d bytes, want %d", position, builder.Size())
+	}
+	if allocated != 34308 {
+		t.Fatalf("allocated bytes = %d, want 34308", allocated)
+	}
+	if !foundPartitionData {
+		t.Fatal("partition allocation was not propagated into GPT extent map")
 	}
 }

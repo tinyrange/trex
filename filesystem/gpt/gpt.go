@@ -10,6 +10,7 @@ import (
 	"sync"
 	"unicode/utf16"
 
+	blockpkg "github.com/tinyrange/trex/block"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	fsinternal "github.com/tinyrange/trex/filesystem/internal"
 	starfile "github.com/tinyrange/trex/storage/star"
@@ -343,10 +344,24 @@ func (b *gptBuilder) ReadAt(p []byte, off int64) (int, error) {
 func (b *gptBuilder) WriteAt(_ []byte, _ int64) (int, error) {
 	return 0, fmt.Errorf("gpt.raw is read-only")
 }
+func (b *gptBuilder) Extents(off, length int64) ([]blockpkg.Extent, error) {
+	image, err := b.generated()
+	if err != nil {
+		return nil, err
+	}
+	extenter, ok := image.(blockpkg.Extenter)
+	if !ok {
+		return nil, fmt.Errorf("gpt: generated image does not expose extents")
+	}
+	return extenter.Extents(off, length)
+}
 func (b *gptBuilder) WriteTo(w io.Writer) (int64, error) {
 	image, err := b.generated()
 	if err != nil {
 		return 0, err
+	}
+	if writer, ok := image.(io.WriterTo); ok {
+		return writer.WriteTo(w)
 	}
 	return io.Copy(w, io.NewSectionReader(image, 0, image.Size()))
 }
@@ -435,3 +450,4 @@ func protectiveMBR(totalSectors int64) []byte {
 }
 
 var _ starfile.File = (*gptBuilder)(nil)
+var _ blockpkg.Extenter = (*gptBuilder)(nil)

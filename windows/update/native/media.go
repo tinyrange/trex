@@ -547,6 +547,25 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		}
 		return nil, fmt.Errorf("open_servicing_target: unknown installed-OS feature %q", featureID)
 	})
+	openServicingFile := starlark.NewBuiltin("open_servicing_file", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var featureID, storePath string
+		if err := starlark.UnpackArgs("open_servicing_file", args, kwargs, "feature_id", &featureID, "store_path", &storePath); err != nil {
+			return nil, err
+		}
+		features := make([]string, len(installedStageMetadata))
+		for i, stage := range installedStageMetadata {
+			features[i] = stage.FeatureID
+		}
+		stage, effect, err := plannedServicingFile(servicingEffectPlans, features, featureID, storePath)
+		if err != nil {
+			return nil, fmt.Errorf("open_servicing_file: %w", err)
+		}
+		file, err := installedStages[stage].OpenPlannedFile(effect)
+		if err != nil {
+			return nil, fmt.Errorf("open_servicing_file: %w", err)
+		}
+		return file.(starlark.Value), nil
+	})
 	diagnoseServicingTarget := starlark.NewBuiltin("diagnose_servicing_target", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var featureID, name string
 		var expectedValue starlark.Value
@@ -769,6 +788,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		"servicing_effects":         servicingEffects,
 		"inspect_servicing_files":   inspectFiles,
 		"open_servicing_target":     openServicingTarget,
+		"open_servicing_file":       openServicingFile,
 		"diagnose_servicing_target": diagnoseServicingTarget,
 		"reference_count":           starlark.MakeInt(len(plan.References)),
 		"servicing_plan":            starlark.NewList(servicingPlanValues),

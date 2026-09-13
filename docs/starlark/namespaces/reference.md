@@ -746,7 +746,9 @@ Runs one target export or executable using semantic system-DLL plugins.
     receive process attach, but the PE entry point is not called as DllMain.
     `command_line` is returned by both GetCommandLine variants. `environment`
     augments a minimal standard Windows process environment and may override
-    any of its values. Each `plugin_factories` callback runs after the core
+    any of its values. `process_create_provider(machine, request)` supplies a
+    bounded semantic result for child-process creation. Each `plugin_factories`
+    callback runs after the core
     runtime plugins are constructed and receives a record containing `crt` and
     `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
@@ -1616,7 +1618,9 @@ Runs one target export or executable using semantic system-DLL plugins.
     receive process attach, but the PE entry point is not called as DllMain.
     `command_line` is returned by both GetCommandLine variants. `environment`
     augments a minimal standard Windows process environment and may override
-    any of its values. Each `plugin_factories` callback runs after the core
+    any of its values. `process_create_provider(machine, request)` supplies a
+    bounded semantic result for child-process creation. Each `plugin_factories`
+    callback runs after the core
     runtime plugins are constructed and receives a record containing `crt` and
     `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
@@ -3151,6 +3155,12 @@ Builds an HTTP response from body, status and headers for the web runtime to sen
 `web.zip(filesystem, path, name='download.zip') -> response`
 
 Builds a downloadable ZIP response for a directory in a supplied virtual filesystem. Packaging is handled in-process rather than by a host archiver.
+
+### `windows.acl_entries`
+
+`windows.acl_entries(source) -> dict`
+
+Validates a complete revision-2/4 Windows ACL (at most 65,535 bytes), returning `revision` and `entries`. Every entry contains `type`, `flags` and its original `data` bytes. Simple allow, deny, audit, alarm and mandatory-label entries also contain a checked binary `sid` and numeric `mask`; other entry layouts retain opaque bytes with `sid` and `mask` set to `None`. Unused ACL allocation space is allowed. This inspects the format; it neither evaluates access nor resolves principals through the host.
 
 ### `windows.acme_plan`
 

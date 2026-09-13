@@ -23,6 +23,10 @@ _KERNEL_SIGNATURES = {
     "createeventexw": 4,
     "createsemaphorea": 4,
     "createsemaphorew": 4,
+    "createsemaphoreexa": 6,
+    "createsemaphoreexw": 6,
+    "opensemaphorea": 3,
+    "opensemaphorew": 3,
     "createmutexa": 3,
     "createmutexw": 3,
     "createmutexexw": 4,
@@ -38,6 +42,10 @@ _KERNEL_SIGNATURES = {
     "comparestringa": 6,
     "comparestringw": 6,
     "createthread": 6,
+    "createthreadpooltimer": 3,
+    "setthreadpooltimer": 4,
+    "waitforthreadpooltimercallbacks": 2,
+    "closethreadpooltimer": 1,
     "queueuserworkitem": 3,
     "createtimerqueue": 0,
     "createtimerqueuetimer": 7,
@@ -137,6 +145,8 @@ _KERNEL_SIGNATURES = {
     "getdrivetypew": 1,
     "getdiskfreespacea": 5,
     "getdiskfreespacew": 5,
+    "getdiskfreespaceexa": 4,
+    "getdiskfreespaceexw": 4,
     "getlocaltime": 1,
     "getlocaleinfoa": 4,
     "getlocaleinfow": 4,
@@ -150,6 +160,8 @@ _KERNEL_SIGNATURES = {
     "gettempfilenamew": 4,
     "gettemppatha": 2,
     "gettemppathw": 2,
+    "gettemppath2a": 2,
+    "gettemppath2w": 2,
     "getsystemtime": 1,
     "getsystemtimeadjustment": 3,
     "getsysteminfo": 1,
@@ -177,6 +189,7 @@ _KERNEL_SIGNATURES = {
     "getversionexa": 1,
     "getversionexw": 1,
     "getversion": 0,
+    "rtlgetversion": 1,
     "getvolumeinformationa": 8,
     "getvolumeinformationw": 8,
     "getuserdefaultlangid": 0,
@@ -383,6 +396,8 @@ _KERNEL_SIGNATURES = {
     "rtlfreeheap": 3,
     "rtlgetntproducttype": 1,
     "rtlgetntversionnumbers": 3,
+    "rtlgetdevicefamilyinfoenum": 3,
+    "rtlgetsuitemask": 0,
     "rtlimagentheader": 1,
     "rtlansistringtounicodestring": 3,
     "rtlappendunicodestringtostring": 2,
@@ -1398,7 +1413,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     current_directory = environment.get("CurrentDirectory", environment.get("CD", module_directory)).replace("/", "\\").rstrip("\\")
     if thread_instruction_limit < 1 or thread_instruction_limit > 10000000:
         fail("kernel thread instruction limit must be between 1 and 10000000")
-    state = {"last_error": 0, "modules": {}, "handles": {}, "next_handle": 0x40000, "next_luid": 0x1000, "next_etw_handle": 1, "main": 0, "current_actctx": 0, "actctx_refs": 0, "tls": {}, "tls_slots": tls_slots, "next_tls": 0, "init_once": {}, "next_temp": 1, "next_thread_id": 16, "threads": [], "executions": {}, "current_thread": None, "thread_locale": 0x0409, "thread_priorities": {8: 0}, "thread_io_priorities": {8: 2}, "thread_page_priorities": {8: 5}, "timer_callbacks": [], "tick_count": 0, "time_adjustment": 156250, "time_increment": 156250, "time_adjustment_disabled": False, "paths": paths, "current_directory": current_directory, "named_mappings": {}, "views": {}, "file_queries": [], "volume_queries": [], "module_queries": [], "procedure_queries": [], "process_queries": [], "thread_queries": [], "system_queries": [], "profile_queries": [], "debug_output": [], "heaps": {1: True}, "allocations": {}, "resources": {}, "critical_sections": {}, "condition_variables": {}, "global_allocations": {}, "local_allocations": {}, "virtual_allocations": {}, "virtual_protections": {}, "standard_handles": {}, "command_line": command_line, "command_lines": {}, "process_exit_code": None, "process_userdata": 0, "unhandled_exception_filter": 0}
+    state = {"last_error": 0, "modules": {}, "handles": {}, "next_handle": 0x40000, "next_luid": 0x1000, "next_etw_handle": 1, "main": 0, "current_actctx": 0, "actctx_refs": 0, "tls": {}, "tls_slots": tls_slots, "next_tls": 0, "init_once": {}, "next_temp": 1, "next_thread_id": 16, "threads": [], "executions": {}, "current_thread": None, "thread_locale": 0x0409, "thread_priorities": {8: 0}, "thread_io_priorities": {8: 2}, "thread_page_priorities": {8: 5}, "timer_callbacks": [], "tick_count": 0, "time_adjustment": 156250, "time_increment": 156250, "time_adjustment_disabled": False, "paths": paths, "current_directory": current_directory, "named_mappings": {}, "views": {}, "file_queries": [], "volume_queries": [], "module_queries": [], "procedure_queries": [], "delay_load_queries": [], "process_queries": [], "thread_queries": [], "system_queries": [], "profile_queries": [], "debug_output": [], "heaps": {1: True}, "allocations": {}, "resources": {}, "critical_sections": {}, "condition_variables": {}, "global_allocations": {}, "local_allocations": {}, "virtual_allocations": {}, "virtual_protections": {}, "standard_handles": {}, "command_line": command_line, "command_lines": {}, "process_exit_code": None, "process_userdata": 0, "unhandled_exception_filter": 0}
 
     state["actctx_stack"] = []
     state["next_actctx_cookie"] = 1
@@ -1609,7 +1624,9 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             kind == "event" and value.get("signaled", False) or
             kind == "mutex" or
             kind == "semaphore" and value.get("count", 0) > 0 or
-            kind == "thread" and value.get("state") == "terminated"
+            kind == "thread" and value.get("state") == "terminated" or
+            kind == "thread_reference" and value.get("state") == "terminated" or
+            kind == "process_reference" and "exit_code" in value
         )
 
     def select_objects(entries, wait_all, consume):
@@ -2407,8 +2424,11 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             wide = name.endswith("w")
             encoding = "utf16le" if wide else "ascii"
             width = 2 if wide else 1
-            left_size = args[3]
-            right_size = args[5]
+            # These are 32-bit INTs even in the AMD64 calling convention.
+            # Stack argument slots may retain arbitrary upper DWORDs when
+            # the caller stores the -1 (NUL-terminated) length sentinel.
+            left_size = args[3] & 0xffffffff
+            right_size = args[5] & 0xffffffff
             left = machine.read_cstring(args[2], encoding = encoding) if left_size == 0xffffffff else binary.text(machine.read(args[2], left_size * width), encoding = encoding)
             right = machine.read_cstring(args[4], encoding = encoding) if right_size == 0xffffffff else binary.text(machine.read(args[4], right_size * width), encoding = encoding)
             if args[1] & 1:  # NORM_IGNORECASE
@@ -2673,6 +2693,42 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         if name == "exitthread":
             machine.transfer(address = 0)
             return None
+        if name == "createthreadpooltimer":
+            if not args[0]:
+                return 0
+            return create_handle("threadpool_timer", {
+                "callback": args[0],
+                "context": args[1],
+                "environment": args[2],
+                "due_time": None,
+                "period": 0,
+                "window": 0,
+                "pending": False,
+            })
+        if name == "setthreadpooltimer":
+            entry = state["handles"].get(args[0])
+            if type(entry) != "dict" or entry.get("kind") != "threadpool_timer":
+                return None
+            timer = entry["value"]
+            if not args[1]:
+                timer["due_time"] = None
+                timer["pending"] = False
+                return None
+            timer["due_time"] = machine.read_u64le(args[1])
+            timer["period"] = args[2] & 0xffffffff
+            timer["window"] = args[3] & 0xffffffff
+            timer["pending"] = True
+            return None
+        if name == "waitforthreadpooltimercallbacks":
+            entry = state["handles"].get(args[0])
+            if type(entry) == "dict" and entry.get("kind") == "threadpool_timer" and args[1]:
+                entry["value"]["pending"] = False
+            return None
+        if name == "closethreadpooltimer":
+            entry = state["handles"].get(args[0])
+            if type(entry) == "dict" and entry.get("kind") == "threadpool_timer":
+                state["handles"].pop(args[0])
+            return None
         if name == "createtimerqueue":
             return create_handle("timer_queue")
         if name == "createtimerqueuetimer":
@@ -2781,7 +2837,16 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                     return handle
             state["last_error"] = 2
             return 0
-        if name in ["createsemaphorea", "createsemaphorew"]:
+        if name in ["opensemaphorea", "opensemaphorew"]:
+            wide = name.endswith("w")
+            object_name = machine.read_cstring(args[2], encoding = "utf16le" if wide else "ascii") if args[2] else ""
+            for handle, entry in state["handles"].items():
+                if type(entry) == "dict" and entry.get("kind") == "semaphore" and entry["value"].get("name", "").lower() == object_name.lower():
+                    state["last_error"] = 0
+                    return handle
+            state["last_error"] = 2
+            return 0
+        if name in ["createsemaphorea", "createsemaphorew", "createsemaphoreexa", "createsemaphoreexw"]:
             if args[1] > args[2] or args[2] == 0:
                 state["last_error"] = 87
                 return 0
@@ -3015,7 +3080,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             state["handles"].pop(args[0])
             state["last_error"] = 0
             return 1
-        if name in ["gettemppatha", "gettemppathw"]:
+        if name in ["gettemppatha", "gettemppathw", "gettemppath2a", "gettemppath2w"]:
             wide = name.endswith("w")
             target = environment.get("TEMP", environment.get("TMP", windows_directory + "\\TEMP")).replace("/", "\\").rstrip("\\") + "\\"
             required = len(target) + 1
@@ -3979,10 +4044,10 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return _write_string(machine, args[0], system_directory, name.endswith("w"), args[1])
         if name in ["getwindowsdirectorya", "getwindowsdirectoryw"]:
             return _write_string(machine, args[0], windows_directory, name.endswith("w"), args[1])
-        if name in ["getversionexa", "getversionexw"]:
+        if name in ["getversionexa", "getversionexw", "rtlgetversion"]:
             size = machine.read_u32le(args[0])
             if size < 20:
-                return 0
+                return 0xc000000d if name == "rtlgetversion" else 0
             machine.write(args[0], b"\x00" * size)
             machine.write_u32le(args[0], size)
             machine.write_u32le(args[0] + 4, version_major)
@@ -3990,7 +4055,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write_u32le(args[0] + 12, version_build)
             machine.write_u32le(args[0] + 16, platform_id)
             if size > 20:
-                wide = name.endswith("w")
+                wide = name != "getversionexa"
                 width = 2 if wide else 1
                 _write_string(machine, args[0] + 20, service_pack, wide, min(128, (size - 20) // width))
                 extension = 20 + 128 * width
@@ -3998,11 +4063,11 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                     builder = binary.builder(capacity = 8)
                     builder.u16le(service_pack_major)
                     builder.u16le(service_pack_minor)
-                    builder.u16le(0)
+                    builder.u16le(suite_mask)
                     builder.u8(product_type_number)
                     builder.u8(0)
                     machine.write(args[0] + extension, builder.bytes())
-            return 1
+            return 0 if name == "rtlgetversion" else 1
         if name == "getversion":
             legacy_platform = 0x80000000 if platform_id == 1 else 0
             return legacy_platform | ((version_build & 0x7fff) << 16) | (version_minor << 8) | version_major
@@ -4116,6 +4181,24 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             state["last_error"] = 0
             query["result"] = 1
             return 1
+        if name in ["getdiskfreespaceexa", "getdiskfreespaceexw"]:
+            root = file_path(machine, args[0], name.endswith("w")) if args[0] else ""
+            query = {"api": name, "root": root, "outputs": list(args[1:])}
+            state["volume_queries"].append(query)
+            if not any(args[1:]):
+                state["last_error"] = 87
+                query["result"] = 0
+                query["error"] = 87
+                return 0
+            bytes_per_cluster = 8 * 512
+            free_bytes = (96 << 10) * bytes_per_cluster
+            total_bytes = (120 << 10) * bytes_per_cluster
+            for address, value in zip(args[1:], [free_bytes, total_bytes, free_bytes]):
+                if address:
+                    machine.write_u64le(address, value)
+            state["last_error"] = 0
+            query["result"] = 1
+            return 1
         if name in ["queryperformancecounter", "queryperformancefrequency"]:
             builder = binary.builder(capacity = 8)
             builder.u64le(0 if name.endswith("counter") else 10000000)
@@ -4198,7 +4281,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if loaded == None:
                 state["last_error"] = 126  # ERROR_MOD_NOT_FOUND
                 return 0
-            machine.write_u32le(output, loaded["handle"])
+            machine.write_pointer(output, loaded["handle"])
             return 1
         if name in ["getmodulehandlea", "getmodulehandlew", "loadlibrarya", "loadlibraryw", "loadlibraryexa", "loadlibraryexw"]:
             if name.startswith("getmodulehandle") and args[0] == 0:
@@ -4211,50 +4294,71 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             state["last_error"] = 0 if loaded != None else 126
             return loaded["handle"] if loaded != None else 0
         if name == "resolvedelayloadedapi":
-            parent, descriptor, unused_dll_hook, unused_system_hook, thunk, flags = args
+            parent, descriptor, unused_dll_hook, unused_system_hook, thunk, raw_flags = args
+            flags = raw_flags & 0xffffffff
+            query = {"parent": parent, "descriptor": descriptor, "thunk": thunk, "flags": flags}
+            if raw_flags != flags:
+                query["raw_flags"] = raw_flags
+            state["delay_load_queries"].append(query)
             if not parent or not descriptor or not thunk or flags:
+                query["stop"] = "invalid-parameter"
                 state["last_error"] = 87  # ERROR_INVALID_PARAMETER
                 return 0
             attributes = machine.read_u32le(descriptor)
+            query["attributes"] = attributes
             if attributes & ~1:
+                query["stop"] = "invalid-attributes"
                 state["last_error"] = 87
                 return 0
             relative = bool(attributes & 1)
+            pointer_size = machine.pointer_size
             def address(field):
-                return (parent + field) & 0xffffffff if relative and field else field
+                return parent + field if relative and field else field
             dll_name = address(machine.read_u32le(descriptor + 4))
             module_slot = address(machine.read_u32le(descriptor + 8))
             iat = address(machine.read_u32le(descriptor + 12))
             names = address(machine.read_u32le(descriptor + 16))
-            if not dll_name or not module_slot or not iat or not names or thunk < iat or (thunk - iat) & 3:
+            query["iat"] = iat
+            query["names"] = names
+            if not dll_name or not module_slot or not iat or not names or thunk < iat or (thunk - iat) % pointer_size:
+                query["stop"] = "invalid-table"
                 state["last_error"] = 87
                 return 0
-            index = (thunk - iat) // 4
+            index = (thunk - iat) // pointer_size
+            query["index"] = index
             if index >= 65536:
+                query["stop"] = "index-out-of-range"
                 state["last_error"] = 87
                 return 0
             requested = machine.read_cstring(dll_name, maximum = 260)
+            query["module"] = requested
             loaded = load_module(machine, requested, name)
             if loaded == None:
+                query["stop"] = "module-not-found"
                 state["last_error"] = 126  # ERROR_MOD_NOT_FOUND
                 return 0
-            lookup = machine.read_u32le(names + index * 4)
-            if lookup & 0x80000000:
+            lookup = machine.read_pointer(names + index * pointer_size)
+            if lookup & (1 << (pointer_size * 8 - 1)):
                 procedure = "#" + str(lookup & 0xffff)
                 resolved = machine.resolve_export(loaded["name"], ordinal = lookup & 0xffff)
             else:
                 import_name = address(lookup)
                 if not import_name:
+                    query["stop"] = "invalid-import-name"
                     state["last_error"] = 127  # ERROR_PROC_NOT_FOUND
                     return 0
                 procedure = machine.read_cstring(import_name + 2, maximum = 4096)
                 resolved = machine.resolve_export(loaded["name"], name = procedure)
+            query["procedure"] = procedure
+            query["resolved"] = resolved
             state["procedure_queries"].append({"module": loaded["name"], "procedure": procedure, "found": resolved != 0})
             if not resolved:
+                query["stop"] = "procedure-not-found"
                 state["last_error"] = 127
                 return 0
-            machine.write_u32le(module_slot, loaded["handle"])
-            machine.write_u32le(thunk, resolved)
+            machine.write_pointer(module_slot, loaded["handle"])
+            machine.write_pointer(thunk, resolved)
+            query["stop"] = "resolved"
             state["last_error"] = 0
             return resolved
         if name == "ldrloaddll":
@@ -4320,10 +4424,16 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 return 0
             process_handle = create_handle("process_reference", {"id": result.get("process_id", 16), "exit_code": result.get("exit_code", 0)})
             thread_handle = create_handle("thread_reference", {"id": result.get("thread_id", 20), "state": "terminated"})
-            machine.write_u32le(args[9], process_handle)
-            machine.write_u32le(args[9] + 4, thread_handle)
-            machine.write_u32le(args[9] + 8, result.get("process_id", 16))
-            machine.write_u32le(args[9] + 12, result.get("thread_id", 20))
+            if machine.pointer_size == 8:
+                machine.write_u64le(args[9], process_handle)
+                machine.write_u64le(args[9] + 8, thread_handle)
+                machine.write_u32le(args[9] + 16, result.get("process_id", 16))
+                machine.write_u32le(args[9] + 20, result.get("thread_id", 20))
+            else:
+                machine.write_u32le(args[9], process_handle)
+                machine.write_u32le(args[9] + 4, thread_handle)
+                machine.write_u32le(args[9] + 8, result.get("process_id", 16))
+                machine.write_u32le(args[9] + 12, result.get("thread_id", 20))
             state["last_error"] = 0
             return 1
         if name == "rtlcapturestackbacktrace":
@@ -4563,6 +4673,20 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if args[2]:
                 machine.write_u32le(args[2], version_build | 0xf0000000)
             return None
+        if name == "rtlgetsuitemask":
+            return suite_mask
+        if name == "rtlgetdevicefamilyinfoenum":
+            # The environment describes a desktop unless the caller supplies
+            # a different family/form. Each output is independently optional.
+            # https://learn.microsoft.com/windows/win32/devnotes/rtlgetdevicefamilyinfoenum
+            if args[0]:
+                uap = (version_major << 48) | (version_minor << 32) | (version_build << 16) | version.get("revision", 0)
+                machine.write_u64le(args[0], version.get("uap_version", uap))
+            if args[1]:
+                machine.write_u32le(args[1], version.get("device_family", 3))
+            if args[2]:
+                machine.write_u32le(args[2], version.get("device_form", 0))
+            return None
         if name in ["ntqueryinformationthread", "ntsetinformationthread"]:
             handle, information_class, output, size = args[:4]
             thread_id = thread_id_for_handle(handle)
@@ -4714,7 +4838,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if flags & 0x100:  # FORMAT_MESSAGE_ALLOCATE_BUFFER
                 output = machine.allocate(size = len(data), value = data, name = "FormatMessage")
                 state["local_allocations"][output] = len(data)
-                machine.write_u32le(args[4], output)
+                machine.write_pointer(args[4], output)
             elif not args[4] or args[5] <= len(value):
                 state["last_error"] = 122  # ERROR_INSUFFICIENT_BUFFER
                 return 0
@@ -5019,16 +5143,17 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             completed = state["init_once"].get(args[0])
             if completed != None:
                 if args[3]:
-                    machine.write_u32le(args[3], completed)
+                    machine.write_pointer(args[3], completed)
                 return 1
             result = machine.invoke(args[1], args = [args[0], args[2], args[3]])
             if result.reason != "return":
-                fail("InitOnce callback stopped with {}: {}".format(result.reason, result.detail))
+                machine.stop(result.reason, detail = result.detail, value = result.value)
+                return 0
             if result.value == 0:
                 return 0
-            context = machine.read_u32le(args[3]) if args[3] else 0
+            context = machine.read_pointer(args[3]) if args[3] else 0
             state["init_once"][args[0]] = context
-            machine.write_u32le(args[0], 2)  # RTL_RUN_ONCE complete
+            machine.write_pointer(args[0], 2)  # RTL_RUN_ONCE complete
             return 1
         if name == "interlockedcompareexchange":
             previous = machine.read_u32le(args[0])
@@ -6021,7 +6146,7 @@ def ole32_plugin(on_class_registration = None, on_class_activation = None, on_se
             pointers.append(address)
         vtable_address = pointer_array(machine, pointers, "IMalloc.vtable")
         state["malloc"] = pointer_array(machine, [vtable_address], "IMalloc")
-        for module in ["ole32.dll", "api-ms-win-core-com-l1-1-1.dll"]:
+        for module in ["ole32.dll", "api-ms-win-core-com-l1-1-0.dll", "api-ms-win-core-com-l1-1-1.dll"]:
             machine.provide_exports(callback, module = module, signatures = _OLE_SIGNATURES)
     return emulator.plugin(install, name = "windows.ole32", state = state)
 
@@ -6707,18 +6832,25 @@ def _crt_main_arguments(machine, command_line, wide):
     """Allocates the argv and empty environment arrays used by CRT startup."""
     values = _command_line_arguments(command_line)
     encoding = "utf16le" if wide else "ascii"
-    pointers = binary.builder(capacity = (len(values) + 1) * 4)
+    pointers = binary.builder(capacity = (len(values) + 1) * machine.pointer_size)
     for value in values:
-        pointers.u32le(machine.allocate(
+        address = machine.allocate(
             value = binary.encode(value, encoding = encoding, nul = True),
             name = "msvcrt.wargv" if wide else "msvcrt.argv",
-        ))
-    pointers.u32le(0)
+        )
+        if machine.pointer_size == 8:
+            pointers.u64le(address)
+        else:
+            pointers.u32le(address)
+    if machine.pointer_size == 8:
+        pointers.u64le(0)
+    else:
+        pointers.u32le(0)
     argv = machine.allocate(
         value = pointers.bytes(),
         name = "msvcrt.wargv[]" if wide else "msvcrt.argv[]",
     )
-    environment = machine.allocate(value = b"\x00\x00\x00\x00", name = "msvcrt.env[]")
+    environment = machine.allocate(value = b"\x00" * machine.pointer_size, name = "msvcrt.env[]")
     return len(values), argv, environment
 
 def _crt_command_line_imports(machine, command_line):
@@ -6787,7 +6919,25 @@ def _crt_compare_memory(machine, left, right, count, ignore_case = False):
 
 def msvcrt_plugin(kernel = None):
     """Models CRT memory, strings, locale data, and guest-backed streams."""
-    state = {"strtok_next": 0, "wcstok_next": 0, "streams": {}, "descriptors": {}, "next_descriptor": 3, "allocations": {}, "actions": [], "calls": {}}
+    state = {"strtok_next": 0, "wcstok_next": 0, "streams": {}, "descriptors": {}, "next_descriptor": 3, "allocations": {}, "onexit_tables": {}, "actions": [], "calls": {}}
+    contract_signatures = {
+        "api-ms-win-crt-private-l1-1-0.dll": {
+            "_o__execute_onexit_table": 1,
+            "_o__initialize_onexit_table": 1,
+            "_o__register_onexit_function": 2,
+        },
+        "api-ms-win-crt-runtime-l1-1-0.dll": {
+            "_initterm": 2,
+            "_initterm_e": 2,
+        },
+        "api-ms-win-crt-string-l1-1-0.dll": {
+            "memset": 3,
+            "strcmp": 2,
+            "strncmp": 3,
+            "wcscmp": 2,
+            "wcsncmp": 3,
+        },
+    }
     signatures = {
         "??2@yapaxi@z": 1,
         "??3@yaxpax@z": 1,
@@ -6828,7 +6978,9 @@ def msvcrt_plugin(kernel = None):
         "memchr": 3,
         "memcmp": 3,
         "memcpy": 3,
+        "memcpy_s": 4,
         "memmove": 3,
+        "memmove_s": 4,
         "memset": 3,
         "mbstowcs": 3,
         "isleadbyte": 1,
@@ -6862,6 +7014,7 @@ def msvcrt_plugin(kernel = None):
         "wcstombs": 3,
         "wcscpy": 2,
         "wcscat": 2,
+        "wcscat_s": 3,
         "wcsncat": 3,
         "wcscmp": 2,
         "wcsncmp": 3,
@@ -6905,6 +7058,7 @@ def msvcrt_plugin(kernel = None):
         "strrchr": 2,
         "wcschr": 2,
         "wcsrchr": 2,
+        "wcspbrk": 2,
         "wcstok": 2,
         "strtok": 2,
         "iswspace": 1,
@@ -6964,6 +7118,7 @@ def msvcrt_plugin(kernel = None):
         "strftime": 4,
         "wcsftime": 4,
         "qsort": 4,
+        "bsearch": 5,
         "_except_handler3": 4,
         "_local_unwind2": 2,
         "?_set_new_handler@@yap6ahi@zp6ahi@z@z": 1,
@@ -7063,6 +7218,60 @@ def msvcrt_plugin(kernel = None):
         name = event.name.lower()
         args = event.args
         state["calls"][name] = state["calls"].get(name, 0) + 1
+        if name == "_o__initialize_onexit_table":
+            table = args[0]
+            if not table:
+                return -1
+            width = event.machine.pointer_size
+            if event.machine.read_pointer(table) == event.machine.read_pointer(table + 2 * width):
+                encoded_null = state["encoded_null"]
+                for index in range(3):
+                    event.machine.write_pointer(table + index * width, encoded_null)
+                state["onexit_tables"][table] = {"callbacks": [], "storage": 0, "capacity": 0}
+            return 0
+        if name == "_o__register_onexit_function":
+            table, function = args[:2]
+            current = state["onexit_tables"].get(table)
+            if not table or not function or current == None:
+                return -1
+            callbacks = current["callbacks"]
+            if len(callbacks) >= 4096:
+                fail("CRT on-exit table exceeds 4096 callbacks")
+            if len(callbacks) == current["capacity"]:
+                capacity = max(8, current["capacity"] * 2)
+                storage = event.machine.allocate(size = capacity * event.machine.pointer_size, name = "ucrt.onexit[]")
+                for index, callback in enumerate(callbacks):
+                    event.machine.write_pointer(storage + index * event.machine.pointer_size, callback)
+                current["storage"] = storage
+                current["capacity"] = capacity
+            event.machine.write_pointer(current["storage"] + len(callbacks) * event.machine.pointer_size, function)
+            callbacks.append(function)
+            event.machine.write_pointer(table, current["storage"])
+            event.machine.write_pointer(table + event.machine.pointer_size, current["storage"] + len(callbacks) * event.machine.pointer_size)
+            event.machine.write_pointer(table + 2 * event.machine.pointer_size, current["storage"] + current["capacity"] * event.machine.pointer_size)
+            return 0
+        if name == "_o__execute_onexit_table":
+            table = args[0]
+            current = state["onexit_tables"].get(table)
+            if not table or current == None:
+                return -1
+            callbacks = current["callbacks"]
+            current["callbacks"] = []
+            encoded_null = state["encoded_null"]
+            for index in range(3):
+                event.machine.write_pointer(table + index * event.machine.pointer_size, encoded_null)
+            for target in reversed(callbacks):
+                result = event.machine.invoke(target, inherit_exceptions = True)
+                state["actions"].append({
+                    "api": name,
+                    "callback": target,
+                    "reason": result.reason,
+                    "detail": result.detail,
+                    "steps": result.steps,
+                })
+                if result.reason != "return":
+                    fail("CRT on-exit callback at %s stopped with %s: %s" % (hex(target), result.reason, result.detail))
+            return 0
         if name == "_eh_prolog":
             # MSVC's helper establishes its exception-registration frame and
             # EBP prologue before returning to the function body.  Hooks see
@@ -7116,8 +7325,8 @@ def msvcrt_plugin(kernel = None):
                 name == "__wgetmainargs",
             )
             event.machine.write_u32le(args[0], argc)
-            event.machine.write_u32le(args[1], argv)
-            event.machine.write_u32le(args[2], environment)
+            event.machine.write_pointer(args[1], argv)
+            event.machine.write_pointer(args[2], environment)
             return 0
         if name in ["exit", "_exit"]:
             event.machine.set_register("eax", args[0])
@@ -7444,6 +7653,19 @@ def msvcrt_plugin(kernel = None):
             if args[2]:
                 event.machine.write(args[0], event.machine.read(args[1], args[2]))
             return args[0]
+        if name in ["memcpy_s", "memmove_s"]:
+            destination, capacity, source, count = args[:4]
+            if count == 0:
+                return 0
+            if not destination or not source or count > capacity:
+                if destination and capacity:
+                    if capacity > 16 << 20:
+                        event.machine.stop("secure CRT copy exceeds bounded destination size")
+                        return 22
+                    event.machine.write(destination, b"\x00" * capacity)
+                return 22  # EINVAL
+            event.machine.write(destination, event.machine.read(source, count))
+            return 0
         if name == "memset":
             if not args[2]:
                 return args[0]
@@ -7531,6 +7753,27 @@ def msvcrt_plugin(kernel = None):
                 value = event.machine.read_cstring(args[0], encoding = "utf16le") + value
             _write_string(event.machine, args[0], value, True)
             return args[0]
+        if name == "wcscat_s":
+            destination, capacity, source = args
+            if not destination or capacity == 0 or not source:
+                if destination and capacity:
+                    event.machine.write_u16le(destination, 0)
+                return 22  # EINVAL
+            if capacity > 16 << 20:
+                event.machine.stop("secure CRT wide-string capacity exceeds process bound")
+                return 22
+            length = 0
+            while length < capacity and event.machine.read_u16le(destination + length * 2) != 0:
+                length += 1
+            if length == capacity:
+                event.machine.write_u16le(destination, 0)
+                return 22
+            suffix = event.machine.read_cstring(source, encoding = "utf16le")
+            if length + len(suffix) + 1 > capacity:
+                event.machine.write_u16le(destination, 0)
+                return 34  # ERANGE
+            event.machine.write(destination + length * 2, binary.encode(suffix, encoding = "utf16le", nul = True))
+            return 0
         if name == "wcsncpy":
             value = event.machine.read_cstring(args[1], encoding = "utf16le")[:args[2]]
             encoded = binary.encode(value, encoding = "utf16le")
@@ -7580,6 +7823,26 @@ def msvcrt_plugin(kernel = None):
                         return found
                 if unit == 0:
                     return found
+            event.machine.stop("CRT character search exceeds bounded string size")
+            return 0
+        if name == "wcspbrk":
+            wanted = {}
+            terminated = False
+            for offset in range(0, 16 << 20, 2):
+                unit = event.machine.read_u16le(args[1] + offset)
+                if unit == 0:
+                    terminated = True
+                    break
+                wanted[unit] = True
+            if not terminated:
+                event.machine.stop("CRT character set exceeds bounded string size")
+                return 0
+            for offset in range(0, 16 << 20, 2):
+                unit = event.machine.read_u16le(args[0] + offset)
+                if unit == 0:
+                    return 0
+                if unit in wanted:
+                    return args[0] + offset
             event.machine.stop("CRT character search exceeds bounded string size")
             return 0
         if name in ["strstr", "_mbsstr"]:
@@ -7748,17 +8011,41 @@ def msvcrt_plugin(kernel = None):
             # one unit. Target cleanup routines still run when called directly;
             # compiler-maintained local unwind tables need no host-side action.
             return None
+        if name == "bsearch":
+            key, base, count, width, comparator = args[:5]
+            if not count:
+                return 0
+            if not key or not base or not width or not comparator:
+                fail("bsearch received invalid nonempty array arguments")
+            while count:
+                middle = count // 2
+                element = base + middle * width
+                compared = event.machine.invoke(comparator, args = [key, element])
+                if compared.reason != "return":
+                    fail("bsearch comparator stopped with %s: %s" % (compared.reason, compared.detail))
+                comparison = compared.value & 0xffffffff
+                if comparison == 0:
+                    return element
+                if comparison & 0x80000000:
+                    count = middle
+                else:
+                    base = element + width
+                    count -= middle + 1
+            return 0
         if name in ["qsort", "_except_handler3"]:
             return 0
         return 0
 
     def install(machine):
+        state["encoded_null"] = machine.allocate(size = 1, name = "ucrt.encoded-null")
         for name, state_name in _MSVCRT_LOCALE_COUNTERS.items():
             state[state_name] = machine.allocate(size = 4, name = "msvcrt." + name)
         for name, spec in _MSVCRT_LOCALE_POINTERS.items():
             state[spec[1]] = machine.allocate(size = spec[0], name = "msvcrt." + name)
         imported_data = {
             "_adjust_fdiv": b"\x00\x00\x00\x00",
+            "_commode": b"\x00\x00\x00\x00",
+            "_fmode": b"\x00\x00\x00\x00",
         }
         if kernel != None:
             imported_data.update(_crt_command_line_imports(
@@ -7766,11 +8053,13 @@ def msvcrt_plugin(kernel = None):
                 kernel.state.get("command_line", ""),
             ))
         for name, value in imported_data.items():
-            machine.provide_export(
+            address = machine.provide_export(
                 module = "msvcrt.dll",
                 name = name,
                 value = value,
             )
+            if name in ["_commode", "_fmode"]:
+                state[name[1:]] = address
         for name, argc in signatures.items():
             convention = "stdcall" if name in _MSVCRT_CXX_CONSTRUCTORS else "cdecl"
             for module in ["msvcrt.dll", "crtdll.dll"]:
@@ -7781,9 +8070,24 @@ def msvcrt_plugin(kernel = None):
                     argc = argc,
                     convention = convention,
                 )
-        for imported in machine.imports_named(signatures):
+        for module, module_signatures in contract_signatures.items():
+            for name, argc in module_signatures.items():
+                machine.provide_export(
+                    callback,
+                    module = module,
+                    name = name,
+                    argc = argc,
+                    convention = "cdecl",
+                )
+        import_signatures = dict(signatures)
+        for module_signatures in contract_signatures.values():
+            import_signatures.update(module_signatures)
+        for imported in machine.imports_named(import_signatures):
             name = imported.name.lower()
             module = imported.module.lower()
+            if module in contract_signatures and name in contract_signatures[module]:
+                machine.hook(callback, address = imported.address, argc = contract_signatures[module][name], convention = "cdecl")
+                continue
             if module not in ["msvcrt.dll", "crtdll.dll", "ntdll.dll"]:
                 continue
             if name in signatures:
@@ -8139,12 +8443,12 @@ def _map_generic_access(mask, mapping):
 
 def _security_provider_module(name):
     normalized = name.replace("/", "\\").split("\\")[-1].lower()
-    return normalized in ["advapi32.dll", "ntdll.dll"] or normalized.startswith("api-ms-win-security-") or normalized.startswith("ext-ms-win-security-")
+    return normalized in ["advapi32.dll", "ntdll.dll", "api-ms-win-core-processthreads-l1-1-0.dll"] or normalized.startswith("api-ms-win-security-") or normalized.startswith("ext-ms-win-security-")
 
 def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], kernel = None, object_security = None, accounts = None):
     """Models an elevated interactive token for setup-time Win32 checks."""
     accounts = accounts if accounts != None else {}
-    state = {"actions": []}
+    state = {"actions": [], "next_token": 2}
 
     def set_last_error(value):
         if kernel != None:
@@ -8167,6 +8471,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         "convertsidtostringsidw": 2,
         "copysid": 3,
         "createwellknownsid": 4,
+        "duplicatetokenex": 6,
         "equalsid": 2,
         "freesid": 1,
         "getlengthsid": 1,
@@ -8185,6 +8490,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         "gettokeninformation": 5,
         "getfilesecuritya": 5,
         "getfilesecurityw": 5,
+        "getkernelobjectsecurity": 5,
         "getusernamea": 2,
         "getusernamew": 2,
         "initializeacl": 3,
@@ -8247,6 +8553,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         "setsecurityinfo": 7,
         "setfilesecuritya": 3,
         "setfilesecurityw": 3,
+        "setkernelobjectsecurity": 3,
         "setnamedsecurityinfoa": 7,
         "setnamedsecurityinfow": 7,
         "setthreadtoken": 2,
@@ -8418,6 +8725,24 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         output.append(dacl_data)
         return output.bytes()
 
+    def persisted_descriptor(machine, address):
+        """Copies caller-owned absolute descriptor fields into self-relative bytes."""
+        control = machine.read_u16le(address + 2)
+        owner = descriptor_pointer(machine, address, "Owner")
+        group = descriptor_pointer(machine, address, "Group")
+        dacl = descriptor_pointer(machine, address, "Dacl")
+        sacl = descriptor_pointer(machine, address, "Sacl")
+        information = 0
+        if owner:
+            information |= 0x1
+        if group:
+            information |= 0x2
+        if control & 0x0004:
+            information |= 0x4
+        if control & 0x0010:
+            information |= 0x8
+        return relative_descriptor(machine, information, owner, group, dacl, sacl)
+
     def access_ace(machine, address, ace_type, ace_size):
         if ace_size < 8:
             return None
@@ -8494,8 +8819,29 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         if not required_address:
             set_last_error(87)
             return 0
-        token_sid = sid(5, [32, 544]) if kind == 2 else sid(5, user_sid)
-        header_size = 12 if kind == 2 else 8
+        if kind in [12, 29]:  # TokenSessionId / TokenIsAppContainer
+            machine.write_u32le(required_address, 4)
+            if not address or capacity < 4:
+                set_last_error(122)
+                return 0
+            machine.write_u32le(address, 0)
+            set_last_error(0)
+            return 1
+        if kind == 2:
+            token_sid = sid(5, [32, 544])
+            header_size = 24 if machine.pointer_size == 8 else 12
+            sid_pointer_offset = 8 if machine.pointer_size == 8 else 4
+            attributes = 4
+        elif kind == 25:  # TokenIntegrityLevel
+            token_sid = sid(16, [12288])  # High mandatory level.
+            header_size = 16 if machine.pointer_size == 8 else 8
+            sid_pointer_offset = 0
+            attributes = 0x60  # SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED.
+        else:
+            token_sid = sid(5, user_sid)
+            header_size = 16 if machine.pointer_size == 8 else 8
+            sid_pointer_offset = 0
+            attributes = 0
         required = header_size + len(token_sid)
         machine.write_u32le(required_address, required)
         if address == 0 or capacity < required:
@@ -8505,10 +8851,11 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         sid_address = address + header_size
         if kind == 2:  # TokenGroups
             machine.write_u32le(address, 1)
-            machine.write_u32le(address + 4, sid_address)
-            machine.write_u32le(address + 8, 4)
-        else:  # TokenUser and bounded fallbacks
-            machine.write_u32le(address, sid_address)
+            machine.write_pointer(address + sid_pointer_offset, sid_address)
+            machine.write_u32le(address + sid_pointer_offset + machine.pointer_size, attributes)
+        else:  # TokenUser, TokenIntegrityLevel, and bounded fallbacks
+            machine.write_pointer(address, sid_address)
+            machine.write_u32le(address + machine.pointer_size, attributes)
         machine.write(sid_address, token_sid)
         set_last_error(0)
         return 1
@@ -8748,7 +9095,16 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             machine.write_u32le(args[2], address)
             return 0
         if name in ["openprocesstoken", "openthreadtoken"]:
-            machine.write_u32le(args[2] if name == "openprocesstoken" else args[3], 1)
+            machine.write_pointer(args[2] if name == "openprocesstoken" else args[3], 1)
+            return 1
+        if name == "duplicatetokenex":
+            if not args[0] or not args[5]:
+                set_last_error(87)
+                return 0
+            token = state["next_token"]
+            state["next_token"] = token + 1
+            machine.write_pointer(args[5], token)
+            set_last_error(0)
             return 1
         if name == "reverttoself":
             return 1
@@ -8805,6 +9161,38 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
                 set_last_error(122)
                 return 0
             machine.write(args[2], descriptor)
+            set_last_error(0)
+            return 1
+        if name == "getkernelobjectsecurity":
+            handle = args[0]
+            entry = kernel.state["handles"].get(handle) if kernel != None else None
+            process_object = handle in [0xffffffff, 0xffffffffffffffff] or type(entry) == "dict" and entry.get("kind") == "process_reference"
+            if not process_object or not args[4]:
+                set_last_error(6 if not process_object else 87)
+                return 0
+            descriptor = state.get("kernel_object_security", _sddl_descriptor("O:SYG:SYD:(A;;GA;;;SY)(A;;GA;;;BA)"))
+            machine.write_u32le(args[4], len(descriptor))
+            state["actions"].append({"api": name, "handle": handle, "information": args[1] & 0xffffffff, "size": len(descriptor)})
+            if not args[2] or (args[3] & 0xffffffff) < len(descriptor):
+                set_last_error(122)
+                return 0
+            machine.write(args[2], descriptor)
+            set_last_error(0)
+            return 1
+        if name == "setkernelobjectsecurity":
+            handle = args[0]
+            entry = kernel.state["handles"].get(handle) if kernel != None else None
+            process_object = handle in [0xffffffff, 0xffffffffffffffff] or type(entry) == "dict" and entry.get("kind") == "process_reference"
+            if not process_object or not args[2]:
+                set_last_error(6 if not process_object else 87)
+                return 0
+            size = descriptor_length(machine, args[2])
+            if size < 20 or size > 1 << 20:
+                set_last_error(1338)  # ERROR_INVALID_SECURITY_DESCR
+                return 0
+            descriptor = persisted_descriptor(machine, args[2])
+            state["kernel_object_security"] = descriptor
+            state["actions"].append({"api": name, "handle": handle, "information": args[1] & 0xffffffff, "descriptor": descriptor})
             set_last_error(0)
             return 1
         if name in ["setfilesecuritya", "setfilesecurityw"]:
@@ -9154,7 +9542,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
                 if ace_size < 8 or offset + ace_size > size:
                     return 0
                 if index == args[1]:
-                    machine.write_u32le(args[2], args[0] + offset)
+                    machine.write_pointer(args[2], args[0] + offset)
                     return 0 if name.startswith("rtl") else 1
                 offset += ace_size
             return 0xc000000d if name.startswith("rtl") else 0
@@ -9315,9 +9703,36 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         return 0
 
     def install(machine):
+        security_base = [
+            "accesscheck",
+            "addaccessallowedace",
+            "copysid",
+            "duplicatetokenex",
+            "equalsid",
+            "getace",
+            "getaclinformation",
+            "getlengthsid",
+            "getkernelobjectsecurity",
+            "getsecuritydescriptorcontrol",
+            "getsecuritydescriptordacl",
+            "getsidsubauthority",
+            "getsidsubauthoritycount",
+            "gettokeninformation",
+            "impersonateloggedonuser",
+            "initializeacl",
+            "initializesecuritydescriptor",
+            "isvalidsid",
+            "reverttoself",
+            "setsecuritydescriptordacl",
+            "setkernelobjectsecurity",
+        ]
         for function, argc in signatures.items():
             module = "ntdll.dll" if function.startswith("rtl") or function.startswith("nt") else "advapi32.dll"
             machine.provide_export(callback, module = module, name = function, argc = argc)
+            if function in ["openprocesstoken", "openthreadtoken"]:
+                machine.provide_export(callback, module = "api-ms-win-core-processthreads-l1-1-0.dll", name = function, argc = argc)
+            if function in security_base:
+                machine.provide_export(callback, module = "api-ms-win-security-base-l1-1-0.dll", name = function, argc = argc)
         for imported in machine.imports:
             function = imported.name.lower()
             if _security_provider_module(imported.module) and function in signatures:
@@ -9879,6 +10294,10 @@ def common_controls_plugin():
                     return callback(event, function)
                 machine.hook(bound, address = imported.address, argc = ordinal_signatures[function])
     return emulator.plugin(install, name = "windows.common-controls", state = state)
+
+def _shlwapi_provider_module(name):
+    normalized = name.replace("/", "\\").split("\\")[-1].lower()
+    return normalized == "shlwapi.dll" or normalized.startswith("api-ms-win-core-shlwapi-")
 
 def shell_plugin(module_path, kernel = None):
     """Models the bounded SHLWAPI compatibility wrappers used by registrars."""
@@ -10592,6 +11011,10 @@ def shell_plugin(module_path, kernel = None):
             wide = function.endswith("w")
             value = machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
             return 1 if value.startswith("\\\\") else 0
+        if function in ["pathisnetworkpatha", "pathisnetworkpathw"]:
+            wide = function.endswith("w")
+            value = machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii").replace("/", "\\")
+            return 1 if value.startswith("\\\\") else 0
         if function in ["pathisurla", "pathisurlw"]:
             if not args[0]:
                 return 0
@@ -10671,13 +11094,13 @@ def shell_plugin(module_path, kernel = None):
                 return 0x80070057
             _write_string(machine, args[2], value[:args[3] - 1], wide, args[3])
             return 0
-        if function in ["strcmpa", "strcmpw", "strcmpia", "strcmpnia", "strcmpiw", "strcmpniw"]:
+        if function in ["strcmpa", "strcmpw", "strcmpca", "strcmpcw", "strcmpia", "strcmpica", "strcmpicw", "strcmpnia", "strcmpiw", "strcmpniw"]:
             encoding = "utf16le" if function.endswith("w") else "ascii"
             left = machine.read_cstring(args[0], encoding = encoding)
             right = machine.read_cstring(args[1], encoding = encoding)
             if function in ["strcmpnia", "strcmpniw"]:
                 left, right = left[:args[2]], right[:args[2]]
-            if function in ["strcmpia", "strcmpnia", "strcmpiw", "strcmpniw"]:
+            if function in ["strcmpia", "strcmpica", "strcmpicw", "strcmpnia", "strcmpiw", "strcmpniw"]:
                 left, right = left.lower(), right.lower()
             return -1 if left < right else (1 if left > right else 0)
         if function == "strchrw":
@@ -10840,6 +11263,8 @@ def shell_plugin(module_path, kernel = None):
         machine.provide_export(lambda event: callback(event, 2), module = "shlwapi.dll", ordinal = 2, argc = 2)
         machine.provide_export(lambda event: callback(event, 199), module = "shlwapi.dll", ordinal = 199, argc = 2)
         machine.provide_export(lambda event: callback(event, "pathisunca"), module = "shlwapi.dll", name = "PathIsUNCA", argc = 1)
+        machine.provide_export(lambda event: callback(event, "pathisnetworkpatha"), module = "shlwapi.dll", name = "PathIsNetworkPathA", argc = 1)
+        machine.provide_export(lambda event: callback(event, "pathisnetworkpathw"), module = "shlwapi.dll", name = "PathIsNetworkPathW", argc = 1)
         machine.provide_export(lambda event: callback(event, "pathisurla"), module = "shlwapi.dll", name = "PathIsURLA", argc = 1)
         machine.provide_export(lambda event: callback(event, "pathisurlw"), module = "shlwapi.dll", name = "PathIsURLW", argc = 1)
         machine.provide_export(lambda event: callback(event, "strcmpa"), module = "shlwapi.dll", name = "StrCmpA", argc = 2)
@@ -10858,7 +11283,7 @@ def shell_plugin(module_path, kernel = None):
         machine.provide_export(lambda event: callback(event, "strrettobufa"), module = "shlwapi.dll", name = "StrRetToBufA", argc = 4)
         machine.provide_export(lambda event: callback(event, "strrettobufw"), module = "shlwapi.dll", name = "StrRetToBufW", argc = 4)
         signatures = {23: 3, 24: 3, 38: 1, 52: 7, 80: 3, 83: 1, 85: 4, 97: 2, 107: 4, 112: 3, 132: 1, 133: 1, 151: 3, 152: 3, 153: 3, 154: 3, 155: 2, 156: 2, 157: 2, 158: 2, 169: 1, 193: 0, 215: 3, 217: 3, 219: 4, 222: 1, 223: 1, 224: 1, 236: 1, 241: 0, 266: 4, 267: 4, 269: 2, 270: 2, 276: 0, 294: 5, 295: 4, 296: 3, 308: 2, 309: 1, 312: 6, 342: 3, 345: 3, 346: 3, 356: 3, 364: 3, 365: 3, 376: 0, 377: 3, 378: 3, 394: 4, 413: 1, 418: 1, 419: 0, 424: 1, 437: 1, 441: 3, 447: 1, 448: 1, 455: 2, 456: 2, 458: 3, 459: 3, 460: 3, 461: 1, 476: 2}
-        named_signatures = {"assoccreate": 3, "pathaddbackslasha": 1, "pathaddbackslashw": 1, "pathappenda": 2, "pathappendw": 2, "pathbuildroota": 2, "pathbuildrootw": 2, "pathcanonicalizea": 2, "pathcanonicalizew": 2, "pathcombinea": 3, "pathcombinew": 3, "pathcommonprefixa": 3, "pathcommonprefixw": 3, "pathfileexistsa": 1, "pathfileexistsw": 1, "pathfindextensiona": 1, "pathfindextensionw": 1, "pathfindfilenamea": 1, "pathfindfilenamew": 1, "pathgetargsa": 1, "pathgetargsw": 1, "pathisfilespeca": 1, "pathisfilespecw": 1, "pathisrelativew": 1, "pathisuncw": 1, "pathisuncservera": 1, "pathisuncserverw": 1, "pathisuncserversharea": 1, "pathisuncserversharew": 1, "pathmakeprettya": 1, "pathmakeprettyw": 1, "pathmakesystemfoldera": 1, "pathmakesystemfolderw": 1, "pathparseiconlocationa": 1, "pathparseiconlocationw": 1, "pathquotespacesa": 1, "pathquotespacesw": 1, "pathremoveargsa": 1, "pathremoveargsw": 1, "pathremovebackslasha": 1, "pathremovebackslashw": 1, "pathremoveblanksa": 1, "pathremoveblanksw": 1, "pathremoveextensiona": 1, "pathremoveextensionw": 1, "pathremovefilespeca": 1, "pathremovefilespecw": 1, "pathrenameextensiona": 2, "pathrenameextensionw": 2, "pathstrippatha": 1, "pathstrippathw": 1, "pathunexpandenvstringsw": 3, "pathunquotespacesa": 1, "pathunquotespacesw": 1, "shcreateshellpalette": 1, "shgetinversecmap": 2, "shreggetboolusvaluea": 4, "shreggetboolusvaluew": 4, "strcatbuffa": 3, "strcatbuffw": 3, "strcatw": 2, "strchra": 2, "strchrw": 2, "strcspna": 2, "strcmpia": 2, "strcmpiw": 2, "strcmpnia": 3, "strcmpniw": 3, "strcpynw": 3, "strcpyw": 2, "strdupa": 1, "strdupw": 1, "strrchra": 3, "strspnw": 2, "strstra": 2, "strstria": 2, "strstrw": 2, "strstriw": 2, "strtointa": 1, "strtointw": 1, "urlcanonicalizea": 4, "urlcanonicalizew": 4, "wnsprintfa": 16, "wnsprintfw": 16, "wvnsprintfw": 4}
+        named_signatures = {"assoccreate": 3, "pathaddbackslasha": 1, "pathaddbackslashw": 1, "pathappenda": 2, "pathappendw": 2, "pathbuildroota": 2, "pathbuildrootw": 2, "pathcanonicalizea": 2, "pathcanonicalizew": 2, "pathcombinea": 3, "pathcombinew": 3, "pathcommonprefixa": 3, "pathcommonprefixw": 3, "pathfileexistsa": 1, "pathfileexistsw": 1, "pathfindextensiona": 1, "pathfindextensionw": 1, "pathfindfilenamea": 1, "pathfindfilenamew": 1, "pathgetargsa": 1, "pathgetargsw": 1, "pathisfilespeca": 1, "pathisfilespecw": 1, "pathisrelativew": 1, "pathisuncw": 1, "pathisuncservera": 1, "pathisuncserverw": 1, "pathisuncserversharea": 1, "pathisuncserversharew": 1, "pathmakeprettya": 1, "pathmakeprettyw": 1, "pathmakesystemfoldera": 1, "pathmakesystemfolderw": 1, "pathparseiconlocationa": 1, "pathparseiconlocationw": 1, "pathquotespacesa": 1, "pathquotespacesw": 1, "pathremoveargsa": 1, "pathremoveargsw": 1, "pathremovebackslasha": 1, "pathremovebackslashw": 1, "pathremoveblanksa": 1, "pathremoveblanksw": 1, "pathremoveextensiona": 1, "pathremoveextensionw": 1, "pathremovefilespeca": 1, "pathremovefilespecw": 1, "pathrenameextensiona": 2, "pathrenameextensionw": 2, "pathstrippatha": 1, "pathstrippathw": 1, "pathunexpandenvstringsw": 3, "pathunquotespacesa": 1, "pathunquotespacesw": 1, "shcreateshellpalette": 1, "shgetinversecmap": 2, "shreggetboolusvaluea": 4, "shreggetboolusvaluew": 4, "strcatbuffa": 3, "strcatbuffw": 3, "strcatw": 2, "strchra": 2, "strchrw": 2, "strcspna": 2, "strcmpca": 2, "strcmpcw": 2, "strcmpia": 2, "strcmpica": 2, "strcmpicw": 2, "strcmpiw": 2, "strcmpnia": 3, "strcmpniw": 3, "strcpynw": 3, "strcpyw": 2, "strdupa": 1, "strdupw": 1, "strrchra": 3, "strspnw": 2, "strstra": 2, "strstria": 2, "strstrw": 2, "strstriw": 2, "strtointa": 1, "strtointw": 1, "urlcanonicalizea": 4, "urlcanonicalizew": 4, "wnsprintfa": 16, "wnsprintfw": 16, "wvnsprintfw": 4}
         for ordinal, argc in signatures.items():
             def bound_ordinal(event, function = ordinal):
                 return callback(event, function)
@@ -10876,7 +11301,7 @@ def shell_plugin(module_path, kernel = None):
                 convention = "cdecl" if exported_name in ["wnsprintfa", "wnsprintfw"] else "stdcall",
             )
         for imported in machine.imports:
-            if imported.module.lower() != "shlwapi.dll":
+            if not _shlwapi_provider_module(imported.module):
                 continue
             function = imported.ordinal if imported.ordinal else imported.name.lower()
             argc = signatures.get(function) if type(function) == "int" else named_signatures.get(function)
@@ -11117,7 +11542,7 @@ def userenv_plugin(environment = {}, kernel = None):
 
     return emulator.plugin(install, name = "windows.userenv", state = state)
 
-def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment = {}, malloc = None):
+def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment = {}, malloc = None, kernel = None):
     """Models the process-local shell change-notification registrations."""
     state = {"next_registration": 1, "registrations": {}, "notifications": [], "shell_settings": b"\x00" * 32, "desktop": 0, "desktop_references": 1, "pidls": {}}
     windows_directory = environment.get("windir", environment.get("WINDIR", _module_windows_directory(module_path))).replace("/", "\\").rstrip("\\")
@@ -11253,7 +11678,7 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
             if not arguments:
                 arguments = [module_path]
             encoded = [binary.encode(value, encoding = "utf16le", nul = True) for value in arguments]
-            pointer_bytes = (len(arguments) + 1) * 4
+            pointer_bytes = (len(arguments) + 1) * event.machine.pointer_size
             allocation_size = pointer_bytes
             for value in encoded:
                 allocation_size += len(value)
@@ -11268,10 +11693,16 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
             pointers = binary.builder(capacity = pointer_bytes)
             string_address = address + pointer_bytes
             for value in encoded:
-                pointers.u32le(string_address)
+                if event.machine.pointer_size == 8:
+                    pointers.u64le(string_address)
+                else:
+                    pointers.u32le(string_address)
                 event.machine.write(string_address, value)
                 string_address += len(value)
-            pointers.u32le(0)
+            if event.machine.pointer_size == 8:
+                pointers.u64le(0)
+            else:
+                pointers.u32le(0)
             event.machine.write(address, pointers.bytes())
             event.machine.write_u32le(event.args[1], len(arguments))
             return address
@@ -11298,7 +11729,7 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
         if function == "shgetknownfolderpath":
             if not event.args[0] or not event.args[3]:
                 return 0x80070057  # E_INVALIDARG
-            event.machine.write_u32le(event.args[3], 0)
+            event.machine.write_pointer(event.args[3], 0)
             path = known_folder_paths.get(_guid_text(event.machine, event.args[0]))
             if path == None:
                 return 0x80070002  # HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
@@ -11306,8 +11737,39 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
                 value = binary.encode(path, encoding = "utf16le", nul = True),
                 name = "SHGetKnownFolderPath",
             )
-            event.machine.write_u32le(event.args[3], value)
+            event.machine.write_pointer(event.args[3], value)
             return 0
+        if function in ["shgetspecialfolderpatha", "shgetspecialfolderpathw"]:
+            if not event.args[1]:
+                return 0
+            path = folder_paths.get(event.args[2] & 0xff)
+            if path == None:
+                return 0
+            _write_string(event.machine, event.args[1], path, function.endswith("w"), 260)
+            return 1
+        if function == "shcreatedirectoryexw":
+            if not event.args[1] or kernel == None:
+                return 87 if not event.args[1] else 120  # ERROR_INVALID_PARAMETER / ERROR_CALL_NOT_IMPLEMENTED
+            supplied = event.machine.read_cstring(event.args[1], encoding = "utf16le")
+            target = _normalize_virtual_path(supplied)
+            if not target:
+                return 87
+            kernel.state["file_queries"].append({"api": function, "path": target})
+            parts = target.split("\\")
+            prefix = parts[0]
+            created = False
+            for part in parts[1:]:
+                if not part:
+                    continue
+                prefix += "\\" + part
+                existing = kernel.state["paths"].get(prefix)
+                if existing != None:
+                    if not existing.get("directory", False):
+                        return 3  # ERROR_PATH_NOT_FOUND
+                    continue
+                kernel.state["paths"][prefix] = {"directory": True}
+                created = True
+            return 0 if created else 183  # ERROR_SUCCESS / ERROR_ALREADY_EXISTS
         if function == "shgetdesktopfolder":
             if not event.args[0]:
                 return 0x80004003
@@ -11322,7 +11784,7 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
         if function == "shgetspecialfolderlocation":
             if not event.args[2]:
                 return 0x80070057
-            event.machine.write_u32le(event.args[2], 0)
+            event.machine.write_pointer(event.args[2], 0)
             path = folder_paths.get(event.args[1] & 0xff)
             if path == None:
                 return 0x80070002
@@ -11331,7 +11793,7 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
             # SHGetPathFromIDList call observes the same shell folder.
             pidl = event.machine.allocate(value = b"\x00\x00", name = "special-folder.ITEMIDLIST")
             state["pidls"][pidl] = path
-            event.machine.write_u32le(event.args[2], pidl)
+            event.machine.write_pointer(event.args[2], pidl)
             return 0
         if function in ["shgetpathfromidlista", "shgetpathfromidlistw"]:
             path = state["pidls"].get(event.args[0])
@@ -11392,8 +11854,11 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
         machine.provide_export(lambda event: callback(event, "shgetdesktopfolder"), module = "shell32.dll", name = "SHGetDesktopFolder", argc = 1)
         machine.provide_export(lambda event: callback(event, "shgetmalloc"), module = "shell32.dll", name = "SHGetMalloc", argc = 1)
         machine.provide_export(lambda event: callback(event, "shgetspecialfolderlocation"), module = "shell32.dll", name = "SHGetSpecialFolderLocation", argc = 3)
+        machine.provide_export(lambda event: callback(event, "shgetspecialfolderpatha"), module = "shell32.dll", name = "SHGetSpecialFolderPathA", argc = 4)
+        machine.provide_export(lambda event: callback(event, "shgetspecialfolderpathw"), module = "shell32.dll", name = "SHGetSpecialFolderPathW", argc = 4)
         machine.provide_export(lambda event: callback(event, "shgetpathfromidlista"), module = "shell32.dll", name = "SHGetPathFromIDListA", argc = 2)
         machine.provide_export(lambda event: callback(event, "shgetpathfromidlistw"), module = "shell32.dll", name = "SHGetPathFromIDListW", argc = 2)
+        machine.provide_export(lambda event: callback(event, "shcreatedirectoryexw"), module = "shell32.dll", name = "SHCreateDirectoryExW", argc = 3)
         machine.provide_export(lambda event: callback(event, "shchangenotify"), module = "shell32.dll", name = "SHChangeNotify", argc = 4)
         for ordinal, argc in signatures.items():
             def bound(event, function = ordinal):
@@ -11410,6 +11875,15 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
                 continue
             if imported.name.lower() == "shchangenotify":
                 machine.hook(lambda event: callback(event, "shchangenotify"), address = imported.address, argc = 4)
+                continue
+            if imported.name.lower() in ["shgetspecialfolderpatha", "shgetspecialfolderpathw"]:
+                function = imported.name.lower()
+                def special_path(event, function = function):
+                    return callback(event, function)
+                machine.hook(special_path, address = imported.address, argc = 4)
+                continue
+            if imported.name.lower() == "shcreatedirectoryexw":
+                machine.hook(lambda event: callback(event, "shcreatedirectoryexw"), address = imported.address, argc = 3)
                 continue
             if imported.ordinal not in signatures:
                 continue

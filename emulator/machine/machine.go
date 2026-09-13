@@ -265,7 +265,7 @@ func (*Machine) Truth() starlark.Bool  { return starlark.True }
 func (*Machine) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: emulator.machine") }
 
 var machineAttrNames = func() []string {
-	names := []string{"architecture", "pointer_size", "entry", "stack", "imports", "modules", "mappings", "run", "call", "call_export", "get_register", "set_register", "read", "write", "allocate", "free", "load_module", "hook", "provide_export", "resolve_export", "use", "segment_base", "read_cstring", "read_cbytes"}
+	names := []string{"architecture", "pointer_size", "entry", "stack", "imports", "modules", "mappings", "run", "call", "call_export", "spawn", "get_register", "set_register", "read", "write", "allocate", "free", "load_module", "hook", "provide_export", "resolve_export", "use", "segment_base", "read_cstring", "read_cbytes"}
 	for _, codec := range binaryapi.ScalarCodecs {
 		names = append(names, "read_"+codec.Name, "write_"+codec.Name)
 	}
@@ -572,6 +572,56 @@ func (m *Machine) method(thread *starlark.Thread, builtin *starlark.Builtin, arg
 			m.processor.SetPC(value)
 		}
 		return m.runUntil(thread, until)
+	case "spawn":
+		address := starlark.Value(starlark.None)
+		arguments := starlark.Value(starlark.None)
+		registerValues := starlark.Value(starlark.None)
+		if err := starlark.UnpackArgs(name, args, kwargs, "address", &address, "args?", &arguments, "registers?", &registerValues); err != nil {
+			return nil, err
+		}
+		target, err := unsigned(address)
+		if err != nil || target == 0 {
+			return nil, fmt.Errorf("spawn: invalid target")
+		}
+		var values []uint64
+		if arguments != starlark.None {
+			iterable, ok := arguments.(starlark.Iterable)
+			if !ok {
+				return nil, fmt.Errorf("spawn: args must be iterable")
+			}
+			iterator := iterable.Iterate()
+			defer iterator.Done()
+			var arg starlark.Value
+			for iterator.Next(&arg) {
+				value, err := unsigned(arg)
+				if err != nil {
+					return nil, err
+				}
+				values = append(values, value)
+				if len(values) > 4096 {
+					return nil, fmt.Errorf("spawn: too many arguments")
+				}
+			}
+		}
+		registers := make(map[string]uint64)
+		if registerValues != starlark.None {
+			dictionary, ok := registerValues.(*starlark.Dict)
+			if !ok {
+				return nil, fmt.Errorf("spawn: registers must be a dict")
+			}
+			for _, item := range dictionary.Items() {
+				register, ok := starlark.AsString(item[0])
+				if !ok {
+					return nil, fmt.Errorf("spawn: register names must be strings")
+				}
+				value, err := unsigned(item[1])
+				if err != nil {
+					return nil, err
+				}
+				registers[register] = value
+			}
+		}
+		return m.spawn(target, values, registers)
 	case "call", "call_export", "invoke":
 		address := starlark.Value(starlark.None)
 		arguments := starlark.Value(starlark.None)

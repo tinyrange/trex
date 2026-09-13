@@ -17,7 +17,7 @@ load("@stdlib//windows/selfreg:comcat.star", "component_categories_provider")
 load("@stdlib//windows/selfreg:wer.star", "wer_plugin")
 load("@stdlib//windows/selfreg:appmodel.star", "appmodel_plugin")
 
-def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800):
+def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, process_create_provider = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800):
     """Runs one target export or executable using semantic system-DLL plugins.
 
     `prepare(machine)` may allocate target memory and return the integer
@@ -32,7 +32,9 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     receive process attach, but the PE entry point is not called as DllMain.
     `command_line` is returned by both GetCommandLine variants. `environment`
     augments a minimal standard Windows process environment and may override
-    any of its values. Each `plugin_factories` callback runs after the core
+    any of its values. `process_create_provider(machine, request)` supplies a
+    bounded semantic result for child-process creation. Each `plugin_factories`
+    callback runs after the core
     runtime plugins are constructed and receives a record containing `crt` and
     `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
@@ -89,10 +91,11 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
 
     deferred = {canonical_module_name(name): True for name in deferred_modules}
     virtual_system_modules = [
-        "advapi32.dll", "advapi32_vista.dll", "api-ms-win-core-com-l1-1-1.dll", "cabinet.dll", "comctl32.dll", "crypt32.dll", "gdi32.dll",
+        "advapi32.dll", "advapi32_vista.dll", "advpack.dll", "api-ms-win-core-com-l1-1-0.dll", "api-ms-win-core-com-l1-1-1.dll", "api-ms-win-core-processthreads-l1-1-0.dll", "cabinet.dll", "comctl32.dll", "crypt32.dll", "gdi32.dll",
         "kernel32.dll", "loadperf.dll", "lz32.dll", "msvcrt.dll", "netapi32.dll", "ntdll.dll",
-        "ole32.dll", "oleaut32.dll", "rpcrt4.dll", "setupapi.dll",
+        "ole32.dll", "oleaut32.dll", "rpcrt4.dll", "setupapi.dll", "api-ms-win-crt-private-l1-1-0.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "api-ms-win-crt-string-l1-1-0.dll", "api-ms-win-security-base-l1-1-0.dll",
         "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll", "version.dll",
+        "api-ms-win-core-shlwapi-legacy-l1-1-0.dll", "api-ms-win-core-shlwapi-obsolete-l1-1-0.dll",
         "winmm.dll", "wintrust.dll", "ws2_32.dll",
     ]
     module_images = dict(modules)
@@ -224,7 +227,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     process_environment.update(environment)
     registry = registry_plugin(values = registry_values, keys = registry_keys, hives = registry_hives, user_sid = user_sid, output_key_case = registry_output_key_case, prepared_state = prepared_registry_state, environment = process_environment)
     versions = version_plugin(file, module_path = module, module_files = module_images)
-    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, on_module_map = map_target_module, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time, tls_slots = tls_slots)
+    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, on_module_map = map_target_module, on_process_create = process_create_provider, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time, tls_slots = tls_slots)
     setup = setupapi_plugin(infs = setup_infs, directories = setup_directories, registry = registry, kernel = kernel)
     advpack = advpack_plugin(registry, module_images, kernel = kernel, setup = setup)
     performance = loadperf_plugin(registry, kernel)
@@ -378,7 +381,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         appmodel_plugin(),
         wer_plugin(),
         gdi32_plugin(),
-        shell32_plugin(module_path = module, environment = process_environment, malloc = ole.state),
+        shell32_plugin(module_path = module, environment = process_environment, malloc = ole.state, kernel = kernel),
         common_controls,
         shell_plugin(module, kernel = kernel),
         user_interface,
@@ -427,6 +430,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                     "file_queries": kernel.state["file_queries"],
                     "module_queries": kernel.state["module_queries"],
                     "procedure_queries": kernel.state["procedure_queries"],
+                    "delay_load_queries": kernel.state["delay_load_queries"],
                     "process_queries": kernel.state["process_queries"],
                     "system_queries": kernel.state["system_queries"],
                     "cabinet_actions": cabinet.state["actions"],
@@ -481,6 +485,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 "volume_queries": kernel.state["volume_queries"],
                 "module_queries": kernel.state["module_queries"],
                 "procedure_queries": kernel.state["procedure_queries"],
+                "delay_load_queries": kernel.state["delay_load_queries"],
                 "process_queries": kernel.state["process_queries"],
                 "system_queries": kernel.state["system_queries"],
                 "cabinet_actions": cabinet.state["actions"],
@@ -542,6 +547,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "volume_queries": kernel.state["volume_queries"],
         "module_queries": kernel.state["module_queries"],
         "procedure_queries": kernel.state["procedure_queries"],
+        "delay_load_queries": kernel.state["delay_load_queries"],
         "process_queries": kernel.state["process_queries"],
         "system_queries": kernel.state["system_queries"],
         "cabinet_actions": cabinet.state["actions"],

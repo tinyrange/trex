@@ -61,17 +61,21 @@ const (
 )
 
 type registryTree struct {
-	name     string
-	subkeys  map[string]*registryTree
-	values   map[string]registryData
-	flags    uint16
-	flagsSet bool
-	class    []byte
-	security []byte
-	cell     uint32
-	parent   uint32
-	listCell uint32
-	valCell  uint32
+	name    string
+	subkeys map[string]*registryTree
+	values  map[string]registryData
+	// valueNames is allocated only for keys large enough that repeatedly
+	// scanning values for Windows' case-insensitive lookup becomes expensive.
+	// It maps a folded name to the original spelling retained in values.
+	valueNames map[string]string
+	flags      uint16
+	flagsSet   bool
+	class      []byte
+	security   []byte
+	cell       uint32
+	parent     uint32
+	listCell   uint32
+	valCell    uint32
 }
 
 type registryData struct {
@@ -2665,13 +2669,12 @@ func setRegistryValueParts(root *registryTree, parts []string, name string, valu
 	if isDefaultRegistryValueName(name) {
 		name = "(default)"
 	}
-	for existing := range key.values {
-		if strings.EqualFold(existing, name) {
-			delete(key.values, existing)
-			break
-		}
+	existing, _, found := registryTreeValue(key, name)
+	if found && existing != name {
+		delete(key.values, existing)
 	}
 	key.values[name] = value
+	indexRegistryValueName(key, name)
 }
 
 func applyRegistryValue(root *registryTree, keyPath, name string, value registryData, flags uint64) error {
@@ -2689,6 +2692,9 @@ func applyRegistryValueParts(root *registryTree, parts []string, name string, va
 	case flags&infAddRegDeleteValue != 0:
 		if found {
 			delete(key.values, existingName)
+			if key.valueNames != nil {
+				delete(key.valueNames, foldRegistryValueName(existingName))
+			}
 		}
 		return nil
 	case flags&(infAddRegAppend|registryPrepend) != 0:
@@ -2722,12 +2728,44 @@ func registryTreeValue(key *registryTree, name string) (string, registryData, bo
 	if isDefaultRegistryValueName(name) {
 		name = "(default)"
 	}
+	ensureRegistryValueNameIndex(key)
+	if key.valueNames != nil {
+		existingName, found := key.valueNames[foldRegistryValueName(name)]
+		if !found {
+			return "", registryData{}, false
+		}
+		value, found := key.values[existingName]
+		return existingName, value, found
+	}
 	for existingName, value := range key.values {
 		if strings.EqualFold(existingName, name) {
 			return existingName, value, true
 		}
 	}
 	return "", registryData{}, false
+}
+
+const registryValueNameIndexThreshold = 8
+
+func foldRegistryValueName(name string) string {
+	return strings.ToUpper(name)
+}
+
+func ensureRegistryValueNameIndex(key *registryTree) {
+	if key.valueNames != nil || len(key.values) < registryValueNameIndexThreshold {
+		return
+	}
+	key.valueNames = make(map[string]string, len(key.values))
+	for name := range key.values {
+		key.valueNames[foldRegistryValueName(name)] = name
+	}
+}
+
+func indexRegistryValueName(key *registryTree, name string) {
+	ensureRegistryValueNameIndex(key)
+	if key.valueNames != nil {
+		key.valueNames[foldRegistryValueName(name)] = name
+	}
 }
 
 func appendRegistryMultiString(existing, addition registryData) (registryData, error) {
@@ -2779,12 +2817,11 @@ func setRegistryValueIfAbsent(root *registryTree, keyPath, name string, value re
 	if isDefaultRegistryValueName(name) {
 		name = "(default)"
 	}
-	for existing := range key.values {
-		if strings.EqualFold(existing, name) {
-			return
-		}
+	if _, _, found := registryTreeValue(key, name); found {
+		return
 	}
 	key.values[name] = value
+	indexRegistryValueName(key, name)
 }
 
 func setAddRegBehaviorFields(out *starlark.Dict, flags uint64) error {

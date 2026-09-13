@@ -394,6 +394,34 @@ func TestSetRegistryValueReplacesNamesCaseInsensitively(t *testing.T) {
 	}
 }
 
+func TestRegistryTreeIndexesLargeValueSetsCaseInsensitively(t *testing.T) {
+	root := newRegistryTree("SOFTWARE")
+	keyPath := "/Microsoft/Windows/CurrentVersion/Component Based Servicing"
+	for i := 0; i < registryValueNameIndexThreshold+4; i++ {
+		setRegistryValue(root, keyPath, fmt.Sprintf("Package_%04d", i), registryDWORD(uint32(i)))
+	}
+	key := ensureRegistryKey(root, keyPath)
+	if key.valueNames == nil {
+		t.Fatal("large value set did not build a case-insensitive name index")
+	}
+
+	setRegistryValue(root, keyPath, "package_0003", registryDWORD(99))
+	if _, present := key.values["Package_0003"]; present {
+		t.Fatal("case-insensitive replacement retained the old spelling")
+	}
+	name, value, found := registryTreeValue(key, "PACKAGE_0003")
+	if !found || name != "package_0003" || binary.LittleEndian.Uint32(value.data) != 99 {
+		t.Fatalf("indexed replacement = %q %#v %t, want package_0003 DWORD 99", name, value, found)
+	}
+
+	if err := applyRegistryValue(root, keyPath, "PaCkAgE_0003", registryData{}, infAddRegDeleteValue); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, found := registryTreeValue(key, "package_0003"); found {
+		t.Fatal("indexed delete retained the value name")
+	}
+}
+
 func TestSetRegistryValueIfAbsentPreservesExistingValue(t *testing.T) {
 	root := newRegistryTree("SOFTWARE")
 	keyPath := "/Classes/Interface/{00000000-0000-0000-0000-000000000000}"

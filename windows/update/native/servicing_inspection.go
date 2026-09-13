@@ -10,6 +10,35 @@ import (
 	"go.starlark.net/starlark"
 )
 
+// plannedServicingFile selects a declared file effect, including unchanged
+// inherited files which have no canonical content-target record of their own.
+func plannedServicingFile(plans []uup.StageEffectPlan, features []string, featureID, storePath string) (int, uup.StageFileEffect, error) {
+	if len(plans) != len(features) {
+		return 0, uup.StageFileEffect{}, fmt.Errorf("mismatched stage metadata")
+	}
+	normalize := func(s string) string { return strings.ToLower(strings.ReplaceAll(s, "\\", "/")) }
+	for stage, feature := range features {
+		if !strings.EqualFold(feature, featureID) {
+			continue
+		}
+		var selected *uup.StageFileEffect
+		for _, file := range plans[stage].Files {
+			if normalize(file.StorePath) != normalize(storePath) {
+				continue
+			}
+			if selected != nil {
+				return 0, uup.StageFileEffect{}, fmt.Errorf("ambiguous planned store path %q", storePath)
+			}
+			selected = &file
+		}
+		if selected == nil {
+			return 0, uup.StageFileEffect{}, fmt.Errorf("unknown planned store path %q", storePath)
+		}
+		return stage, *selected, nil
+	}
+	return 0, uup.StageFileEffect{}, fmt.Errorf("unknown installed-OS feature %q", featureID)
+}
+
 // inspectServicingFiles exposes declared placement only. It has no payload
 // reader and cannot be mistaken for the mandatory reconstruction/hash pass.
 // Name and destination-prefix selectors form a union; plan order is preserved.

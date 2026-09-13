@@ -8,7 +8,9 @@ _SIGNATURES = {
     "setupcloseinffile": 1,
     "setupcloselog": 0,
     "setupcommitfilequeuea": 4,
+    "setupcommitfilequeuew": 4,
     "setupdefaultqueuecallbacka": 4,
+    "setupdefaultqueuecallbackw": 4,
     "setupfindfirstlinea": 4,
     "setupfindfirstlinew": 4,
     "setupfindnextline": 2,
@@ -17,6 +19,7 @@ _SIGNATURES = {
     "setupgetlinetexta": 7,
     "setupgetlinetextw": 7,
     "setupgetstringfielda": 5,
+    "setupgetstringfieldw": 5,
     "setupgettargetpathw": 6,
     "setupinstallfilesfrominfsectionw": 6,
     "setupinitdefaultqueuecallbackex": 5,
@@ -25,10 +28,13 @@ _SIGNATURES = {
     "setupinstallservicesfrominfsectionw": 3,
     "setuplogerrora": 2,
     "setupopenappendinffilea": 3,
+    "setupopenappendinffilew": 3,
     "setupopenfilequeue": 0,
     "setupopeninffilea": 4,
+    "setupopeninffilew": 4,
     "setupopenlog": 1,
     "setupqueuecopya": 9,
+    "setupqueuecopyw": 9,
     "setupremoveinstallsectionfromdiskspacelistw": 6,
     "setupsetdirectoryida": 3,
     "setupsetdirectoryidw": 3,
@@ -155,10 +161,10 @@ def setupapi_plugin(infs = {}, directories = {}, registry = None, kernel = None)
             state["calls"].append(call)
         wide = name.endswith("w")
         encoding = "utf16le" if wide else "ascii"
-        if name == "setupopeninffilea":
+        if name in ["setupopeninffilea", "setupopeninffilew"]:
             if not args[0] or kernel == None:
                 return 0xffffffff
-            path = virtual_path(machine.read_cstring(args[0], encoding = "ascii"))
+            path = virtual_path(machine.read_cstring(args[0], encoding = encoding))
             data = kernel.state["file_data"](path)
             if not data:
                 if args[3]:
@@ -169,7 +175,7 @@ def setupapi_plugin(infs = {}, directories = {}, registry = None, kernel = None)
             state["infs"][handle] = windows.inf(data)
             state["actions"].append({"kind": "open_inf", "path": path, "handle": handle, "sections": sorted(state["infs"][handle].json.keys())})
             return handle
-        if name == "setupopenappendinffilea":
+        if name in ["setupopenappendinffilea", "setupopenappendinffilew"]:
             # The Win9x ADVPack path uses this for optional layout metadata.
             # Its primary temporary INF is already complete and remains live.
             call["handle"] = args[1]
@@ -256,7 +262,7 @@ def setupapi_plugin(infs = {}, directories = {}, registry = None, kernel = None)
                 return 0
             write_context(machine, args[3], {"section": section, "lines": lines, "index": args[2]})
             return 1
-        if name == "setupgetstringfielda":
+        if name in ["setupgetstringfielda", "setupgetstringfieldw"]:
             line = read_context(machine, args[0])
             if line == None:
                 return 0
@@ -269,7 +275,7 @@ def setupapi_plugin(infs = {}, directories = {}, registry = None, kernel = None)
                 machine.write_u32le(args[4], required)
             if not args[2] or args[3] < required:
                 return 0
-            machine.write(args[2], binary.encode(value, encoding = "ascii", nul = True))
+            machine.write(args[2], binary.encode(value, encoding = encoding, nul = True))
             return 1
         if name in ["setupsetdirectoryida", "setupsetdirectoryidw"]:
             if inf_for(args[0]) == None or not args[2]:
@@ -352,7 +358,7 @@ def setupapi_plugin(infs = {}, directories = {}, registry = None, kernel = None)
             return machine.allocate(size = 4, name = "SetupAPI queue callback")
         if name == "setuptermdefaultqueuecallback":
             return None
-        if name == "setupdefaultqueuecallbacka":
+        if name in ["setupdefaultqueuecallbacka", "setupdefaultqueuecallbackw"]:
             return 1
         if name == "setupopenfilequeue":
             handle = state["next_queue"]
@@ -362,15 +368,15 @@ def setupapi_plugin(infs = {}, directories = {}, registry = None, kernel = None)
         if name == "setupclosefilequeue":
             state["queues"].pop(args[0], None)
             return None
-        if name == "setupqueuecopya":
+        if name in ["setupqueuecopya", "setupqueuecopyw"]:
             queue = state["queues"].get(args[0])
             if queue == None:
                 return 0
             def text_at(index):
-                return machine.read_cstring(args[index], encoding = "ascii") if args[index] else ""
+                return machine.read_cstring(args[index], encoding = encoding) if args[index] else ""
             queue.append({"source_root": text_at(1), "source_path": text_at(2), "source_name": text_at(3), "target_path": text_at(6), "target_name": text_at(7), "style": args[8]})
             return 1
-        if name == "setupcommitfilequeuea":
+        if name in ["setupcommitfilequeuea", "setupcommitfilequeuew"]:
             queue = state["queues"].get(args[1])
             if queue == None:
                 return 0
