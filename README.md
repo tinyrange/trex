@@ -24,6 +24,11 @@ Use Go 1.25.5 or newer. Use `trex -h` for command syntax,
 `trex -repl` to explore without a script, and `trex script.star [arguments...]`
 to run a program.
 
+For a native desktop archive browser, run `go run ./cmd/trex-browser [directory-or-archive]`
+or install it with `go install ./cmd/trex-browser`. It uses
+[gowin](https://github.com/tinyrange/gowin) and the same portable archive readers
+as the web viewer. See [desktop browser usage](docs/archive-browser.md).
+
 Start with the [quickstart](docs/starlark/quickstart.md), executable
 [public examples and script index](scripts/README.md), and
 [emulator guide](docs/starlark/emulation.md). The
