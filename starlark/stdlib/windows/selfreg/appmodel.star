@@ -24,6 +24,7 @@ _SIGNATURES = {
     "packagefullnamefromid": 3,
     "packageidfromfullname": 4,
     "packagenameandpublisheridfromfamilyname": 5,
+    "rtlquerypackageclaims": 8,
 }
 
 def appmodel_plugin():
@@ -82,6 +83,20 @@ def appmodel_plugin():
             if args[2]:
                 event.machine.write_u32le(args[2], 0)
             return _ERROR_NOT_FOUND
+        if name == "rtlquerypackageclaims":
+            if not args[0]:
+                return 0xc0000008  # STATUS_INVALID_HANDLE
+            if args[2]:
+                event.machine.write_pointer(args[2], 0)
+            if args[4]:
+                event.machine.write_pointer(args[4], 0)
+            if args[5]:
+                event.machine.write(args[5], b"\x00" * 16)
+            if args[6]:
+                event.machine.write_u32le(args[6], 0)
+            if args[7]:
+                event.machine.write_u64le(args[7], 0)
+            return 0
         return _ERROR_NOT_FOUND
 
     def install(machine):
@@ -91,11 +106,13 @@ def appmodel_plugin():
             "kernel32.dll",
         ]
         for name, argc in _SIGNATURES.items():
-            for module in modules:
+            providers = ["ntdll.dll"] if name.startswith("rtl") else modules
+            for module in providers:
                 machine.provide_export(callback, module = module, name = name, argc = argc)
         for imported in machine.imports_named(_SIGNATURES):
             name = imported.name.lower()
-            if (imported.module.lower().startswith("api-ms-win-appmodel-runtime-") or imported.module.lower() == "kernel32.dll") and name in _SIGNATURES:
+            provider = imported.module.lower()
+            if (provider.startswith("api-ms-win-appmodel-runtime-") or provider == "kernel32.dll" or provider == "ntdll.dll" and name.startswith("rtl")) and name in _SIGNATURES:
                 machine.hook(callback, address = imported.address, argc = _SIGNATURES[name])
 
     return emulator.plugin(install, name = "windows.appmodel", state = state)

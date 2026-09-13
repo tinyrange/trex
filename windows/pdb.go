@@ -37,6 +37,7 @@ type pdbMSF struct {
 type pdbValue struct {
 	guid      string
 	age       uint32
+	dbiAge    uint32
 	signature uint32
 	symbols   []pdbSymbol
 }
@@ -58,35 +59,56 @@ func parsePDB(file starfile.File, streamLimit int64) (*pdbValue, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := msf.stream(1)
+	value, dbi, err := msf.identity()
 	if err != nil {
-		return nil, fmt.Errorf("PDB info stream: %w", err)
+		return nil, err
 	}
-	if len(info) < 12 {
-		return nil, fmt.Errorf("PDB info stream is short")
-	}
-	value := &pdbValue{signature: binary.LittleEndian.Uint32(info[4:8]), age: binary.LittleEndian.Uint32(info[8:12])}
-	if msf.version >= 7 {
-		if len(info) < 28 {
-			return nil, fmt.Errorf("PDB info stream has no GUID")
-		}
-		value.guid = formatPDBGUID(info[12:28])
-	}
-	value.symbols, err = parsePDBSymbolStreams(msf)
+	value.symbols, err = parsePDBSymbolStreams(msf, dbi)
 	if err != nil {
 		return nil, err
 	}
 	return value, nil
 }
 
-func parsePDBSymbolStreams(msf *pdbMSF) ([]pdbSymbol, error) {
+// identity reads the Info and DBI identity fields without decoding symbol,
+// section or module streams. Download validation needs these identities only;
+// the explicit pdb parser remains responsible for full symbol decoding.
+func (msf *pdbMSF) identity() (*pdbValue, []byte, error) {
+	info, err := msf.stream(1)
+	if err != nil {
+		return nil, nil, fmt.Errorf("PDB info stream: %w", err)
+	}
+	if len(info) < 12 {
+		return nil, nil, fmt.Errorf("PDB info stream is short")
+	}
+	value := &pdbValue{signature: binary.LittleEndian.Uint32(info[4:8]), age: binary.LittleEndian.Uint32(info[8:12])}
+	if msf.version >= 7 {
+		if len(info) < 28 {
+			return nil, nil, fmt.Errorf("PDB info stream has no GUID")
+		}
+		value.guid = formatPDBGUID(info[12:28])
+	}
 	dbi, err := msf.stream(3)
 	if err != nil {
-		return nil, fmt.Errorf("PDB DBI stream: %w", err)
+		return nil, nil, fmt.Errorf("PDB DBI stream: %w", err)
 	}
 	if len(dbi) < 64 {
-		return nil, fmt.Errorf("PDB DBI stream is short")
+		return nil, nil, fmt.Errorf("PDB DBI stream is short")
 	}
+	value.dbiAge = binary.LittleEndian.Uint32(dbi[8:12])
+	return value, dbi, nil
+}
+
+// validateImageAge follows Microsoft's PDB1::OpenValidate4: post-link updates
+// may advance the Info age, but symbol records must retain the image's DBI age.
+func (p *pdbValue) validateImageAge(age uint32) error {
+	if p.age < age || (p.dbiAge != 0 && p.dbiAge != age) {
+		return fmt.Errorf("PDB Info age %d and DBI age %d do not match image age %d", p.age, p.dbiAge, age)
+	}
+	return nil
+}
+
+func parsePDBSymbolStreams(msf *pdbMSF, dbi []byte) ([]pdbSymbol, error) {
 	symbolStream := int(binary.LittleEndian.Uint16(dbi[20:22]))
 	omapStream, err := pdbOptionalDebugStream(dbi, 4)
 	if err != nil {
@@ -472,6 +494,8 @@ func (p *pdbValue) Attr(name string) (starlark.Value, error) {
 		return starlark.String(p.guid), nil
 	case "age":
 		return starlark.MakeUint64(uint64(p.age)), nil
+	case "dbi_age":
+		return starlark.MakeUint64(uint64(p.dbiAge)), nil
 	case "signature":
 		return starlark.MakeUint64(uint64(p.signature)), nil
 	case "symbols":
@@ -484,7 +508,7 @@ func (p *pdbValue) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (p *pdbValue) AttrNames() []string {
-	return []string{"age", "find", "guid", "nearest", "signature", "symbols"}
+	return []string{"age", "dbi_age", "find", "guid", "nearest", "signature", "symbols"}
 }
 
 type pdbSymbolValue struct{ symbol pdbSymbol }

@@ -4377,6 +4377,33 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		} else {
 			m.x87Stack[index] = value / current
 		}
+	case x86asm.FIDIV:
+		value, err := m.x87IntegerOperand(instruction.Args[0], instruction.MemBytes)
+		if err != nil {
+			return "", "", err
+		}
+		current, err := m.x87Value(0)
+		if err != nil {
+			return "", "", err
+		}
+		m.x87Stack[m.x87Top] = current / float64(value)
+	case x86asm.FYL2X:
+		x, err := m.x87Value(0)
+		if err != nil {
+			return "", "", err
+		}
+		y, err := m.x87Value(1)
+		if err != nil {
+			return "", "", err
+		}
+		m.x87Stack[(m.x87Top+1)%len(m.x87Stack)] = y * math.Log2(x)
+		m.x87Pop()
+	case x86asm.FCHS:
+		value, err := m.x87Value(0)
+		if err != nil {
+			return "", "", err
+		}
+		m.x87Stack[m.x87Top] = -value
 	case x86asm.FADDP, x86asm.FMULP, x86asm.FSUBP, x86asm.FSUBRP, x86asm.FDIVP, x86asm.FDIVRP:
 		leftIndex, err := x87RegisterIndex(instruction.Args[0])
 		if err != nil {
@@ -4484,7 +4511,7 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		if err := m.setOperand(instruction.Args[0], instruction.MemBytes, v); err != nil {
 			return "", "", err
 		}
-	case x86asm.XORPS, x86asm.PXOR, x86asm.POR, x86asm.PAND, x86asm.PANDN:
+	case x86asm.XORPS, x86asm.PXOR, x86asm.ORPS, x86asm.POR, x86asm.ANDPS, x86asm.PAND, x86asm.ANDNPS, x86asm.PANDN:
 		left, err := m.vector128Value(instruction.Args[0])
 		if err != nil {
 			return "", "", err
@@ -4497,11 +4524,11 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 			switch instruction.Op {
 			case x86asm.XORPS, x86asm.PXOR:
 				left[index] ^= right[index]
-			case x86asm.POR:
+			case x86asm.ORPS, x86asm.POR:
 				left[index] |= right[index]
-			case x86asm.PAND:
+			case x86asm.ANDPS, x86asm.PAND:
 				left[index] &= right[index]
-			case x86asm.PANDN:
+			case x86asm.ANDNPS, x86asm.PANDN:
 				left[index] = ^left[index] & right[index]
 			}
 		}
@@ -4704,6 +4731,44 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		if err := m.setOperand(instruction.Args[0], 4, mask); err != nil {
 			return "", "", err
 		}
+	case x86asm.PSHUFD:
+		value, err := m.vector128Value(instruction.Args[1])
+		if err != nil {
+			return "", "", err
+		}
+		control, ok := instruction.Args[2].(x86asm.Imm)
+		if !ok {
+			return "", "", fmt.Errorf("PSHUFD control is %T", instruction.Args[2])
+		}
+		var output [16]byte
+		for index := 0; index < 4; index++ {
+			source := (uint8(control) >> (index * 2)) & 3
+			copy(output[index*4:index*4+4], value[int(source)*4:int(source)*4+4])
+		}
+		if err := m.setVector128(instruction.Args[0], output); err != nil {
+			return "", "", err
+		}
+	case x86asm.PADDD, x86asm.PSUBD:
+		left, err := m.vector128Value(instruction.Args[0])
+		if err != nil {
+			return "", "", err
+		}
+		right, err := m.vector128Value(instruction.Args[1])
+		if err != nil {
+			return "", "", err
+		}
+		for offset := 0; offset < len(left); offset += 4 {
+			value := binary.LittleEndian.Uint32(left[offset:])
+			if instruction.Op == x86asm.PADDD {
+				value += binary.LittleEndian.Uint32(right[offset:])
+			} else {
+				value -= binary.LittleEndian.Uint32(right[offset:])
+			}
+			binary.LittleEndian.PutUint32(left[offset:], value)
+		}
+		if err := m.setVector128(instruction.Args[0], left); err != nil {
+			return "", "", err
+		}
 	case x86asm.MOVAPS, x86asm.MOVUPS, x86asm.MOVAPD, x86asm.MOVUPD, x86asm.MOVDQA, x86asm.MOVDQU:
 		value, err := m.vector128Value(instruction.Args[1])
 		if err != nil {
@@ -4722,6 +4787,17 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 			return "", "", err
 		}
 		if err := m.setVectorScalar(instruction.Args[0], value, width, sourceMemory); err != nil {
+			return "", "", err
+		}
+	case x86asm.MOVLPD:
+		value, _, err := m.vectorScalarValue(instruction.Args[1], 8)
+		if err != nil {
+			return "", "", err
+		}
+		// Unlike MOVSD's memory form, legacy MOVLPD preserves the high
+		// quadword of an XMM destination. Its store form writes only the low
+		// quadword, which setVectorScalar also models.
+		if err := m.setVectorScalar(instruction.Args[0], value, 8, false); err != nil {
 			return "", "", err
 		}
 	case x86asm.MOVQ:
@@ -4962,10 +5038,10 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 				return "", "", err
 			}
 		}
-	case x86asm.BT:
+	case x86asm.BT, x86asm.BTS, x86asm.BTR:
 		width := m.operandWidth(instruction.Args[0], instruction.MemBytes)
 		if width != 2 && width != 4 {
-			return "unsupported", fmt.Sprintf("unsupported BT width %d at 0x%08x", width, next-uint32(instruction.Len)), nil
+			return "unsupported", fmt.Sprintf("unsupported %s width %d at 0x%08x", instruction.Op, width, next-uint32(instruction.Len)), nil
 		}
 		bitOffset, err := m.operandValueWidth(instruction.Args[1], next, instruction.MemBytes)
 		if err != nil {
@@ -4974,6 +5050,7 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		bitWidth := uint32(width * 8)
 		bit := bitOffset % bitWidth
 		value := uint32(0)
+		memoryAddress := uint32(0)
 		if memory, ok := instruction.Args[0].(x86asm.Mem); ok {
 			address, err := m.effectiveAddress(memory)
 			if err != nil {
@@ -4984,6 +5061,7 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 			if _, registerOffset := instruction.Args[1].(x86asm.Reg); registerOffset {
 				address += bitOffset / bitWidth * uint32(width)
 			}
+			memoryAddress = address
 			data, err := m.readMemory(address, width, 'r')
 			if err != nil {
 				return "", "", err
@@ -4996,6 +5074,26 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 			}
 		}
 		m.carry = value&(uint32(1)<<bit) != 0
+		if instruction.Op == x86asm.BTS || instruction.Op == x86asm.BTR {
+			if instruction.Op == x86asm.BTS {
+				value |= uint32(1) << bit
+			} else {
+				value &^= uint32(1) << bit
+			}
+			if memoryAddress != 0 {
+				var data [4]byte
+				if width == 2 {
+					binary.LittleEndian.PutUint16(data[:], uint16(value))
+				} else {
+					binary.LittleEndian.PutUint32(data[:], value)
+				}
+				if err := m.writeMemory(memoryAddress, data[:width]); err != nil {
+					return "", "", err
+				}
+			} else if err := m.setOperand(instruction.Args[0], width, value); err != nil {
+				return "", "", err
+			}
+		}
 	case x86asm.XCHG:
 		width := m.operandWidth(instruction.Args[0], instruction.MemBytes)
 		if _, ok := instruction.Args[1].(x86asm.Mem); ok {

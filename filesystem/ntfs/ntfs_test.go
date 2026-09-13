@@ -302,6 +302,18 @@ func TestNTFSAttributeListEntriesAreOrderedByType(t *testing.T) {
 	}
 }
 
+func TestNTFSReadExtensionReferenceRequiresCurrentBaseSequence(t *testing.T) {
+	base := &ntfsReadNode{id: 34537, sequence: 7}
+	current := &ntfsReadNode{id: 90000, baseSequence: 7}
+	stale := &ntfsReadNode{id: 90001, baseSequence: 6}
+	if !ntfsReadExtensionMatchesBase(base, current) {
+		t.Fatal("current extension reference did not match its base sequence")
+	}
+	if ntfsReadExtensionMatchesBase(base, stale) {
+		t.Fatal("stale extension reference matched a reused base record")
+	}
+}
+
 func TestNTFSIndexBlockEntryOffsetIsRelativeToIndexHeader(t *testing.T) {
 	entry := ntfsIndexEndEntry(false, 0)
 	block := ntfsIndexBlock(0, [][]byte{entry}, false)
@@ -693,6 +705,35 @@ func TestNTFS31PreservesImportedSecurityDescriptors(t *testing.T) {
 	}
 	if !allocations["$SDH"] || !allocations["$SII"] {
 		t.Fatalf("large security indexes have allocations %v", allocations)
+	}
+}
+
+func TestNTFSHardLinkSecurityUpdateSurvivesBuilderOrder(t *testing.T) {
+	root := filesystemapi.New()
+	root.PutFile("/z/source", filesystemapi.FileRecord{Data: []byte("shared"), Size: 6})
+	if err := root.HardLink("/z/source", "/a/alias"); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := ntfsSecurityDescriptor(ntfsSID(5, 18), ntfsSID(5, 18), 0x001600b9, ntfsSID(5, 18))
+	if err := root.SetSecurity("/z/source", descriptor); err != nil {
+		t.Fatal(err)
+	}
+	image, err := buildNTFSImageWithOptions(root, 64<<20, nil, 0, "LINKSEC", 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume, err := newNTFSVolume(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, alias := volume.paths["/z/source"], volume.paths["/a/alias"]
+	if source == nil || alias == nil || source.id != alias.id {
+		t.Fatal("hard-link identity not preserved")
+	}
+	for _, node := range []*ntfsReadNode{source, alias} {
+		if !bytes.Equal(volume.securityDescriptors[node.securityID], descriptor) {
+			t.Fatal("builder lost hard-link security update")
+		}
 	}
 }
 

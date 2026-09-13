@@ -2,6 +2,7 @@ package amd64
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -359,6 +360,67 @@ func TestRepeatedStoresAreBoundedAndResumeAfterFault(t *testing.T) {
 	requireRegister(t, c, "rdi", destination-8)
 }
 
+func TestRepeatedMovesAreBoundedAndResumeAfterFault(t *testing.T) {
+	c, m := codeMemory(t, "f3a4 f4") // rep movsb; hlt
+	const source, destination = 0x200000000, 0x300000000
+	if err := m.Map(source, []byte{1, 2, 3}, cpu.Read); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Map(destination, []byte{0, 0}, cpu.Read|cpu.Write); err != nil {
+		t.Fatal(err)
+	}
+	c.SetRegister("rsi", source)
+	c.SetRegister("rdi", destination)
+	c.SetRegister("rcx", 3)
+	c.flags = flagCarry | flagZero
+	start := c.PC()
+	for range 2 {
+		if _, err := c.Step(m); err != nil {
+			t.Fatal(err)
+		}
+		if c.PC() != start || c.flags != flagCarry|flagZero {
+			t.Fatal("repeat advanced RIP or changed flags")
+		}
+	}
+	if _, err := c.Step(m); err == nil {
+		t.Fatal("move across unmapped boundary succeeded")
+	}
+	requireRegister(t, c, "rcx", 1)
+	requireRegister(t, c, "rsi", source+2)
+	requireRegister(t, c, "rdi", destination+2)
+	if err := m.Map(destination+2, []byte{0}, cpu.Read|cpu.Write); err != nil {
+		t.Fatal(err)
+	}
+	runCode(t, c, m, 2)
+	var got [3]byte
+	if err := m.ReadMemory(destination, got[:], cpu.Read); err != nil || got != [3]byte{1, 2, 3} {
+		t.Fatalf("moved bytes = %x, %v", got, err)
+	}
+	requireRegister(t, c, "rcx", 0)
+	requireRegister(t, c, "rsi", source+3)
+	requireRegister(t, c, "rdi", destination+3)
+
+	c, m = codeMemory(t, "f3 48a5 f4") // rep movsq; hlt, backwards
+	input := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	if err := m.Map(source, input, cpu.Read); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Map(destination, make([]byte, len(input)), cpu.Read|cpu.Write); err != nil {
+		t.Fatal(err)
+	}
+	c.SetRegister("rsi", source+8)
+	c.SetRegister("rdi", destination+8)
+	c.SetRegister("rcx", 2)
+	c.flags = flagDirection
+	runCode(t, c, m, 3)
+	words := make([]byte, len(input))
+	if err := m.ReadMemory(destination, words, cpu.Read); err != nil || !bytes.Equal(words, input) {
+		t.Fatalf("moved words = %x, %v", words, err)
+	}
+	requireRegister(t, c, "rsi", source-8)
+	requireRegister(t, c, "rdi", destination-8)
+}
+
 func TestExecuteRegisterWidths(t *testing.T) {
 	// mov rax,-1; mov ax,1234h; mov ah,56h; mov r8,rax;
 	// mov eax,89abcdefh; mov r9,rax; hlt
@@ -619,16 +681,158 @@ func TestVectorMovePreservesFullRegister(t *testing.T) {
 	}
 }
 
+func TestMOVDRoundTripsLowDword(t *testing.T) {
+	// mov eax,0x12345678; movd xmm1,eax; mov eax,-1; movd eax,xmm1; hlt
+	c, m := codeMemory(t, "b878563412 660f6ec8 b8ffffffff 660f7ec8 f4")
+	for index := range c.xmm[1] {
+		c.xmm[1][index] = 0xff
+	}
+	c.flags = flagCarry | flagZero
+	runCode(t, c, m, 5)
+	requireRegister(t, c, "rax", 0x12345678)
+	if binary.LittleEndian.Uint32(c.xmm[1][:4]) != 0x12345678 || !bytes.Equal(c.xmm[1][4:], make([]byte, 12)) {
+		t.Fatalf("xmm1=%x", c.xmm[1])
+	}
+	if c.flags != flagCarry|flagZero {
+		t.Fatalf("flags=%x", c.flags)
+	}
+}
+
+func TestPSRLDQShiftsBytesAndClearsHighLanes(t *testing.T) {
+	// psrldq xmm0,4; psrldq xmm1,16; hlt
+	c, m := codeMemory(t, "660f73d804 660f73d910 f4")
+	for i := range c.xmm[0] {
+		c.xmm[0][i] = byte(i)
+		c.xmm[1][i] = byte(i + 16)
+	}
+	c.flags = flagCarry | flagZero
+	runCode(t, c, m, 3)
+	want := append([]byte{4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}, make([]byte, 4)...)
+	if !bytes.Equal(c.xmm[0][:], want) || c.xmm[1] != [16]byte{} {
+		t.Fatalf("vectors=%x %x", c.xmm[0], c.xmm[1])
+	}
+	if c.flags != flagCarry|flagZero {
+		t.Fatalf("flags=%x", c.flags)
+	}
+}
+
+func TestLFENCEPreservesArchitecturalState(t *testing.T) {
+	// lfence; hlt
+	c, m := codeMemory(t, "0faee8 f4")
+	c.registers[0] = 0x123456789abcdef0
+	c.flags = flagCarry | flagZero
+	runCode(t, c, m, 2)
+	if c.registers[0] != 0x123456789abcdef0 || c.flags != flagCarry|flagZero {
+		t.Fatalf("rax=%x flags=%x", c.registers[0], c.flags)
+	}
+}
+
+func TestExchangeOperandWidths(t *testing.T) {
+	for _, tt := range []struct {
+		code  string
+		width int
+	}{{"8601", 1}, {"668701", 2}, {"8701", 4}, {"488701", 8}} {
+		c, m := codeMemory(t, tt.code)
+		const address = 0x200000000
+		if err := m.Map(address, bytes.Repeat([]byte{0x5a}, 8), cpu.Read|cpu.Write); err != nil {
+			t.Fatal(err)
+		}
+		c.registers[0], c.registers[1] = 0xffeeddccbbaa9988, address
+		c.flags = flagCarry | flagZero
+		if _, err := c.Step(m); err != nil {
+			t.Fatal(err)
+		}
+		got, err := readWord(m, address, 8)
+		want := uint64(0x5a5a5a5a5a5a5a5a)&^mask(tt.width) | uint64(0xffeeddccbbaa9988)&mask(tt.width)
+		register := uint64(0xffeeddccbbaa9988)&^mask(tt.width) | uint64(0x5a5a5a5a5a5a5a5a)&mask(tt.width)
+		if tt.width == 4 {
+			register &= mask(4)
+		}
+		if err != nil || got != want || c.registers[0] != register || c.flags != flagCarry|flagZero {
+			t.Fatalf("width %d: memory=%x register=%x flags=%x: %v", tt.width, got, c.registers[0], c.flags, err)
+		}
+	}
+}
+
+func TestXORPS(t *testing.T) {
+	// xorps xmm8,[rcx]; xorps xmm9,xmm8; xorps xmm8,xmm8.
+	c, m := codeMemory(t, "440f5701 450f57c8 450f57c0")
+	const source = 0x200000000
+	if err := m.Map(source, bytes.Repeat([]byte{0x5a}, 16), cpu.Read); err != nil {
+		t.Fatal(err)
+	}
+	c.registers[1] = source
+	for i := range c.xmm[8] {
+		c.xmm[8][i], c.xmm[9][i] = 0xff, 0x0f
+	}
+	c.flags = flagCarry | flagZero
+	for range 3 {
+		if _, err := c.Step(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.xmm[8] != [16]byte{} || !bytes.Equal(c.xmm[9][:], bytes.Repeat([]byte{0xaa}, 16)) || c.flags != flagCarry|flagZero {
+		t.Fatalf("XORPS state: %x %x flags=%x", c.xmm[8], c.xmm[9], c.flags)
+	}
+}
+
+func TestScalarVectorMoves(t *testing.T) {
+	for _, tt := range []struct {
+		prefix string
+		width  int
+	}{{"f2", 8}, {"f3", 4}} {
+		t.Run(tt.prefix, func(t *testing.T) {
+			// movsd/movss xmm8,[rcx]; xmm9,xmm8; [rdx],xmm9.
+			c, m := codeMemory(t, fmt.Sprintf("%s440f1001 %s450f10c8 %s440f110a", tt.prefix, tt.prefix, tt.prefix))
+			const source, destination = 0x200000001, 0x300000001
+			input := []byte{1, 2, 3, 4, 5, 6, 7, 8}[:tt.width]
+			if err := m.Map(source, input, cpu.Read); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Map(destination, bytes.Repeat([]byte{0xaa}, 16), cpu.Read|cpu.Write); err != nil {
+				t.Fatal(err)
+			}
+			c.registers[1], c.registers[2] = source, destination
+			for i := range c.xmm[8] {
+				c.xmm[8][i], c.xmm[9][i] = 0xcc, 0xdd
+			}
+			c.flags = flagCarry | flagDirection | flagZero
+			flags := c.flags
+			for range 3 {
+				if _, err := c.Step(m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !bytes.Equal(c.xmm[8][:tt.width], input) || !bytes.Equal(c.xmm[8][tt.width:], make([]byte, 16-tt.width)) {
+				t.Fatalf("memory load: %x", c.xmm[8])
+			}
+			if !bytes.Equal(c.xmm[9][:tt.width], input) || !bytes.Equal(c.xmm[9][tt.width:], bytes.Repeat([]byte{0xdd}, 16-tt.width)) {
+				t.Fatalf("register move: %x", c.xmm[9])
+			}
+			got := make([]byte, 16)
+			if err := m.ReadMemory(destination, got, cpu.Read); err != nil {
+				t.Fatal(err)
+			}
+			want := append(append([]byte{}, input...), bytes.Repeat([]byte{0xaa}, 16-tt.width)...)
+			if !bytes.Equal(got, want) || c.flags != flags {
+				t.Fatalf("store=%x flags=%x", got, c.flags)
+			}
+		})
+	}
+}
+
 func TestAlignedVectorMoveRejectsUnalignedAddress(t *testing.T) {
-	c, m := codeMemory(t, "660f6f01")
-	if err := m.Map(0x200000001, make([]byte, 16), cpu.Read); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.SetRegister("rcx", 0x200000001); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.Step(m); err == nil || !strings.Contains(err.Error(), "unaligned") {
-		t.Fatalf("unaligned move: %v", err)
+	for _, code := range []string{"660f6f01", "0f5701"} {
+		c, m := codeMemory(t, code)
+		if err := m.Map(0x200000001, make([]byte, 16), cpu.Read); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.SetRegister("rcx", 0x200000001); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Step(m); err == nil || !strings.Contains(err.Error(), "unaligned") {
+			t.Fatalf("unaligned vector operand: %v", err)
+		}
 	}
 }
 
@@ -745,6 +949,115 @@ func TestBitComplementRegisterAndMemory(t *testing.T) {
 				t.Fatalf("BTC memory = %#x flags %#x, %v", value, c.flags, err)
 			}
 		}
+	}
+}
+
+func TestBitSetAndResetRegisterAndMemory(t *testing.T) {
+	for _, test := range []struct {
+		code          string
+		initial, want uint64
+		carry         bool
+	}{
+		{"0f ba ea 07", 0, 0x80, false},       // bts edx,7
+		{"0f ba ea 07", 0x80, 0x80, true},     // bts edx,7
+		{"0f ba f2 07", 0x80, 0, true},        // btr edx,7
+		{"48 0f ba e8 3f", 0, 1 << 63, false}, // bts rax,63
+	} {
+		c, m := codeMemory(t, test.code)
+		c.registers[2], c.registers[0], c.flags = test.initial, test.initial, flagZero
+		if _, err := c.Step(m); err != nil {
+			t.Fatal(err)
+		}
+		got := c.registers[2]
+		if test.code == "48 0f ba e8 3f" {
+			got = c.registers[0]
+		}
+		if got != test.want || c.flags&^flagCarry != flagZero || (c.flags&flagCarry != 0) != test.carry {
+			t.Fatalf("bit update %s = %#x flags %#x", test.code, got, c.flags)
+		}
+	}
+
+	for _, writable := range []bool{false, true} {
+		c, m := codeMemory(t, "0f ab 10") // bts [rax],edx
+		access := cpu.Read
+		if writable {
+			access |= cpu.Write
+		}
+		if err := m.Map(0x200000000, make([]byte, 12), access); err != nil {
+			t.Fatal(err)
+		}
+		c.registers[0], c.registers[2], c.flags = 0x200000004, 33, flagZero
+		before := *c
+		_, err := c.Step(m)
+		if !writable {
+			if err == nil || *c != before {
+				t.Fatal("read-only BTS did not fault atomically")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := readWord(m, 0x200000008, 4)
+		if err != nil || value != 2 || c.flags != flagZero {
+			t.Fatalf("BTS memory = %#x flags %#x, %v", value, c.flags, err)
+		}
+	}
+}
+
+func TestExchangeAddRegisterAndLockedMemory(t *testing.T) {
+	c, m := codeMemory(t, "0f c1 d8") // xadd eax,ebx
+	c.registers[0], c.registers[3] = 0xffffffff, 1
+	if _, err := c.Step(m); err != nil {
+		t.Fatal(err)
+	}
+	if c.registers[0] != 0 || c.registers[3] != 0xffffffff || c.flags&flagCarry == 0 || c.flags&flagZero == 0 {
+		t.Fatalf("register XADD: eax=%#x ebx=%#x flags=%#x", c.registers[0], c.registers[3], c.flags)
+	}
+
+	for _, writable := range []bool{false, true} {
+		c, m := codeMemory(t, "f0 0f c1 01") // lock xadd [rcx],eax
+		access := cpu.Read
+		if writable {
+			access |= cpu.Write
+		}
+		if err := m.Map(0x200000000, []byte{4, 0, 0, 0}, access); err != nil {
+			t.Fatal(err)
+		}
+		c.registers[1], c.registers[0], c.flags = 0x200000000, 3, flagZero
+		before := *c
+		_, err := c.Step(m)
+		if !writable {
+			if err == nil || *c != before {
+				t.Fatal("read-only XADD did not fault atomically")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := readWord(m, 0x200000000, 4)
+		if err != nil || value != 7 || c.registers[0] != 4 {
+			t.Fatalf("memory XADD: memory=%#x eax=%#x flags=%#x err=%v", value, c.registers[0], c.flags, err)
+		}
+	}
+}
+
+func TestCPUIDReportsStableVendorAndLongMode(t *testing.T) {
+	c, m := codeMemory(t, "0f a2")
+	if _, err := c.Step(m); err != nil {
+		t.Fatal(err)
+	}
+	if c.registers[0] != 1 || c.registers[3] != 0x756e6547 || c.registers[2] != 0x49656e69 || c.registers[1] != 0x6c65746e {
+		t.Fatalf("CPUID vendor result = %#x %#x %#x %#x", c.registers[0], c.registers[3], c.registers[2], c.registers[1])
+	}
+	c.rip -= 2
+	c.registers[0] = 0x80000001
+	if _, err := c.Step(m); err != nil {
+		t.Fatal(err)
+	}
+	if c.registers[2] != 1<<29 {
+		t.Fatalf("CPUID extended features EDX = %#x", c.registers[2])
 	}
 }
 

@@ -1,12 +1,60 @@
 package windows
 
 import (
+	"bytes"
 	"encoding/binary"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"testing"
 
 	"go.starlark.net/starlark"
 )
+
+func TestMinidumpExceptionContext(t *testing.T) {
+	context := make([]byte, 1232)
+	binary.LittleEndian.PutUint64(context[248:256], 0x7ffe12345678)
+	raw := make([]byte, 168+len(context))
+	binary.LittleEndian.PutUint32(raw[160:164], uint32(len(context)))
+	binary.LittleEndian.PutUint32(raw[164:168], 168)
+	copy(raw[168:], context)
+	value, err := minidumpExceptionRecord(&starfile.Bytes{Name: "exception", Data: raw}, minidumpLocation{size: 168})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := value.(*starfile.Record).Attr("context")
+	if err != nil || !bytes.Equal([]byte(got.(starlark.Bytes)), context) {
+		t.Fatalf("exception context was not preserved: %v", err)
+	}
+	for _, size := range []uint32{1233, minidumpMaxContext + 1} {
+		binary.LittleEndian.PutUint32(raw[160:164], size)
+		if _, err := minidumpExceptionRecord(&starfile.Bytes{Name: "invalid context", Data: raw}, minidumpLocation{size: 168}); err == nil {
+			t.Fatalf("accepted context size %d", size)
+		}
+	}
+}
+
+func TestMinidumpThreadContext(t *testing.T) {
+	context := make([]byte, 1232)
+	binary.LittleEndian.PutUint64(context[248:256], 0x7ffe87654321)
+	raw := make([]byte, 52+len(context))
+	binary.LittleEndian.PutUint32(raw[:4], 1)
+	binary.LittleEndian.PutUint32(raw[44:48], uint32(len(context)))
+	binary.LittleEndian.PutUint32(raw[48:52], 52)
+	copy(raw[52:], context)
+	threads, err := minidumpThreads(&starfile.Bytes{Name: "thread", Data: raw}, minidumpLocation{size: 52}, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := threads[0].(*starfile.Record).Attr("context")
+	if err != nil || !bytes.Equal([]byte(got.(starlark.Bytes)), context) {
+		t.Fatalf("thread context was not preserved: %v", err)
+	}
+	for _, size := range []uint32{1233, minidumpMaxContext + 1} {
+		binary.LittleEndian.PutUint32(raw[44:48], size)
+		if _, err := minidumpThreads(&starfile.Bytes{Name: "invalid thread context", Data: raw}, minidumpLocation{size: 52}, 9); err == nil {
+			t.Fatalf("accepted thread context size %d", size)
+		}
+	}
+}
 
 func TestMinidumpExceptionRecord(t *testing.T) {
 	raw := make([]byte, 168)
@@ -34,6 +82,10 @@ func TestMinidumpExceptionRecord(t *testing.T) {
 	information, _ := record.Attr("information")
 	if got := information.(*starlark.List).Len(); got != 2 {
 		t.Fatalf("information length = %d", got)
+	}
+	context, _ := record.Attr("context")
+	if context != starlark.Bytes("") {
+		t.Fatalf("absent context = %v", context)
 	}
 }
 

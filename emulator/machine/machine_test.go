@@ -46,3 +46,43 @@ func TestResumeImportAfterProvidingTarget(t *testing.T) {
 		t.Fatalf("resumed stop = %v, value %#x", reason, value)
 	}
 }
+
+func TestSpawnExecutionPreservesParentContext(t *testing.T) {
+	const target, mainStack, executionStack = 0x180001000, 0x200000000, 0x300000000
+	m := &Machine{
+		processor: &amd64.CPU{}, memory: cpu.NewAddressSpace(1 << 20), limit: 20,
+		memoryLimit: 1 << 20, stackLow: mainStack, stackHigh: mainStack + 0x1000,
+		nextAllocation: executionStack, allocationNames: make(map[uint64]string),
+	}
+	// mov rax,rcx; ret
+	if err := m.memory.Map(target, []byte{0x48, 0x89, 0xc8, 0xc3}, cpu.Read|cpu.Execute); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.memory.Map(mainStack, make([]byte, 0x1000), cpu.Read|cpu.Write); err != nil {
+		t.Fatal(err)
+	}
+	m.processor.SetPC(0x123456789)
+	if err := m.processor.SetRegister("rax", 0xabcdef); err != nil {
+		t.Fatal(err)
+	}
+	execution, err := m.spawn(target, []uint64{0x123456789abcdef0}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := execution.runBuiltin(&starlark.Thread{Name: "spawn"}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason, _ := result.(starlark.HasAttrs).Attr("reason")
+	value, _ := result.(starlark.HasAttrs).Attr("value")
+	if reason != starlark.String("return") || value.String() != "1311768467463790320" || !execution.done {
+		t.Fatalf("execution result reason=%v value=%v done=%t", reason, value, execution.done)
+	}
+	parentValue, _ := m.processor.Register("rax")
+	if m.processor.PC() != 0x123456789 || parentValue != 0xabcdef {
+		t.Fatalf("parent context pc=%#x rax=%#x", m.processor.PC(), parentValue)
+	}
+	if err := m.memory.CheckMemory(executionStack, 1, cpu.Read); err == nil {
+		t.Fatal("completed execution retained its stack")
+	}
+}

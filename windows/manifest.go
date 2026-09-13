@@ -1,42 +1,14 @@
 package windows
 
 import (
-	"encoding/xml"
+	"bytes"
 	"fmt"
-	starfile "github.com/tinyrange/trex/storage/star"
 	"strings"
 
+	starfile "github.com/tinyrange/trex/storage/star"
+	"github.com/tinyrange/trex/windows/uup"
 	"go.starlark.net/starlark"
 )
-
-type assemblyManifestAttribute struct {
-	namespace string
-	name      string
-	value     string
-}
-
-type assemblyManifestIdentity struct{ attributes []assemblyManifestAttribute }
-
-func (identity *assemblyManifestIdentity) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
-	identity.attributes = identity.attributes[:0]
-	for _, attribute := range start.Attr {
-		if attribute.Name.Space == "xmlns" || attribute.Name.Local == "xmlns" {
-			continue
-		}
-		identity.attributes = append(identity.attributes, assemblyManifestAttribute{namespace: attribute.Name.Space, name: attribute.Name.Local, value: attribute.Value})
-	}
-	return decoder.Skip()
-}
-
-type assemblyManifestFile struct {
-	Name          string `xml:"name,attr"`
-	Hash          string `xml:"hash,attr"`
-	HashAlgorithm string `xml:"hashalg,attr"`
-}
-type assemblyManifest struct {
-	Identity assemblyManifestIdentity `xml:"assemblyIdentity"`
-	Files    []assemblyManifestFile   `xml:"file"`
-}
 
 func assemblyManifestBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
@@ -47,17 +19,29 @@ func assemblyManifestBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starl
 	if err != nil {
 		return nil, fmt.Errorf("assembly_manifest: %w", err)
 	}
-	var manifest assemblyManifest
-	if err := xml.Unmarshal(data, &manifest); err != nil {
+	manifest, err := uup.ParseAssemblyManifest(bytes.NewReader(data))
+	if err != nil {
 		return nil, fmt.Errorf("assembly_manifest: parse XML: %w", err)
 	}
-	attributes := make([]starlark.Value, len(manifest.Identity.attributes))
-	for index, attribute := range manifest.Identity.attributes {
-		attributes[index] = starfile.NewRecord(starlark.StringDict{"namespace": starlark.String(attribute.namespace), "name": starlark.String(attribute.name), "value": starlark.String(attribute.value)})
+	attributes := make([]starlark.Value, len(manifest.Identity.Attributes))
+	for index, attribute := range manifest.Identity.Attributes {
+		attributes[index] = starfile.NewRecord(starlark.StringDict{"namespace": starlark.String(attribute.Namespace), "name": starlark.String(attribute.Name), "value": starlark.String(attribute.Value)})
 	}
 	files := make([]starlark.Value, len(manifest.Files))
 	for index, file := range manifest.Files {
 		files[index] = starfile.NewRecord(starlark.StringDict{"name": starlark.String(file.Name), "hash": starlark.String(strings.ToLower(file.Hash)), "hash_algorithm": starlark.String(file.HashAlgorithm)})
 	}
-	return starfile.NewRecord(starlark.StringDict{"identity": starlark.NewList(attributes), "files": starlark.NewList(files)}), nil
+	references := make([]starlark.Value, len(manifest.References))
+	for index, reference := range manifest.References {
+		referenceAttributes := make([]starlark.Value, len(reference.Identity.Attributes))
+		for attributeIndex, attribute := range reference.Identity.Attributes {
+			referenceAttributes[attributeIndex] = starfile.NewRecord(starlark.StringDict{"namespace": starlark.String(attribute.Namespace), "name": starlark.String(attribute.Name), "value": starlark.String(attribute.Value)})
+		}
+		references[index] = starfile.NewRecord(starlark.StringDict{"kind": starlark.String(reference.Kind), "identity": starlark.NewList(referenceAttributes)})
+	}
+	keys := make([]starlark.Value, len(manifest.RegistryKeys))
+	for index, key := range manifest.RegistryKeys {
+		keys[index] = starlark.String(key)
+	}
+	return starfile.NewRecord(starlark.StringDict{"identity": starlark.NewList(attributes), "files": starlark.NewList(files), "references": starlark.NewList(references), "registry_keys": starlark.NewList(keys)}), nil
 }
