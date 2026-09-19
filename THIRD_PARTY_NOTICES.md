@@ -22,3 +22,10 @@ texts are listed in
 
 The Microsoft MS-DOS 4.0 MIT notice retained for the independently assembled
 BIOS MBR is also recorded there.
+
+The RAR decompression components in `archive/internal/rarcodec` are adapted from
+Nicholas Waples' rardecode v2.4.1 under BSD-2-Clause; the original license is
+retained there and reproduced in the binary-distribution notices. The 7z x86
+BCJ filter adapts explicitly public-domain code from the existing XZ dependency.
+Zstandard uses the existing `github.com/klauspost/compress` dependency; its
+notices are also retained below. No additional Go module dependency was added.
