@@ -237,7 +237,7 @@ func parseSevenZipFolder(r *sevenZipReader) (sevenZipFolder, error) {
 				return sevenZipFolder{}, err
 			}
 		}
-		if coder.inputs == 0 || coder.outputs == 0 || totalInputs > math.MaxUint64-coder.inputs || totalOutputs > math.MaxUint64-coder.outputs {
+		if coder.inputs == 0 || coder.inputs > 4 || coder.outputs != 1 || totalInputs > 256-coder.inputs || totalOutputs >= 64 {
 			return sevenZipFolder{}, fmt.Errorf("7z: invalid coder stream counts")
 		}
 		if flags&0x20 != 0 {
@@ -587,10 +587,9 @@ func parseSevenZipStreams(r *sevenZipReader) (sevenZipStreams, error) {
 
 type sevenZipFolderData struct {
 	base              storage.Reader
-	packedOffset      int64
-	packedSize        int64
+	graph             sevenZipFolder
+	packed            []sevenZipPackedStream
 	unpackSize        int64
-	coder             sevenZipCoder
 	crc               sevenZipDigest
 	maximumDictionary uint64
 
@@ -612,6 +611,8 @@ func sevenZipMethodName(method []byte) string {
 		return "copy"
 	case bytes.Equal(method, []byte{0x03, 0x01, 0x01}):
 		return "lzma"
+	case bytes.Equal(method, []byte{0x03, 0x03, 0x01, 0x1b}):
+		return "bcj2"
 	case bytes.Equal(method, []byte{0x21}):
 		return "lzma2"
 	default:
@@ -623,28 +624,11 @@ func (f *sevenZipFolderData) initialize() error {
 	if f.reader != nil || f.done || f.err != nil {
 		return f.err
 	}
-	section := io.NewSectionReader(f.base, f.packedOffset, f.packedSize)
-	switch sevenZipMethodName(f.coder.method) {
-	case "copy":
-		if f.packedSize != f.unpackSize {
-			return fmt.Errorf("7z: copy folder packed size %d differs from output size %d", f.packedSize, f.unpackSize)
-		}
-		f.reader = section
-	case "lzma":
-		reader, err := newLZMAReader(section, f.coder.properties, uint64(f.unpackSize), f.maximumDictionary)
-		if err != nil {
-			return err
-		}
-		f.reader = reader
-	case "lzma2":
-		reader, err := newLZMA2Reader(section, f.coder.properties, uint64(f.unpackSize), f.maximumDictionary)
-		if err != nil {
-			return err
-		}
-		f.reader = reader
-	default:
-		return fmt.Errorf("7z: unsupported coder method %x", f.coder.method)
+	reader, err := f.graphReader()
+	if err != nil {
+		return err
 	}
+	f.reader = reader
 	return nil
 }
 
@@ -741,6 +725,17 @@ func (f *sevenZipFolderData) pageLocked(start int64) ([]byte, error) {
 			}
 		}
 		f.done = f.position == f.unpackSize
+		if f.done {
+			// ReadFull can suppress a decoder's terminal error when it also
+			// returns the final requested bytes. Check stream completion even
+			// when the output CRC is correct (e.g. a corrupt BCJ2 RC trailer).
+			var extra [1]byte
+			n, err := f.reader.Read(extra[:])
+			if n != 0 || err != io.EOF {
+				f.err = fmt.Errorf("7z: decoder did not finish at declared output size: %v", err)
+				return nil, f.err
+			}
+		}
 	}
 	if f.pages == nil {
 		f.pages = make(map[int64]*sevenZipPage)
@@ -1061,33 +1056,6 @@ func parseSevenZipFiles(r *sevenZipReader, maximumEntries int, maximumMetadata i
 	}
 }
 
-func validateSevenZipFolder(folder sevenZipFolder) error {
-	if len(folder.coders) != 1 || len(folder.packedIndices) != 1 || len(folder.bindPairs) != 0 {
-		return fmt.Errorf("7z: coder graphs are not supported yet (coders=%d packed=%d binds=%d)", len(folder.coders), len(folder.packedIndices), len(folder.bindPairs))
-	}
-	coder := folder.coders[0]
-	if coder.inputs != 1 || coder.outputs != 1 {
-		return fmt.Errorf("7z: coder method %x has %d inputs and %d outputs", coder.method, coder.inputs, coder.outputs)
-	}
-	switch sevenZipMethodName(coder.method) {
-	case "copy":
-		if len(coder.properties) != 0 {
-			return fmt.Errorf("7z: copy coder has properties")
-		}
-	case "lzma":
-		if len(coder.properties) != 5 {
-			return fmt.Errorf("7z: LZMA coder has %d property bytes, want 5", len(coder.properties))
-		}
-	case "lzma2":
-		if len(coder.properties) != 1 || coder.properties[0] > 40 {
-			return fmt.Errorf("7z: invalid LZMA2 properties %x", coder.properties)
-		}
-	default:
-		return fmt.Errorf("7z: unsupported coder method %x", coder.method)
-	}
-	return nil
-}
-
 func sevenZipFolderDataFromStreams(file storage.Reader, streams sevenZipStreams, baseOffset int64, maximumDictionary uint64) ([]*sevenZipFolderData, error) {
 	packedIndex := 0
 	packedOffset := baseOffset
@@ -1100,23 +1068,27 @@ func sevenZipFolderDataFromStreams(file storage.Reader, streams sevenZipStreams,
 		if err := validateSevenZipFolder(folder); err != nil {
 			return nil, fmt.Errorf("7z: folder %d: %w", i, err)
 		}
-		if packedIndex >= len(streams.packSizes) {
-			return nil, fmt.Errorf("7z: folder %d has no packed stream", i)
-		}
-		packedSize := streams.packSizes[packedIndex]
 		unpackSize, err := folder.unpackSize()
 		if err != nil {
 			return nil, err
 		}
-		if packedSize > math.MaxInt64 || unpackSize > math.MaxInt64 || packedOffset < 0 || int64(packedSize) > file.Size()-packedOffset {
-			return nil, fmt.Errorf("7z: folder %d data lies outside archive", i)
+		if unpackSize > math.MaxInt64 {
+			return nil, fmt.Errorf("7z: folder output size exceeds signed file range")
 		}
-		result[i] = &sevenZipFolderData{
-			base: file, packedOffset: packedOffset, packedSize: int64(packedSize), unpackSize: int64(unpackSize),
-			coder: folder.coders[0], crc: folder.crc, maximumDictionary: maximumDictionary,
+		data := &sevenZipFolderData{base: file, graph: folder, unpackSize: int64(unpackSize), crc: folder.crc, maximumDictionary: maximumDictionary}
+		for range folder.packedIndices {
+			if packedIndex >= len(streams.packSizes) {
+				return nil, fmt.Errorf("7z: folder %d has missing packed streams", i)
+			}
+			packedSize := streams.packSizes[packedIndex]
+			if packedSize > math.MaxInt64 || packedOffset < 0 || packedOffset > file.Size() || int64(packedSize) > file.Size()-packedOffset {
+				return nil, fmt.Errorf("7z: folder %d data lies outside archive", i)
+			}
+			data.packed = append(data.packed, sevenZipPackedStream{offset: packedOffset, size: int64(packedSize)})
+			packedOffset += int64(packedSize)
+			packedIndex++
 		}
-		packedOffset += int64(packedSize)
-		packedIndex++
+		result[i] = data
 	}
 	if packedIndex != len(streams.packSizes) {
 		return nil, fmt.Errorf("7z: %d packed streams are not connected to folders", len(streams.packSizes)-packedIndex)
