@@ -30,6 +30,7 @@ import (
 	"github.com/tinyrange/trex/archive/kwaj"
 	"github.com/tinyrange/trex/archive/lha"
 	"github.com/tinyrange/trex/archive/macresource"
+	"github.com/tinyrange/trex/archive/rar"
 	"github.com/tinyrange/trex/archive/rms"
 	"github.com/tinyrange/trex/archive/sevenzip"
 	"github.com/tinyrange/trex/archive/sfp"
@@ -40,6 +41,7 @@ import (
 	"github.com/tinyrange/trex/archive/wim"
 	"github.com/tinyrange/trex/archive/xz"
 	ziparchive "github.com/tinyrange/trex/archive/zip"
+	"github.com/tinyrange/trex/archive/zstd"
 	autostar "github.com/tinyrange/trex/auto/star"
 	binaryapi "github.com/tinyrange/trex/binary"
 	binarystar "github.com/tinyrange/trex/binary/star"
@@ -58,6 +60,7 @@ import (
 	filesystemnative "github.com/tinyrange/trex/filesystem/native"
 	filesystemntfs "github.com/tinyrange/trex/filesystem/ntfs"
 	filesystemods2 "github.com/tinyrange/trex/filesystem/ods2"
+	filesystemrawcd "github.com/tinyrange/trex/filesystem/rawcd"
 	filesystemsgi "github.com/tinyrange/trex/filesystem/sgi"
 	filesystemudf "github.com/tinyrange/trex/filesystem/udf"
 	filesystemufs "github.com/tinyrange/trex/filesystem/ufs"
@@ -115,6 +118,8 @@ func predeclared() starlark.StringDict {
 				"tar":              starlark.NewBuiltin("tar", filesystemapi.TarBuiltin),
 				"wim":              starlark.NewBuiltin("wim", wim.Builtin),
 				"xz":               starlark.NewBuiltin("xz", xz.Builtin),
+				"rar":              starlark.NewBuiltin("rar", rar.Builtin),
+				"zstd":             starlark.NewBuiltin("zstd", zstd.Builtin),
 				"zip":              starlark.NewBuiltin("zip", ziparchive.Builtin),
 				"aws":              starlark.NewBuiltin("aws", aws.Builtin),
 				"vmsbackup_blocks": starlark.NewBuiltin("vmsbackup_blocks", vmsbackup.BlocksBuiltin),
@@ -177,6 +182,7 @@ func predeclared() starlark.StringDict {
 				"fat32":        starlark.NewBuiltin("fat32", filesystemfat.FAT32Builtin),
 				"gpt":          starlark.NewBuiltin("gpt", filesystemgpt.GPTBuiltin),
 				"host":         starlark.NewBuiltin("host", filesystemnative.HostBuiltin),
+				"raw_cd":       starlark.NewBuiltin("raw_cd", filesystemrawcd.Builtin),
 				"iso9660":      starlark.NewBuiltin("iso9660", filesystemiso9660.ISO9660Builtin),
 				"mbr":          starlark.NewBuiltin("mbr", filesystemmbr.MBRBuiltin),
 				"ntfs":         starlark.NewBuiltin("ntfs", filesystemntfs.NTFSBuiltin),

@@ -197,6 +197,8 @@ var nativeStarlarkSignatures = map[string]string{
 	"archive.szdd":                      "archive.szdd(file, maximum=512MiB) -> file",
 	"archive.sfp":                       "archive.sfp(file, maximum_entries=1M, maximum_metadata=64MiB) -> sfp",
 	"archive.tar":                       "archive.tar(directory, compress='') -> bytes; archive.tar(file, maximum_entries=1M) -> tar",
+	"archive.rar":                       "archive.rar(file, maximum_entries=100000) -> RAR archive",
+	"archive.zstd":                      "archive.zstd(file) -> file",
 	"archive.xz":                        "archive.xz(file, max_dictionary=64MiB) -> file",
 	"clock.monotonic":                   "clock.monotonic() -> elapsed seconds",
 	"clock.profiler":                    "clock.profiler() -> clock.profiler",
