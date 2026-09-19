@@ -31,6 +31,10 @@ func validateSevenZipFolder(f sevenZipFolder) error {
 			if len(c.properties) != 1 || c.properties[0] > 40 {
 				return fmt.Errorf("7z: invalid LZMA2 properties")
 			}
+		case "bcj":
+			if len(c.properties) != 0 && len(c.properties) != 4 {
+				return fmt.Errorf("7z: invalid BCJ properties")
+			}
 		case "bcj2":
 			want = 4
 			if len(c.properties) != 0 {
@@ -159,6 +163,11 @@ func (f *sevenZipFolderData) graphReader() (io.Reader, error) {
 			return newLZMAReader(readers[0], c.properties, size, f.maximumDictionary)
 		case "lzma2":
 			return newLZMA2Reader(readers[0], c.properties, size, f.maximumDictionary)
+		case "bcj":
+			if lengths[0] != size {
+				return nil, fmt.Errorf("7z: BCJ stream size mismatch")
+			}
+			return newBCJReader(readers[0], size, c.properties)
 		case "bcj2":
 			return newBCJ2Reader(readers, lengths, size)
 		}

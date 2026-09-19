@@ -611,6 +611,8 @@ func sevenZipMethodName(method []byte) string {
 		return "copy"
 	case bytes.Equal(method, []byte{0x03, 0x01, 0x01}):
 		return "lzma"
+	case bytes.Equal(method, []byte{0x03, 0x03, 0x01, 0x03}):
+		return "bcj"
 	case bytes.Equal(method, []byte{0x03, 0x03, 0x01, 0x1b}):
 		return "bcj2"
 	case bytes.Equal(method, []byte{0x21}):

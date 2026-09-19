@@ -2127,6 +2127,12 @@ Parses a classic Macintosh resource fork, checking map, reference, name and payl
 
 Decodes a UNIX pack (1f1e) Huffman stream, checking its symbol tree, end marker, padding and declared output size. Enforces maximum_bytes and returns a file; useful for compressed IRIX manual pages nested inside inst images.
 
+### `archive.rar`
+
+`archive.rar(file, maximum_entries=100000) -> RAR archive`
+
+Opens RAR4 and RAR5 archives using bounded-memory native readers, including solid compression, PPMd and executable filters. Files are decoded on demand; complete reads verify checksums. Password-protected and split-volume members require capabilities not exposed by this API.
+
 ### `archive.rms_variable`
 
 `archive.rms_variable(file, attributes, maximum_records=1M) -> record`
@@ -2198,6 +2204,12 @@ Decodes an XZ stream into a file, rejecting decoder dictionaries above max_dicti
 `archive.zip(file) -> zip`
 
 Parses a ZIP archive and exposes member files through files or entries. Members expose name/path and entry_type; complete reads validate decoded size and CRC, including exact-sized reads. Call entry.verify() to force complete validation, including empty entries. Data stays in memory rather than being extracted into a host directory.
+
+### `archive.zstd`
+
+`archive.zstd(file) -> file`
+
+Opens a Zstandard stream as a portable file with a 64 MiB decoder window limit. Frame headers provide decoded sizes when available; streams without content sizes require a counting pass. Reads and seeks replay decompression without extracting host files.
 
 ### `binary.annotate`
 
@@ -2831,6 +2843,12 @@ unrelated invalid attribute list prevents a complete namespace read.
 `filesystem.ods2(file, maximum_entries=1M, maximum_depth=64) -> record`
 
 Reads Files-11 ODS-2 version1 home blocks, index headers and versioned directory trees. Verifies home/header checksums, primary and backup index maps, file identities, allocation bounds, EOF fields, directory records and traversal limits. Returns entries, files, exact-path find(path), raw home bytes and padded volume_name. Entries retain raw names, version, file_number, sequence, header, record_attributes, characteristics, data and size. Names include ;version, with unsafe bytes percent-escaped; the root self-reference is a directory_link and is not followed. Data is a borrowed read-only extent view; RMS records are not translated and allocation slack is excluded. Supports retrieval formats1/2/3. Extension chains, placement-control pointers, alternate-volume resolution and other ODS generations remain explicit gaps. Opening an ODS-2 view does not validate any enclosing CD-image trailer or decode nested backup savesets.
+
+### `filesystem.raw_cd`
+
+`filesystem.raw_cd(file) -> file`
+
+Views a single-track 2352-byte or 2448-byte raw CD as logical 2048-byte sectors. Supports Mode 1 and Mode 2 Form 1, preserving the source without conversion or mounting.
 
 ### `filesystem.sgi`
 
