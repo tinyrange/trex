@@ -1,4 +1,4 @@
-"""Registry policy for MSFT type libraries exposed by windows.pe()."""
+"""Registry policy for MSFT and SLTG type libraries exposed by windows.pe()."""
 
 load(":common.star", "module_parts", "patch")
 load(":facts.star", "export_rva")
@@ -68,7 +68,7 @@ def typelib_patches(libraries, module, selected, interface_libraries):
     return output
 
 def typelib_registration_patches(file, module, referenced = None, pe = None):
-    """Registers referenced or self-registering embedded MSFT type libraries."""
+    """Registers referenced or self-registering embedded MSFT and SLTG type libraries."""
     pe = pe or windows.pe(file)
     selected, interface_libraries = _selected_libraries(pe, referenced)
     return typelib_patches(pe.typelibs, module, selected, interface_libraries)

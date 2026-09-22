@@ -1050,7 +1050,7 @@ def environment_plugin(values = {}, system_time = 946684800):
             if args[1] and args[2]:
                 _write_string(machine, args[1], value, wide, args[2])
             return required
-        if name in ["getenvironmentstringsa", "getenvironmentstringsw"]:
+        if name in ["getenvironmentstrings", "getenvironmentstringsa", "getenvironmentstringsw"]:
             return environment_block(machine, wide)
         if name in ["freeenvironmentstringsa", "freeenvironmentstringsw"]:
             return 1
@@ -1116,7 +1116,7 @@ def environment_plugin(values = {}, system_time = 946684800):
             "getenvironmentvariablea": 3, "getenvironmentvariablew": 3,
             "setenvironmentvariablea": 2, "setenvironmentvariablew": 2,
             "expandenvironmentstringsa": 3, "expandenvironmentstringsw": 3,
-            "getenvironmentstringsa": 0, "getenvironmentstringsw": 0,
+            "getenvironmentstrings": 0, "getenvironmentstringsa": 0, "getenvironmentstringsw": 0,
             "freeenvironmentstringsa": 1, "freeenvironmentstringsw": 1,
             "rtlcreateenvironment": 2, "rtlsetcurrentenvironment": 2,
             "rtldestroyenvironment": 1, "rtlexpandenvironmentstrings_u": 4,
@@ -6306,6 +6306,21 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
                     if args[2]:
                         event.machine.write_u32le(args[2], 0)
                     return 0x8002802B
+                if name == "GetLibAttr" and "guid" in library:
+                    if not args[1]:
+                        return 0x80070057
+                    # TLIBATTR is a 32-byte Win32 ABI record (including tail
+                    # padding), populated from the parsed on-media library.
+                    attr = binary.builder(capacity = 32)
+                    attr.append(guid_bytes(library["guid"]))
+                    attr.u32le(library["lcid"])
+                    attr.u32le(library["syskind"])
+                    attr.u16le(library["major"])
+                    attr.u16le(library["minor"])
+                    attr.u16le(library["flags"])
+                    attr.u16le(0)
+                    event.machine.write_u32le(args[1], event.machine.allocate(value = attr.bytes(), name = "TLIBATTR"))
+                    return 0
                 if name in ["GetLibAttr", "GetTypeComp"]:
                     if args[len(args) - 1]:
                         event.machine.write_u32le(args[len(args) - 1], 0)
@@ -11315,7 +11330,7 @@ def shell_plugin(module_path, kernel = None):
 
 def gdi32_plugin():
     """Models registration-visible GDI stock objects without a host display."""
-    state = {"next_palette": 0xda000001, "palettes": {}, "next_bitmap": 0xda100001, "bitmaps": {}, "next_brush": 0xdc000001, "brushes": {}}
+    state = {"next_palette": 0xda000001, "palettes": {}, "next_bitmap": 0xda100001, "bitmaps": {}, "next_brush": 0xdc000001, "brushes": {}, "next_pen": 0xdd000001, "pens": {}, "next_dc": 0xde000001, "dcs": {}}
     def callback(event):
         name = event.name.lower()
         if name == "getstockobject":
@@ -11326,6 +11341,51 @@ def gdi32_plugin():
             # A solid brush is completely described by its COLORREF. Keep a
             # stable nonzero pseudo-handle; callers only select or delete it.
             return 0xdb000000 | (event.args[0] & 0xffffff)
+        if name == "deletedc":
+            return 1 if state["dcs"].pop(event.args[0], None) != None else 0
+        if name == "createcompatiblebitmap":
+            dc, width, height = event.args
+            # USER's GetDC returns the screen DC 0xda00. Memory DCs initially
+            # contain a monochrome stock bitmap; selected bitmaps change depth.
+            if (dc != 0xda00 and dc not in state["dcs"]) or width >= 0x80000000 or height >= 0x80000000:
+                return 0
+            selected = state["dcs"].get(dc, {}).get("bitmap", 0)
+            depth = 32 if dc == 0xda00 else state["bitmaps"].get(selected, {}).get("depth", 1)
+            if width == 0 or height == 0:
+                depth = 1
+            width, height = max(1, width), max(1, height)
+            stride = ((width * depth + 15) // 16) * 2
+            if stride * height > 16 << 20:
+                return 0
+            handle = state["next_bitmap"]
+            state["next_bitmap"] = handle + 1
+            state["bitmaps"][handle] = {"width": width, "height": height, "planes": 1, "depth": depth, "stride": stride, "data": b"\x00" * (stride * height)}
+            return handle
+        if name == "createcompatibledc":
+            if event.args[0] not in [0, 0xda00] and event.args[0] not in state["dcs"]:
+                return 0
+            handle = state["next_dc"]
+            state["next_dc"] = handle + 1
+            state["dcs"][handle] = {"compatible": event.args[0], "bitmap": 0xd915}
+            return handle
+        if name == "selectobject":
+            dc, handle = event.args
+            context = state["dcs"].get(dc)
+            if context == None:
+                return 0
+            if handle in state["bitmaps"] or handle == 0xd915:
+                previous = context["bitmap"]
+                context["bitmap"] = handle
+                return previous
+            fail("SelectObject: unsupported object kind")
+        if name == "createpen":
+            style, width, color = event.args
+            if style > 6:
+                return 0
+            handle = state["next_pen"]
+            state["next_pen"] = handle + 1
+            state["pens"][handle] = {"style": style, "width": width, "color": color & 0xffffff}
+            return handle
         if name == "createpalette":
             logical = event.args[0]
             if not logical:
@@ -11400,11 +11460,12 @@ def gdi32_plugin():
             state["palettes"].pop(event.args[0], None)
             state["bitmaps"].pop(event.args[0], None)
             state["brushes"].pop(event.args[0], None)
+            state["pens"].pop(event.args[0], None)
             return 1 if event.args[0] else 0
         return 0
 
     def install(machine):
-        signatures = {"getstockobject": 1, "createsolidbrush": 1, "createpalette": 1, "createdibitmap": 6, "createbitmap": 5, "createpatternbrush": 1, "getpaletteentries": 4, "getdevicecaps": 2, "enumfontfamiliesa": 4, "enumfontfamiliesw": 4, "enumfontfamiliesexa": 5, "enumfontfamiliesexw": 5, "deleteobject": 1}
+        signatures = {"getstockobject": 1, "createsolidbrush": 1, "createcompatibledc": 1, "deletedc": 1, "createcompatiblebitmap": 3, "selectobject": 2, "createpen": 3, "createpalette": 1, "createdibitmap": 6, "createbitmap": 5, "createpatternbrush": 1, "getpaletteentries": 4, "getdevicecaps": 2, "enumfontfamiliesa": 4, "enumfontfamiliesw": 4, "enumfontfamiliesexa": 5, "enumfontfamiliesexw": 5, "deleteobject": 1}
         for name, argc in signatures.items():
             machine.provide_export(callback, module = "gdi32.dll", name = name, argc = argc)
         for imported in machine.imports_named(signatures):
@@ -12738,6 +12799,34 @@ def user32_plugin(file, module_files = {}, kernel = None):
                 output = [min(left[0], right[0]), min(left[1], right[1]), max(left[2], right[2]), max(left[3], right[3])]
             write_rect(event.machine, event.args[0], output)
             return 0 if rect_empty(output) else 1
+        if name in ["loadbitmapa", "loadbitmapw"]:
+            machine = event.machine
+            def invoke(module, function, args):
+                result = machine.invoke(machine.resolve_export(module, name = function), args = args)
+                if result.reason != "return":
+                    fail("LoadBitmap: " + function + " stopped: " + result.detail)
+                return result.value
+            resource = invoke("kernel32.dll", "FindResourceW" if wide else "FindResourceA", [event.args[0], event.args[1], 2])
+            if not resource:
+                return 0
+            loaded = invoke("kernel32.dll", "LoadResource", [event.args[0], resource])
+            header = invoke("kernel32.dll", "LockResource", [loaded]) if loaded else 0
+            if not header:
+                return 0
+            size = invoke("kernel32.dll", "SizeofResource", [event.args[0], resource])
+            if size < 40 or machine.read_u32le(header) != 40:
+                fail("LoadBitmap: unsupported DIB header")
+            depth = machine.read_u16le(header + 14)
+            compression = machine.read_u32le(header + 16)
+            if compression not in [0, 3]:
+                fail("LoadBitmap: unsupported DIB compression")
+            colors = machine.read_u32le(header + 32)
+            if not colors and depth <= 8:
+                colors = 1 << depth
+            offset = 40 + colors * 4 + (12 if compression == 3 else 0)
+            if offset >= size:
+                return 0
+            return invoke("gdi32.dll", "CreateDIBitmap", [0xda00, header, 4, header + offset, header, 0])
         if name in ["loadimagea", "loadimagew", "loadcursora", "loadcursorw", "loadicona", "loadiconw"]:
             handle = state["next_image"]
             state["next_image"] = handle + 1
@@ -12853,6 +12942,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
             "LoadImageA": 6, "LoadImageW": 6,
             "LoadCursorA": 2, "LoadCursorW": 2,
             "LoadIconA": 2, "LoadIconW": 2,
+            "LoadBitmapA": 2, "LoadBitmapW": 2,
             "RegisterClassA": 1, "RegisterClassW": 1,
             "RegisterClassExA": 1, "RegisterClassExW": 1,
             "GetClassInfoA": 3, "GetClassInfoW": 3,

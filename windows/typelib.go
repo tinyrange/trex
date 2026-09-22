@@ -111,10 +111,18 @@ func msftTypeLibsFromPE(data []byte) ([]msftTypeLib, error) {
 	}
 	var libraries []msftTypeLib
 	for _, resource := range resources {
-		if !strings.EqualFold(resource.typ, "TYPELIB") || len(resource.data) < 4 || string(resource.data[:4]) != "MSFT" {
+		if !strings.EqualFold(resource.typ, "TYPELIB") || len(resource.data) < 4 {
 			continue
 		}
-		library, err := parseMSFTTypeLib(resource.data)
+		var library msftTypeLib
+		switch string(resource.data[:4]) {
+		case "MSFT":
+			library, err = parseMSFTTypeLib(resource.data)
+		case "SLTG":
+			library, err = parseSLTGTypeLib(resource.data)
+		default:
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("TYPELIB %s: %w", resource.name, err)
 		}

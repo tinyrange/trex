@@ -491,3 +491,57 @@ func TestBuildCREGCoalescesDefaultValueSpellings(t *testing.T) {
 		t.Fatalf("default value = %q, want %q", got, want)
 	}
 }
+
+func TestBuildCREGRTMRecordExtentBoundaries(t *testing.T) {
+	root := newRegistryTree("")
+	for i := 0; i < 400; i++ {
+		setRegistryValue(root, fmt.Sprintf("/Classes/Control%03d", i), "", registryString(regSZ, strings.Repeat("x", 91+i%23)))
+	}
+	data, err := buildCREGWithGeneration(root, 1, "windows95_rtm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseCREG(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 400; i++ {
+		key := parsed.subkeys["CLASSES"].subkeys[fmt.Sprintf("CONTROL%03d", i)]
+		if got, want := registryDataString(key.values["(default)"]), strings.Repeat("x", 91+i%23); got != want {
+			t.Fatalf("record %d value mismatch", i)
+		}
+	}
+	padded := 0
+	for offset := int(binary.LittleEndian.Uint32(data[8:])); offset < len(data); {
+		size := int(binary.LittleEndian.Uint32(data[offset+4:]))
+		used := int(binary.LittleEndian.Uint32(data[offset+16:]))
+		cursor := 32
+		for cursor < used {
+			record := data[offset+cursor:]
+			allocated := int(binary.LittleEndian.Uint32(record))
+			meaningful := int(binary.LittleEndian.Uint32(record[8:]))
+			// Allocation extents end at 4 KiB, 12 KiB, 20 KiB, ... .
+			for boundary := 0x1000; boundary < size; boundary += 0x2000 {
+				if cursor < boundary && cursor+meaningful > boundary {
+					t.Fatalf("record at %#x straddles extent %#x", cursor, boundary)
+				}
+			}
+			if allocated > meaningful {
+				padded++
+			}
+			for _, b := range record[meaningful:allocated] {
+				if b != 0 {
+					t.Fatal("nonzero padding")
+				}
+			}
+			cursor += allocated
+		}
+		if cursor != used || used+int(binary.LittleEndian.Uint32(data[offset+8:])) != size {
+			t.Fatal("invalid block space accounting")
+		}
+		offset += size
+	}
+	if padded == 0 {
+		t.Fatal("fixture did not cross an allocation extent")
+	}
+}

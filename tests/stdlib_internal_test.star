@@ -2893,6 +2893,73 @@ def test_registration_bitmap_ownership():
     machine.call(machine.resolve_export("gdi32.dll", name = "DeleteObject"), args = [brush])
     true(brush not in gdi.state["brushes"])
 
+def test_registration_compatible_dc_and_typelib_attributes():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    machine = emulator.x86(code = b"\xc3")
+    gdi = module["gdi32_plugin"]()
+    guid = "{6B7E6392-850A-101B-AFC0-4210102A8DA7}"
+    library = {"guid": guid, "lcid": 0, "syskind": 1, "major": 1, "minor": 2, "flags": 8, "types": []}
+    automation = module["oleaut_plugin"](registered_type_libraries = [{"path": r"C:\test.ocx", "library": library}])
+    machine.use([gdi, automation])
+    def call(name, args):
+        result = machine.call(machine.resolve_export("gdi32.dll", name = name), args = args)
+        equal(result.reason, "return")
+        return result.value
+    dc = call("CreateCompatibleDC", [0])
+    mono = call("CreateCompatibleBitmap", [dc, 9, 2])
+    equal(gdi.state["bitmaps"][mono]["depth"], 1)
+    color = call("CreateCompatibleBitmap", [0xda00, 9, 2])
+    equal(gdi.state["bitmaps"][color]["depth"], 32)
+    old = call("SelectObject", [dc, color])
+    equal(old, 0xd915)
+    compatible = call("CreateCompatibleBitmap", [dc, 2, 2])
+    equal(gdi.state["bitmaps"][compatible]["depth"], 32)
+    equal(call("SelectObject", [dc, old]), color)
+    pen = call("CreatePen", [0, 1, 0x123456])
+    equal(gdi.state["pens"][pen]["color"], 0x123456)
+    equal(call("DeleteObject", [pen]), 1)
+    true(pen not in gdi.state["pens"])
+    equal(call("DeleteDC", [dc]), 1)
+    equal(call("DeleteDC", [dc]), 0)
+    equal(call("CreateCompatibleBitmap", [dc, 1, 1]), 0)
+    equal(call("CreateCompatibleDC", [123]), 0)
+    identifier = machine.allocate(value = testing.module("@stdlib//windows/selfreg:facts.star")["guid_bytes"](guid))
+    output = machine.allocate(size = 4)
+    result = machine.call(machine.resolve_export("oleaut32.dll", name = "LoadRegTypeLib"), args = [identifier, 1, 2, 0, output])
+    equal((result.reason, result.value), ("return", 0))
+    obj = machine.read_u32le(output)
+    vtable = machine.read_u32le(obj)
+    result = machine.call(machine.read_u32le(vtable + 7 * 4), args = [obj, output])
+    equal((result.reason, result.value), ("return", 0))
+    attr = machine.read_u32le(output)
+    equal(machine.read(attr, 16), testing.module("@stdlib//windows/selfreg:facts.star")["guid_bytes"](guid).bytes())
+    equal(machine.read(attr + 16, 16), b"\x00\x00\x00\x00\x01\x00\x00\x00\x01\x00\x02\x00\x08\x00\x00\x00")
+
+def test_registration_load_bitmap_resource():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    bitmap = binary.builder()
+    for value in [40, 2, 2]:
+        bitmap.u32le(value)
+    bitmap.u16le(1)
+    bitmap.u16le(24)
+    for value in [0, 16, 0, 0, 0, 0]:
+        bitmap.u32le(value)
+    bitmap.append(b"\xaa" * 16)
+    image = windows.pe(binary.view(windows.pe32_executable(section = b"\xc3", labels = {"entry": 0}, fixups = []))).with_resources([
+        {"type": "#2", "name": "#2004", "lang": "#0", "data": bitmap.bytes()},
+    ])
+    machine = emulator.x86(image = image)
+    gdi = module["gdi32_plugin"]()
+    machine.use([module["resource_plugin"](image), gdi, module["user32_plugin"](image)])
+    handle = machine.call(machine.resolve_export("user32.dll", name = "LoadBitmapA"), args = [0, 2004])
+    equal(handle.reason, "return")
+    true(handle.value in gdi.state["bitmaps"])
+    record = gdi.state["bitmaps"][handle.value]
+    equal(machine.read(record["bits"], 16), b"\xaa" * 16)
+    equal(machine.call(machine.resolve_export("user32.dll", name = "LoadBitmapA"), args = [0, 2005]).value, 0)
+    equal(machine.call(machine.resolve_export("gdi32.dll", name = "DeleteObject"), args = [handle.value]).value, 1)
+    true(handle.value not in gdi.state["bitmaps"])
+
 def test_registration_activation_context_lifetime():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     machine = emulator.x86(code = b"\xc3")
@@ -3191,6 +3258,8 @@ TEST_SUITE = suite("stdlib/internal", [
     case("installshield5_conventional_component_locations", test_installshield5_conventional_component_locations),
     case("registration_ui_object_handles", test_registration_ui_object_handles),
     case("registration_bitmap_ownership", test_registration_bitmap_ownership),
+    case("registration_compatible_dc_and_typelib_attributes", test_registration_compatible_dc_and_typelib_attributes),
+    case("registration_load_bitmap_resource", test_registration_load_bitmap_resource),
     case("registration_activation_context_lifetime", test_registration_activation_context_lifetime),
     case("registration_registry_delete_tree", test_registration_registry_delete_tree),
     case("registration_reggetvalue_contract", test_registration_reggetvalue_contract),

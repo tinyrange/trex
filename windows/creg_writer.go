@@ -211,7 +211,7 @@ func buildCREGWithGeneration(root *registryTree, state uint16, generation string
 				break
 			}
 			recordSize := len(records[end].record)
-			if modern && recordSize <= 0x1000 && end > first {
+			if (modern || windows95RTM) && recordSize <= 0x1000 && end > first {
 				// RGDB starts with one 4 KiB allocation containing its header,
 				// then grows in 8 KiB extents. A small key may not straddle one
 				// of those allocation boundaries.
@@ -223,7 +223,7 @@ func buildCREGWithGeneration(root *registryTree, state uint16, generation string
 					if alignCREG(boundary+12, 0x1000) > blockLimit {
 						break
 					}
-					// The later allocator never starts a small record in the tail of
+					// The live allocator never starts a small record in the tail of
 					// one page and finishes it in the next. REGEDIT accounts for the
 					// gap by extending the preceding record's allocation while leaving
 					// that record's used-size field unchanged.
