@@ -1679,7 +1679,7 @@ Models INF access, install sections, queues, and process-local logging.
 
 ## `windows/selfreg/typelib.star`
 
-Registry policy for MSFT type libraries exposed by windows.pe().
+Registry policy for MSFT and SLTG type libraries exposed by windows.pe().
 
 ### `typelib_patches`
 
@@ -1687,7 +1687,7 @@ Builds registry operations from parsed type-library facts.
 
 ### `typelib_registration_patches`
 
-Registers referenced or self-registering embedded MSFT type libraries.
+Registers referenced or self-registering embedded MSFT and SLTG type libraries.
 
 ## `windows/selfreg/wer.star`
 
@@ -4278,7 +4278,7 @@ Methods and attributes: `kind`, `name`, `rva`.
 
 ### `windows.pe` value
 
-A lazy PE32/PE32+ inspection value. Metadata attributes expose headers, sections, imports, exports, resources, strings and debug/type-library data from an owned snapshot. read/disasm use RVAs; patch returns modified file bytes without changing the original. data provides the shared immutable source snapshot.
+A lazy PE32/PE32+ inspection value. Metadata attributes expose headers, sections, imports, exports, resources, strings and debug/type-library data from an owned snapshot. Type-library registration metadata supports MSFT and SLTG resources. read/disasm use RVAs; patch returns modified file bytes without changing the original. data provides the shared immutable source snapshot.
 
 Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `typelibs`, `version`, `with_resources(resources)`.
 
