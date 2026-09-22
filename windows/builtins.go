@@ -55,6 +55,8 @@ func Builtins() starlark.StringDict {
 		"inf_patches":                 infPatchesBuiltin,
 		"inf":                         infBuiltin,
 		"acme_table":                  acmeTableBuiltin,
+		"patch_ini":                   patchINIBuiltin,
+		"registry31":                  registry31Builtin,
 		"acme_plan":                   acmePlanBuiltin,
 		"sdk_inf_plan":                sdkInfPlanBuiltin,
 		"setup_inf":                   setupInfBuiltin,

@@ -393,3 +393,29 @@ trex. Its full licence is retained in
 Vendor documentation is used only to validate public InstallScript semantics.
 Users remain responsible for the licence terms of installers they inspect or
 extract; trex does not redistribute third-party software.
+
+## Windows 3.1 installation configuration
+
+`windows.registry31(entries, sources=[])` builds a native `SHCC3.10` registration
+file. `entries` maps case-insensitive HKEY_CLASSES_ROOT-relative paths to their
+unnamed string values. `sources` accepts portable file handles containing the
+Windows 3.1 `REGEDIT` text format; explicit entries override source entries.
+As documented by the original Windows `SETUP.REG`, lines not beginning with
+`HKEY_CLASSES_ROOT\` are comments. Named values and NT registry syntax are not
+part of this format. The encoder uses Windows-1252 and rejects embedded NULs
+and databases larger than 64 KiB.
+
+The format has a 32-byte header, eight-byte directory/string records, and an
+interned string table. Hash chains are circular and include their bucket
+sentinel; the encoder uses one bucket. Its tree and strings are validated by
+unit tests and by native Windows 3.11 Registry Editor and `RegQueryValue` in the
+VB3 application smoke. Layout facts were cross-checked against Tor Sjøwall's
+[format description in the historical Wine registry reader](https://github.com/wine-mirror/wine/blob/wine-20000109/misc/registry.c);
+the encoder is an independent implementation.
+
+`windows.patch_ini(source, changes)` merges literal Windows INI strings.
+`source` is a file or `None`; `changes` maps section names to dictionaries of
+keys and string values. Section/key matching is case-insensitive, existing
+unmodified lines are retained, and changed keys are emitted once even if the
+source repeats a section. Commas and quotation marks in values are preserved.
+The result is a portable Windows-1252 file using CRLF line endings.
