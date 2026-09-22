@@ -3649,6 +3649,12 @@ to create, including missing parents; existing keys are preserved. Empty keys
 remain truly empty, so registry indexes represented by child-key names do not
 need placeholder values. New keys inherit their parent's security descriptor.
 
+### `windows.patch_ini`
+
+`windows.patch_ini(source, changes) -> file`
+
+Merges literal section/key string settings into a Windows INI file, matching section and key names case-insensitively. Preserves unrelated lines, commas, and quotes; returns a new file. source=None creates a new INI file.
+
 ### `windows.pdb`
 
 `windows.pdb(file, stream_limit=256MiB)`
@@ -3724,6 +3730,12 @@ Encodes a named ReactOS binary-record kind from declarative fields. Layout and f
 `windows.registration_expand(value, replacements) -> value`
 
 Expands percent-delimited registration variables in replacement-dictionary order, uppercase token then lowercase token, for at most four passes. Unknown tokens remain unchanged and non-string inputs pass through; this is not general case-insensitive environment expansion.
+
+### `windows.registry31`
+
+`windows.registry31(entries, sources=[]) -> file`
+
+Constructs a Windows 3.1 SHCC3.10 registry file from class-path string entries and optional REGEDIT text source files. Explicit entries override sources; keys match case-insensitively. Uses Windows-1252 strings and rejects output exceeding 64 KiB. Does not launch REGEDIT or modify a live registry.
 
 ### `windows.registry_children`
 
