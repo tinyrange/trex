@@ -247,7 +247,7 @@ func (m *Machine) load(data []byte, name string) (module, error) {
 func (m *Machine) relinkImports() error {
 	for _, item := range m.imports {
 		address := m.resolve(item.module, item.name, int(item.ordinal), 0)
-		if _, hooked := m.hooks[item.address]; hooked {
+		if _, hooked := m.hooks[item.address]; hooked && m.provided[exportKey(item.module, item.name, int(item.ordinal))] == 0 {
 			address = item.address
 		}
 		if address == 0 {
@@ -258,6 +258,15 @@ func (m *Machine) relinkImports() error {
 		}
 	}
 	return nil
+}
+
+// A provided export owns the IAT binding; callers may subsequently hook its
+// resolved address. Only native bindings need restoring to an import thunk.
+func (m *Machine) bindImportHook(item imported, address uint64) error {
+	if m.provided[exportKey(item.module, item.name, int(item.ordinal))] != 0 {
+		return nil
+	}
+	return m.writeImportAddress(item.iat, address)
 }
 
 func (m *Machine) writeImportAddress(iat, address uint64) error {
@@ -755,7 +764,7 @@ func (m *Machine) method(thread *starlark.Thread, builtin *starlark.Builtin, arg
 				if export == "" {
 					export = item.name
 				}
-				if err := m.writeImportAddress(item.iat, value); err != nil {
+				if err := m.bindImportHook(item, value); err != nil {
 					return nil, err
 				}
 			}
@@ -764,7 +773,7 @@ func (m *Machine) method(thread *starlark.Thread, builtin *starlark.Builtin, arg
 		} else {
 			for target, item := range m.imports {
 				if (moduleName == "" || canonical(moduleName) == item.module) && (export != "" && strings.EqualFold(export, item.name) || ordinal != 0 && uint16(ordinal) == item.ordinal) {
-					if err := m.writeImportAddress(item.iat, target); err != nil {
+					if err := m.bindImportHook(item, target); err != nil {
 						return nil, err
 					}
 					m.setHook(target, hook{item.module, item.name, argc, callback})

@@ -63,3 +63,35 @@ func TestNativeDataImportBinding(t *testing.T) {
 		t.Fatal("native relinking lost explicit import hook or changed sibling slot")
 	}
 }
+
+func TestProvidedExportKeepsBindingAfterImportHook(t *testing.T) {
+	const iat, thunk, provided = uint64(0x2000), uint64(0x7fff00000000), uint64(0x7ffe00000000)
+	m := &Machine{memory: cpu.NewAddressSpace(1 << 20), provided: map[string]uint64{exportKey("test.dll", "Function", 0): provided}}
+	if err := m.memory.Map(iat, make([]byte, 8), cpu.Read|cpu.Write); err != nil {
+		t.Fatal(err)
+	}
+	item := imported{module: "test.dll", name: "Function", iat: iat, address: thunk}
+	m.addImport(item)
+	if err := m.writeImportAddress(iat, provided); err != nil {
+		t.Fatal(err)
+	}
+	m.setHook(thunk, hook{})
+	if err := m.bindImportHook(item, thunk); err != nil {
+		t.Fatal(err)
+	}
+	check := func() {
+		t.Helper()
+		var data [8]byte
+		if err := m.memory.ReadMemory(iat, data[:], cpu.Read); err != nil {
+			t.Fatal(err)
+		}
+		if got := binary.LittleEndian.Uint64(data[:]); got != provided {
+			t.Fatalf("IAT = %#x, want provided export %#x", got, provided)
+		}
+	}
+	check()
+	if err := m.relinkImports(); err != nil {
+		t.Fatal(err)
+	}
+	check()
+}
