@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/tinyrange/trex/emulator/uefi"
 	"github.com/tinyrange/trex/vmm"
 	"j5.nz/cc/hypervisor"
 	"j5.nz/cc/hypervisor/x86state"
@@ -14,9 +15,14 @@ import (
 const biosPort = 0xf1
 
 // pc implements firmware against guest memory and a portable block device.
-// Each IVT entry points to an OUT/IRET trampoline; native execution retains
-// all mode switches and executes the original boot sector and loader.
+// Interrupt entries execute small real-mode ROM routines; native execution
+// retains all mode switches and executes the original boot sector and loader.
 type pc struct {
+	efiTrace      []any
+	efi           *uefi.Firmware
+	efiMemory     *efiMemory
+	acpi          *acpiPM
+	hpet          *hpet
 	nic           *ne2000
 	framebuffer   []byte
 	input         *virtioInput
@@ -43,6 +49,9 @@ type pc struct {
 	inputTrace    []string
 	keyboard      *keyboard
 	rtcTrace      []any
+	videoPacket   videoPacket
+	pciAddress    uint32
+	pciIDE        *pciIDE
 }
 
 func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) (*pc, error) {
@@ -73,6 +82,7 @@ func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) 
 	copy(ram[0xf2000:], []byte{0x50, 0x1e, 0xb8, 0x40, 0, 0x8e, 0xd8, 0x66, 0xff, 0x06, 0x6c, 0, 0xcd, 0x1c, 0xb0, 0x20, 0xe6, 0x20, 0x1f, 0x58, 0xcf})
 	binary.LittleEndian.PutUint16(ram[8*4:], 0x2000)
 	ram[0xf1000+0x1c*4] = 0xcf // default user timer hook
+	p.installVideoFirmware()
 	// POST programs the real interrupt controllers and timer before entering
 	// the original MBR. These instructions execute against KVM's PC devices.
 	post := []byte{0xfa}
@@ -225,61 +235,9 @@ func (p *pc) bios() error {
 	unsupported := func() { carry = true; setAH(&r.Rax, 0x86) }
 	switch vector {
 	case 0x10:
-		defer p.vga.syncText()
-		switch ah {
-		case 0:
-			if err := p.vga.setMode(al); err != nil {
-				return err
-			}
-			p.mode = al & 0x7f
-			p.ram[0x449] = p.mode
-			p.cursor = 0
-		case 1:
-		case 2:
-			p.cursor = uint16(r.Rdx)
-			binary.LittleEndian.PutUint16(p.ram[0x450:], p.cursor)
-		case 3:
-			setLow(&r.Rdx, p.cursor)
-			setLow(&r.Rcx, 0x0607)
-		case 5:
-		case 6, 7:
-			for i := 0xb8000; i < 0xb8000+4000; i += 2 {
-				p.ram[i] = ' '
-				p.ram[i+1] = byte(r.Rbx >> 8)
-			}
-		case 8:
-			off := 0xb8000 + int(p.cursor>>8)*160 + int(p.cursor&255)*2
-			if off+2 <= 0xb8000+4000 {
-				setLow(&r.Rax, binary.LittleEndian.Uint16(p.ram[off:]))
-			}
-		case 9, 10:
-			for i := 0; i < int(uint16(r.Rcx)); i++ {
-				off := 0xb8000 + int(p.cursor>>8)*160 + (int(p.cursor&255)+i)*2
-				if off+2 > 0xb8000+4000 {
-					break
-				}
-				p.ram[off] = al
-				if ah == 9 {
-					p.ram[off+1] = byte(r.Rbx)
-				}
-			}
-		case 0x0e:
-			p.putchar(al)
-		case 0x0f:
-			setLow(&r.Rax, uint16(p.mode)|80<<8)
-			r.Rbx &^= 0xff00
-		case 0x12:
-			if byte(r.Rbx) == 0x10 {
-				setLow(&r.Rbx, 3)
-				setLow(&r.Rcx, 0)
-			} else {
-				unsupported()
-			}
-		case 0x1a:
-			setLow(&r.Rax, 0x1a)
-			setLow(&r.Rbx, 8)
-		default:
-			unsupported()
+		carry, err = p.videoBIOS(&r)
+		if err != nil {
+			return err
 		}
 	case 0x11:
 		setLow(&r.Rax, binary.LittleEndian.Uint16(p.ram[0x410:]))
@@ -363,6 +321,10 @@ func (p *pc) bios() error {
 		}
 	case 0x15:
 		switch ah {
+		case 0xe8:
+			if !p.extendedMemory(&r, s) {
+				unsupported()
+			}
 		case 0xc2:
 			// NTDETECT uses the BIOS pointing-device reset/ID services before
 			// the protected-mode i8042 driver takes over the auxiliary port.

@@ -239,6 +239,60 @@ func TestBuildTableFanoutDoesNotCreateUnaryInteriorPage(t *testing.T) {
 	}
 }
 
+func TestBuildIndexBalancedVariableRecords(t *testing.T) {
+	for _, pageSize := range []int{512, 1024, 4096, 65536} {
+		for _, count := range []int{0, 4, 5, 16, 17, 24, 25, 80, 300, 1000} {
+			rows := make([]Row, count)
+			for i := range rows {
+				// A long run of small records beside large records used to
+				// produce leaf and interior siblings at the same depth.
+				text := "x"
+				if i >= count/2 {
+					text = strings.Repeat("x", pageSize/3)
+				}
+				rows[i] = Row{Values: []any{int64(i), text, int64(i + 1)}}
+			}
+			file, err := Build([]Object{{Type: "index", Name: "idx", TableName: "items", SQL: "CREATE INDEX idx ON items(value)", Rows: rows}}, BuildOptions{PageSize: pageSize})
+			if err != nil {
+				t.Fatalf("page size %d, rows %d: %v", pageSize, count, err)
+			}
+			leafDepth := -1
+			var visit func(uint32, int)
+			visit = func(number uint32, depth int) {
+				page := file.Data[int(number-1)*pageSize : int(number)*pageSize]
+				cells := int(binary.BigEndian.Uint16(page[3:5]))
+				if page[0] == 0x0a {
+					if depth > 0 && cells == 0 {
+						t.Fatal("empty non-root leaf")
+					}
+					if leafDepth != -1 && depth != leafDepth {
+						t.Fatalf("page size %d, rows %d: leaf depths %d and %d", pageSize, count, leafDepth, depth)
+					}
+					leafDepth = depth
+					return
+				}
+				if page[0] != 0x02 || cells < 1 || depth > 0 && cells < 2 {
+					t.Fatalf("invalid interior page %d: type %#x, cells %d", number, page[0], cells)
+				}
+				for i := 0; i < cells; i++ {
+					offset := binary.BigEndian.Uint16(page[12+2*i:])
+					visit(binary.BigEndian.Uint32(page[offset:]), depth+1)
+				}
+				visit(binary.BigEndian.Uint32(page[8:]), depth+1)
+			}
+			visit(2, 0)
+			db, err := Open(file, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := db.Rows("idx", count+1)
+			if err != nil || !reflect.DeepEqual(got, rows) && count != 0 {
+				t.Fatalf("page size %d, rows %d: index round trip differs: %v", pageSize, count, err)
+			}
+		}
+	}
+}
+
 func TestBuildIndexDoesNotCreateEmptyChildPages(t *testing.T) {
 	rows := make([]Row, 300)
 	for index := range rows {

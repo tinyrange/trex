@@ -1,24 +1,85 @@
 # CrumbleCracker PC backend
 
 `cc.backend()` implements `vmm.Backend` in process on Linux/amd64 with KVM.
-It runs an existing BIOS-bootable disk supplied through the VMM block interface.
+It runs a caller-supplied boot disk through the VMM block interface, using
+BIOS by default or native Go UEFI with `cc.backend(uefi=True)`.
 Guest image construction and operating-system setup belong to the caller.
 Go constructs the BIOS data areas and supplies interrupt services through
-small OUT/IRET firmware entrypoints. No firmware binary or external process
+small real-mode firmware entrypoints. Video calls exchange register values
+through I/O packets, including when a guest interprets the BIOS ROM. No external firmware binary or process
 is used.
+
+UEFI requires `x86_64` and enables ACPI and PCI IDE. It reads the GPT and FAT
+EFI System Partition through native parsers, loads `EFI/Boot/BootX64.efi`,
+and executes the original AMD64 image. Its firmware services share the
+portable `emulator/uefi` implementation and the IDE device's disk overlay.
+The graphics output protocol exposes a 1280×720 BGRX framebuffer with a
+hardware device path. Guest page tables translate firmware-call arguments;
+runtime address mapping updates the firmware tables and their checksums.
+Usable low RAM remains available for Windows startup stubs; VGA and firmware
+ranges are reserved. Both BIOS and UEFI machines accept 16 MiB–2 GiB RAM.
+The `efi` inspection field contains the last 32 firmware calls and statuses.
+Unsupported firmware services stop execution with their name and arguments.
 
 Fixed-disk BIOS services include EDD probing, extended reads/writes, verification,
 seek and drive parameters. Larger disks use translated BIOS CHS independently
 of ATA's 16-head task-file geometry. Explicit caller-supplied CHS remains intact.
 The single-CPU model exposes basic CPUID leaves through 3 with supported legacy
 features, without SMT or XSAVE/AVX enumeration. CPUID policy uses the portable
-accelerator interface rather than patching guest instructions.
+accelerator interface rather than patching guest instructions. The vendor is
+GenuineIntel, the signature is family 6/model 6/stepping 3, and the extended
+brand is TinyRangeX Virtual CPU, independent of the accelerator host.
+The `x86_64` target also exposes supported long-mode, SYSCALL, NX and
+CMPXCHG16B, SSE3, SSSE3, SSE4.1, SSE4.2 and POPCNT features when supported
+by the accelerator.
 
 The PC contains one CPU, KVM PIC/PIT, a CMOS RTC with periodic IRQ8, one primary
 ATA PIO disk, standard planar VGA and i8042 keyboard/mouse. The disk uses the
 portable block interface; snapshot attachments use bounded memory overlays.
+`cc.backend(overlay_limit=...)` sets the dirty-memory bound in bytes; the
+default is 256 MiB. Larger Windows images can require a larger limit during
+first logon. The limit reserves no memory until the guest writes.
 The VGA aperture is unmapped RAM and generates MMIO exits. Guest RAM, disk
 and firmware are never transferred through temporary host files.
+The E820 memory map omits the VGA device aperture while reserving ROM and
+firmware memory. Advertising VGA as firmware-owned memory conflicts with
+NT 3.51's video resource allocation.
+
+RTC periodic interrupts raise IRQ8 without cancelling native execution.
+Register C latches the interrupt until the guest acknowledges it. Native
+execution slices allow progress through host split-lock mitigation delays;
+repeated millisecond cancellation can otherwise starve NT10 x86 atomic
+operations that cross cache-line boundaries.
+
+An `x86_64` machine enables ACPI automatically; `cc.backend(acpi=True)` also
+enables it for an i386 machine. Go builds the RSDP, RSDT/XSDT, FADT, FACS, MADT
+and DSDT in reserved guest firmware memory. Fixed devices are children of the
+PCI root so its interrupt-routing interface is initialized before their
+resources are assigned. The root supplies PCI configuration mechanism 1.
+The ACPI fixed registers provide a 24-bit
+3.579545 MHz timer, SCI events, a power button and S5 shutdown.
+
+`cc.backend(hpet=True)` adds an ACPI-described HPET at `0xfed00000`. Its
+100 MHz main counter and three 64-bit comparators support one-shot, periodic,
+32-bit wrap, and edge or level interrupts through IOAPIC inputs 20–23. Legacy
+replacement and FSB delivery are not advertised. HPET and RTC deadlines share
+asynchronous IRQ delivery, with register state serialized before guest access.
+`cc.v1.state().hpet` reports the counter, configuration and comparators.
+
+`cc.backend(pci_ide=True, ide_dma=False)` retains the PCI controller and
+selects a PIO-only disk. This allows a guest profile to choose the transfer
+mode independently of its bus topology.
+
+`cc.backend(pci_ide=True)` enables ACPI and a generic PCI IDE controller at
+00:01.0 (1234:cc01). It retains compatibility-mode ports and IRQ14/15 and
+provides the standard 16-byte bus-master register block in BAR4. PIO and
+multiword DMA use the portable block device. DMA validates guest physical
+region descriptors before transferring, including RAM bounds, 64 KiB windows,
+direction, and the PCI bus-master enable bit. The ATA disk advertises only the
+implemented transfer modes. The ACPI namespace omits the separate legacy IDE
+device when PCI owns the controller.
+Inspection exposes the bus-master registers and the last eight ATA failures,
+including the command, task file, and DMA validation or block-device error.
 
 ```starlark
 vm = vmm.start(vmm.machine(
@@ -49,6 +110,8 @@ consumer-level validation of this backend, not image-building features of trex.
 `vm.extension("cc.v1").state()` returns a serialized observation containing
 PC, CR0/CR3, last BIOS service, ATA task registers and command count, VGA
 access count, PIC/PIT state, and bounded keyboard/CMOS transaction tails.
+PCI inspection includes the configuration-address latch, controller header,
+and bitmaps of configuration dwords read and written.
 It also exposes integer registers, CR2/CR4 and the IDT base. `read_physical(address,
 size)` returns an owned snapshot of at most 64 KiB of RAM, including the display
 aperture. `breakpoint(address)` installs a debugger-owned execution breakpoint;
@@ -57,9 +120,9 @@ Reading a screenshot or state serializes with execution. Closing the VM
 releases KVM and RAM and is idempotent; stopping preserves inspection until
 close. Events support `debug.select` and the portable automation helpers.
 
-This initial platform supports one IDE disk, BIOS modes 03h/12h, PNG capture,
+This platform supports one IDE disk, BIOS modes 03h/12h, UEFI GOP, PNG capture,
 keyboard transitions, chords and relative PS/2 pointer input. Text injection,
-interactive host windows, ACPI powerdown, reset, guest snapshots and debugger
+interactive host windows, reset, guest snapshots and debugger
 channels are not advertised capabilities. ARM64 UEFI continuation remains
 available through its existing emulator interface. Other host platforms return
 an explicit unsupported-backend error for cc PC execution.
@@ -71,6 +134,8 @@ MAC for each guest. The switch learns unicast destinations, floods broadcasts
 and multicasts, and bounds each port's receive queue. It requires no host
 network configuration. Guest NIC drivers and protocol bindings belong to the
 image recipe. `cc.v1.state().network` reports device state and frame counts.
+The ACPI platform currently rejects this NIC attachment because its SCI also
+uses IRQ9.
 
 `vm.extension("cc.v1").disk()` takes an immutable, in-memory snapshot of a
 snapshot-attached disk for inspection with trex filesystem readers. It preserves
@@ -82,7 +147,8 @@ extracting a disk image to a host file.
 
 CC's `hypervisor.X86` accepts architectural state and RAM mappings, with no
 host paths or image-building policy. `MapRAMRegions` allows one RAM backing
-allocation to leave MMIO holes. Calls are serialized except for `Cancel`.
+allocation to leave MMIO holes. Calls are serialized except for `Cancel` and `SetIRQ`. Pending IRQ callbacks
+are joined before closing the accelerator.
 `CompleteIO` completes the pending operation without executing a further
 instruction before the firmware reads or modifies CPU state. This follows the
 [KVM I/O completion contract](https://docs.kernel.org/virt/kvm/api.html#the-kvm-run-structure).

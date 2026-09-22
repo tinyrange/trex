@@ -10,6 +10,8 @@ type PCIInterrupt struct {
 	Interrupt   uint32
 }
 type PCIRoot struct {
+	// Legacy selects PCI configuration mechanism 1 instead of ECAM.
+	Legacy                 bool
 	Segment                uint16
 	FirstBus, LastBus      uint8
 	MemoryBase, MemorySize uint64
@@ -46,14 +48,19 @@ func amlInteger(v uint64) []byte {
 }
 func amlName(name string, value []byte) []byte { return append(append([]byte{8}, name...), value...) }
 
-// AML describes an ECAM PCI root with a fixed memory window and INTx routing.
+// AML describes a PCI root with a fixed memory window and INTx routing.
+// Legacy roots also expose the conventional 16-bit I/O window.
 // Interrupt pins use the ACPI numbering (0=INTA through 3=INTD).
 func (p PCIRoot) AML() ([]byte, error) {
 	if p.FirstBus > p.LastBus || p.MemorySize == 0 || p.MemoryBase+p.MemorySize < p.MemoryBase || len(p.Interrupts) > 255 {
 		return nil, fmt.Errorf("invalid PCI root resources")
 	}
 	body := []byte("PCI0")
-	for _, id := range []struct{ name, value string }{{"_HID", "PNP0A08"}, {"_CID", "PNP0A03"}} {
+	ids := []struct{ name, value string }{{"_HID", "PNP0A08"}, {"_CID", "PNP0A03"}}
+	if p.Legacy {
+		ids = []struct{ name, value string }{{"_HID", "PNP0A03"}}
+	}
+	for _, id := range ids {
 		v, _ := acpiEISAID(id.value)
 		body = append(body, amlName(id.name, amlInteger(uint64(v)))...)
 	}
@@ -70,6 +77,13 @@ func (p PCIRoot) AML() ([]byte, error) {
 	resources := append(bus, 0x8a, 43, 0, 0, 0x0c, 1)
 	for _, v := range []uint64{0, p.MemoryBase, p.MemoryBase + p.MemorySize - 1, 0, p.MemorySize} {
 		resources = binary.LittleEndian.AppendUint64(resources, v)
+	}
+	if p.Legacy {
+		// DWord I/O window; 65536 bytes cannot fit in a Word descriptor.
+		resources = append(resources, 0x87, 23, 0, 1, 0x0c, 3)
+		for _, v := range []uint32{0, 0, 0xffff, 0, 0x10000} {
+			resources = binary.LittleEndian.AppendUint32(resources, v)
+		}
 	}
 	resources = append(resources, 0x79, 0)
 	buffer := append(amlInteger(uint64(len(resources))), resources...)

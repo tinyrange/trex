@@ -131,17 +131,35 @@ func (p *pc) inspectState() (starlark.Value, error) {
 		"esi": int64(r.Rsi), "edi": int64(r.Rdi), "esp": int64(r.Rsp), "ebp": int64(r.Rbp),
 		"eip": int64(r.Rip), "eflags": int64(r.Rflags),
 	}
+	var timer any
+	if h := p.hpet; h != nil {
+		comparators := make([]any, len(h.timers))
+		for i, t := range h.timers {
+			comparators[i] = map[string]any{"config": int64(t.config), "match": int64(t.match), "period": int64(t.period), "asserted": t.asserted}
+		}
+		timer = map[string]any{"config": int64(h.config), "counter": int64(h.counter(p.now())), "status": int64(h.status), "timers": comparators}
+	}
 	var network any
+	var pciIDE any
+	if d := p.pciIDE; d != nil {
+		pciIDE = map[string]any{"config": fmt.Sprintf("%x", d.config[:64]), "read_dwords": fmt.Sprintf("%016x", d.reads), "write_dwords": fmt.Sprintf("%016x", d.writes), "bus_master": fmt.Sprintf("%x", d.bm)}
+	}
 	if n := p.nic; n != nil {
 		network = map[string]any{"tx": int64(n.tx), "rx": int64(n.rx), "command": int(n.command), "isr": int(n.isr), "imr": int(n.imr), "start": int(n.start), "stop": int(n.stop), "current": int(n.current), "boundary": int(n.boundary), "mac": fmt.Sprintf("%x", n.physical)}
 	}
+	failures := make([]any, len(p.ide.failures))
+	for i, failure := range p.ide.failures {
+		failures[i] = map[string]any{"command": int(failure.command), "feature": int(failure.feature), "error": int(failure.code), "reason": failure.reason, "task": fmt.Sprintf("%x", failure.task)}
+	}
 	return starvalue.Starlark(map[string]any{
 		"virtio_input": map[string]any{"status": int(p.input.status), "reports": int64(p.input.reports), "queue_ready": p.input.queues[0].ready, "used": int(p.input.queues[0].written), "descriptor": int64(p.input.queues[0].desc), "available": int64(p.input.queues[0].avail), "pending": len(p.input.pending)},
-		"network":      network,
-		"pc":           int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
+		"ata_failures": failures, "ata_last_command": int(p.ide.lastCommand), "ata_dma_pending": p.ide.dmaPending, "ata_irq_pending": p.ide.pending,
+		"pci_address": int64(p.pciAddress), "pci_ide": pciIDE,
+		"network": network, "hpet": timer,
+		"pc": int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
 		"cr2": int64(s.Cr2), "cr4": int64(s.Cr4),
 		"registers": registers, "idt_base": int64(s.Idt.Base),
-		"last_bios": p.lastService, "ata_commands": int64(p.ide.commands),
+		"efi": p.efiTrace, "last_bios": p.lastService, "ata_commands": int64(p.ide.commands),
 		"ata_task": fmt.Sprintf("%x", p.ide.task), "vga_accesses": int64(p.vga.accesses),
 		"keyboard_commands": keyboard, "rtc": p.rtcTrace, "interrupts": interrupts,
 	})

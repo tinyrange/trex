@@ -33,6 +33,31 @@ check(invalid_result.reason == "plugin" and "non-reserved reason" in invalid_res
 `)
 }
 
+func TestAMD64RegistrarEntryHomeSpace(t *testing.T) {
+	thread, globals, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := thread.Load(thread, "@stdlib//windows/selfreg:policy.star")
+	if err != nil {
+		t.Fatal(err)
+	}
+	globals["run_entry"] = policy["_run_entry"]
+	_, err = starlark.ExecFile(thread, "registrar-entry.star", `
+# Save a nonvolatile register in the fourth caller home slot, as the media
+# CRT does before calling any runtime helper. Verify entry stack alignment.
+def exercise():
+    machine = emulator.machine(architecture="amd64",code=b"\x48\x89\x5c\x24\x20\x48\x89\xe0\x83\xe0\x0f\xc3")
+    result = run_entry(machine)
+    if result.reason != "return" or result.value != 8:
+        fail("invalid Win64 registrar entry stack: "+result.reason+" "+result.detail)
+exercise()
+`, globals)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRegistryHandlesAcrossArchitectures(t *testing.T) {
 	thread, predeclared, err := newStarlarkRuntime("-")
 	if err != nil {
@@ -452,6 +477,185 @@ def exercise(architecture):
     check(machine.read_pointer(restored+layout["Dacl"]) == restored_acl)
     check(machine.read(restored_acl,8) == machine.read(acl,8))
     check(machine.read(restored+layout["Size"],4) == b"\xaa"*4)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestConvertedSecurityDescriptorAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "security_plugin")
+def check(condition):
+    if not condition:
+        fail("converted security descriptor architecture check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    machine.use(security_plugin())
+    for suffix, encoding in [("A","ascii"),("W","utf16le")]:
+        text = machine.allocate(value=binary.encode("O:SYG:SYD:(A;;GA;;;SY)",encoding=encoding,nul=True))
+        output = machine.allocate(value=b"\xaa"*(machine.pointer_size+4))
+        length = machine.allocate(value=b"\xbb"*8)
+        result = machine.call(machine.resolve_export("advapi32.dll",name="ConvertStringSecurityDescriptorToSecurityDescriptor"+suffix),args=[text,1,output,length])
+        check(result.reason == "return" and result.value == 1)
+        descriptor = machine.read_pointer(output)
+        check(architecture != "amd64" or descriptor > 0xffffffff)
+        check(machine.read(descriptor,2) == b"\x01\x00")
+        size = machine.call(machine.resolve_export("advapi32.dll",name="GetSecurityDescriptorLength"),args=[descriptor])
+        check(size.reason == "return" and size.value == machine.read_u32le(length))
+        check(machine.read(output+machine.pointer_size,4) == b"\xaa"*4)
+        check(machine.read(length+4,4) == b"\xbb"*4)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestDateFormatCapacityAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+def check(condition):
+    if not condition:
+        fail("date format capacity architecture check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    machine.use(kernel32_plugin())
+    poison = 0x7ff00000000 if architecture == "amd64" else 0
+    for suffix, width in [("A",1),("W",2)]:
+        output = machine.allocate(value=b"\xaa"*(260*width+4))
+        fn = machine.resolve_export("kernel32.dll",name="GetDateFormat"+suffix)
+        result = machine.call(fn,args=[0x800,2,0,0,output,poison|260])
+        check(result.reason == "return" and result.value == 26)
+        check(machine.read_cstring(output,encoding="utf16le" if width == 2 else "ascii") == "Saturday, January 1, 2000")
+        check(machine.read(output+260*width,4) == b"\xaa"*4)
+        fn = machine.resolve_export("kernel32.dll",name="GetTimeFormat"+suffix)
+        result = machine.call(fn,args=[0x800,0,0,0,output,poison|260])
+        check(result.reason == "return" and result.value == 12)
+        check(machine.read_cstring(output,encoding="utf16le" if width == 2 else "ascii") == "12:00:00 AM")
+        check(machine.read(output+260*width,4) == b"\xaa"*4)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestServiceConfigurationDWORDsAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:service.star", "service_manager_plugin")
+load("@stdlib//windows/selfreg:registry.star", "registry_plugin")
+def check(condition):
+    if not condition:
+        fail("service DWORD architecture check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    registry = registry_plugin()
+    machine.use(service_manager_plugin(registry=registry))
+    def call(name,args):
+        result = machine.call(machine.resolve_export("advapi32.dll",name=name),args=args)
+        check(result.reason == "return")
+        return result.value
+    manager = call("OpenSCManagerW",[0,0,0xf003f])
+    name = machine.allocate(value=binary.encode("WidthTest",encoding="utf16le",nul=True))
+    poison = 0x7fff00000000 if architecture == "amd64" else 0
+    service = call("CreateServiceW",[manager,name,0,0xf01ff,poison|0x20,poison|2,poison|1,0,0,0,0,0,0])
+    check(service != 0)
+    key = "/ControlSet001/Services/WidthTest"
+    check(registry.get_value("SYSTEM",key,"Type",0) == 0x20)
+    check(registry.get_value("SYSTEM",key,"Start",0) == 2)
+    check(registry.get_value("SYSTEM",key,"ErrorControl",0) == 1)
+    check(call("ChangeServiceConfigW",[service,poison|0xffffffff,poison|3,poison|0xffffffff,0,0,0,0,0,0,0]) == 1)
+    check(registry.get_value("SYSTEM",key,"Type",0) == 0x20)
+    check(registry.get_value("SYSTEM",key,"Start",0) == 3)
+    check(registry.get_value("SYSTEM",key,"ErrorControl",0) == 1)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestAddAceDWORDsAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "security_plugin")
+def check(condition):
+    if not condition:
+        fail("AddAce DWORD architecture check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    machine.use(security_plugin())
+    acl = machine.allocate(size=64)
+    machine.write(acl,b"\x02\x00\x40\x00\x00\x00\x00\x00")
+    ace_bytes = b"\x00\x00\x14\x00\xff\x01\x1f\x00\x01\x01\x00\x00\x00\x00\x00\x05\x12\x00\x00\x00"
+    ace = machine.allocate(value=ace_bytes)
+    poison = 0xffffffff00000000 if architecture == "amd64" else 0
+    result = machine.call(machine.resolve_export("advapi32.dll",name="AddAce"),args=[acl,2,poison|0xffffffff,ace,poison|len(ace_bytes)])
+    check(result.reason == "return" and result.value == 1)
+    check(machine.read_u16le(acl+4) == 1)
+    check(machine.read(acl+8,20) == ace_bytes)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestRPCProxyRegistrationAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/emulation:rpc.star", "rpc_plugin")
+load("@stdlib//windows/selfreg:registry.star", "registry_plugin")
+def check(condition):
+    if not condition:
+        fail("RPC proxy architecture check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    registry = registry_plugin()
+    machine.use(rpc_plugin(registry,"C:\\Windows\\System32\\proxy.dll"))
+    width = machine.pointer_size
+    def pointers(values):
+        result = machine.allocate(size=len(values)*width)
+        for i,value in enumerate(values):
+            machine.write_pointer(result+i*width,value)
+        return result
+    iid = machine.allocate(value=b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff")
+    clsid = machine.allocate(value=b"\x10\x20\x30\x40\x50\x60\x70\x80\x90\xa0\xb0\xc0\xd0\xe0\xf0\x01")
+    name = machine.allocate(value=b"ITest\x00")
+    vtables = pointers([pointers([0,iid]),0])
+    names = pointers([name,0])
+    info = pointers([vtables,0,names,0,0,0])
+    machine.write_u32le(info+5*width,0x20001)
+    files = pointers([info,0])
+    result = machine.call(machine.resolve_export("rpcrt4.dll",name="NdrDllRegisterProxy"),args=[0,files,clsid])
+    check(result.reason == "return" and result.value == 0)
+    key = "/Classes/Interface/{33221100-5544-7766-8899-AABBCCDDEEFF}"
+    check(registry.get_value("SOFTWARE",key,"(default)","") == "ITest")
+    check(registry.get_value("SOFTWARE",key+"/ProxyStubClsid32","(default)","") == "{40302010-6050-8070-90A0-B0C0D0E0F001}")
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestLoadedTypeLibraryPointersAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "oleaut_plugin")
+def check(condition):
+    if not condition:
+        fail("ITypeLib pointer architecture check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    path = "C:\\Windows\\fixture.tlb"
+    # The plugin receives an explicit, already-indexed library catalogue.
+    machine.use(oleaut_plugin(type_libraries={path:binary.concat([b"MSFT"])}))
+    text = machine.allocate(value=binary.encode(path,encoding="utf16le",nul=True))
+    output = machine.allocate(value=b"\xaa"*(machine.pointer_size+4))
+    result = machine.call(machine.resolve_export("oleaut32.dll",name="LoadTypeLib"),args=[text,output])
+    check(result.reason == "return" and result.value == 0)
+    obj = machine.read_pointer(output)
+    vtable = machine.read_pointer(obj)
+    check(architecture != "amd64" or obj > 0xffffffff)
+    check(machine.read(output+machine.pointer_size,4) == b"\xaa"*4)
+    result = machine.call(machine.read_pointer(vtable+3*machine.pointer_size),args=[obj])
+    check(result.reason == "return" and result.value == 0)
+    result = machine.call(machine.read_pointer(vtable),args=[obj,0,output])
+    check(result.reason == "return" and result.value == 0 and machine.read_pointer(output) == obj)
+    result = machine.call(machine.read_pointer(vtable+2*machine.pointer_size),args=[obj])
+    check(result.reason == "return" and result.value == 1)
+    missing = machine.allocate(value=binary.encode("missing.tlb",encoding="utf16le",nul=True))
+    result = machine.call(machine.resolve_export("oleaut32.dll",name="LoadTypeLib"),args=[missing,output])
+    check(result.reason == "return" and result.value == 0x80029c4a and machine.read_pointer(output) == 0)
+    check(machine.read(output+machine.pointer_size,4) == b"\xaa"*4)
 exercise("x86")
 exercise("amd64")
 `)

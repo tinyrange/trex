@@ -123,9 +123,10 @@ func (d *driver) loop() {
 		default:
 		}
 		// Bound each native slice so a command cannot be lost in the small
-		// interval between enqueueing it and entering KVM_RUN.
-		ctx, cancel := context.WithTimeout(d.ctx, 10*time.Millisecond)
-		ex, err := d.pc.run(ctx)
+		// interval between enqueueing it and entering KVM_RUN. Allow native
+		// host delays (notably Linux's 10 ms split-lock mitigation) to finish.
+		ctx, cancel := context.WithTimeout(d.ctx, 50*time.Millisecond)
+		ex, err := d.pc.runDevices(ctx)
 		cancel()
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			continue
@@ -143,7 +144,9 @@ func (d *driver) loop() {
 			case hypervisor.X86ExitIO:
 				err = d.pc.handleIO(ex)
 			case hypervisor.X86ExitMMIO:
-				if ex.Address >= inputAddress && ex.Address < inputAddress+0x1000 {
+				if d.pc.hpet != nil && ex.Address >= hpetAddress && ex.Address < hpetAddress+0x400 {
+					err = d.pc.hpet.mmio(ex, d.pc.cpu, d.pc.now())
+				} else if ex.Address >= inputAddress && ex.Address < inputAddress+0x1000 {
 					err = d.pc.input.mmio(ex, d.pc.cpu)
 				} else {
 					err = d.pc.vga.mmio(ex, d.pc.cpu)
@@ -157,6 +160,9 @@ func (d *driver) loop() {
 		}
 		if err != nil {
 			d.finish("guest_failure", err.Error(), false)
+		}
+		if d.pc.acpi != nil && d.pc.acpi.poweroff {
+			d.finish("shutdown", "ACPI S5", true)
 		}
 	}
 }
@@ -220,7 +226,13 @@ func (d *driver) Stop(ctx context.Context) error {
 func (d *driver) Reset(context.Context) error {
 	return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "cc reset is not implemented"}
 }
-func (d *driver) Powerdown(context.Context) error {
+func (d *driver) Powerdown(ctx context.Context) error {
+	if d.pc.acpi != nil {
+		return d.call(ctx, func() error {
+			d.pc.acpi.status |= 1 << 8
+			return d.pc.acpi.updateIRQ()
+		})
+	}
 	return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "the legacy PC has no ACPI power button"}
 }
 func (d *driver) Close(ctx context.Context) error {

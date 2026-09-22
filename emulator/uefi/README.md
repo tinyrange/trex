@@ -190,3 +190,21 @@ initialization. Checkpoints copy RAM, so retain only the variants needed.
 The future HVF handoff must preserve CPU, page tables, RAM and device state and
 provide a runtime-services bridge. Current synthetic firmware gate addresses are
 interpreter dispatch points, not executable native firmware stubs.
+
+## Caller-owned CPUs
+
+`NewFirmware` exposes the shared 64-bit EFI service core independently of the
+ARM interpreter. The caller supplies guest virtual and physical `cpu.Memory`
+interfaces, an instruction gate emitter, a clock, and a stall callback.
+`Entry` supplies the relocated PE entrypoint, stack, image handle and system
+table; `Service` and `Call` dispatch traps using physical gate addresses and
+up to ten ABI arguments. CrumbleCracker uses this interface for native AMD64
+UEFI execution.
+
+Block attachment can share an existing portable `block.Device` with the
+operating-system controller. GOP exposes caller-owned BGRX framebuffer bytes,
+and runtime address conversion updates firmware pointers and table CRCs.
+Memory reservations exclude platform holes from allocations; executable
+runtime gate pages are distinct from runtime table pages. EFI UINT32 stack
+arguments ignore the unused upper bytes of x64 stack slots. Unsupported
+services return a named error so the caller can retain a stopped guest.

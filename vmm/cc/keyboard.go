@@ -205,7 +205,7 @@ func (k *keyboard) io(ex hypervisor.X86Exit) error {
 }
 
 var scanCodes = map[string]uint16{
-	"ctrl_r": 0xe01d, "alt_r": 0xe038,
+	"ctrl_r": 0xe01d, "alt_r": 0xe038, "meta_l": 0xe05b, "meta_r": 0xe05c,
 	"esc": 1, "escape": 1, "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10, "0": 11, "minus": 12, "equal": 13, "backspace": 14, "tab": 15,
 	"q": 16, "w": 17, "e": 18, "r": 19, "t": 20, "y": 21, "u": 22, "i": 23, "o": 24, "p": 25, "bracket_left": 26, "bracket_right": 27, "ret": 28, "enter": 28, "ctrl": 29, "control": 29,
 	"a": 30, "s": 31, "d": 32, "f": 33, "g": 34, "h": 35, "j": 36, "k": 37, "l": 38, "semicolon": 39, "apostrophe": 40, "grave_accent": 41, "shift": 42, "backslash": 43,
@@ -310,18 +310,28 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 		timer.Stop()
 	case <-timer.C:
 	}
-	// Always release accepted presses, even when the caller cancels its wait.
-	cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	err := d.call(cleanup, func() error {
-		for i := len(input.Keys) - 1; i >= 0; i-- {
-			if err := d.pc.keyboard.key(input.Keys[i], false); err != nil {
+	// Both attempts execute on the serialized device loop. Track progress
+	// there so cancellation racing a completed release cannot duplicate it.
+	remaining := len(input.Keys)
+	releaseKeys := func() error {
+		for remaining > 0 {
+			if err := d.pc.keyboard.key(input.Keys[remaining-1], false); err != nil {
 				return err
 			}
+			remaining--
 		}
 		return nil
-	})
+	}
+	// Cold guest reads may keep the device loop busy for more than a second.
+	// Preserve the live caller's deadline; only cancellation starts cleanup.
+	err := ctx.Err()
+	if err == nil {
+		err = d.call(ctx, releaseKeys)
+	}
 	if ctx.Err() != nil {
+		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = d.call(cleanup, releaseKeys)
 		return ctx.Err()
 	}
 	return err

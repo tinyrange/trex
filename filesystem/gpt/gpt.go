@@ -80,6 +80,7 @@ func GPTBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 }
 
 type gptReadPartition struct {
+	index      uint32
 	typeGUID   [16]byte
 	uniqueGUID [16]byte
 	startLBA   int64
@@ -174,6 +175,7 @@ func newGPTVolume(file starfile.File) (*gptVolume, error) {
 		}
 		path := fmt.Sprintf("/partition%d", index+1)
 		volume.partitions = append(volume.partitions, gptReadPartition{
+			index:    index + 1,
 			typeGUID: typeGUID, uniqueGUID: uniqueGUID,
 			startLBA: startLBA, endLBA: endLBA,
 			attributes: binary.LittleEndian.Uint64(entry[48:56]),

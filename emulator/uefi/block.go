@@ -20,6 +20,7 @@ type BlockOptions struct {
 }
 type diskStore struct {
 	overlay *blockstar.OverlayDevice
+	device  block.Device
 	limit   int64
 }
 type blockEndpoint struct {
@@ -51,7 +52,7 @@ func (m *Machine) AttachBlockDevice(source storage.Reader, opts BlockOptions) (u
 		return 0, err
 	}
 	index := len(m.diskStores)
-	m.diskStores = append(m.diskStores, diskStore{overlay, opts.OverlayBytes})
+	m.diskStores = append(m.diskStores, diskStore{overlay: overlay, limit: opts.OverlayBytes})
 	return m.attachEndpoint(blockEndpoint{Store: index, Size: source.Size(), BlockSize: opts.BlockSize, ReadOnly: opts.ReadOnly}, opts.Handle, opts.DevicePath, false)
 }
 
@@ -161,7 +162,10 @@ func (m *Machine) blockCall(name string, a [8]uint64) uint64 {
 	if a[4] == 0 {
 		return invalidParameter
 	}
-	store := m.diskStores[endpoint.Store].overlay
+	store := m.diskStores[endpoint.Store].device
+	if store == nil {
+		store = m.diskStores[endpoint.Store].overlay
+	}
 	absolute := endpoint.Offset + int64(offset)
 	if name == "Block.Write" || name == "Disk.Write" {
 		if endpoint.ReadOnly {
@@ -171,7 +175,11 @@ func (m *Machine) blockCall(name string, a [8]uint64) uint64 {
 		if m.err != nil {
 			return invalidParameter
 		}
-		n, err := store.WriteAt(data, absolute)
+		writer, ok := store.(block.Writer)
+		if !ok {
+			return efiError | 8
+		}
+		n, err := writer.WriteAt(data, absolute)
 		if err != nil || n != len(data) {
 			return efiError | 7
 		}
@@ -182,11 +190,14 @@ func (m *Machine) blockCall(name string, a [8]uint64) uint64 {
 		}
 		m.put(a[4], data)
 	}
-	m.emit(Event{Kind: "disk", Name: name, PC: m.processor.PC(), Address: uint64(absolute), Size: size, Args: a})
+	m.emit(Event{Kind: "disk", Name: name, PC: m.servicePC(), Address: uint64(absolute), Size: size, Args: a})
 	return 0
 }
 
 func (s diskStore) clone() (diskStore, error) {
+	if s.overlay == nil {
+		return diskStore{}, fmt.Errorf("uefi: caller-owned block devices cannot be cloned")
+	}
 	snapshot, err := s.overlay.Snapshot()
 	if err != nil {
 		return diskStore{}, err
@@ -199,5 +210,5 @@ func (s diskStore) clone() (diskStore, error) {
 	if err != nil {
 		return diskStore{}, err
 	}
-	return diskStore{overlay, s.limit}, nil
+	return diskStore{overlay: overlay, limit: s.limit}, nil
 }

@@ -243,7 +243,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"windows.win9x_vxd_library":         "windows.win9x_vxd_library(base, members, exclude=[]) -> file",
 	"windows.win9x_vxd_library_members": "windows.win9x_vxd_library_members(file) -> list[string]",
 	"qemu.acpi_table":                   "qemu.acpi_table(file)",
-	"cc.backend":                        "cc.backend() -> vmm_backend",
+	"cc.backend":                        "cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_dma=True, overlay_limit=268435456) -> vmm_backend",
 	"qemu.backend":                      "qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', display_zoom_to_fit=False, block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[])",
 	"qemu.chardev":                      "qemu.chardev(name, **properties)",
 	"qemu.device":                       "qemu.device(name, **properties)",

@@ -14,7 +14,13 @@ import (
 	"j5.nz/cc/hypervisor"
 )
 
-type Backend struct{}
+type Backend struct {
+	ACPI, PCIIDE, HPET, UEFI bool
+	// PIOOnly disables the PCI IDE disk's DMA capability.
+	PIOOnly bool
+	// OverlayLimit bounds dirty snapshot memory; zero uses 256 MiB.
+	OverlayLimit int64
+}
 
 func Available() bool { return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" }
 func Capabilities() []string {
@@ -27,17 +33,23 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	add := func(field, message string) {
 		issues = append(issues, vmm.ValidationIssue{Code: "cc.unsupported", Field: field, Message: message, Backend: b.ID()})
 	}
+	if b.UEFI && m.Architecture != "x86_64" {
+		add("architecture", "cc UEFI requires x86_64")
+	}
+	if b.OverlayLimit < 0 {
+		add("overlay_limit", "snapshot overlay limit must be positive")
+	}
 	if !Available() {
 		add("backend", "cc PC execution requires Linux/amd64 KVM")
 	}
-	if m.Architecture != "i386" {
-		add("architecture", "cc PC supports i386")
+	if m.Architecture != "i386" && m.Architecture != "x86_64" {
+		add("architecture", "cc PC supports i386 and x86_64")
 	}
 	if m.CPUs != 1 {
 		add("cpus", "cc PC requires one CPU")
 	}
-	if m.Memory < 16<<20 || m.Memory > 1<<30 || m.Memory%4096 != 0 {
-		add("memory", "memory must be page-aligned and between 16 MiB and 1 GiB")
+	if m.Memory < 16<<20 || m.Memory > 2<<30 || m.Memory%4096 != 0 {
+		add("memory", "memory must be page-aligned and between 16 MiB and 2 GiB")
 	}
 	if len(m.Disks) != 1 {
 		add("disks", "cc PC requires one primary IDE disk")
@@ -67,6 +79,9 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	}
 	if len(m.Networks) > 1 {
 		add("networks", "cc PC supports one ISA NE2000")
+	}
+	if len(m.Networks) != 0 && (b.ACPI || b.PCIIDE || m.Architecture == "x86_64") {
+		add("networks", "ACPI SCI and ISA NE2000 currently require the same IRQ9")
 	}
 	for _, network := range m.Networks {
 		if network.Kind != "ethernet" || network.Switch == nil || network.MAC == [6]byte{} || network.MAC[0]&1 != 0 {
@@ -103,7 +118,11 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	}
 	disk := m.Disks[0]
 	if disk.Snapshot {
-		overlay, err := blockstar.NewOverlayDevice(disk.Device, 256<<20, 64<<10)
+		limit := b.OverlayLimit
+		if limit == 0 {
+			limit = 256 << 20
+		}
+		overlay, err := blockstar.NewOverlayDevice(disk.Device, limit, blockstar.DefaultOverlayChunk)
 		if err != nil {
 			return nil, err
 		}
@@ -113,7 +132,7 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	if err != nil {
 		return nil, err
 	}
-	if err = configureCPU(cpu); err != nil {
+	if err = configureCPUArchitecture(cpu, m.Architecture == "x86_64"); err != nil {
 		cpu.Close()
 		return nil, err
 	}
@@ -134,6 +153,25 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		return nil, err
 	}
 	platform.framebuffer = ram[m.Memory : uint64(m.Memory)+ramfb.Size]
+	if b.PCIIDE || b.UEFI {
+		platform.pciIDE = newPCIIDE()
+		platform.ide.dmaEnabled = !b.PIOOnly
+		platform.ide.irq = func(irq uint32, level bool) error {
+			if level {
+				platform.pciIDE.bm[2] |= 4
+			}
+			return cpu.SetIRQ(irq, level && platform.pciIDE.config[4]&1 != 0)
+		}
+	}
+	if b.HPET {
+		platform.hpet = newHPET(platform.now(), cpu.SetIRQ)
+	}
+	if b.ACPI || b.PCIIDE || b.HPET || b.UEFI || m.Architecture == "x86_64" {
+		if err = platform.installACPI(); err != nil {
+			cpu.Close()
+			return nil, err
+		}
+	}
 	if len(m.Channels) == 1 {
 		platform.channelMemory = ram[uint64(m.Memory)+ramfb.Size:]
 		platform.channelName = m.Channels[0].Name
@@ -143,6 +181,12 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	if len(m.Networks) == 1 {
 		network := m.Networks[0]
 		platform.nic = newNE2000(network.Switch.Connect(), network.MAC, func(level bool) error { return cpu.SetIRQ(9, level) })
+	}
+	if b.UEFI {
+		if err = platform.installUEFI(); err != nil {
+			cpu.Close()
+			return nil, err
+		}
 	}
 	return newDriver(ctx, platform, m.StartPaused), nil
 }

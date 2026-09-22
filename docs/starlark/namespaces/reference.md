@@ -1462,7 +1462,7 @@ Static COM facts derived from generic PE, binary, and x86 primitives.
 
 ### `class_ids`
 
-Finds classes served by a 32-bit PE's DllGetClassObject implementation.
+Finds classes served by an x86 or AMD64 DllGetClassObject implementation.
 
     This mirrors common compiler output without interpreting the function: the
     generic disassembler identifies direct factory calls and immediate GUID
@@ -2555,9 +2555,9 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 ### `cc.backend`
 
-`cc.backend() -> vmm_backend`
+`cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_dma=True, overlay_limit=268435456) -> vmm_backend`
 
-Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The initial i386 platform provides Go BIOS services, one ATA disk, VGA capture and keyboard input. vmm.start creates the guest from portable memory and disk intent.
+Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 2 GiB. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
 ### `clock.monotonic`
 

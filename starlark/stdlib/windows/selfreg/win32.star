@@ -3717,12 +3717,14 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             pattern = machine.read_cstring(args[3], encoding = "utf16le" if wide else "ascii") if args[3] else ("dddd, MMMM d, yyyy" if args[1] & 0x2 else "M/d/yyyy")
             value = date_text(pattern, year, month, day, day_of_week)
             required = len(value) + 1
-            if not args[4] or args[5] == 0:
+            # cchDate is an int, including in the Win64 stack argument slot.
+            capacity = args[5] & 0xffffffff
+            if not args[4] or capacity == 0:
                 return required
-            if args[5] < required:
+            if capacity & 0x80000000 or capacity < required:
                 state["last_error"] = 122
                 return 0
-            _write_string(machine, args[4], value, wide, args[5])
+            _write_string(machine, args[4], value, wide, capacity)
             return required
         if name in ["gettimeformata", "gettimeformatw"]:
             wide = name.endswith("w")
@@ -3749,12 +3751,13 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                     pattern = pattern.replace(" tt", "")
             value = time_text(pattern, hour, minute, second)
             required = len(value) + 1
-            if not args[4] or args[5] == 0:
+            capacity = args[5] & 0xffffffff
+            if not args[4] or capacity == 0:
                 return required
-            if args[5] < required:
+            if capacity & 0x80000000 or capacity < required:
                 state["last_error"] = 122
                 return 0
-            _write_string(machine, args[4], value, wide, args[5])
+            _write_string(machine, args[4], value, wide, capacity)
             return required
         if name in ["getstringtypea", "getstringtypew", "getstringtypeexa", "getstringtypeexw"]:
             wide = name.endswith("w")
@@ -6272,7 +6275,7 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
         def query_interface(event):
             if not event.args[2]:
                 return 0x80070057
-            event.machine.write_u32le(event.args[2], event.args[0])
+            event.machine.write_pointer(event.args[2], event.args[0])
             return 0
         def add_ref(event):
             return 2
@@ -6354,14 +6357,14 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
             ("FindName", interface_method("FindName"), 6),
             ("ReleaseTLibAttr", interface_method("ReleaseTLibAttr"), 2),
         ]
-        vtable = binary.builder(capacity = len(methods) * 4)
-        for name, callback, argc in methods:
+        vtable_address = machine.allocate(size = len(methods) * machine.pointer_size, name = "ITypeLib.vtable")
+        for index, method in enumerate(methods):
+            name, callback, argc = method
             address = machine.provide_export(callback, module = "trex.typelib", name = name + str(identifier), argc = argc)
-            vtable.u32le(address)
-        vtable_address = machine.allocate(value = vtable.bytes(), name = "ITypeLib.vtable")
-        value = binary.builder(capacity = 4)
-        value.u32le(vtable_address)
-        return machine.allocate(value = value.bytes(), name = "ITypeLib")
+            machine.write_pointer(vtable_address + index * machine.pointer_size, address)
+        value = machine.allocate(size = machine.pointer_size, name = "ITypeLib")
+        machine.write_pointer(value, vtable_address)
+        return value
 
     def bstr(machine, value):
         encoded = binary.encode(value, encoding = "utf16le", nul = True)
@@ -6445,14 +6448,14 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
         })
         if resolved == None or not output:
             if output:
-                machine.write_u32le(output, 0)
+                machine.write_pointer(output, 0)
             return 0x80029c4a  # TYPE_E_CANTLOADLIBRARY
         registered = None
         for item in registered_type_libraries:
             if item["path"].replace("/", "\\").lower() == resolved:
                 registered = item
                 break
-        machine.write_u32le(output, type_library_object(machine, registered))
+        machine.write_pointer(output, type_library_object(machine, registered))
         return 0
 
     def callback(event, ordinal):
@@ -6935,6 +6938,14 @@ def _crt_compare_memory(machine, left, right, count, ignore_case = False):
 def msvcrt_plugin(kernel = None):
     """Models CRT memory, strings, locale data, and guest-backed streams."""
     state = {"strtok_next": 0, "wcstok_next": 0, "streams": {}, "descriptors": {}, "next_descriptor": 3, "allocations": {}, "onexit_tables": {}, "actions": [], "calls": {}}
+    def errno_address(machine):
+        thread = kernel.state.get("current_thread") if kernel != None else None
+        thread_id = thread["id"] if thread != None else 8
+        errors = state.setdefault("errno", {})
+        if thread_id not in errors:
+            errors[thread_id] = machine.allocate(size = 4, name = "msvcrt.errno.%d" % thread_id)
+        return errors[thread_id]
+
     contract_signatures = {
         "api-ms-win-crt-private-l1-1-0.dll": {
             "_o__execute_onexit_table": 1,
@@ -7103,6 +7114,7 @@ def msvcrt_plugin(kernel = None):
         "asctime": 1,
         "_wtol": 1,
         "_wtoi": 1,
+        "_wtoi64": 1,
         "_wtof": 1,
         "strtoul": 3,
         "localtime": 1,
@@ -7323,12 +7335,7 @@ def msvcrt_plugin(kernel = None):
                 state[key] = event.machine.allocate(size = 4, name = "msvcrt." + key)
             return state[key]
         if name == "_errno":
-            thread = kernel.state.get("current_thread") if kernel != None else None
-            thread_id = thread["id"] if thread != None else 8
-            errors = state.setdefault("errno", {})
-            if thread_id not in errors:
-                errors[thread_id] = event.machine.allocate(size = 4, name = "msvcrt.errno.%d" % thread_id)
-            return errors[thread_id]
+            return errno_address(event.machine)
         if name == "__setusermatherr":
             state["user_math_error"] = args[0]
             return None
@@ -7625,11 +7632,12 @@ def msvcrt_plugin(kernel = None):
         if name in ["isleadbyte", "_ismbblead"]:
             return 0
         if name in _MSVCRT_LOCALE_COUNTERS:
-            return state[_MSVCRT_LOCALE_COUNTERS[name]]
+            address = state[_MSVCRT_LOCALE_COUNTERS[name]]
+            return event.machine.read_u32le(address) if name == "___setlc_active_func" else address
         if name in _MSVCRT_LOCALE_POINTERS:
             return state[_MSVCRT_LOCALE_POINTERS[name][1]]
         if name in _MSVCRT_LOCALE_VALUES:
-            return _MSVCRT_LOCALE_VALUES[name]
+            return event.machine.read_u32le(state[name])
         if name in ["_initterm", "_initterm_e"]:
             address = args[0]
             while address < args[1]:
@@ -7915,6 +7923,22 @@ def msvcrt_plugin(kernel = None):
                 "upper": upper, "xdigit": xdigit,
             }[kind]
             return 1 if matched else 0
+        if name == "_wtoi64":
+            machine = event.machine
+            value = 0
+            if args[0] == 0:
+                machine.write_u32le(errno_address(machine), 22)  # EINVAL
+            else:
+                value = _parse_c_integer(machine.read_cstring(args[0], encoding = "utf16le"), 10)["value"]
+                minimum, maximum = -(1 << 63), (1 << 63) - 1
+                if value < minimum or value > maximum:
+                    value = min(max(value, minimum), maximum)
+                    machine.write_u32le(errno_address(machine), 34)  # ERANGE
+            value &= (1 << 64) - 1
+            if machine.pointer_size == 4:
+                machine.set_register("edx", value >> 32)
+                return value & 0xffffffff
+            return value
         if name in ["atol", "_wtol", "_wtoi", "strtoul", "wcstol", "wcstoul"]:
             wide = name in ["_wtol", "_wtoi", "wcstol", "wcstoul"]
             value = event.machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
@@ -8054,9 +8078,13 @@ def msvcrt_plugin(kernel = None):
     def install(machine):
         state["encoded_null"] = machine.allocate(size = 1, name = "ucrt.encoded-null")
         for name, state_name in _MSVCRT_LOCALE_COUNTERS.items():
-            state[state_name] = machine.allocate(size = 4, name = "msvcrt." + name)
+            # Older MSVCP60 imports these variables directly; newer runtimes
+            # use accessor functions. Both ABIs must share the same storage.
+            state[state_name] = machine.provide_export(module = "msvcrt.dll", name = "__" + state_name, value = b"\x00" * 4)
         for name, spec in _MSVCRT_LOCALE_POINTERS.items():
-            state[spec[1]] = machine.allocate(size = spec[0], name = "msvcrt." + name)
+            state[spec[1]] = machine.provide_export(module = "msvcrt.dll", name = name[1:-5], value = b"\x00" * spec[0])
+        for name, value in _MSVCRT_LOCALE_VALUES.items():
+            state[name] = machine.provide_export(module = "msvcrt.dll", name = name[1:-5], value = binary.u32le(value))
         imported_data = {
             "_adjust_fdiv": b"\x00\x00\x00\x00",
             "_commode": b"\x00\x00\x00\x00",
@@ -9132,7 +9160,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             administrator = "S-1-5-" + "-".join([str(part) for part in user_sid])
             descriptor = _sddl_descriptor(value, aliases = {"LA": administrator})
             address = local_allocation(machine, descriptor, "self-relative security descriptor")
-            machine.write_u32le(args[2], address)
+            machine.write_pointer(args[2], address)
             if args[3]:
                 machine.write_u32le(args[3], len(descriptor))
             return 1
@@ -9438,7 +9466,9 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         if name in ["addaccessallowedaceex", "addaccessdeniedaceex"]:
             return append_access_ace(machine, args[0], 0 if name == "addaccessallowedaceex" else 1, args[2], args[3], args[4])
         if name == "addace":
-            if not args[0] or not args[3] or args[4] == 0:
+            length = args[4] & 0xffffffff
+            starting_index = args[2] & 0xffffffff
+            if not args[0] or not args[3] or length == 0:
                 return 0
             header = binary.cursor(machine.read(args[0], 8))
             header.u8()
@@ -9447,23 +9477,23 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             count = header.u16le()
             source_count = 0
             source_offset = 0
-            while source_offset < args[4]:
-                if source_offset + 4 > args[4]:
+            while source_offset < length:
+                if source_offset + 4 > length:
                     return 0
                 source_header = binary.cursor(machine.read(args[3] + source_offset, 4))
                 source_header.u8()
                 source_header.u8()
                 source_size = source_header.u16le()
-                if source_size < 8 or source_offset + source_size > args[4]:
+                if source_size < 8 or source_offset + source_size > length:
                     return 0
                 source_count += 1
                 source_offset += source_size
-            if source_offset != args[4]:
+            if source_offset != length:
                 return 0
             used = acl_used(machine, args[0])
-            if used + args[4] > capacity:
+            if used + length > capacity:
                 return 0
-            index = count if args[2] == 0xffffffff else args[2]
+            index = count if starting_index == 0xffffffff else starting_index
             if index > count:
                 return 0
             insertion = 8
@@ -9473,8 +9503,8 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
                 ace.u8()
                 insertion += ace.u16le()
             tail = machine.read(args[0] + insertion, used - insertion)
-            source = machine.read(args[3], args[4])
-            machine.write(args[0] + insertion + args[4], tail)
+            source = machine.read(args[3], length)
+            machine.write(args[0] + insertion + length, tail)
             machine.write(args[0] + insertion, source)
             machine.write_u16le(args[0] + 4, count + source_count)
             return 1

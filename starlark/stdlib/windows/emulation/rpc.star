@@ -104,6 +104,7 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
     permissions. Malformed target structures fail closed through machine.read.
     """
     def register_proxy(event):
+        pointer_size = event.machine.pointer_size
         proxy_files = event.args[1]
         proxy_clsid = _guid(event.machine, event.args[2])
         class_key = "/Classes/CLSID/" + proxy_clsid
@@ -113,21 +114,21 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
 
         seen = {}
         for file_index in range(maximum_files):
-            info = event.machine.read_u32le(proxy_files + file_index * 4)
+            info = event.machine.read_pointer(proxy_files + file_index * pointer_size)
             if info == 0:
                 break
-            proxy_vtables = event.machine.read_u32le(info)
-            names = event.machine.read_u32le(info + 8)
-            table = event.machine.read_u32le(info + 20)
+            proxy_vtables = event.machine.read_pointer(info)
+            names = event.machine.read_pointer(info + 2 * pointer_size)
+            table = event.machine.read_u32le(info + 5 * pointer_size)
             table_size = table & 0xffff
             table_version = table >> 16
             if table_version not in [1, 2] or table_size > maximum_interfaces:
                 fail("unsupported ProxyFileInfo table version/size %d/%d" % (table_version, table_size))
             for interface_index in range(table_size):
-                proxy_vtable = event.machine.read_u32le(proxy_vtables + interface_index * 4)
+                proxy_vtable = event.machine.read_pointer(proxy_vtables + interface_index * pointer_size)
                 if proxy_vtable == 0:
                     continue
-                iid_address = event.machine.read_u32le(proxy_vtable + 4)
+                iid_address = event.machine.read_pointer(proxy_vtable + pointer_size)
                 if iid_address == 0:
                     continue
                 iid = _guid(event.machine, iid_address)
@@ -136,7 +137,7 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
                 seen[iid] = True
                 key = "/Classes/Interface/" + iid
                 if names:
-                    name_address = event.machine.read_u32le(names + interface_index * 4)
+                    name_address = event.machine.read_pointer(names + interface_index * pointer_size)
                     if name_address:
                         _set_string(registry, key, "(default)", event.machine.read_cstring(name_address))
                 _set_string(registry, key + "/ProxyStubClsid32", "(default)", proxy_clsid)

@@ -106,8 +106,51 @@ def _direct_calls(pe, rva, size):
             break
     return output
 
+def _amd64_class_ids(pe, rva, textual):
+    # MSVC compares the first qword of REFCLSID against image-relative GUIDs.
+    # Track only this bounded straight-line prefix; calls and unconditional
+    # branches end the evidence. Textual GUIDs corroborate the binary values.
+    addresses = {}
+    prefixes = {}
+    output = []
+    aliases = {"eax": "rax", "ebx": "rbx", "ecx": "rcx", "edx": "rdx", "esi": "rsi", "edi": "rdi", "ebp": "rbp", "esp": "rsp"}
+    for short, full in [("ax", "rax"), ("bx", "rbx"), ("cx", "rcx"), ("dx", "rdx"), ("si", "rsi"), ("di", "rdi"), ("bp", "rbp"), ("sp", "rsp"), ("al", "rax"), ("ah", "rax"), ("bl", "rbx"), ("bh", "rbx"), ("cl", "rcx"), ("ch", "rcx"), ("dl", "rdx"), ("dh", "rdx")]:
+        aliases[short] = full
+    for index in range(8, 16):
+        for suffix in ["b", "w", "l", "d"]:
+            aliases["r%d%s" % (index, suffix)] = "r%d" % index
+    for instruction in pe.disasm(rva, size = 512):
+        op = instruction["op"]
+        operands = instruction["operands"]
+        if op in ["ret", "call", "jmp", "pop", "inc", "dec", "neg", "not"]:
+            break
+        if len(operands) < 2:
+            continue
+        dst, src = operands[:2]
+        if op == "cmp" and prefixes.get(dst.get("name"), False) and src["kind"] == "memory" and not src.get("index"):
+            base = addresses.get(src.get("base"))
+            if base != None:
+                target = (base + src["disp"]) & 0xffffffff
+                if _mapped(pe, target, 16):
+                    value = textual.get(hex(pe.read(target, 16)))
+                    if value != None and value not in output:
+                        output.append(value)
+        if op in ["cmp", "test"] or dst["kind"] != "register":
+            continue
+        name = dst["name"]
+        canonical = aliases.get(name, name)
+        if canonical == "rcx":
+            break # REFCLSID is no longer available in its argument register.
+        addresses.pop(canonical, None)
+        prefixes.pop(canonical, None)
+        if op == "lea" and name == canonical and src["kind"] == "memory" and src.get("base") == "rip" and not src.get("index"):
+            addresses[name] = (instruction["rva"] + instruction["size"] + src["disp"]) & 0xffffffff
+        elif op == "mov" and src["kind"] == "memory" and src.get("base") == "rcx" and not src.get("index") and src["disp"] == 0 and name.startswith("r") and name == canonical:
+            prefixes[name] = True
+    return output
+
 def class_ids(file, pe = None):
-    """Finds classes served by a 32-bit PE's DllGetClassObject implementation.
+    """Finds classes served by an x86 or AMD64 DllGetClassObject implementation.
 
     This mirrors common compiler output without interpreting the function: the
     generic disassembler identifies direct factory calls and immediate GUID
@@ -115,11 +158,13 @@ def class_ids(file, pe = None):
     """
     pe = pe or windows.pe(file)
     rva = export_rva(pe, "DllGetClassObject")
-    if not rva or pe.info["machine"] != 0x14c:
+    if not rva or pe.info["machine"] not in [0x14c, 0x8664]:
         return []
     image_base = pe.info["image_base"]
     rva = _initial_target(pe, rva)
     textual = _text_guids(file)
+    if pe.info["machine"] == 0x8664:
+        return _amd64_class_ids(pe, rva, textual)
     output = []
     seen = {}
     helpers = _direct_calls(pe, rva, 256)

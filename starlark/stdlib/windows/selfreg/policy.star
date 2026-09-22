@@ -59,6 +59,10 @@ def _execution_succeeded(reason, value, executable):
     return reason == "return" and _registration_succeeded(value, False)
 
 def _run_entry(machine):
+    if machine.pointer_size == 8:
+        # The Win64 loader invokes the entry point with a return address and
+        # four home slots. CRT prologues may save registers above entry RSP.
+        return machine.call(machine.entry)
     return machine.run()
 
 def _merge_execution_patches(static, runtime):

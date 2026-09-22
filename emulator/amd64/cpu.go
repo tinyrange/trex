@@ -1044,7 +1044,9 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				edx = 1 << 29 // Long mode.
 			}
 			c.registers[0], c.registers[3], c.registers[1], c.registers[2] = uint64(eax), uint64(ebx), uint64(ecx), uint64(edx)
-		case x86asm.NOP:
+		case x86asm.NOP, x86asm.PREFETCHNTA, x86asm.PREFETCHT0,
+			x86asm.PREFETCHT1, x86asm.PREFETCHT2, x86asm.PREFETCHW:
+			// Cache hints do not read guest memory or fault on unmapped addresses.
 		case x86asm.BSWAP:
 			var value uint64
 			value, err = read(inst.Args[0], width)
@@ -1070,9 +1072,11 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			c.flags |= flagCarry
 		case x86asm.CMC:
 			c.flags ^= flagCarry
-		case x86asm.MOV, x86asm.MOVZX, x86asm.MOVSX, x86asm.MOVSXD:
+		case x86asm.MOV, x86asm.MOVNTI, x86asm.MOVZX, x86asm.MOVSX, x86asm.MOVSXD:
+			// Non-temporal stores have ordinary memory semantics in this CPU,
+			// which has no cache or deferred store buffer.
 			sourceWidth := width
-			if inst.Op != x86asm.MOV {
+			if inst.Op != x86asm.MOV && inst.Op != x86asm.MOVNTI {
 				sourceWidth = operandWidth(inst.Args[1], inst)
 			}
 			var value uint64

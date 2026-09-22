@@ -236,7 +236,34 @@ func (m *Machine) load(data []byte, name string) (module, error) {
 	for _, imported := range newImports {
 		m.addImport(imported)
 	}
+	if err := m.relinkImports(); err != nil {
+		return module{}, err
+	}
 	return loaded, nil
+}
+
+// Native imports must point at the exported object, not merely a dispatch
+// thunk: exported data can be dereferenced without executing a call.
+func (m *Machine) relinkImports() error {
+	for _, item := range m.imports {
+		address := m.resolve(item.module, item.name, int(item.ordinal), 0)
+		if _, hooked := m.hooks[item.address]; hooked {
+			address = item.address
+		}
+		if address == 0 {
+			continue
+		}
+		if err := m.writeImportAddress(item.iat, address); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Machine) writeImportAddress(iat, address uint64) error {
+	var data [8]byte
+	binary.LittleEndian.PutUint64(data[:], address)
+	return m.memory.WriteMemory(iat, data[:])
 }
 
 // addImport indexes every IAT slot, including duplicate imports in different
@@ -728,12 +755,18 @@ func (m *Machine) method(thread *starlark.Thread, builtin *starlark.Builtin, arg
 				if export == "" {
 					export = item.name
 				}
+				if err := m.writeImportAddress(item.iat, value); err != nil {
+					return nil, err
+				}
 			}
 			m.setHook(value, hook{canonical(moduleName), export, argc, callback})
 			targets = append(targets, starlark.MakeUint64(value))
 		} else {
 			for target, item := range m.imports {
 				if (moduleName == "" || canonical(moduleName) == item.module) && (export != "" && strings.EqualFold(export, item.name) || ordinal != 0 && uint16(ordinal) == item.ordinal) {
+					if err := m.writeImportAddress(item.iat, target); err != nil {
+						return nil, err
+					}
 					m.setHook(target, hook{item.module, item.name, argc, callback})
 					targets = append(targets, starlark.MakeUint64(target))
 				}
