@@ -71,12 +71,14 @@ def main(args):
         if disk_media == None and images[0].path.lower().endswith((".img", ".ima")):
             floppies = images
             disk_media = floppy_files(floppies)
-        media_source = images[0]
+        # Solid archive random reads otherwise replay decompression for every
+        # filesystem lookup. Keep the selected optical image entirely in memory.
+        media_source = binary.view(images[0].bytes()) if disk_media == None and images[0].size <= 512 << 20 else images[0]
     disc = (filesystem.fat(media_source) if disk_media != None else optical_media(media_source)) if len(args) == 2 else None
     source = disc[args[1]] if disc != None else open(args[0])
     if disc != None and args[1] == "/":
         source = media_source
-    if source == None or type(source) != "file":
+    if source == None or type(source) not in ["file", "byte_view"]:
         fail("installer path not found: %s" % args[-1])
     msi = database.msi(source) if args[-1].lower().endswith(".msi") else None
     acme = windows.acme_table(source) if args[-1].lower().endswith(".stf") else None
