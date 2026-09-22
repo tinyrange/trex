@@ -133,6 +133,10 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
         registry.set_value("SYSTEM", service_key(name), value_name, value_type, value)
 
     def configure(machine, name, wide, service_type, start_type, error_control, binary_path, group, tag, dependencies, account):
+        # These are DWORDs even when supplied in Win64 stack slots.
+        service_type &= 0xffffffff
+        start_type &= 0xffffffff
+        error_control &= 0xffffffff
         if service_type != _NO_CHANGE:
             set_value(name, "Type", "REG_DWORD", service_type)
         if start_type != _NO_CHANGE:

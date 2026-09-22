@@ -31,6 +31,11 @@ func ARM64FixedDescription(dsdt uint64, psci, hvc bool) ([]byte, error) {
 // RootPointer constructs the ACPI 2.0+ RSDP pointing to an XSDT in guest memory.
 // Both the legacy twenty-byte checksum and extended checksum are populated.
 func RootPointer(xsdt uint64, oemID string) ([]byte, error) {
+	return RootPointerTables(0, xsdt, oemID)
+}
+
+// RootPointerTables also supplies the RSDT used by legacy IA-PC loaders.
+func RootPointerTables(rsdt uint32, xsdt uint64, oemID string) ([]byte, error) {
 	if err := acpiFixedName("OEM ID", oemID, 6); err != nil {
 		return nil, err
 	}
@@ -38,6 +43,7 @@ func RootPointer(xsdt uint64, oemID string) ([]byte, error) {
 	copy(data, "RSD PTR ")
 	copy(data[9:15], oemID)
 	data[15] = 2
+	binary.LittleEndian.PutUint32(data[16:], rsdt)
 	binary.LittleEndian.PutUint32(data[20:], 36)
 	binary.LittleEndian.PutUint64(data[24:], xsdt)
 	var sum byte

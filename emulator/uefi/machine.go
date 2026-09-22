@@ -45,7 +45,15 @@ type Event struct {
 	PC               uint64
 	Args             [8]uint64
 }
+
+// MemoryReservation excludes a physical range from firmware allocations.
+// Type is an EFI_MEMORY_TYPE; conventional memory (7) is not a reservation.
+type MemoryReservation struct {
+	Address, Pages uint64
+	Type           uint32
+}
 type Options struct {
+	Reservations []MemoryReservation
 	// TimeUnix is the virtual wall-clock epoch. The ARM generic counter
 	// advances time; the core never reads the host wall clock.
 	TimeUnix   int64
@@ -78,7 +86,12 @@ type Result struct {
 	Trace             []uint64
 }
 type Machine struct {
+	tpl                                                uint64
 	runtimeMemory                                      cpu.Memory
+	firmwareMemory                                     cpu.Memory
+	firmwareGate                                       func(uint64) []byte
+	firmwareClock                                      func() (uint64, uint64)
+	firmwarePC                                         uint64
 	rewrites                                           map[uint64]Rewrite
 	rewriteCode                                        [4096]byte
 	rewriteFilter                                      [4096]bool
@@ -109,6 +122,7 @@ type Machine struct {
 // are guest physical addresses and have no relationship to host addresses.
 func New(image storage.Reader, opts Options) (*Machine, error) {
 	opts.EventKinds = slices.Clone(opts.EventKinds)
+	opts.Reservations = slices.Clone(opts.Reservations)
 	if opts.MemoryBase == 0 {
 		opts.MemoryBase = ramBase
 	}
@@ -145,63 +159,9 @@ func New(image storage.Reader, opts Options) (*Machine, error) {
 	if err := m.memory.Map(m.ramBase, make([]byte, int(opts.Memory)), cpu.Read|cpu.Write|cpu.Execute); err != nil {
 		return nil, err
 	}
-	m.variables = map[variableKey]Variable{}
-	m.protocolOpens = map[protocolOpen]uint32{}
-	m.blockHandles = map[uint64]blockEndpoint{}
-	m.blockInterfaces = map[uint64]blockEndpoint{}
-	m.configuration = map[[16]byte]uint64{}
-	m.allocations = []allocation{{m.ramBase, 16, 6}} // runtime firmware tables and service gates
-	m.systemTable = m.ramBase + 0x100
-	m.bootTable = m.ramBase + 0x200
-	m.imageHandle = m.ramBase + 0x800
-	m.returnAddress = m.ramBase + 0x900
-	m.tables()
-	kind := uint64(0)
-	if opts.ImageBase != 0 {
-		kind = 2
-	}
-	base := m.allocate(kind, 1, uint64(len(pe.Data)+4095)/page, opts.ImageBase)
-	if base == 0 {
-		return nil, fmt.Errorf("uefi: insufficient image memory")
-	}
-	if err := peimage.Relocate(pe.Data, pe.Directories[5], pe.PreferredBase, base, 8); err != nil {
+	base, stack, err := m.loadImage(pe)
+	if err != nil {
 		return nil, err
-	}
-	m.put(base, pe.Data)
-	stack := m.allocate(0, 2, opts.StackSize/page, 0)
-	if stack == 0 {
-		return nil, fmt.Errorf("uefi: insufficient stack memory")
-	}
-	loaded := m.ramBase + 0xa00
-	m.u32(loaded, 0x1000)
-	m.u64(loaded+16, m.systemTable)
-	m.u64(loaded+24, m.ramBase+0xb00)
-	// LoadedImage.FilePath is relative to DeviceHandle's volume path.
-	path := utf16.Encode([]rune(opts.ImagePath))
-	if len(path) > 1024 {
-		return nil, fmt.Errorf("uefi: image path exceeds 1024 UTF-16 units")
-	}
-	filePath := make([]byte, 4+2*(len(path)+1)+4)
-	filePath[0], filePath[1] = 4, 4
-	binary.LittleEndian.PutUint16(filePath[2:], uint16(len(filePath)-4))
-	for j, v := range path {
-		binary.LittleEndian.PutUint16(filePath[4+j*2:], v)
-	}
-	copy(filePath[len(filePath)-4:], []byte{0x7f, 0xff, 4, 0})
-	m.put(m.ramBase+0x2000, filePath)
-	m.u64(loaded+32, m.ramBase+0x2000)
-	m.u64(loaded+64, base)
-	m.u64(loaded+72, uint64(len(pe.Data)))
-	m.u32(loaded+80, 1)
-	m.u32(loaded+84, 2)
-	m.protocols[m.imageHandle] = map[string]uint64{loadedImageGUID: loaded}
-	if len(opts.DevicePath) != 0 {
-		p := m.allocate(0, 4, (uint64(len(opts.DevicePath))+4095)/page, 0)
-		if p == 0 {
-			return nil, fmt.Errorf("uefi: insufficient device path memory")
-		}
-		m.put(p, opts.DevicePath)
-		m.protocols[m.ramBase+0xb00] = map[string]uint64{devicePathGUID: p}
 	}
 	m.processor.SetPC(base + uint64(pe.EntryRVA))
 	m.processor.SetRegister("current_el", 4)
@@ -242,9 +202,99 @@ func New(image storage.Reader, opts Options) (*Machine, error) {
 	return m, nil
 }
 
+// loadImage initializes the shared 64-bit firmware layout and original PE.
+func (m *Machine) loadImage(pe *peimage.Image) (uint64, uint64, error) {
+	m.tpl = 4
+	m.variables = map[variableKey]Variable{}
+	m.protocolOpens = map[protocolOpen]uint32{}
+	m.blockHandles = map[uint64]blockEndpoint{}
+	m.blockInterfaces = map[uint64]blockEndpoint{}
+	m.configuration = map[[16]byte]uint64{}
+	// Runtime entrypoints occupy their own executable descriptor, distinct
+	// from firmware tables and other runtime data.
+	m.allocations = []allocation{{m.ramBase, 1, 6}, {m.ramBase + page, 1, 5}, {m.ramBase + 2*page, 14, 6}}
+	for _, r := range m.opts.Reservations {
+		if r.Pages == 0 || r.Pages > m.opts.Memory/page || r.Address%page != 0 || r.Address < m.ramBase+16*page || r.Address > m.ramBase+m.opts.Memory-r.Pages*page || r.Type > 14 || r.Type == 7 {
+			return 0, 0, fmt.Errorf("uefi: invalid memory reservation")
+		}
+		for _, a := range m.allocations {
+			if r.Address < a.Base+a.Pages*page && a.Base < r.Address+r.Pages*page {
+				return 0, 0, fmt.Errorf("uefi: overlapping memory reservation")
+			}
+		}
+		m.allocations = append(m.allocations, allocation{r.Address, r.Pages, r.Type})
+	}
+	m.systemTable = m.ramBase + 0x100
+	m.bootTable = m.ramBase + 0x200
+	m.imageHandle = m.ramBase + 0x800
+	m.returnAddress = m.ramBase + 0x900
+	m.tables()
+	kind := uint64(0)
+	if m.opts.ImageBase != 0 {
+		kind = 2
+	}
+	base := m.allocate(kind, 1, uint64(len(pe.Data)+4095)/page, m.opts.ImageBase)
+	if base == 0 {
+		return 0, 0, fmt.Errorf("uefi: insufficient image memory")
+	}
+	if err := peimage.Relocate(pe.Data, pe.Directories[5], pe.PreferredBase, base, 8); err != nil {
+		return 0, 0, err
+	}
+	m.put(base, pe.Data)
+	stack := m.allocate(0, 2, m.opts.StackSize/page, 0)
+	if stack == 0 {
+		return 0, 0, fmt.Errorf("uefi: insufficient stack memory")
+	}
+	loaded := m.ramBase + 0xa00
+	m.u32(loaded, 0x1000)
+	m.u64(loaded+16, m.systemTable)
+	m.u64(loaded+24, m.ramBase+0xb00)
+	// LoadedImage.FilePath is relative to DeviceHandle's volume path.
+	path := utf16.Encode([]rune(m.opts.ImagePath))
+	if len(path) > 1024 {
+		return 0, 0, fmt.Errorf("uefi: image path exceeds 1024 UTF-16 units")
+	}
+	filePath := make([]byte, 4+2*(len(path)+1)+4)
+	filePath[0], filePath[1] = 4, 4
+	binary.LittleEndian.PutUint16(filePath[2:], uint16(len(filePath)-4))
+	for j, v := range path {
+		binary.LittleEndian.PutUint16(filePath[4+j*2:], v)
+	}
+	copy(filePath[len(filePath)-4:], []byte{0x7f, 0xff, 4, 0})
+	m.put(m.ramBase+0x2000, filePath)
+	m.u64(loaded+32, m.ramBase+0x2000)
+	m.u64(loaded+64, base)
+	m.u64(loaded+72, uint64(len(pe.Data)))
+	m.u32(loaded+80, 1)
+	m.u32(loaded+84, 2)
+	m.protocols[m.imageHandle] = map[string]uint64{loadedImageGUID: loaded}
+	if len(m.opts.DevicePath) != 0 {
+		p := m.allocate(0, 4, (uint64(len(m.opts.DevicePath))+4095)/page, 0)
+		if p == 0 {
+			return 0, 0, fmt.Errorf("uefi: insufficient device path memory")
+		}
+		m.put(p, m.opts.DevicePath)
+		m.protocols[m.ramBase+0xb00] = map[string]uint64{devicePathGUID: p}
+	}
+	return base, stack, m.err
+}
+
+func (m *Machine) serviceMemory() cpu.Memory {
+	if m.firmwareMemory != nil {
+		return m.firmwareMemory
+	}
+	return m.processor.VirtualMemory(m.executionMemory())
+}
+func (m *Machine) servicePC() uint64 {
+	if m.firmwareMemory != nil {
+		return m.firmwarePC
+	}
+	return m.processor.PC()
+}
+
 func (m *Machine) put(p uint64, b []byte) {
 	if m.err == nil {
-		m.err = m.processor.VirtualMemory(m.executionMemory()).WriteMemory(p, b)
+		m.err = m.serviceMemory().WriteMemory(p, b)
 	}
 }
 func (m *Machine) get(p, n uint64) []byte {
@@ -254,7 +304,7 @@ func (m *Machine) get(p, n uint64) []byte {
 	}
 	b := make([]byte, int(n))
 	if m.err == nil {
-		m.err = m.processor.VirtualMemory(m.executionMemory()).ReadMemory(p, b, cpu.Read)
+		m.err = m.serviceMemory().ReadMemory(p, b, cpu.Read)
 	}
 	return b
 }
@@ -298,6 +348,9 @@ func (m *Machine) gate(name string) uint64 {
 	}
 	m.nextService += 4
 	m.services[v] = name
+	if m.firmwareGate != nil {
+		m.put(v, m.firmwareGate(v))
+	}
 	return v
 }
 func (m *Machine) table(p, signature uint64, size uint32) {
@@ -399,6 +452,11 @@ func (m *Machine) free(p, pages uint64) bool {
 		return false
 	}
 	end := p + pages*page
+	for _, r := range m.opts.Reservations {
+		if p < r.Address+r.Pages*page && r.Address < end {
+			return false
+		}
+	}
 	allocs := slices.Clone(m.allocations)
 	sort.Slice(allocs, func(i, j int) bool { return allocs[i].Base < allocs[j].Base })
 	cursor := p
@@ -621,6 +679,19 @@ func (m *Machine) RunWithOptions(ctx context.Context, opts RunOptions) Result {
 
 func (m *Machine) dispatch(name string, a [8]uint64) (uint64, bool) {
 	switch name {
+	case "RaiseTPL":
+		if a[0] < m.tpl || a[0] > 31 {
+			return invalidParameter, true
+		}
+		old := m.tpl
+		m.tpl = a[0]
+		return old, true
+	case "RestoreTPL":
+		if a[0] < 4 || a[0] > m.tpl {
+			return invalidParameter, true
+		}
+		m.tpl = a[0]
+		return 0, true
 	case "Block.Reset", "Block.Read", "Block.Write", "Block.Flush", "Disk.Read", "Disk.Write":
 		return m.blockCall(name, a), true
 	case "LocateHandle":
@@ -631,8 +702,16 @@ func (m *Machine) dispatch(name string, a [8]uint64) (uint64, bool) {
 		if a[0] == 0 {
 			return invalidParameter, true
 		}
-		ticks, _ := m.processor.Register("cntpct_el0")
-		frequency, _ := m.processor.Register("cntfrq_el0")
+		var ticks, frequency uint64
+		if m.firmwareClock != nil {
+			ticks, frequency = m.firmwareClock()
+		} else {
+			ticks, _ = m.processor.Register("cntpct_el0")
+			frequency, _ = m.processor.Register("cntfrq_el0")
+		}
+		if frequency == 0 {
+			return invalidParameter, true
+		}
 		now := time.Unix(m.opts.TimeUnix+int64(ticks/frequency), int64(ticks%frequency)*1000000000/int64(frequency)).UTC()
 		if now.Year() < 1900 || now.Year() > 9999 {
 			return invalidParameter, true
@@ -756,10 +835,7 @@ func (m *Machine) dispatch(name string, a [8]uint64) (uint64, bool) {
 	case "SetVariable":
 		return m.setVariable(a), true
 	case "GetNextVariableName":
-		if len(m.variables) != 0 {
-			return 0, false
-		}
-		return notFound, true
+		return m.getNextVariableName(a), true
 	case "Input.ReadKeyStroke":
 		if a[0] != m.ramBase+0xe00 || a[1] == 0 {
 			return invalidParameter, true

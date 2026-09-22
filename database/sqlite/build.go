@@ -207,24 +207,39 @@ func (b *sqliteBuilder) writeTableInterior(number uint32, headerOffset int, chil
 }
 
 func (b *sqliteBuilder) buildIndex(root uint32, rows []Row) error {
+	maximumCell := 0
 	for index, row := range rows {
 		if row.RowID != nil {
 			return fmt.Errorf("index row %d unexpectedly has a rowid", index)
 		}
-	}
-	return b.buildIndexNode(root, rows)
-}
-
-func (b *sqliteBuilder) buildIndexNode(number uint32, rows []Row) error {
-	leafBytes := 0
-	for _, row := range rows {
 		size, err := b.indexCellSize(row)
 		if err != nil {
 			return err
 		}
-		leafBytes += size
+		maximumCell = max(maximumCell, size)
 	}
-	if 8+len(rows)*2+leafBytes <= b.options.PageSize {
+	// Use one capacity and height throughout the tree. Splitting each subtree
+	// only when its bytes exceed a page can leave siblings at different depths.
+	// SQLite can read those trees but rejects them when balancing an insertion.
+	// Include the interior child pointer and cell-pointer slot in the bound.
+	capacity := (b.options.PageSize - 12) / (maximumCell + 6)
+	if capacity < 2 {
+		return fmt.Errorf("two index records cannot fit one interior page")
+	}
+	height, available := 0, capacity
+	for available < len(rows) {
+		height++
+		if available > (math.MaxInt-capacity)/(capacity+1) {
+			available = math.MaxInt
+		} else {
+			available = (available+1)*(capacity+1) - 1
+		}
+	}
+	return b.buildIndexNode(root, rows, height, capacity, true)
+}
+
+func (b *sqliteBuilder) buildIndexNode(number uint32, rows []Row, height, capacity int, root bool) error {
+	if height == 0 {
 		cells := make([][]byte, 0, len(rows))
 		for _, row := range rows {
 			cell, err := b.indexCell(row)
@@ -235,38 +250,38 @@ func (b *sqliteBuilder) buildIndexNode(number uint32, rows []Row) error {
 		}
 		return b.writeBtreePage(number, 0, 0x0a, 0, cells)
 	}
-	if len(rows) < 5 {
-		return fmt.Errorf("four index records cannot fit one page")
+	maximumChild := capacity
+	for level := 1; level < height; level++ {
+		maximumChild = (maximumChild+1)*(capacity+1) - 1
 	}
-	// Non-root SQLite index interior pages require at least two keys. Split
-	// into three non-empty children and promote two records instead of
-	// recursively creating one-key interior pages.
-	first, second := len(rows)/3, 2*len(rows)/3
-	left, middle, right := b.allocate(), b.allocate(), b.allocate()
-	if err := b.buildIndexNode(left, rows[:first]); err != nil {
-		return err
+	children := max(2, (len(rows)+1+maximumChild)/(maximumChild+1))
+	if !root {
+		children = max(3, children)
 	}
-	if err := b.buildIndexNode(middle, rows[first+1:second]); err != nil {
-		return err
+	remaining := len(rows) - children + 1
+	cells := make([][]byte, 0, children-1)
+	position := 0
+	var child uint32
+	for index := 0; index < children; index++ {
+		count := remaining / (children - index)
+		child = b.allocate()
+		if err := b.buildIndexNode(child, rows[position:position+count], height-1, capacity, false); err != nil {
+			return err
+		}
+		position += count
+		remaining -= count
+		if index != children-1 {
+			payload, err := b.indexCell(rows[position])
+			if err != nil {
+				return err
+			}
+			cell := make([]byte, 4)
+			binary.BigEndian.PutUint32(cell, child)
+			cells = append(cells, append(cell, payload...))
+			position++
+		}
 	}
-	if err := b.buildIndexNode(right, rows[second+1:]); err != nil {
-		return err
-	}
-	firstCell, err := b.indexCell(rows[first])
-	if err != nil {
-		return err
-	}
-	secondCell, err := b.indexCell(rows[second])
-	if err != nil {
-		return err
-	}
-	leftInterior := make([]byte, 4)
-	binary.BigEndian.PutUint32(leftInterior, left)
-	leftInterior = append(leftInterior, firstCell...)
-	middleInterior := make([]byte, 4)
-	binary.BigEndian.PutUint32(middleInterior, middle)
-	middleInterior = append(middleInterior, secondCell...)
-	return b.writeBtreePage(number, 0, 0x02, right, [][]byte{leftInterior, middleInterior})
+	return b.writeBtreePage(number, 0, 0x02, child, cells)
 }
 
 func (b *sqliteBuilder) indexCellSize(row Row) (int, error) {

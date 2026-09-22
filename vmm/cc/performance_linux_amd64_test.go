@@ -17,6 +17,12 @@ import (
 // Measure the production PC execution path with repeated planar VGA writes.
 // There is no browser, framebuffer capture, disk activity or guest scheduler.
 func BenchmarkVGAExit(b *testing.B) {
+	for _, batch := range []bool{false, true} {
+		b.Run(map[bool]string{false: "single", true: "batched"}[batch], func(b *testing.B) { benchmarkVGAExit(b, batch) })
+	}
+}
+
+func benchmarkVGAExit(b *testing.B, batch bool) {
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		b.Skip("KVM unavailable")
 	}
@@ -46,7 +52,22 @@ func BenchmarkVGAExit(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		ex, err := p.run(ctx)
+		var ex hypervisor.X86Exit
+		var err error
+		if batch {
+			ex, err = p.runWithHandler(ctx, func(exit hypervisor.X86Exit) (bool, error) {
+				if exit.Reason != hypervisor.X86ExitMMIO {
+					return false, nil
+				}
+				if err := p.vga.mmio(exit, cpu); err != nil {
+					return false, err
+				}
+				i++
+				return i < b.N, nil
+			})
+		} else {
+			ex, err = p.run(ctx)
+		}
 		cancel()
 		if errors.Is(err, context.DeadlineExceeded) {
 			continue
@@ -59,6 +80,9 @@ func BenchmarkVGAExit(b *testing.B) {
 		}
 		if ex.Reason != hypervisor.X86ExitMMIO {
 			b.Fatalf("unexpected exit: %+v", ex)
+		}
+		if batch {
+			continue
 		}
 		if err := p.vga.mmio(ex, cpu); err != nil {
 			b.Fatal(err)

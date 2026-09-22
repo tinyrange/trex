@@ -12,6 +12,9 @@ type protocolOpen struct {
 }
 
 func (m *Machine) openProtocol(a [8]uint64) uint64 {
+	// Attributes is UINT32. On the x64 ABI its stack slot may have arbitrary
+	// upper bytes; these are not part of the argument.
+	a[5] = uint64(uint32(a[5]))
 	if m.protocols[a[0]] == nil {
 		return invalidParameter
 	}

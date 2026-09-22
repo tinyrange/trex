@@ -12,6 +12,12 @@ import (
 
 // ide is a primary ATA task file with one PIO disk. All transfers go directly
 // through the block abstraction, including a caller-selected memory overlay.
+type ideFailure struct {
+	command, feature, code byte
+	task                   [8]byte
+	reason                 string
+}
+
 type ide struct {
 	disk                     vmm.Disk
 	geometry                 vmm.CHSGeometry
@@ -23,6 +29,11 @@ type ide struct {
 	lba                      int64
 	write, identify, pending bool
 	commands                 uint64
+	dmaEnabled, dmaPending   bool
+	dmaMode                  byte
+	lastCommand, lastFeature byte
+	failures                 []ideFailure
+	dmaError                 string
 }
 
 func newIDE(disk vmm.Disk, g vmm.CHSGeometry, irq func(uint32, bool) error) *ide {
@@ -36,12 +47,19 @@ func (d *ide) reset() {
 	d.remaining = 0
 	d.write = false
 	d.identify = false
+	d.dmaPending = false
+	d.dmaMode = 0xff
 }
 func (d *ide) signal(level bool) error {
 	d.pending = level
 	return d.irq(14, level && d.control&2 == 0)
 }
 func (d *ide) fail(code byte) error {
+	if len(d.failures) == 8 {
+		copy(d.failures, d.failures[1:])
+		d.failures = d.failures[:7]
+	}
+	d.failures = append(d.failures, ideFailure{d.lastCommand, d.lastFeature, code, d.task, d.dmaError})
 	d.task[1] = code
 	d.task[7] = 0x51
 	d.remaining = 0
@@ -77,6 +95,7 @@ func (d *ide) advance() {
 }
 func (d *ide) readSector() error {
 	if _, err := d.disk.Device.ReadAt(d.buffer[:], d.lba*512); err != nil {
+		d.dmaError = fmt.Sprintf("PIO read at %#x: %v", d.lba*512, err)
 		return d.fail(0x40)
 	}
 	d.position = 0
@@ -86,6 +105,8 @@ func (d *ide) readSector() error {
 func (d *ide) command(command byte) error {
 	d.commands++
 	feature := d.task[1]
+	d.lastCommand, d.lastFeature = command, feature
+	d.dmaError = ""
 	if err := d.signal(false); err != nil {
 		return err
 	}
@@ -93,6 +114,7 @@ func (d *ide) command(command byte) error {
 	d.position = 0
 	d.identify = false
 	d.write = false
+	d.dmaPending = false
 	if d.task[6]&0x10 != 0 {
 		d.task[7] = 0
 		return nil
@@ -107,6 +129,14 @@ func (d *ide) command(command byte) error {
 		word(6, uint16(d.geometry.Sectors))
 		word(47, 0x8001)
 		word(49, 0x200)
+		if d.dmaEnabled {
+			word(49, 0x300)
+			modes := uint16(7)
+			if d.dmaMode < 3 {
+				modes |= 1 << (8 + d.dmaMode)
+			}
+			word(63, modes)
+		}
 		word(53, 1)
 		word(54, uint16(d.geometry.Cylinders))
 		word(55, uint16(d.geometry.Heads))
@@ -127,7 +157,10 @@ func (d *ide) command(command byte) error {
 		d.remaining = 1
 		d.task[7] = 0x58
 		return d.signal(true)
-	case command == 0x20 || command == 0x21 || command == 0x30 || command == 0x31 || command == 0x40 || command == 0x41:
+	case command == 0x20 || command == 0x21 || command == 0x30 || command == 0x31 || command == 0x40 || command == 0x41 || command >= 0xc8 && command <= 0xcb:
+		if command >= 0xc8 && !d.dmaEnabled {
+			return d.fail(4)
+		}
 		lba, ok := d.address()
 		if !ok {
 			return d.fail(0x10)
@@ -145,7 +178,7 @@ func (d *ide) command(command byte) error {
 			d.task[7] = 0x50
 			return d.signal(true)
 		}
-		d.write = command == 0x30 || command == 0x31
+		d.write = command == 0x30 || command == 0x31 || command == 0xca || command == 0xcb
 		if d.write {
 			if d.disk.ReadOnly {
 				return d.fail(4)
@@ -153,6 +186,13 @@ func (d *ide) command(command byte) error {
 			if _, ok := d.disk.Device.(io.WriterAt); !ok {
 				return d.fail(4)
 			}
+		}
+		if command >= 0xc8 {
+			d.dmaPending = true
+			d.task[7] = 0x58
+			return nil
+		}
+		if d.write {
 			d.task[7] = 0x58
 			return nil
 		}
@@ -168,7 +208,16 @@ func (d *ide) command(command byte) error {
 		d.task[1] = 1
 	case command >= 0x10 && command <= 0x1f, command >= 0x70 && command <= 0x7f:
 	case command == 0xef:
-		if feature != 2 && feature != 0x82 {
+		if feature == 3 && d.dmaEnabled {
+			mode := d.task[2]
+			if mode >= 0x20 && mode <= 0x22 {
+				d.dmaMode = mode - 0x20
+			} else if mode != 0 && (mode < 8 || mode > 12) {
+				return d.fail(4)
+			} else {
+				d.dmaMode = 0xff
+			}
+		} else if feature != 2 && feature != 0x82 {
 			return d.fail(4)
 		}
 	case command == 0xe7:
@@ -253,6 +302,7 @@ func (d *ide) io(ex hypervisor.X86Exit) error {
 			}
 			if d.write {
 				if _, err := d.disk.Device.(io.WriterAt).WriteAt(d.buffer[:], d.lba*512); err != nil {
+					d.dmaError = fmt.Sprintf("PIO write at %#x: %v", d.lba*512, err)
 					return d.fail(0x40)
 				}
 			}
