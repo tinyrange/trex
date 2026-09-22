@@ -81,6 +81,7 @@ func standardLibraryDocumentation() ([]byte, error) {
 }
 
 var nativeStarlarkTypes = map[string][]string{
+	"database.ese":             {"info", "tables", "rows(table, maximum=100000)", "index_entries(table, index, maximum=100000)", "verify()"},
 	"auto":                     {"name", "metadata", "file", "files", "find(path)", "page(offset=0, limit=100)", "plans", "bytes(offset=0, size=remaining)", "slice(offset=0, size=remaining)"},
 	"windows.signing_identity": {"certificate (DER bytes; private key is not exposed)"},
 	"crypto.hasher":            {"reset()", "sum()", "update(value)"},
@@ -209,7 +210,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"binary.hex":                        "binary.hex(value, maximum=512MiB)",
 	"binary.xml":                        "binary.xml(value, maximum=16MiB, max_depth=256, max_nodes=1M)",
 	"database.ese":                      "database.ese(file) -> ESE database",
-	"database.ese_build":                "database.ese_build(tables, database_pages=0, sort_data=None) -> file",
+	"database.ese_build":                "database.ese_build(tables, database_pages=0, sort_data=None, page_size=32768, revision=0) -> file",
 	"debug.disassemble":                 "debug.disassemble(data, address=0, architecture='i386', maximum=64MiB, count=-1); architectures: i8086/x86-16, i386/x86, amd64/x86_64",
 	"debug.gdb":                         "debug.gdb(channel, memory_limit=64MiB, stop_queue=256, timeout=15)",
 	"debug.select":                      "debug.select(values, timeout=-1)",
@@ -267,6 +268,16 @@ var nativeStarlarkSignatures = map[string]string{
 	"windows.catalog_members":           "windows.catalog_members(value)",
 	"windows.pdb":                       "windows.pdb(file, stream_limit=256MiB)",
 	"windows.symbol_server":             "windows.symbol_server(base_url, name, key, guid=None, age=None, maximum=256MiB, timeout=45)",
+	"windows.ad_legacy_pek_list":        "windows.ad_legacy_pek_list(boot_key, key, salt, generated) -> bytes",
+	"windows.ad_legacy_secret":          "windows.ad_legacy_secret(secret, key, salt) -> bytes",
+	"windows.ad_replication_metadata":   "windows.ad_replication_metadata(attributes, invocation_id, changed, usn) -> bytes",
+	"windows.ad_stored_sid":             "windows.ad_stored_sid(sid) -> bytes",
+	"windows.ad_ancestors":              "windows.ad_ancestors(tags) -> bytes",
+	"windows.ad_legacy_dn_binary":       "windows.ad_legacy_dn_binary(tag, value) -> bytes",
+	"windows.winsock_catalog_item":      "windows.winsock_catalog_item(library, protocol, provider, catalog_id) -> bytes",
+	"windows.guid_bytes":                "windows.guid_bytes(value) -> bytes",
+	"windows.ad_replication_schedule":   "windows.ad_replication_schedule(hours) -> bytes",
+	"windows.object_ace":                "windows.object_ace(type, flags, mask, sid, object_type='', inherited_type='') -> bytes",
 	"windows.wmi_repository":            "windows.wmi_repository(files=None, documents=None, default_namespace='root\\cimv2', server_name='')",
 }
 

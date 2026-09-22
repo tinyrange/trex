@@ -38,22 +38,27 @@ func Serve(ctx context.Context, ch channel.ByteChannel, display vmm.DisplaySourc
 		for key := range s.keys {
 			_ = display.Input(cleanup, vmm.Input{Kind: "key", Key: key})
 		}
-		_ = display.Input(cleanup, vmm.Input{Kind: "pointer"})
+		input := vmm.Input{Kind: "pointer", Absolute: s.absolute}
+		if s.absolute {
+			input.X, input.Y = s.absoluteCoordinates(s.px, s.py)
+		}
+		_ = display.Input(cleanup, input)
 	}()
 	return s.run()
 }
 
 type session struct {
-	ctx           context.Context
-	ch            channel.ByteChannel
-	display       vmm.DisplaySource
-	keys          map[string]bool
-	format        []byte
-	width, height int
-	resize        bool
-	previous      *image.RGBA
-	px, py        int
-	pointer       bool
+	ctx                                     context.Context
+	ch                                      channel.ByteChannel
+	display                                 vmm.DisplaySource
+	keys                                    map[string]bool
+	format                                  []byte
+	width, height                           int
+	resize                                  bool
+	previous                                *image.RGBA
+	px, py                                  int
+	pointer                                 bool
+	pointerTypes, pointerTypeSent, absolute bool
 }
 
 func (s *session) read(n int) ([]byte, error) {
@@ -172,9 +177,13 @@ func (s *session) setEncodings() error {
 		return err
 	}
 	s.resize = false
+	s.pointerTypes = false
 	for i := 0; i < n; i++ {
 		if int32(be.Uint32(b[i*4:])) == -223 {
 			s.resize = true
+		}
+		if int32(be.Uint32(b[i*4:])) == -257 {
+			s.pointerTypes = true
 		}
 	}
 	return nil
@@ -218,7 +227,9 @@ func (s *session) pointerEvent() error {
 	}
 	x, y := int(be.Uint16(b[1:])), int(be.Uint16(b[3:]))
 	dx, dy := 0, 0
-	if s.pointer {
+	if s.pointerTypeSent && !s.absolute {
+		dx, dy = x-0x7fff, y-0x7fff
+	} else if s.pointer {
 		dx = int(int16(uint16(x - s.px)))
 		dy = int(int16(uint16(y - s.py)))
 	}
@@ -231,10 +242,24 @@ func (s *session) pointerEvent() error {
 			buttons = append(buttons, name)
 		}
 	}
-	if err = s.display.Input(s.ctx, vmm.Input{Kind: "pointer", X: float64(dx), Y: float64(dy), Buttons: buttons}); err != nil {
+	input := vmm.Input{Kind: "pointer", X: float64(dx), Y: float64(dy), Buttons: buttons, Absolute: s.absolute}
+	if s.absolute {
+		input.X, input.Y = s.absoluteCoordinates(x, y)
+	}
+	if b[0]&8 != 0 {
+		input.Wheel++
+	}
+	if b[0]&16 != 0 {
+		input.Wheel--
+	}
+	if err = s.display.Input(s.ctx, input); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (s *session) absoluteCoordinates(x, y int) (float64, float64) {
+	return float64(min(max(x, 0), s.width-1)) * 32767 / float64(max(s.width-1, 1)), float64(min(max(y, 0), s.height-1)) * 32767 / float64(max(s.height-1, 1))
 }
 
 func (s *session) discardClipboard() error {
@@ -282,6 +307,27 @@ func (s *session) update(req []byte) error {
 	}
 	if err = validFrame(f); err != nil {
 		return err
+	}
+	if s.pointerTypes {
+		absolute := false
+		if source, ok := s.display.(vmm.AbsolutePointerSource); ok {
+			absolute, err = source.AbsolutePointer(s.ctx)
+			if err != nil {
+				return err
+			}
+		}
+		if !s.pointerTypeSent || absolute != s.absolute {
+			s.absolute, s.pointerTypeSent, s.pointer = absolute, true, false
+			b := make([]byte, 16)
+			b[3] = 1
+			if absolute {
+				b[5] = 1
+			}
+			be.PutUint16(b[8:], uint16(s.width))
+			be.PutUint16(b[10:], uint16(s.height))
+			be.PutUint32(b[12:], 0xfffffeff)
+			return s.write(b)
+		}
 	}
 	if f.Rect.Dx() != s.width || f.Rect.Dy() != s.height {
 		if !s.resize {

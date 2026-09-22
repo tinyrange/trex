@@ -136,8 +136,9 @@ func (p *pc) inspectState() (starlark.Value, error) {
 		network = map[string]any{"tx": int64(n.tx), "rx": int64(n.rx), "command": int(n.command), "isr": int(n.isr), "imr": int(n.imr), "start": int(n.start), "stop": int(n.stop), "current": int(n.current), "boundary": int(n.boundary), "mac": fmt.Sprintf("%x", n.physical)}
 	}
 	return starvalue.Starlark(map[string]any{
-		"network": network,
-		"pc":      int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
+		"virtio_input": map[string]any{"status": int(p.input.status), "reports": int64(p.input.reports), "queue_ready": p.input.queues[0].ready, "used": int(p.input.queues[0].written), "descriptor": int64(p.input.queues[0].desc), "available": int64(p.input.queues[0].avail), "pending": len(p.input.pending)},
+		"network":      network,
+		"pc":           int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
 		"cr2": int64(s.Cr2), "cr4": int64(s.Cr4),
 		"registers": registers, "idt_base": int64(s.Idt.Base),
 		"last_bios": p.lastService, "ata_commands": int64(p.ide.commands),

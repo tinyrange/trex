@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 
 test('tabs release input, ignore stale sockets, and select successfully created VMs', async () => {
   const nodes = new Map();
-  const element = () => ({disabled:false, textContent:'', children:[], attributes:{},
+  const element = () => ({disabled:false, textContent:'', children:[], attributes:{}, style:{},
+    addEventListener(){}, getBoundingClientRect(){return {left:10,top:20,width:100,height:100};},
     setAttribute(k,v){this.attributes[k]=v;}, replaceChildren(...children){this.children=children;},
     getContext(){return {clearRect(){},putImageData(){}};}, focus(){}, requestPointerLock(){}});
   for (const id of ['screen','status','connect','cad','tabs','create','vm-name']) nodes.set(`#${id}`,element());
@@ -46,6 +47,9 @@ test('tabs release input, ignore stale sockets, and select successfully created 
     assert(first.sent.some(p=>JSON.stringify(p)==='[4,0,0,0,0,0,0,97]'),'held key released on old VM');
     assert.equal(first.readyState,3);
     const second=sockets[1];second.ready();
+    second.feed([0,0,0,1,0,1,0,0,0,2,0,2,255,255,254,255]);
+    nodes.get('#screen').onmousedown({clientX:109,clientY:119,button:0,preventDefault(){}});
+    assert.deepEqual(second.sent.at(-1),[5,1,0,1,0,1],'absolute click maps CSS coordinates to framebuffer pixels');
     first.onclose();
     assert.equal(nodes.get('#cad').disabled,false,'old socket must not disable new VM');
     assert.equal(nodes.get('#vm-name').textContent,'CLIENT31');

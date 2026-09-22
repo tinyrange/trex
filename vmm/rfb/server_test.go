@@ -89,6 +89,56 @@ type bufferChannel struct{ bytes.Buffer }
 
 func (*bufferChannel) Close() error { return nil }
 
+type modeDisplay struct {
+	*testDisplay
+	absolute bool
+}
+
+func (d *modeDisplay) AbsolutePointer(context.Context) (bool, error) { return d.absolute, nil }
+
+func TestPointerModeChangesAndCoordinates(t *testing.T) {
+	d := &modeDisplay{&testDisplay{image.NewRGBA(image.Rect(0, 0, 1280, 720)), make(chan vmm.Input, 8)}, true}
+	ch := &bufferChannel{}
+	s := session{ctx: context.Background(), ch: ch, display: d, width: 1280, height: 720, pointerTypes: true}
+	req := []byte{1, 0, 0, 0, 0, 5, 0, 2, 208}
+	if err := s.update(req); err != nil {
+		t.Fatal(err)
+	}
+	if b := ch.Bytes(); len(b) != 16 || be.Uint16(b[4:]) != 1 || int32(be.Uint32(b[12:])) != -257 {
+		t.Fatalf("mode: %v", b)
+	}
+	ch.Reset()
+	ch.Write([]byte{1 | 8, 4, 255, 2, 207})
+	if err := s.pointerEvent(); err != nil {
+		t.Fatal(err)
+	}
+	if i := <-d.inputs; !i.Absolute || i.X != 32767 || i.Y != 32767 || i.Wheel != 1 || len(i.Buttons) != 1 {
+		t.Fatal(i)
+	}
+	ch.Write([]byte{0, 255, 255, 255, 255})
+	if err := s.pointerEvent(); err != nil {
+		t.Fatal(err)
+	}
+	if i := <-d.inputs; i.X != 32767 || i.Y != 32767 {
+		t.Fatal("out-of-bounds pointer was not clamped", i)
+	}
+	d.absolute = false
+	if err := s.update(req); err != nil {
+		t.Fatal(err)
+	}
+	if b := ch.Bytes(); len(b) != 16 || be.Uint16(b[4:]) != 0 {
+		t.Fatalf("relative mode: %v", b)
+	}
+	ch.Reset()
+	ch.Write([]byte{0, 128, 4, 127, 252})
+	if err := s.pointerEvent(); err != nil {
+		t.Fatal(err)
+	}
+	if i := <-d.inputs; i.Absolute || i.X != 5 || i.Y != -3 {
+		t.Fatal("incorrect relative delta", i)
+	}
+}
+
 func TestDirtyRectangleAndDesktopResize(t *testing.T) {
 	f := image.NewRGBA(image.Rect(0, 0, 4, 3))
 	old := image.NewRGBA(f.Rect)

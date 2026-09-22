@@ -56,6 +56,7 @@ type Table struct {
 	Indexes              []string
 
 	longValuePage uint32
+	indexRoots    map[string]uint32
 }
 
 // Field preserves the catalog order of one record value.
@@ -208,6 +209,7 @@ func (d *Database) Rows(name string, maximum int) ([]Record, error) {
 	}
 	limitReached := fmt.Errorf("ese: record limit reached")
 	table := &d.tables[index]
+	longValues := make(map[uint32][]byte)
 	err := d.walkTree(table.FatherDataPageNumber, func(value pageValue) error {
 		if len(rows) >= maximum {
 			return limitReached
@@ -216,7 +218,7 @@ func (d *Database) Rows(name string, maximum int) ([]Record, error) {
 		if err != nil {
 			return err
 		}
-		record, err := d.decodeRecord(table, data)
+		record, err := d.decodeRecordValues(table, data, longValues)
 		if err != nil {
 			return err
 		}
@@ -245,6 +247,7 @@ func (d *Database) readCatalog() error {
 			d.tables = append(d.tables, Table{
 				FatherDataPageNumber: record.definition,
 				Name:                 record.name,
+				indexRoots:           make(map[string]uint32),
 			})
 			current = len(d.tables) - 1
 			d.byName[strings.ToLower(record.name)] = current
@@ -262,6 +265,7 @@ func (d *Database) readCatalog() error {
 				return fmt.Errorf("index %q precedes its table", record.name)
 			}
 			d.tables[current].Indexes = append(d.tables[current].Indexes, record.name)
+			d.tables[current].indexRoots[strings.ToLower(record.name)] = record.definition
 		case 4: // long-value tree
 			if current < 0 {
 				return fmt.Errorf("long-value tree precedes its table")
@@ -285,6 +289,15 @@ func (d *Database) readCatalog() error {
 }
 
 func (d *Database) walkTree(root uint32, visit func(pageValue) error) error {
+	return d.walkNodes(root, func(page page, value pageValue) error {
+		if page.flags&(pageFlagSpaceTree|pageFlagIndex|pageFlagLongValue) != 0 {
+			return nil
+		}
+		return visit(value)
+	})
+}
+
+func (d *Database) walkNodes(root uint32, visit func(page, pageValue) error) error {
 	maximumPages := uint32(d.source.Size()/d.info.PageSize - 2)
 	visited := make(map[uint32]bool)
 	var walk func(uint32) error
@@ -309,10 +322,7 @@ func (d *Database) walkTree(root uint32, visit func(pageValue) error) error {
 				if len(value.data) == 0 || value.flags&tagFlagDefunct != 0 {
 					continue
 				}
-				if page.flags&(pageFlagSpaceTree|pageFlagIndex|pageFlagLongValue) != 0 {
-					continue
-				}
-				if err := visit(value); err != nil {
+				if err := visit(page, value); err != nil {
 					return err
 				}
 			}
@@ -462,6 +472,10 @@ func decodeCatalogRecord(data []byte) (catalogRecord, error) {
 }
 
 func (d *Database) decodeRecord(table *Table, data []byte) (Record, error) {
+	return d.decodeRecordValues(table, data, nil)
+}
+
+func (d *Database) decodeRecordValues(table *Table, data []byte, longValues map[uint32][]byte) (Record, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("short data-definition header")
 	}
@@ -534,7 +548,29 @@ func (d *Database) decodeRecord(table *Table, data []byte) (Record, error) {
 		case column.Identifier >= 256:
 			value, ok := tagged[column.Identifier]
 			if ok {
+				legacy := d.info.Version == 0x620 && d.info.Revision <= 2
+				if len(value.repeated) != 0 {
+					values := make([]any, 0, len(value.repeated))
+					for _, part := range value.repeated {
+						data := part.data
+						if legacy && part.flags&1 != 0 {
+							data, err = d.legacyLongValue(table, data, longValues)
+							if err != nil {
+								return nil, fmt.Errorf("column %q: %w", column.Name, err)
+							}
+						}
+						values = append(values, decodeColumnValue(column, data))
+					}
+					record = append(record, Field{Name: column.Name, Value: values})
+					continue
+				}
 				raw, present = value.data, true
+				if legacy && value.flags&1 != 0 {
+					raw, err = d.legacyLongValue(table, raw, longValues)
+					if err != nil {
+						return nil, fmt.Errorf("column %q: %w", column.Name, err)
+					}
+				}
 				if value.flags&0x08 != 0 {
 					parts, err := decodeMultiValue(raw, value.flags&0x10 != 0)
 					if err != nil {
@@ -557,11 +593,15 @@ func (d *Database) decodeRecord(table *Table, data []byte) (Record, error) {
 }
 
 type taggedValue struct {
-	data  []byte
-	flags uint8
+	data     []byte
+	flags    uint8
+	repeated []taggedValue
 }
 
 func (d *Database) decodeTaggedValues(data []byte) (map[uint32]taggedValue, error) {
+	if d.info.Version == 0x620 && d.info.Revision <= 2 {
+		return decodeLinearTaggedValues(data)
+	}
 	result := make(map[uint32]taggedValue)
 	if len(data) < 4 {
 		return result, nil
@@ -592,6 +632,42 @@ func (d *Database) decodeTaggedValues(data []byte) (map[uint32]taggedValue, erro
 			start++
 		}
 		result[identifier] = taggedValue{data: data[start:end], flags: flags}
+	}
+	return result, nil
+}
+
+// Revision 2 stores successive (column, length, value) tuples instead of an
+// offset directory. The length includes the optional flag byte (bit 15).
+func decodeLinearTaggedValues(data []byte) (map[uint32]taggedValue, error) {
+	result := make(map[uint32]taggedValue)
+	for len(data) != 0 {
+		if len(data) < 4 {
+			return nil, fmt.Errorf("truncated linear tagged-value header")
+		}
+		identifier := uint32(binary.LittleEndian.Uint16(data[:2]))
+		rawSize := binary.LittleEndian.Uint16(data[2:4])
+		size := int(rawSize & 0x5fff)
+		data = data[4:]
+		if identifier < 256 || size > len(data) {
+			return nil, fmt.Errorf("linear tagged value %d has invalid size %d", identifier, size)
+		}
+		value := taggedValue{data: data[:size]}
+		if rawSize&0x8000 != 0 {
+			if size == 0 {
+				return nil, fmt.Errorf("linear tagged value %d has no flag byte", identifier)
+			}
+			value.flags, value.data = value.data[0], value.data[1:]
+		}
+		if previous, exists := result[identifier]; exists {
+			if previous.repeated == nil {
+				previous.repeated = []taggedValue{previous}
+			}
+			previous.repeated = append(previous.repeated, value)
+			result[identifier] = previous
+		} else {
+			result[identifier] = value
+		}
+		data = data[size:]
 	}
 	return result, nil
 }

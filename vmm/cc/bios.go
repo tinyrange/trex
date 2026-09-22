@@ -19,6 +19,7 @@ const biosPort = 0xf1
 type pc struct {
 	nic           *ne2000
 	framebuffer   []byte
+	input         *virtioInput
 	channelMemory []byte
 	channelName   string
 	cpu           hypervisor.X86
@@ -61,6 +62,7 @@ func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) 
 	}
 	p.vga = newVGA(ram[0xb8000:0xc0000])
 	p.keyboard = newKeyboard(cpu.SetIRQ)
+	p.input = &virtioInput{memory: p.inputMemory, irq: cpu.SetIRQ}
 	p.initializeCMOS()
 	for i := 0; i < 256; i++ {
 		binary.LittleEndian.PutUint16(ram[i*4:], uint16(0x1000+i*4))
@@ -155,6 +157,13 @@ func (p *pc) memory(addr, size uint64) ([]byte, error) {
 		return nil, fmt.Errorf("guest memory out of range: %#x+%#x", addr, size)
 	}
 	return p.ram[addr : addr+size], nil
+}
+
+func (p *pc) inputMemory(addr, size uint64) ([]byte, error) {
+	if addr < 0x100000 && (addr >= 0xa0000 || size > 0xa0000-addr) {
+		return nil, fmt.Errorf("virtio DMA overlaps reserved PC memory")
+	}
+	return p.memory(addr, size)
 }
 
 func (p *pc) physical(address uint64, s x86state.SystemRegisters) (uint64, error) {

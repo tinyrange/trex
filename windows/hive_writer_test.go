@@ -599,6 +599,47 @@ func TestPatchHiveCreatesEmptyKeys(t *testing.T) {
 	}
 }
 
+func TestPatchHivePreservesNumericValueType(t *testing.T) {
+	root := newRegistryTree("SAM")
+	data, err := buildRegistryHive(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch := starlark.NewDict(4)
+	for key, value := range map[string]starlark.Value{
+		"key":   starlark.String("/Domains/Builtin/Aliases/Members"),
+		"name":  starlark.String(""),
+		"type":  starlark.MakeInt(7),
+		"value": starlark.Bytes("\x00\x00"),
+	} {
+		if err := patch.SetKey(starlark.String(key), value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := patchHiveBuiltin(nil, nil, starlark.Tuple{
+		&starfile.Bytes{Name: "sam.hiv", Data: data},
+		starlark.NewList([]starlark.Value{patch}),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hive, err := newRegistryHive(result.(starfile.File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := hive.lookup("/Domains/Builtin/Aliases/Members")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := hive.readRawValues(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].value.typ != 7 || !bytes.Equal(values[0].value.data, []byte{0, 0}) {
+		t.Fatalf("numeric patch = %#v, want type 7 with two zero bytes", values)
+	}
+}
+
 func TestMutableHivePatchesNT31CellsInPlace(t *testing.T) {
 	root := newRegistryTree("SYSTEM")
 	setRegistryValue(root, "/ControlSet001/Services/Atdisk", "Start", registryDWORD(3))

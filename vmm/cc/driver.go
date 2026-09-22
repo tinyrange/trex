@@ -143,7 +143,11 @@ func (d *driver) loop() {
 			case hypervisor.X86ExitIO:
 				err = d.pc.handleIO(ex)
 			case hypervisor.X86ExitMMIO:
-				err = d.pc.vga.mmio(ex, d.pc.cpu)
+				if ex.Address >= inputAddress && ex.Address < inputAddress+0x1000 {
+					err = d.pc.input.mmio(ex, d.pc.cpu)
+				} else {
+					err = d.pc.vga.mmio(ex, d.pc.cpu)
+				}
 			case hypervisor.X86ExitShutdown:
 				d.finish("guest_failure", "x86 triple fault", false)
 				continue

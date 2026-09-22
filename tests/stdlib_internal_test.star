@@ -2561,6 +2561,11 @@ def test_security_access_mapping():
         true(machine.resolve_export("api-ms-win-security-base-l1-1-0.dll", name = name) != 0)
 
 def test_sddl_security_descriptor():
+    security = testing.module("@stdlib//windows:security.star")
+    object_sd = security["sddl_security_descriptor"]("D:(OA;CI;RP;bf967aba-0de6-11d0-a285-00aa003049e2;;AU)")
+    object_acl = binary.read_u32le(object_sd, 16)
+    equal(binary.read_u8(object_sd, object_acl), 4)
+    equal(hex(object_sd[object_acl + 8:]), "050228001000000001000000ba7a96bfe60dd011a28500aa003049e201010000000000050b000000")
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     equal(module["_MAKE_ABSOLUTE_SD_ARGUMENTS"], 11)
     equal(module["_WELL_KNOWN_SIDS"][22], [5, [18]])

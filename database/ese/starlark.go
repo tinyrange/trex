@@ -35,10 +35,29 @@ func (*databaseValue) Type() string          { return "database.ese" }
 func (*databaseValue) Freeze()               {}
 func (*databaseValue) Truth() starlark.Bool  { return starlark.True }
 func (*databaseValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: database.ese") }
-func (*databaseValue) AttrNames() []string   { return []string{"info", "rows", "tables", "verify"} }
+func (*databaseValue) AttrNames() []string {
+	return []string{"index_entries", "info", "rows", "tables", "verify"}
+}
 
 func (d *databaseValue) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "index_entries":
+		return starlark.NewBuiltin("index_entries", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var table, index string
+			maximum := defaultMaximumRows
+			if err := starlark.UnpackArgs("index_entries", args, kwargs, "table", &table, "index", &index, "maximum?", &maximum); err != nil {
+				return nil, err
+			}
+			entries, err := d.database.IndexEntries(table, index, maximum)
+			if err != nil {
+				return nil, err
+			}
+			values := make([]starlark.Value, 0, len(entries))
+			for _, entry := range entries {
+				values = append(values, stringDict(map[string]starlark.Value{"key": starlark.Bytes(entry.Key), "data": starlark.Bytes(entry.Data)}))
+			}
+			return starlark.NewList(values), nil
+		}), nil
 	case "info":
 		info := d.database.Info()
 		return stringDict(map[string]starlark.Value{

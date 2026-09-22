@@ -9,6 +9,15 @@ import (
 // the optional Starlark frontend.
 func Builtins() starlark.StringDict {
 	functions := map[string]func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error){
+		"winsock_catalog_item":        winsockCatalogItemBuiltin,
+		"guid_bytes":                  guidBytesBuiltin,
+		"ad_legacy_dn_binary":         adLegacyDNBinaryBuiltin,
+		"ad_replication_schedule":     adReplicationScheduleBuiltin,
+		"ad_legacy_pek_list":          adLegacyPEKListBuiltin,
+		"ad_stored_sid":               adStoredSIDBuiltin,
+		"ad_ancestors":                adAncestorsBuiltin,
+		"ad_legacy_secret":            adLegacySecretBuiltin,
+		"ad_replication_metadata":     adReplicationMetadataBuiltin,
 		"memory_image":                memoryImageBuiltin,
 		"reactos_record":              reactOSRecordBuiltin,
 		"ne_fastboot":                 windowsNEFastBootBuiltin,
@@ -64,6 +73,7 @@ func Builtins() starlark.StringDict {
 		"event_log":                   eventLogBuiltin,
 		"sid_string":                  sidStringBuiltin,
 		"acl_entries":                 aclEntriesBuiltin,
+		"object_ace":                  objectACEBuiltin,
 		"sam_alias_members":           samAliasMembersBuiltin,
 		"sam_alias_with_members":      samAliasWithMembersBuiltin,
 		"selfreg_patches":             selfregPatchesBuiltin,

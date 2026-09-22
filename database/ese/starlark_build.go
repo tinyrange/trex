@@ -14,11 +14,12 @@ func BuildBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 	var tablesValue starlark.Value
 	var sortDataValue starlark.Value = starlark.None
 	databasePages := 0
-	if err := starlark.UnpackArgs("ese_build", args, kwargs, "tables", &tablesValue, "database_pages?", &databasePages, "sort_data?", &sortDataValue); err != nil {
+	pageSize, revision := 0, 0
+	if err := starlark.UnpackArgs("ese_build", args, kwargs, "tables", &tablesValue, "database_pages?", &databasePages, "sort_data?", &sortDataValue, "page_size?", &pageSize, "revision?", &revision); err != nil {
 		return nil, err
 	}
-	if databasePages < 0 {
-		return nil, fmt.Errorf("ese_build: database_pages must be non-negative")
+	if databasePages < 0 || pageSize < 0 || revision < 0 {
+		return nil, fmt.Errorf("ese_build: sizes and revision must be non-negative")
 	}
 	tableValues, err := starlarkSequence(tablesValue, "tables")
 	if err != nil {
@@ -36,13 +37,25 @@ func BuildBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 		}
 		tables = append(tables, table)
 	}
-	options := BuildOptions{DatabasePages: uint32(databasePages)}
+	options := BuildOptions{DatabasePages: uint32(databasePages), PageSize: pageSize, Revision: uint32(revision)}
 	if sortDataValue != starlark.None {
 		source, ok := sortDataValue.(storage.Reader)
 		if !ok {
 			return nil, fmt.Errorf("ese_build: sort_data is %s, want file", sortDataValue.Type())
 		}
-		collation, err := nls.OpenSortDefault(source)
+		var collation *nls.SortTable
+		if pageSize == 8192 {
+			for _, table := range tables {
+				for _, index := range table.Indexes {
+					if index.Locale != 0 && index.Locale != 1033 {
+						return nil, fmt.Errorf("ese_build: legacy sort_data supports locale 1033")
+					}
+				}
+			}
+			collation, err = nls.OpenLegacySortKey(source)
+		} else {
+			collation, err = nls.OpenSortDefault(source)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("ese_build: sort_data: %w", err)
 		}
@@ -151,7 +164,11 @@ func starlarkColumnDefinition(value *starlark.Dict) (ColumnDefinition, error) {
 	if err != nil {
 		return ColumnDefinition{}, err
 	}
-	return ColumnDefinition{Name: name, Identifier: identifier, Type: typeCode, Maximum: maximum, Flags: flags, CodePage: codePage}, nil
+	defaultValue, err := optionalBytes(value, "default")
+	if err != nil {
+		return ColumnDefinition{}, err
+	}
+	return ColumnDefinition{Name: name, Identifier: identifier, Type: typeCode, Maximum: maximum, Flags: flags, CodePage: codePage, Default: defaultValue}, nil
 }
 
 func starlarkIndexDefinition(value *starlark.Dict) (IndexDefinition, error) {
@@ -206,6 +223,20 @@ func starlarkIndexDefinition(value *starlark.Dict) (IndexDefinition, error) {
 }
 
 func starlarkColumnValue(column ColumnDefinition, value starlark.Value) (any, error) {
+	if list, ok := value.(*starlark.List); ok {
+		if column.Identifier < 256 {
+			return nil, fmt.Errorf("multi-value data requires a tagged column")
+		}
+		result := make([]any, list.Len())
+		for i := range result {
+			var err error
+			result[i], err = starlarkColumnValue(column, list.Index(i))
+			if err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
+	}
 	switch column.Type {
 	case ColumnBoolean:
 		boolean, ok := value.(starlark.Bool)

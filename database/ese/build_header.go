@@ -32,15 +32,22 @@ func (b *builder) databaseHeader() ([]byte, error) {
 	binary.LittleEndian.PutUint32(header[52:56], 3) // JET_dbstateCleanShutdown
 	binary.LittleEndian.PutUint32(header[104:108], 1)
 	binary.LittleEndian.PutUint32(header[212:216], b.objidLast)
-	binary.LittleEndian.PutUint32(header[216:220], 6)
-	binary.LittleEndian.PutUint32(header[220:224], 3)
-	binary.LittleEndian.PutUint32(header[224:228], 9600)
+	if b.legacy() {
+		binary.LittleEndian.PutUint32(header[216:220], 5)
+		binary.LittleEndian.PutUint32(header[224:228], 2195)
+	} else {
+		binary.LittleEndian.PutUint32(header[216:220], 6)
+		binary.LittleEndian.PutUint32(header[220:224], 3)
+		binary.LittleEndian.PutUint32(header[224:228], 9600)
+	}
 	binary.LittleEndian.PutUint32(header[232:236], b.options.Revision)
 	binary.LittleEndian.PutUint32(header[236:240], uint32(b.options.PageSize))
-	binary.LittleEndian.PutUint32(header[340:344], b.options.Version)
-	binary.LittleEndian.PutUint32(header[344:348], b.options.Revision)
-	binary.LittleEndian.PutUint64(header[508:516], ^uint64(0))
-	binary.LittleEndian.PutUint32(header[667:671], 0)
+	if !b.legacy() {
+		binary.LittleEndian.PutUint32(header[340:344], b.options.Version)
+		binary.LittleEndian.PutUint32(header[344:348], b.options.Revision)
+		binary.LittleEndian.PutUint64(header[508:516], ^uint64(0))
+		binary.LittleEndian.PutUint32(header[667:671], 0)
+	}
 	checksum, err := oldChecksum(header)
 	if err != nil {
 		return nil, fmt.Errorf("ese: database header: %w", err)

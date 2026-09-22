@@ -46,9 +46,9 @@ type TableDefinition struct {
 	Rows    []Row
 }
 
-// BuildOptions selects the persisted ESE generation. This writer currently
-// targets the 32 KiB Windows 8 generation because its large-page record flags
-// and checksums are materially different from the older formats.
+// BuildOptions selects the persisted ESE generation: Windows 2000 revision 2
+// with 8 KiB pages or Windows 8 revision 0x14 with 32 KiB pages. Their tagged
+// records, index segments, page flags, and checksums have distinct encodings.
 type BuildOptions struct {
 	DatabasePages uint32
 	PageSize      int
@@ -72,20 +72,24 @@ type buildIndex struct {
 	oe         uint32
 	ae         uint32
 	primary    bool
+	longValue  bool
 	owner      *buildTable
 	extents    []pageExtent
 	available  []pageExtent
 }
 
 type buildTable struct {
-	definition TableDefinition
-	fdp        uint32
-	objid      uint32
-	oe         uint32
-	ae         uint32
-	indexes    []*buildIndex
-	extents    []pageExtent
-	available  []pageExtent
+	definition  TableDefinition
+	fdp         uint32
+	objid       uint32
+	oe          uint32
+	ae          uint32
+	indexes     []*buildIndex
+	longValues  *buildIndex
+	longEntries []treeEntry
+	nextLongID  uint32
+	extents     []pageExtent
+	available   []pageExtent
 }
 
 type pageExtent struct{ first, count uint32 }
@@ -117,17 +121,20 @@ func Build(tables []TableDefinition, options BuildOptions) (*starfile.Bytes, err
 	if options.PageSize == 0 {
 		options.PageSize = 32768
 	}
-	if options.PageSize != 32768 {
-		return nil, fmt.Errorf("ese: writer currently supports 32768-byte pages")
+	if options.PageSize != 32768 && options.PageSize != 8192 {
+		return nil, fmt.Errorf("ese: writer supports 8192 or 32768-byte pages")
 	}
 	if options.Version == 0 {
 		options.Version = 0x620
 	}
 	if options.Revision == 0 {
 		options.Revision = 0x14
+		if options.PageSize == 8192 {
+			options.Revision = 2
+		}
 	}
-	if options.Version != 0x620 || options.Revision != 0x14 {
-		return nil, fmt.Errorf("ese: writer currently supports format 0x620 revision 0x14")
+	if options.Version != 0x620 || !(options.PageSize == 32768 && options.Revision == 0x14 || options.PageSize == 8192 && options.Revision == 2) {
+		return nil, fmt.Errorf("ese: writer supports format 0x620 revision 2 (8 KiB) or 0x14 (32 KiB)")
 	}
 	if len(tables) == 0 {
 		return nil, fmt.Errorf("ese: at least one user table is required")
@@ -140,6 +147,9 @@ func Build(tables []TableDefinition, options BuildOptions) (*starfile.Bytes, err
 	}
 
 	b := &builder{options: options, pages: make(map[uint32][]byte), next: 35, dbtime: 64, objidLast: 7}
+	if b.legacy() {
+		b.next, b.objidLast = 33, 5
+	}
 	physical := make([]*buildTable, 0, len(tables))
 	for _, definition := range tables {
 		table := &buildTable{definition: definition, objid: b.nextObjectID()}
@@ -162,12 +172,34 @@ func Build(tables []TableDefinition, options BuildOptions) (*starfile.Bytes, err
 			table.extents = append(table.extents, secondary.extents...)
 			table.indexes = append(table.indexes, secondary)
 		}
+		if len(table.indexes) == 0 {
+			table.indexes = []*buildIndex{{fdp: table.fdp, objid: table.objid, oe: table.oe, ae: table.ae, primary: true, owner: table, definition: IndexDefinition{Flags: 1}}}
+		}
 		physical = append(physical, table)
 	}
 
 	for _, table := range physical {
+		records := make([][]byte, len(table.definition.Rows))
+		for index, row := range table.definition.Rows {
+			var err error
+			records[index], err = b.encodeTableRecord(table, row)
+			if err != nil {
+				return nil, fmt.Errorf("ese: table %q row %d: %w", table.definition.Name, index, err)
+			}
+		}
+		if table.longValues != nil {
+			if err := b.buildTree(table.longValues, table.longEntries); err != nil {
+				return nil, err
+			}
+		}
 		primaryKeys := make([][]byte, len(table.definition.Rows))
 		for index, row := range table.definition.Rows {
+			if len(table.definition.Indexes) == 0 {
+				key := make([]byte, 4)
+				binary.BigEndian.PutUint32(key, uint32(index+1))
+				primaryKeys[index] = key
+				continue
+			}
 			key, err := encodeIndexKey(table.definition.Columns, row, table.definition.Indexes[0], b.options.UnicodeCollation)
 			if err != nil {
 				return nil, fmt.Errorf("ese: table %q row %d primary key: %w", table.definition.Name, index, err)
@@ -187,20 +219,17 @@ func Build(tables []TableDefinition, options BuildOptions) (*starfile.Bytes, err
 			}
 			entries := make([]treeEntry, 0, len(table.definition.Rows))
 			for rowIndex, row := range table.definition.Rows {
-				key, err := encodeIndexKey(table.definition.Columns, row, tree.definition, b.options.UnicodeCollation)
+				if index == 0 {
+					entries = append(entries, treeEntry{key: primaryKeys[rowIndex], data: records[rowIndex]})
+					continue
+				}
+				keys, err := secondaryKeys(table.definition.Columns, row, tree.definition, b.options.UnicodeCollation)
 				if err != nil {
 					return nil, fmt.Errorf("ese: table %q index %q row %d: %w", table.definition.Name, tree.definition.Name, rowIndex, err)
 				}
-				var data []byte
-				if index == 0 {
-					data, err = encodeRecord(table.definition.Columns, row)
-				} else {
-					data = append([]byte(nil), primaryKeys[rowIndex]...)
+				for _, key := range keys {
+					entries = append(entries, treeEntry{key: key, data: primaryKeys[rowIndex]})
 				}
-				if err != nil {
-					return nil, fmt.Errorf("ese: table %q row %d: %w", table.definition.Name, rowIndex, err)
-				}
-				entries = append(entries, treeEntry{key: key, data: data})
 			}
 			sort.SliceStable(entries, func(left, right int) bool {
 				order := bytes.Compare(entries[left].key, entries[right].key)
@@ -259,7 +288,7 @@ func validateTableDefinition(table *TableDefinition, names map[string]bool) erro
 	if err := validateColumns(table.Columns); err != nil {
 		return fmt.Errorf("ese: table %q: %w", table.Name, err)
 	}
-	if len(table.Indexes) == 0 || len(table.Indexes[0].Columns) == 0 {
+	if len(table.Indexes) != 0 && len(table.Indexes[0].Columns) == 0 {
 		return fmt.Errorf("ese: table %q must have a primary index", table.Name)
 	}
 	indexes := make(map[string]bool)
@@ -269,7 +298,7 @@ func validateTableDefinition(table *TableDefinition, names map[string]bool) erro
 			return fmt.Errorf("ese: table %q has duplicate or empty index name %q", table.Name, definition.Name)
 		}
 		indexes[name] = true
-		if index == 0 && definition.Flags&0x10000 == 0 {
+		if index == 0 && definition.Flags&indexFlagPrimaryPersisted == 0 {
 			return fmt.Errorf("ese: table %q primary index flags do not contain persisted primary bit", table.Name)
 		}
 		for _, identifier := range definition.Columns {
@@ -323,9 +352,21 @@ func validateTreeEntries(entries []treeEntry, unique bool) error {
 }
 
 func (b *builder) put(spec encodedPage) error {
+	if b.legacy() {
+		spec.flags &^= pageFlagNewRecord
+	}
 	page, err := spec.encode(b.options.PageSize)
 	if err != nil {
 		return err
+	}
+	if b.legacy() {
+		binary.LittleEndian.PutUint32(page[4:8], spec.number)
+		binary.LittleEndian.PutUint32(page[36:40], spec.flags)
+		checksum, err := oldChecksum(page)
+		if err != nil {
+			return err
+		}
+		binary.LittleEndian.PutUint32(page[:4], checksum)
 	}
 	if _, exists := b.pages[spec.number]; exists {
 		return fmt.Errorf("ese: page %d was generated twice", spec.number)
@@ -407,7 +448,9 @@ func (b *builder) buildTree(tree *buildIndex, entries []treeEntry) error {
 	}
 
 	flags := uint32(0)
-	if !tree.primary {
+	if tree.longValue {
+		flags |= pageFlagLongValue
+	} else if !tree.primary {
 		flags |= pageFlagIndex
 	}
 	if tree.definition.Flags&1 == 0 {

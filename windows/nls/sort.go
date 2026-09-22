@@ -47,6 +47,24 @@ type SortTable struct {
 	data       []byte
 	keysOffset uint32
 	guids      []sortGUID
+	legacy     bool
+}
+
+// OpenLegacySortKey reads the base Windows 2000 sortkey.nls weights used by
+// the US English directory indexes. Locale-specific sorttbls.nls overrides
+// are not represented by this table.
+func OpenLegacySortKey(source storage.Reader) (*SortTable, error) {
+	if source == nil || source.Size() != 4+baseKeyCount*4 {
+		return nil, fmt.Errorf("nls: invalid legacy sort-key table size")
+	}
+	data := make([]byte, source.Size())
+	if _, err := readFullAt(source, data, 0); err != nil {
+		return nil, err
+	}
+	if binary.LittleEndian.Uint32(data) != 0 {
+		return nil, fmt.Errorf("nls: unsupported legacy sort-key header")
+	}
+	return &SortTable{data: data, keysOffset: 4, guids: []sortGUID{{}}, legacy: true}, nil
 }
 
 type sortGUID struct {
@@ -116,6 +134,9 @@ func (table *SortTable) SortKey(text string, flags uint32, sortID []byte) ([]byt
 	if table == nil {
 		return nil, fmt.Errorf("nls: nil sort table")
 	}
+	if table.legacy && len(sortID) == 0 {
+		sortID = make([]byte, 16)
+	}
 	if len(sortID) != 16 {
 		return nil, fmt.Errorf("nls: sort ID is %d bytes, want 16", len(sortID))
 	}
@@ -163,6 +184,14 @@ func (table *SortTable) SortKey(text string, flags uint32, sortID []byte) ([]byt
 			return nil, fmt.Errorf("nls: sort script %d is not implemented", script)
 		case scriptPunctuation:
 			if flags&normIgnoreSymbols != 0 {
+				continue
+			}
+			if table.legacy {
+				// Windows 2000's word-sort tail stores a biased primary-byte
+				// position and the script/primary weight. This differs from
+				// the later signed-position and combined case/diacritic form.
+				location := uint16(0x8003 + (len(primary)+2)*2)
+				special = append(special, byte(location>>8), byte(location), script, primaryWeight)
 				continue
 			}
 			// Punctuation is ordered after ordinary levels. The signed position
