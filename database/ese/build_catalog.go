@@ -12,7 +12,7 @@ const (
 	catalogTypeIndex  = 3
 
 	indexFlagUniquePersisted  = 0x00000001
-	indexFlagPrimaryPersisted = 0x00010000
+	indexFlagPrimaryPersisted = 0x00000020
 )
 
 var catalogColumns = []ColumnDefinition{
@@ -94,6 +94,9 @@ func catalogColumnRows(object catalogObject) []Row {
 			row["RecordOffset"] = fixedOffset
 			fixedOffset += int16(fixedColumnSize(column.Type))
 		}
+		if column.Default != nil {
+			row["DefaultValue"] = column.Default
+		}
 		rows = append(rows, row)
 	}
 	return rows
@@ -167,25 +170,40 @@ func (b *builder) catalogRows(tables []*buildTable) ([]Row, error) {
 			indexes: []*buildIndex{{objid: 7, fdp: 34, primary: true, definition: IndexDefinition{Name: "KeyPrimary", Columns: []int32{128}, Flags: 0x1402f, KeyMost: 255}}},
 		},
 	}
+	if b.legacy() {
+		objects = objects[:2]
+		for index := range objects {
+			objects[index].columns = b.catalogColumns()
+		}
+	}
 	for _, table := range tables {
+		indexes := table.indexes
+		if len(table.definition.Indexes) == 0 {
+			indexes = nil
+		}
 		objects = append(objects, catalogObject{
 			name: table.definition.Name, objid: table.objid, fdp: table.fdp,
-			flags: table.definition.Flags, columns: table.definition.Columns, indexes: table.indexes,
+			flags: table.definition.Flags, columns: table.definition.Columns, indexes: indexes,
 		})
 	}
 	rows := make([]Row, 0, 64)
+	for _, table := range tables {
+		if tree := table.longValues; tree != nil {
+			rows = append(rows, Row{"ObjidTable": int32(table.objid), "Type": int16(4), "Id": int32(tree.objid), "ColtypOrPgnoFDP": int32(tree.fdp), "SpaceUsage": int32(100), "Flags": int32(0), "PagesOrLocale": int32(1), "Name": "LV"})
+		}
+	}
 	for _, object := range objects {
 		initialPages := int32(5)
 		if object.objid == 2 {
 			initialPages = 20
 		} else if object.objid == 3 {
 			initialPages = 5
-		} else if object.objid == 6 || object.objid == 7 {
+		} else if !b.legacy() && (object.objid == 6 || object.objid == 7) {
 			initialPages = 1
 		}
 		rows = append(rows, catalogTableRow(object, initialPages))
 		rows = append(rows, catalogColumnRows(object)...)
-		rows = append(rows, catalogIndexRows(object)...)
+		rows = append(rows, b.catalogIndexRows(object)...)
 	}
 	sort.SliceStable(rows, func(left, right int) bool {
 		leftKey, _ := encodeIndexColumns(catalogColumns, rows[left], []int32{1, 2, 3})
@@ -196,11 +214,13 @@ func (b *builder) catalogRows(tables []*buildTable) ([]Row, error) {
 }
 
 func (b *builder) buildSystemPages(rows []Row, tables []*buildTable) error {
-	if err := b.buildSystemObjids(tables); err != nil {
-		return err
-	}
-	if err := b.buildSystemLocales(tables); err != nil {
-		return err
+	if !b.legacy() {
+		if err := b.buildSystemObjids(tables); err != nil {
+			return err
+		}
+		if err := b.buildSystemLocales(tables); err != nil {
+			return err
+		}
 	}
 	entries := make([]treeEntry, 0, len(rows))
 	primaryKeys := make([][]byte, 0, len(rows))
@@ -209,7 +229,7 @@ func (b *builder) buildSystemPages(rows []Row, tables []*buildTable) error {
 		if err != nil {
 			return fmt.Errorf("ese: catalog row %d key: %w", index, err)
 		}
-		record, err := encodeRecord(catalogColumns, row)
+		record, err := b.encodeRecord(b.catalogColumns(), row)
 		if err != nil {
 			return fmt.Errorf("ese: catalog row %d: %w", index, err)
 		}

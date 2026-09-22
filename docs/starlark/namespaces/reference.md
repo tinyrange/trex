@@ -2681,9 +2681,9 @@ Parses an Extensible Storage Engine database into inspectable tables and records
 
 ### `database.ese_build`
 
-`database.ese_build(tables, database_pages=0, sort_data=None) -> file`
+`database.ese_build(tables, database_pages=0, sort_data=None, page_size=32768, revision=0) -> file`
 
-Builds an ESE database file from declarative tables, optionally controlling database page allocation and sort data. Construction stays in memory.
+Builds an ESE database in memory from declarative tables. Supports Windows 2000 revision 2 with page_size=8192 and Windows 8 revision 0x14 with page_size=32768; revision=0 selects the matching default. sort_data accepts base US-English sortkey.nls for Windows 2000 or SortDefault.nls for Windows 8. An empty indexes list creates a heap table. Revision 2 tagged columns accept lists of values; columns may preserve raw catalog defaults with default bytes.
 
 ### `database.msi`
 
@@ -3222,6 +3222,48 @@ Joins an ACME STF object graph with its INF file catalogue and portable media fi
 
 Parses an ACME setup table into headers, objects, arguments, annotations, and source provenance.
 
+### `windows.ad_ancestors`
+
+`windows.ad_ancestors(tags) -> bytes`
+
+Encodes a root-to-object path of 1..1024 nonzero, distinct directory name tags as little-endian DWORDs.
+
+### `windows.ad_legacy_dn_binary`
+
+`windows.ad_legacy_dn_binary(tag, value) -> bytes`
+
+Encodes a Windows 2000 non-linked DN-Binary value from a nonzero directory name tag and opaque binary payload.
+
+### `windows.ad_legacy_pek_list`
+
+`windows.ad_legacy_pek_list(boot_key, key, salt, generated) -> bytes`
+
+Builds an encrypted revision-2 AD password encryption key list containing key zero. boot_key, key and salt are 16-byte values; generated is a Windows FILETIME. The caller supplies key and salt bytes.
+
+### `windows.ad_legacy_secret`
+
+`windows.ad_legacy_secret(secret, key, salt) -> bytes`
+
+Wraps a nonempty secret with the Windows 2000 AD RC4-with-salt format using PEK zero. key and salt must each contain 16 bytes. Password hashes require RID-based DES protection before this outer layer.
+
+### `windows.ad_replication_metadata`
+
+`windows.ad_replication_metadata(attributes, invocation_id, changed, usn) -> bytes`
+
+Builds initial version-one attribute replication metadata in attribute-ID order. invocation_id uses Windows GUID byte order; changed uses the target directory generation's persisted timestamp. Local and originating USNs equal usn. Duplicate attribute IDs are rejected.
+
+### `windows.ad_replication_schedule`
+
+`windows.ad_replication_schedule(hours) -> bytes`
+
+Builds a SCHEDULE_INTERVAL record from 168 hourly bytes, starting Sunday at 00:00 UTC. Each byte contains four quarter-hour availability bits; upper bits must be zero.
+
+### `windows.ad_stored_sid`
+
+`windows.ad_stored_sid(sid) -> bytes`
+
+Converts a wire-format SID to AD's stored form by reversing only the final subauthority's byte order.
+
 ### `windows.assembly_manifest`
 
 `windows.assembly_manifest(value) -> record(identity, files, references, registry_keys)`
@@ -3441,6 +3483,12 @@ Parses legacy EVT or supported EVTX event-log input into event records. The form
 
 Extracts full font-name strings from supported OpenType/TrueType files, including collections. Returns a list of names without installing or rendering the font.
 
+### `windows.guid_bytes`
+
+`windows.guid_bytes(value) -> bytes`
+
+Parses a textual GUID into the 16-byte mixed-endian representation used by Windows binary formats.
+
 ### `windows.hive`
 
 `windows.hive(file) -> registry hive`
@@ -3583,6 +3631,12 @@ Extracts snap-in identifiers referenced by an MMC console file. Use the identifi
 
 Constructs the Windows NE fast-boot binary and overlay from supplied modules, returning bin and overlay files. overlay_path is the guest-visible location to encode, not a host output path.
 
+### `windows.object_ace`
+
+`windows.object_ace(type, flags, mask, sid, object_type='', inherited_type='') -> bytes`
+
+Builds an allow, deny, audit or alarm object ACE (types 5..8) from a wire SID, access mask, ACE flags and optional object/inherited-object GUID strings. The containing ACL must use revision 4.
+
 ### `windows.patch_hive`
 
 `windows.patch_hive(file, patches, root_name='', keys=[]) -> file`
@@ -3590,7 +3644,7 @@ Constructs the Windows NE fast-boot binary and overlay from supplied modules, re
 Applies declarative registry patches to an NT hive and returns a new file, optionally replacing the root name. `keys` lists registry paths to create without adding values; existing keys and their values remain intact. This preserves the source hive's layout, including legacy REGF 1.1 cells. The input hive is not edited in place.
 
 Each value patch has
-`key`, `name`, `type`, and `value`. Optional `keys` contains registry key paths
+`key`, `name`, `type`, and `value`. `type` accepts a registry type name or a raw non-negative 32-bit integer for formats such as SAM indexes that encode counts in the type field. Optional `keys` contains registry key paths
 to create, including missing parents; existing keys are preserved. Empty keys
 remain truly empty, so registry indexes represented by child-key names do not
 need placeholder values. New keys inherit their parent's security descriptor.
@@ -3619,9 +3673,9 @@ Links a labeled section, fixups and optional imports into a minimal PE32 executa
 
 ### `windows.pe32_link`
 
-`windows.pe32_link(object, imports, exports, callbacks=None, entry='', subsystem=3, version_major=3, version_minor=10, image_base=0x62000000, executable=False) -> bytes`
+`windows.pe32_link(object, imports, exports, callbacks=None, import_abi=None, indirect_calls=None, entry='', subsystem=3, version_major=3, version_minor=10, image_base=0x62000000, executable=False, native_dll=False) -> bytes`
 
-Links an in-memory ELF32/i386 cdecl object into a PE32 DLL, executable, or native driver. executable=True requires an entry point and emits an EXE instead of a DLL. Imports map DLLs to symbol/stack-word dictionaries; exports and callbacks map symbols to stack-word counts. Explicit stdcall adapters bridge the object ABI. Supports R_386_32 and R_386_PC32 relocations; rejects unresolved symbols and unsupported relocations. No OS runtime is linked.
+Links an in-memory ELF32/i386 cdecl object into a PE32 DLL, executable, or native driver. executable=True requires an entry point; native_dll=True marks a subsystem=1 module as a DLL. Imports map DLLs to symbol/argument-word dictionaries; exports and callbacks map symbols to stack-word counts. import_abi optionally selects fastcall instead of stdcall for named imports. indirect_calls maps synthetic symbols to stdcall argument counts: the cdecl caller supplies a function pointer followed by those arguments. Supports R_386_32 and R_386_PC32 relocations; rejects unresolved symbols and unsupported relocations. No OS runtime is linked.
 
 ### `windows.pe_sign`
 
@@ -3884,6 +3938,12 @@ Lists the member names contained in a Windows 9x VxD library. It provides invent
 
 Decodes the supported compressed Windows 9x VxD container into an unpacked file. The result can be inspected or rebuilt without a host conversion tool.
 
+### `windows.winsock_catalog_item`
+
+`windows.winsock_catalog_item(library, protocol, provider, catalog_id) -> bytes`
+
+Builds a Windows NT Winsock 2 Protocol_Catalog9 PackedCatalogItem from an ASCII guest DLL path, 628-byte WSAPROTOCOL_INFOW record, 16-byte Windows-order provider GUID, and nonzero catalog ID. Preserves the transport helper's protocol fields while assigning its provider and catalog identity.
+
 ### `windows.wmi_repository`
 
 `windows.wmi_repository(files=None, documents=None, default_namespace='root\cimv2', server_name='')`
@@ -3987,6 +4047,12 @@ Methods and attributes: `binary`, `diagnostic`, `ok`, `outputs (immutable dict o
 A mutable incremental digest. update feeds binary input, sum returns the current digest without clearing state, and reset discards accumulated input. Frozen hashers cannot be updated or reset.
 
 Methods and attributes: `reset()`, `sum()`, `update(value)`.
+
+### `database.ese` value
+
+A portable ESE file reader. rows resolves Windows 2000 separated long values. index_entries returns persisted ordered key/data byte pairs: secondary data is the primary bookmark, while primary data is the encoded record. maximum bounds returned entries. verify checks stored pages without running a host database engine.
+
+Methods and attributes: `index_entries(table, index, maximum=100000)`, `info`, `rows(table, maximum=100000)`, `tables`, `verify()`.
 
 ### `directory` value
 

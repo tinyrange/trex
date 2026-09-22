@@ -38,6 +38,7 @@ type ColumnDefinition struct {
 	Maximum    uint32
 	Name       string
 	Type       uint32
+	Default    []byte
 }
 
 // Row contains logical column values keyed by exact column name.
@@ -499,8 +500,10 @@ func normalizeVariable(column ColumnDefinition, raw []byte, descending bool, def
 			segment = []byte{0x40}
 			break
 		}
+		segment = []byte{0x7f}
 		if column.Identifier < 128 {
-			segment = []byte{0x7f}
+			segment = append(segment, raw...)
+			break
 		}
 		for len(raw) > 8 {
 			segment = append(segment, raw[:8]...)
@@ -508,6 +511,7 @@ func normalizeVariable(column ColumnDefinition, raw []byte, descending bool, def
 			raw = raw[8:]
 		}
 		segment = append(segment, raw...)
+		segment = append(segment, make([]byte, 8-len(raw))...)
 		segment = append(segment, byte(len(raw)))
 	default:
 		return nil, fmt.Errorf("ese: unsupported variable key type %d for %q", column.Type, column.Name)

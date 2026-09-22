@@ -16,16 +16,22 @@ type PE32LinkOptions struct {
 	Imports                    map[string]map[string]int // DLL -> symbol -> stack words
 	Exports                    map[string]int
 	Callbacks                  map[string]int
-	Entry                      string // empty for a DLL without an initialization routine
+	ImportABI                  map[string]string // symbol -> "stdcall" (default) or "fastcall"
+	IndirectCalls              map[string]int    // cdecl symbol(pointer, args...) -> stdcall pointer invocation
+	Entry                      string            // empty for a DLL without an initialization routine
 	Subsystem                  uint16
 	VersionMajor, VersionMinor uint16
 	ImageBase                  uint32
 	Executable                 bool // emit an EXE instead of a DLL for a user subsystem
+	NativeDLL                  bool // set IMAGE_FILE_DLL for a native-subsystem module
 }
 
 // LinkPE32 links one in-memory ELF32/i386 relocatable object into a PE image.
 // R_386_32 and R_386_PC32 are supported; other relocation semantics are rejected.
 func LinkPE32(object []byte, options PE32LinkOptions) ([]byte, error) {
+	if options.NativeDLL && (options.Subsystem != 1 || options.Executable) {
+		return nil, fmt.Errorf("native DLL requires subsystem 1 and cannot be executable")
+	}
 	if options.Executable && options.Entry == "" {
 		return nil, fmt.Errorf("executable requires an entry point")
 	}
@@ -100,13 +106,40 @@ func LinkPE32(object []byte, options PE32LinkOptions) ([]byte, error) {
 			if _, exists := importSymbols[name]; exists {
 				return nil, fmt.Errorf("ambiguous import %q", name)
 			}
-			at, err := image.stdcallBridge("iat:"+dll+":"+name, options.Imports[dll][name], true)
+			abi := options.ImportABI[name]
+			if abi != "" && abi != "stdcall" && abi != "fastcall" {
+				return nil, fmt.Errorf("unsupported import ABI %q", abi)
+			}
+			var at int
+			if abi == "fastcall" {
+				at, err = image.callBridge("iat:"+dll+":"+name, options.Imports[dll][name], true)
+			} else {
+				at, err = image.stdcallBridge("iat:"+dll+":"+name, options.Imports[dll][name], true)
+			}
 			if err != nil {
 				return nil, err
 			}
 			importSymbols[name] = at
 			imports[dll] = append(imports[dll], name)
 		}
+	}
+	for name := range options.ImportABI {
+		if _, ok := importSymbols[name]; !ok {
+			return nil, fmt.Errorf("ABI specified for unknown import %q", name)
+		}
+	}
+	for _, name := range sortedLinkNames(options.IndirectCalls) {
+		if name == "" || strings.ContainsRune(name, 0) {
+			return nil, fmt.Errorf("invalid indirect call name")
+		}
+		if _, ok := importSymbols[name]; ok {
+			return nil, fmt.Errorf("conflicting indirect call %q", name)
+		}
+		at, err := image.callBridge("", options.IndirectCalls[name], false)
+		if err != nil {
+			return nil, err
+		}
+		importSymbols[name] = at
 	}
 	if err := image.relocateELF(f, offsets, symbols, wrappers, importSymbols); err != nil {
 		return nil, err
@@ -137,7 +170,7 @@ func LinkPE32(object []byte, options PE32LinkOptions) ([]byte, error) {
 	if entry == "" {
 		binary.LittleEndian.PutUint32(optional[16:], 0)
 	}
-	if options.Subsystem != 1 && !options.Executable {
+	if options.NativeDLL || options.Subsystem != 1 && !options.Executable {
 		binary.LittleEndian.PutUint16(out[0x96:], 0x2102)
 	}
 	binary.LittleEndian.PutUint32(optional[96:], exportRVA)

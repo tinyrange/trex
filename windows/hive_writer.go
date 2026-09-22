@@ -785,9 +785,12 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		if err != nil {
 			return nil, err
 		}
-		dataType, err := requiredPatchString(patch, "type")
+		dataTypeValue, found, err := patch.Get(starlark.String("type"))
 		if err != nil {
 			return nil, err
+		}
+		if !found {
+			return nil, fmt.Errorf("patch_hive: patch %d missing type", i)
 		}
 		value, found, err := patch.Get(starlark.String("value"))
 		if err != nil {
@@ -796,7 +799,22 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		if !found {
 			return nil, fmt.Errorf("patch_hive: patch %d missing value", i)
 		}
-		registryValue, err := registryDataFromStarlark(dataType, value)
+		var registryValue registryData
+		if dataType, ok := starlark.AsString(dataTypeValue); ok {
+			registryValue, err = registryDataFromStarlark(dataType, value)
+		} else if typeInt, ok := dataTypeValue.(starlark.Int); ok {
+			typ, ok := typeInt.Uint64()
+			if !ok || typ > 0xffffffff {
+				return nil, fmt.Errorf("patch_hive: patch %d has invalid numeric type", i)
+			}
+			data, dataErr := bytesForValue(value)
+			if dataErr != nil {
+				return nil, fmt.Errorf("patch_hive: patch %d data: %w", i, dataErr)
+			}
+			registryValue = registryData{typ: uint32(typ), data: data}
+		} else {
+			return nil, fmt.Errorf("patch_hive: patch %d type is %s, want string or int", i, dataTypeValue.Type())
+		}
 		if err != nil {
 			return nil, fmt.Errorf("patch_hive: patch %d: %w", i, err)
 		}

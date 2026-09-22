@@ -174,6 +174,7 @@ _SDDL_SIDS = {
     "BU": "S-1-5-32-545",
     "CG": "S-1-3-1",
     "CO": "S-1-3-0",
+    "ED": "S-1-5-9",
     "IU": "S-1-5-4",
     "LS": "S-1-5-19",
     "LU": "S-1-5-32-559",
@@ -183,6 +184,7 @@ _SDDL_SIDS = {
     "OW": "S-1-3-4",
     "PO": "S-1-5-32-550",
     "PU": "S-1-5-32-547",
+    "PS": "S-1-5-10",
     "RC": "S-1-5-12",
     "RD": "S-1-5-32-555",
     "RE": "S-1-5-32-552",
@@ -254,10 +256,16 @@ def _sddl_ace(value, aliases, generic_mapping):
     fields = value.split(";")
     if len(fields) != 6:
         fail("invalid SDDL ACE " + value)
-    ace_types = {"A": 0, "D": 1, "AU": 2}
+    ace_types = {"A": 0, "D": 1, "AU": 2, "OA": 5, "OD": 6, "OU": 7, "OL": 8}
     ace_type = fields[0].upper()
     if ace_type not in ace_types:
         fail("unsupported SDDL ACE type " + fields[0])
+    if ace_types[ace_type] >= 5:
+        return windows.object_ace(
+            ace_types[ace_type],
+            _sddl_bit_pairs(fields[1], _SDDL_ACE_FLAGS, "ACE flag"),
+            _sddl_access_mask(fields[2], generic_mapping),
+            _sddl_sid(fields[5], aliases), fields[3], fields[4])
     if fields[3] or fields[4]:
         fail("object-specific SDDL ACEs are not supported")
     principal = _sddl_sid(fields[5], aliases)
@@ -298,7 +306,8 @@ def _sddl_acl(value, sacl, aliases, generic_mapping):
             fail("unterminated SDDL ACE")
         aces.append(_sddl_ace(value[cursor + 1:end], aliases, generic_mapping))
         cursor = end + 1
-    return acl(aces), control
+    revision = 4 if any([binary.read_u8(ace, 0) in [5, 6, 7, 8] for ace in aces]) else 2
+    return acl(aces, revision = revision), control
 
 def _merge_acl(parent, child):
     if parent == None:

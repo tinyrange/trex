@@ -3,10 +3,11 @@
 const VERSION = 'RFB 003.008\n';
 const MAX_BUFFER = 70 * 1024 * 1024;
 const DESKTOP_SIZE = -223;
+const POINTER_TYPE = -257;
 
 export class RFB {
-  constructor(send, frame, resize, ready) {
-    Object.assign(this, {send, frame, resize, ready});
+  constructor(send, frame, resize, ready, pointerMode = () => {}) {
+    Object.assign(this, {send, frame, resize, ready, pointerMode});
     this.buffer = new Uint8Array();
     this.state = 'version';
     this.rectangles = 0;
@@ -79,8 +80,8 @@ export class RFB {
     this.take(24 + nameLength);
     // SetPixelFormat: RGB888 in 32-bit little-endian words.
     this.send(Uint8Array.of(0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 0, 8, 16, 0, 0, 0));
-    // SetEncodings: raw pixels and DesktopSize.
-    this.send(Uint8Array.of(2, 0, 0, 2, 0, 0, 0, 0, 255, 255, 255, 33));
+    // Raw pixels, DesktopSize, and QEMU Pointer Motion Change.
+    this.send(Uint8Array.of(2, 0, 0, 3, 0, 0, 0, 0, 255, 255, 255, 33, 255, 255, 254, 255));
     this.state = 'message';
     this.ready();
     this.request(false);
@@ -107,7 +108,13 @@ export class RFB {
     const x = view.getUint16(0), y = view.getUint16(2);
     const width = view.getUint16(4), height = view.getUint16(6);
     const encoding = view.getInt32(8);
-    if (encoding === DESKTOP_SIZE) {
+    if (encoding === POINTER_TYPE) {
+      if (x > 1) throw Error('Invalid pointer mode');
+      this.take(12);
+      this.relative = x === 0;
+      this.pointerX = this.pointerY = undefined;
+      this.pointerMode(x === 1);
+    } else if (encoding === DESKTOP_SIZE) {
       this.take(12);
       this.size(width, height);
     } else {
@@ -165,6 +172,14 @@ export class RFB {
   }
 
   pointer(x, y, buttons) {
+    const previousX = this.pointerX, previousY = this.pointerY;
+    this.pointerX = x;
+    this.pointerY = y;
+    if (this.relative) {
+      const delta = (value, previous) => previous === undefined ? 0 : ((value - previous + 32768) & 65535) - 32768;
+      x = 32767 + Math.max(-32767, delta(x, previousX));
+      y = 32767 + Math.max(-32767, delta(y, previousY));
+    }
     const bytes = new Uint8Array(6), view = new DataView(bytes.buffer);
     bytes[0] = 5;
     bytes[1] = buttons;

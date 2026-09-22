@@ -152,3 +152,25 @@ Guest-specific driver implementations and installation policy belong to the
 image recipe. TinyRangeX provides the NT 3.1 implementation. Trex supplies
 `windows.pe32_link` for in-memory i386 object linking and stdcall adapters,
 and `windows.pe(...).with_resources` for PE resource construction.
+
+### Virtio absolute pointer
+
+A modern virtio-MMIO input device occupies `0xe2000000..0xe2000fff`, IRQ10,
+separate from the shared-memory byte channel. It advertises device type18,
+VIRTIO_F_VERSION_1, absolute X/Y axes spanning0..65535, left/right/middle
+buttons, and a vertical wheel. Two split queues accept up to128 descriptors
+each. Events are delivered as complete SYN_REPORT batches; malformed rings
+or DMA ranges set DEVICE_NEEDS_RESET. DMA cannot access the VGA/firmware hole,
+device apertures, or memory outside guest RAM.
+
+`vmm.Input` uses absolute coordinates0..32767; the backend scales these to the
+virtio axes. `vmm.AbsolutePointerSource` reports when the guest has enabled the
+device. RFB advertises that transition using Pointer Motion Change (-257),
+and the JavaScript client maps CSS canvas positions to framebuffer pixels.
+Relative mode uses the extension's0x7fff-biased deltas. Clients without the
+extension retain the existing accumulated-coordinate input behavior.
+
+`cc.v1.state().virtio_input` exposes negotiated status, queue addresses,
+completion count, pending reports, and delivered report count. Windows-specific
+driver source and installation policy live in TinyRangeX; no guest-driver
+code is embedded in the backend or compiler.

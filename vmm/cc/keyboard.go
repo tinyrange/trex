@@ -3,6 +3,7 @@ package cc
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -14,6 +15,13 @@ type ps2byte struct {
 	value byte
 	mouse bool
 }
+
+func (d *driver) AbsolutePointer(ctx context.Context) (bool, error) {
+	var active bool
+	err := d.call(ctx, func() error { active = d.pc.input.active(); return nil })
+	return active, err
+}
+
 type keyboard struct {
 	queue                                        []ps2byte
 	command, output, pending, parameter, scanSet byte
@@ -230,6 +238,30 @@ func (k *keyboard) key(name string, down bool) error {
 }
 func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 	if input.Kind == "pointer" {
+		if math.IsNaN(input.X) || math.IsNaN(input.Y) || math.IsInf(input.X, 0) || math.IsInf(input.Y, 0) || input.Wheel < -127 || input.Wheel > 127 {
+			return &vmm.Error{Code: vmm.ErrorInvalid, Message: "invalid pointer coordinates or wheel delta"}
+		}
+		if input.Absolute {
+			if input.X < 0 || input.X > 32767 || input.Y < 0 || input.Y > 32767 {
+				return &vmm.Error{Code: vmm.ErrorInvalid, Message: "absolute pointer coordinates must be in 0..32767"}
+			}
+			var buttons byte
+			for _, name := range input.Buttons {
+				switch name {
+				case "left":
+					buttons |= 1
+				case "right":
+					buttons |= 2
+				case "middle":
+					buttons |= 4
+				default:
+					return &vmm.Error{Code: vmm.ErrorInvalid, Message: "unknown mouse button"}
+				}
+			}
+			return d.call(ctx, func() error {
+				return d.pc.input.pointer(uint32(input.X*65535/32767), uint32(input.Y*65535/32767), buttons, int32(input.Wheel))
+			})
+		}
 		if input.Absolute || input.Wheel != 0 {
 			return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "cc PS/2 mouse requires relative motion without a wheel"}
 		}

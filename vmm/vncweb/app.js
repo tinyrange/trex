@@ -15,6 +15,7 @@ history.replaceState(null, '', location.pathname);
 let socket, rfb, active = false, buttons = 0;
 let selected, machines = [], creating = false, cadTimer;
 let x = 32768, y = 32768;
+let absolute = false;
 const held = new Set();
 const buttonMask = button => [1, 2, 4][button] || 0;
 
@@ -35,6 +36,9 @@ function stop() {
   rfb?.close();
   socket?.close();
   socket = null;
+  absolute = false;
+  canvas.style.cursor = '';
+  x = y = 32768;
   button.textContent = 'Connect';
   if (document.pointerLockElement === canvas) document.exitPointerLock();
 }
@@ -57,6 +61,9 @@ function connect() {
   button.textContent = 'Disconnect';
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   if (!selected) return;
+  absolute = false;
+  x = y = 32768;
+  canvas.style.cursor = '';
   const ws = new WebSocket(`${scheme}://${location.host}/rfb?token=${encodeURIComponent(token)}&vm=${encodeURIComponent(selected)}`);
   socket = ws;
   ws.binaryType = 'arraybuffer';
@@ -69,6 +76,14 @@ function connect() {
       cad.disabled = false;
       status.textContent = 'Connected';
       client.pointer(x, y, 0);
+    },
+    mode => {
+      absolute = mode;
+      x = y = mode ? 0 : 32768;
+      buttons = 0;
+      canvas.style.cursor = mode ? 'none' : '';
+      if (!mode) client.pointer(x, y, 0);
+      if (mode && document.pointerLockElement === canvas) document.exitPointerLock();
     },
   );
   rfb = client;
@@ -92,6 +107,8 @@ function connect() {
     held.clear();
     buttons = 0;
     active = false;
+    absolute = false;
+    canvas.style.cursor = '';
     cad.disabled = true;
     button.textContent = 'Connect';
     if (status.textContent === 'Connected') status.textContent = 'Disconnected';
@@ -109,11 +126,17 @@ function keyEvent(event, down) {
 }
 
 button.onclick = connect;
+function position(event) {
+  const rect = canvas.getBoundingClientRect();
+  x = Math.max(0, Math.min(canvas.width - 1, Math.floor((event.clientX - rect.left) * canvas.width / rect.width)));
+  y = Math.max(0, Math.min(canvas.height - 1, Math.floor((event.clientY - rect.top) * canvas.height / rect.height)));
+}
 canvas.onmousedown = event => {
   if (!active) return;
   event.preventDefault();
   canvas.focus();
-  if (document.pointerLockElement !== canvas) {
+  if (absolute) position(event);
+  else if (document.pointerLockElement !== canvas) {
     canvas.requestPointerLock();
     return;
   }
@@ -121,18 +144,34 @@ canvas.onmousedown = event => {
   rfb.pointer(x, y, buttons);
 };
 window.addEventListener('mouseup', event => {
-  if (!active) return;
+  if (!active || !(buttons & buttonMask(event.button))) return;
+  if (absolute) position(event);
   buttons &= ~buttonMask(event.button);
   rfb.pointer(x, y, buttons);
 });
 canvas.onmousemove = event => {
-  if (!active || document.pointerLockElement !== canvas) return;
+  if (!active) return;
+  if (absolute) {
+    position(event);
+    rfb.pointer(x, y, buttons);
+    return;
+  }
+  if (document.pointerLockElement !== canvas) return;
   // Accumulate relative motion modulo the RFB coordinate width. The server
   // unwraps each difference before delivering it to the guest's PS/2 mouse.
   x = (x + event.movementX) & 65535;
   y = (y + event.movementY) & 65535;
   rfb.pointer(x, y, buttons);
 };
+canvas.addEventListener('wheel', event => {
+  if (!active || !absolute) return;
+  event.preventDefault();
+  if (absolute) position(event);
+  if (event.deltaY) {
+    rfb.pointer(x, y, buttons | (event.deltaY < 0 ? 8 : 16));
+    rfb.pointer(x, y, buttons);
+  }
+}, {passive: false});
 canvas.oncontextmenu = event => event.preventDefault();
 canvas.onkeydown = event => keyEvent(event, true);
 canvas.onkeyup = event => keyEvent(event, false);

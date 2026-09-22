@@ -192,6 +192,19 @@ func TestBuildMultiPageTreeRoundTrip(t *testing.T) {
 	if len(rows) != 5000 || rows[0][0].Value != int32(1) || rows[4999][0].Value != int32(5000) {
 		t.Fatalf("unexpected rows: count=%d first=%#v last=%#v", len(rows), rows[0], rows[len(rows)-1])
 	}
+	entries, err := database.IndexEntries("ManyRows", "primary", 5000)
+	if err != nil || len(entries) != 5000 {
+		t.Fatalf("index entries=%d err=%v", len(entries), err)
+	}
+	if !bytes.Equal(entries[0].Key, []byte{0x7f, 0x80, 0, 0, 1}) || !bytes.Equal(entries[4999].Key, []byte{0x7f, 0x80, 0, 0x13, 0x88}) {
+		t.Fatalf("index endpoints=%x/%x", entries[0].Key, entries[4999].Key)
+	}
+	if entries, err := database.IndexEntries("ManyRows", "primary", 0); err != nil || len(entries) != 0 {
+		t.Fatalf("zero limit=%v err=%v", entries, err)
+	}
+	if _, err := database.IndexEntries("ManyRows", "primary", -1); err == nil {
+		t.Fatal("accepted negative entry bound")
+	}
 }
 
 func TestOpenWalksNativeCatalogAndTablePages(t *testing.T) {

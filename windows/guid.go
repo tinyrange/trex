@@ -4,7 +4,21 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"go.starlark.net/starlark"
 )
+
+func guidBytesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var value string
+	if err := starlark.UnpackArgs("guid_bytes", args, kwargs, "value", &value); err != nil {
+		return nil, err
+	}
+	guid, ok := parseWindowsGUID(value)
+	if !ok {
+		return nil, fmt.Errorf("guid_bytes: invalid GUID %q", value)
+	}
+	return starlark.Bytes(guid[:]), nil
+}
 
 // windowsGUIDString formats the mixed-endian byte representation used by
 // Windows binary formats as a canonical braced GUID.
