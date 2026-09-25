@@ -18,8 +18,8 @@ func init() {
 			return nil, auto.ErrNoMatch
 		}
 		// Use the same recognizers as archive.installer: embedded Cabinets, nested
-		// InstallShield packages, InstallShield SFX envelopes and Wise overlays.
-		installer, err := OpenInstaller(adapter.File(source), min(installerDefaultMaximumScan, options.MaxExpandedBytes), true, bytecache.New(bytecache.DefaultBytes), 1)
+		// InstallShield packages, SFX envelopes, Wise overlays and NSIS containers.
+		installer, err := openInstaller(adapter.File(source), min(installerDefaultMaximumScan, options.MaxExpandedBytes), true, bytecache.New(bytecache.DefaultBytes), 1, options.MaxExpandedBytes)
 		if errors.Is(err, ErrNoPayload) {
 			return nil, auto.ErrNoMatch
 		}
