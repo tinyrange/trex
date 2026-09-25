@@ -113,7 +113,7 @@ def exception_plugin(kernel = None):
                 invoke(machine, entry["handler"], frame)
             level = entry["outer"]
 
-    def dispatch(machine, code, flags, values, address):
+    def dispatch(machine, code, flags, values, address, resume_stack = None):
         count = min(len(values), 15)
         record = binary.builder(capacity = 80)
         record.u32le(code)
@@ -127,6 +127,11 @@ def exception_plugin(kernel = None):
         record_address = machine.allocate(value = record.bytes(), name = "EXCEPTION_RECORD")
         context_address = machine.allocate(size = 716, name = "CONTEXT")
         write_context(machine, context_address, address)
+        if resume_stack != None:
+            # RaiseException is a stdcall API. Its continuation is after the
+            # call, with its arguments removed, even when an SEH handler
+            # resumes via CONTEXT rather than returning through the hook.
+            machine.write_u32le(context_address + 196, resume_stack)
         pointers = binary.builder(capacity = 8)
         pointers.u32le(record_address)
         pointers.u32le(context_address)
@@ -243,7 +248,7 @@ def exception_plugin(kernel = None):
         values = []
         for index in range(min(count, 15)):
             values.append(_record(event.machine, values_address + index * 4, 4).u32le() if values_address else 0)
-        return dispatch(event.machine, code, flags, values, event.machine.get_register("eip"))
+        return dispatch(event.machine, code, flags, values, event.return_address, resume_stack = event.argument_address + 16)
 
     def hardware_exception(event):
         return dispatch(event.machine, event.code, 0, list(event.information), event.address)

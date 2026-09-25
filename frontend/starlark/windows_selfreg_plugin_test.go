@@ -11,6 +11,120 @@ import (
 	"go.starlark.net/starlark"
 )
 
+func TestLargeVirtualFileBoundedReadAndSeek(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+def check(v):
+    if not v: fail("large file range check failed")
+size = (13 << 30) + 100
+source = binary.extents(size,[(size-4,b"tail")])
+machine = emulator.machine(architecture="x86",code=b"\xc3")
+kernel = kernel32_plugin(files={"C:\\large.dat":source})
+machine.use(kernel)
+def call(name,args):
+    r=machine.call(machine.resolve_export("kernel32.dll",name=name),args=args)
+    check(r.reason == "return")
+    return r.value
+name=machine.allocate(value=b"C:\\large.dat\x00")
+handle=call("CreateFileA",[name,0x80000000,1,0,3,0,0])
+out=machine.allocate(size=16)
+check(call("GetFileSizeEx",[handle,out]) == 1)
+check(machine.read_u64le(out) == size)
+check(call("SetFilePointer",[handle,0xfffffffc,0,2]) == (size-4)&0xffffffff)
+check(call("ReadFile",[handle,out,8,out+8,0]) == 1)
+check(machine.read(out,4) == b"tail" and machine.read_u32le(out+8) == 4)
+check("data" not in kernel.state["paths"]["c:\\large.dat"])
+`)
+}
+
+func TestWriteProcessMemoryRestoresCodeProtection(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+def check(condition):
+    if not condition:
+        fail("WriteProcessMemory check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    machine.use(kernel32_plugin())
+    target = machine.allocate(value=b"\xb8\x01\x00\x00\x00\xc3", writable=False, executable=True)
+    source = machine.allocate(value=b"\xb8\x63\x00\x00\x00\xc3")
+    written = machine.allocate(value=b"\xaa"*(machine.pointer_size+4))
+    write = machine.resolve_export("kernel32.dll",name="WriteProcessMemory")
+    process = (1 << (machine.pointer_size*8))-1
+    result = machine.call(write,args=[process,target,source,6,written])
+    check(result.reason == "return" and result.value == 1)
+    check(machine.read_pointer(written) == 6)
+    check(machine.read(written+machine.pointer_size,4) == b"\xaa"*4)
+    check(machine.call(target).value == 99)
+    previous = machine.protect(target,6,readable=True,writable=False,executable=True)
+    check(all([r.readable and not r.writable and r.executable for r in previous]))
+    machine.write(source,b"\xb8\x02\x00\x00\x00\xc3")
+    result = machine.call(write,args=[123,target,source,6,written])
+    check(result.reason == "return" and result.value == 0)
+    check(machine.call(target).value == 99)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestX86SListPushPop(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+def check(condition):
+    if not condition:
+        fail("SList check failed")
+machine = emulator.machine(architecture="x86",code=b"\xc3")
+machine.use(kernel32_plugin())
+head = machine.allocate(value=b"\xaa"*8,alignment=8)
+first = machine.allocate(size=8,alignment=8)
+second = machine.allocate(size=8,alignment=8)
+initialize = machine.resolve_export("kernel32.dll",name="InitializeSListHead")
+push = machine.resolve_export("kernel32.dll",name="InterlockedPushEntrySList")
+pop = machine.resolve_export("kernel32.dll",name="InterlockedPopEntrySList")
+check(machine.call(initialize,args=[head]).reason == "return")
+check(machine.call(pop,args=[head]).value == 0)
+check(machine.call(push,args=[head,first]).value == 0)
+check(machine.call(push,args=[head,second]).value == first)
+check(machine.read_u16le(head+4) == 2)
+check(machine.read_u16le(head+6) == 2)
+checkpoint = machine.checkpoint()
+check(machine.call(pop,args=[head]).value == second)
+check(machine.call(pop,args=[head]).value == first)
+check(machine.call(pop,args=[head]).value == 0)
+check(machine.read_u16le(head+4) == 0)
+machine.restore(checkpoint)
+check(machine.call(pop,args=[head]).value == second)
+`)
+}
+
+func TestRaiseExceptionContinuationCleansArguments(t *testing.T) {
+	thread, globals, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = starlark.ExecFile(thread, "raise-continuation.star", `
+load("@stdlib//windows/selfreg:exception.star", "exception_plugin")
+# Push a sentinel, four RaiseException arguments, CALL through IAT, return sentinel.
+code = b"\x68\x78\x56\x34\x12\x6a\x00\x6a\x00\x6a\x00\x68\x88\x13\x6d\x40\xff\x15\x00\x00\x00\x00\x58\xc3"
+image = windows.pe32_executable(code,{"entry":0},[{"offset":18,"label":"iat:KERNEL32.dll:RaiseException"}],imports={"KERNEL32.dll":["RaiseException"]})
+machine = emulator.x86(image=image,fs_base=0x7ffb0000)
+handler = machine.allocate(value=b"\x31\xc0\xc2\x10\x00",executable=True)
+frame = machine.allocate(size=16)
+machine.write_u32le(frame,0xffffffff)
+machine.write_u32le(frame+4,handler)
+machine.write_u32le(machine.segment_base("fs"),frame)
+machine.use(exception_plugin())
+result = machine.call(machine.entry)
+def check():
+    if result.reason != "return" or result.value != 0x12345678:
+        fail("RaiseException corrupted continuation: %s %s value=%s" % (result.reason,result.detail,hex(result.value)))
+check()
+`, globals)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testStarlarkStringDict(values map[string]starlark.Value) *starlark.Dict {
 	dict := starlark.NewDict(len(values))
 	for name, value := range values {

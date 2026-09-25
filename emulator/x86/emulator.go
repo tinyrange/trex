@@ -110,6 +110,8 @@ func (i emulatorImport) displayName() string {
 }
 
 type emulatorHook struct {
+	prologue   string // Nonempty for mapped semantic exports; patches take precedence.
+	internal   bool   // Trampoline continuation, not a separately published export.
 	module     string
 	name       string
 	address    uint32
@@ -240,6 +242,7 @@ type emulatorDecodedEntry struct {
 }
 
 type emulatorCPUContext struct {
+	pendingBranch  *emulatorPendingBranch
 	registers      emulatorRegisterFile
 	xmm            [32][16]byte
 	eip            uint32
@@ -252,12 +255,17 @@ type emulatorCPUContext struct {
 	overflow       bool
 	direction      bool
 	x87ControlWord uint16
+	mxcsr          uint32
 	x87StatusWord  uint16
 	x87Stack       [8]float64
 	x87Top         int
 	x87Depth       int
 	exceptionHead  uint32
 }
+
+// A semantic call suspended after target evaluation must retry the same target,
+// even when the hook supplies a diagnostic EAX value in its stop result.
+type emulatorPendingBranch struct{ site, target uint32 }
 
 type emulatorExecution struct {
 	machine   *emulatorX86
@@ -478,6 +486,7 @@ type emulatorX86 struct {
 	overflow            bool
 	direction           bool
 	x87ControlWord      uint16
+	mxcsr               uint32
 	x87StatusWord       uint16
 	x87Stack            [8]float64
 	x87Top              int
@@ -504,6 +513,7 @@ type emulatorX86 struct {
 	codeWatches         map[uint64]*emulatorCodeWatch
 	nextCodeWatch       uint64
 	pendingTransfer     bool
+	pendingBranch       *emulatorPendingBranch
 	pendingStop         string
 	pendingStopDetail   string
 	hookDepth           int
@@ -606,6 +616,7 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 		stackSlots:          make(map[int]bool),
 		executions:          make(map[*emulatorExecution]bool),
 		x87ControlWord:      0x037f,
+		mxcsr:               0x1f80,
 		trace:               trace,
 		traceLimit:          traceLimit,
 		profile:             profile,
@@ -1807,6 +1818,17 @@ func (m *emulatorX86) loadModuleBuiltin(_ *starlark.Thread, _ *starlark.Builtin,
 	return emulatorModuleValue(module), nil
 }
 
+// activeHook preserves explicit instruction hooks while allowing guest patches
+// to replace a materialized semantic export's entry code.
+func (m *emulatorX86) activeHook(address uint32) (emulatorHook, bool) {
+	hook, ok := m.hooks[address]
+	if !ok || hook.prologue == "" {
+		return hook, ok
+	}
+	code, err := m.readMemory(address, len(hook.prologue), 'x')
+	return hook, err == nil && string(code) == hook.prologue
+}
+
 func (m *emulatorX86) provideExportsBuiltin(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	return exportbatch.Provide(args, kwargs, func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		return m.provideExportBuiltin(thread, builtin, args, kwargs)
@@ -1886,6 +1908,20 @@ func (m *emulatorX86) provideExportBuiltin(_ *starlark.Thread, _ *starlark.Built
 		}
 		m.nextVirtualExport += uint32(size)
 	} else {
+		if uint64(target)+16 > math.MaxUint32 {
+			return nil, fmt.Errorf("provide_export: virtual export address space exhausted")
+		}
+		symbol := name
+		if symbol == "" {
+			symbol = fmt.Sprintf("#%d", ordinal)
+		}
+		// Five independently relocatable bytes support ordinary detours. The
+		// following trap remains callable by a copied-prologue trampoline.
+		code := bytes.Repeat([]byte{0xcc}, 16)
+		copy(code, []byte{0x90, 0x90, 0x90, 0x90, 0x90})
+		if err := m.addMapping(canonicalName+"!"+symbol, target, code, true, false, true); err != nil {
+			return nil, fmt.Errorf("provide_export: %w", err)
+		}
 		m.nextVirtualExport += 16
 	}
 	export := emulatorModuleExport{address: target}
@@ -1897,7 +1933,12 @@ func (m *emulatorX86) provideExportBuiltin(_ *starlark.Thread, _ *starlark.Built
 		hookName = fmt.Sprintf("#%d", ordinal)
 	}
 	if hasCallback {
-		m.hooks[target] = emulatorHook{module: canonicalName, name: hookName, address: target, argc: argc, convention: convention, callback: callback}
+		hook := emulatorHook{module: canonicalName, name: hookName, address: target, argc: argc, convention: convention, callback: callback, prologue: "\x90\x90\x90\x90\x90"}
+		m.hooks[target] = hook
+		hook.address = target + 5
+		hook.internal = true
+		hook.prologue = "\xcc"
+		m.hooks[target+5] = hook
 	}
 	if err := m.relinkProvidedExport(canonicalName, name, uint32(ordinal), target); err != nil {
 		return nil, fmt.Errorf("provide_export: %w", err)
@@ -2009,7 +2050,7 @@ func (m *emulatorX86) runBuiltin(thread *starlark.Thread, _ *starlark.Builtin, a
 	// Explicit entry overrides retain their debugging meaning and execute from
 	// the requested instruction verbatim.
 	if entryValue == starlark.None {
-		if hook, ok := m.hooks[m.eip]; ok {
+		if hook, ok := m.activeHook(m.eip); ok {
 			stop, detail, err := m.invokeTailHook(thread, hook)
 			if err != nil {
 				return nil, err
@@ -2069,6 +2110,7 @@ func (m *emulatorX86) stackSlot() (int, uint32, error) {
 
 func (m *emulatorX86) captureContext() (emulatorCPUContext, error) {
 	context := emulatorCPUContext{
+		pendingBranch:  m.pendingBranch,
 		registers:      m.registers,
 		xmm:            m.xmm,
 		eip:            m.eip,
@@ -2081,6 +2123,7 @@ func (m *emulatorX86) captureContext() (emulatorCPUContext, error) {
 		overflow:       m.overflow,
 		direction:      m.direction,
 		x87ControlWord: m.x87ControlWord,
+		mxcsr:          m.mxcsr,
 		x87StatusWord:  m.x87StatusWord,
 		x87Stack:       m.x87Stack,
 		x87Top:         m.x87Top,
@@ -2098,6 +2141,7 @@ func (m *emulatorX86) captureContext() (emulatorCPUContext, error) {
 }
 
 func (m *emulatorX86) restoreContext(context emulatorCPUContext) error {
+	m.pendingBranch = context.pendingBranch
 	m.registers, m.xmm = context.registers, context.xmm
 	m.eip = context.eip
 	m.callDepth = context.callDepth
@@ -2105,6 +2149,7 @@ func (m *emulatorX86) restoreContext(context emulatorCPUContext) error {
 	m.zero, m.carry, m.parity = context.zero, context.carry, context.parity
 	m.sign, m.overflow, m.direction = context.sign, context.overflow, context.direction
 	m.x87ControlWord, m.x87StatusWord = context.x87ControlWord, context.x87StatusWord
+	m.mxcsr = context.mxcsr
 	m.x87Stack, m.x87Top, m.x87Depth = context.x87Stack, context.x87Top, context.x87Depth
 	if fsBase := m.segmentBases[x86asm.FS]; fsBase != 0 {
 		if err := m.writeUint32(fsBase, context.exceptionHead); err != nil {
@@ -2157,7 +2202,7 @@ func (m *emulatorX86) spawnBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args
 		machine:   m,
 		stackSlot: slot,
 		context: emulatorCPUContext{
-			registers: registers, eip: uint32(address), x87ControlWord: 0x037f,
+			registers: registers, eip: uint32(address), x87ControlWord: 0x037f, mxcsr: 0x1f80,
 			exceptionHead: math.MaxUint32,
 		},
 	}
@@ -2192,6 +2237,7 @@ func (m *emulatorX86) callBuiltinNamed(thread *starlark.Thread, builtinName stri
 		eip, callDepth, callFrames := m.eip, m.callDepth, m.callFrames
 		zero, carry, parity, sign, overflow, direction := m.zero, m.carry, m.parity, m.sign, m.overflow, m.direction
 		x87ControlWord, x87StatusWord, x87Stack, x87Top, x87Depth := m.x87ControlWord, m.x87StatusWord, m.x87Stack, m.x87Top, m.x87Depth
+		mxcsr := m.mxcsr
 		traceEntries, traceCursor := m.traceEntries, m.traceCursor
 		var exceptionHead uint32
 		fsBase := m.segmentBases[x86asm.FS]
@@ -2230,6 +2276,7 @@ func (m *emulatorX86) callBuiltinNamed(thread *starlark.Thread, builtinName stri
 		m.eip, m.callDepth, m.callFrames = eip, callDepth, callFrames
 		m.zero, m.carry, m.parity, m.sign, m.overflow, m.direction = zero, carry, parity, sign, overflow, direction
 		m.x87ControlWord, m.x87StatusWord, m.x87Stack, m.x87Top, m.x87Depth = x87ControlWord, x87StatusWord, x87Stack, x87Top, x87Depth
+		m.mxcsr = mxcsr
 		m.traceEntries = traceEntries
 		m.traceCursor = traceCursor
 		return result, err
@@ -2246,6 +2293,7 @@ func (m *emulatorX86) callAddressWithRegisters(thread *starlark.Thread, address 
 }
 
 func (m *emulatorX86) callAddressWithRegistersAt(thread *starlark.Thread, address uint32, values []uint32, initial map[x86asm.Reg]uint32, stackTop uint32) (starlark.Value, error) {
+	m.pendingBranch = nil
 	m.registers = emulatorRegisterFile{}
 	m.xmm = [32][16]byte{}
 	m.zero, m.carry, m.sign, m.overflow, m.direction = false, false, false, false, false
@@ -2265,7 +2313,7 @@ func (m *emulatorX86) callAddressWithRegistersAt(thread *starlark.Thread, addres
 		return nil, err
 	}
 	m.eip = address
-	if hook, ok := m.hooks[address]; ok {
+	if hook, ok := m.activeHook(address); ok {
 		stop, detail, err := m.invokeTailHook(thread, hook)
 		if err != nil {
 			return nil, err
@@ -4060,6 +4108,20 @@ func (m *emulatorX86) run(thread *starlark.Thread) (starlark.Value, error) {
 		if m.eip == 0 {
 			return m.result("return", steps, ""), nil
 		}
+		// A detour trampoline can fall through its copied prologue into the
+		// semantic body. Observe mapped bytes before intercepting that body.
+		if hook, ok := m.activeHook(m.eip); ok && hook.prologue != "" {
+			stop, detail, err := m.invokeTailHook(thread, hook)
+			if err != nil {
+				return nil, err
+			}
+			steps++
+			m.timestampCounter++
+			if stop != "" {
+				return m.result(stop, steps, detail), nil
+			}
+			continue
+		}
 		address := m.eip
 		m.currentInstruction = address
 		m.sampleProfile(address)
@@ -4283,6 +4345,19 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 			m.registers[x86asm.ECX] = 0
 			m.registers[x86asm.EDX] = 0
 		}
+	case x86asm.STMXCSR:
+		if err := m.setOperand(instruction.Args[0], 4, m.mxcsr); err != nil {
+			return "", "", err
+		}
+	case x86asm.LDMXCSR:
+		value, err := m.operandValueWidth(instruction.Args[0], next, 4)
+		if err != nil {
+			return "", "", err
+		}
+		if value&0xffff0000 != 0 {
+			return "", "", fmt.Errorf("LDMXCSR sets reserved bits")
+		}
+		m.mxcsr = value
 	case x86asm.FNSTCW:
 		if err := m.setOperand(instruction.Args[0], 2, uint32(m.x87ControlWord)); err != nil {
 			return "", "", err
@@ -4322,6 +4397,22 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		if err := m.x87Push(value); err != nil {
 			return "", "", err
 		}
+	case x86asm.FXCH:
+		index, err := x87RegisterIndex(instruction.Args[0])
+		if err != nil {
+			return "", "", err
+		}
+		left, err := m.x87Value(0)
+		if err != nil {
+			return "", "", err
+		}
+		right, err := m.x87Value(index)
+		if err != nil {
+			return "", "", err
+		}
+		m.x87Stack[m.x87Top] = right
+		m.x87Stack[(m.x87Top+index)&7] = left
+		m.x87StatusWord &^= 0x200 // C1 is cleared on a successful exchange.
 	case x86asm.FADD, x86asm.FMUL, x86asm.FSUB, x86asm.FSUBR:
 		destination := 0
 		source := instruction.Args[0]
@@ -4398,6 +4489,38 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		}
 		m.x87Stack[(m.x87Top+1)%len(m.x87Stack)] = y * math.Log2(x)
 		m.x87Pop()
+	case x86asm.FSQRT:
+		value, err := m.x87Value(0)
+		if err != nil {
+			return "", "", err
+		}
+		m.x87Stack[m.x87Top] = math.Sqrt(value)
+	case x86asm.FCOS, x86asm.FSIN, x86asm.FPTAN:
+		value, err := m.x87Value(0)
+		if err != nil {
+			return "", "", err
+		}
+		if math.Abs(value) >= 0x1p63 && !math.IsInf(value, 0) {
+			m.x87StatusWord |= 0x400 // C2: argument needs range reduction.
+			break
+		}
+		if instruction.Op != x86asm.FPTAN {
+			if instruction.Op == x86asm.FCOS {
+				m.x87Stack[m.x87Top] = math.Cos(value)
+			} else {
+				m.x87Stack[m.x87Top] = math.Sin(value)
+			}
+			m.x87StatusWord &^= 0x400
+			break
+		}
+		if m.x87Depth == 8 {
+			return "", "", fmt.Errorf("x87 stack overflow")
+		}
+		m.x87Stack[m.x87Top] = math.Tan(value)
+		m.x87StatusWord &^= 0x400
+		if err := m.x87Push(1); err != nil {
+			return "", "", err
+		}
 	case x86asm.FCHS:
 		value, err := m.x87Value(0)
 		if err != nil {
@@ -4617,7 +4740,7 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		if err := m.setVector128(instruction.Args[0], output); err != nil {
 			return "", "", err
 		}
-	case x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.PUNPCKLDQ, x86asm.PUNPCKLQDQ,
+	case x86asm.UNPCKLPS, x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.PUNPCKLDQ, x86asm.PUNPCKLQDQ,
 		x86asm.PUNPCKHBW, x86asm.PUNPCKHWD, x86asm.PUNPCKHDQ, x86asm.PUNPCKHQDQ:
 		left, err := m.vector128Value(instruction.Args[0])
 		if err != nil {
@@ -4631,7 +4754,7 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		switch instruction.Op {
 		case x86asm.PUNPCKLWD, x86asm.PUNPCKHWD:
 			width = 2
-		case x86asm.PUNPCKLDQ, x86asm.PUNPCKHDQ:
+		case x86asm.UNPCKLPS, x86asm.PUNPCKLDQ, x86asm.PUNPCKHDQ:
 			width = 4
 		case x86asm.PUNPCKLQDQ, x86asm.PUNPCKHQDQ:
 			width = 8
@@ -4934,7 +5057,7 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		if err := m.setVectorScalar(instruction.Args[0], data[:], 8, false); err != nil {
 			return "", "", err
 		}
-	case x86asm.ADDSS, x86asm.SUBSS, x86asm.MULSS, x86asm.DIVSS, x86asm.MINSS, x86asm.MAXSS:
+	case x86asm.SQRTSS, x86asm.ADDSS, x86asm.SUBSS, x86asm.MULSS, x86asm.DIVSS, x86asm.MINSS, x86asm.MAXSS:
 		leftBytes, _, err := m.vectorScalarValue(instruction.Args[0], 4)
 		if err != nil {
 			return "", "", err
@@ -4947,6 +5070,8 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		right := math.Float32frombits(binary.LittleEndian.Uint32(rightBytes))
 		result := float32(0)
 		switch instruction.Op {
+		case x86asm.SQRTSS:
+			result = float32(math.Sqrt(float64(right)))
 		case x86asm.ADDSS:
 			result = left + right
 		case x86asm.SUBSS:
@@ -5242,13 +5367,26 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		if err := m.push(m.flagsValue()); err != nil {
 			return "", "", err
 		}
-	case x86asm.PUSHAD:
+	case x86asm.PUSHF:
+		esp := m.registers[x86asm.ESP] - 2
+		data := []byte{byte(m.flagsValue()), byte(m.flagsValue() >> 8)}
+		if err := m.writeMemory(esp, data); err != nil {
+			return "", "", err
+		}
+		m.registers[x86asm.ESP] = esp
+	case x86asm.PUSHA, x86asm.PUSHAD:
 		originalESP := m.registers[x86asm.ESP]
 		for _, value := range []uint32{
 			m.registers[x86asm.EAX], m.registers[x86asm.ECX], m.registers[x86asm.EDX], m.registers[x86asm.EBX],
 			originalESP, m.registers[x86asm.EBP], m.registers[x86asm.ESI], m.registers[x86asm.EDI],
 		} {
-			if err := m.push(value); err != nil {
+			if instruction.Op == x86asm.PUSHA {
+				esp := m.registers[x86asm.ESP] - 2
+				if err := m.writeMemory(esp, []byte{byte(value), byte(value >> 8)}); err != nil {
+					return "", "", err
+				}
+				m.registers[x86asm.ESP] = esp
+			} else if err := m.push(value); err != nil {
 				return "", "", err
 			}
 		}
@@ -5266,13 +5404,31 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 			return "", "", err
 		}
 		m.setFlagsValue(flags)
-	case x86asm.POPAD:
+	case x86asm.POPF:
+		data, err := m.readMemory(m.registers[x86asm.ESP], 2, 'r')
+		if err != nil {
+			return "", "", err
+		}
+		m.setFlagsValue(m.flagsValue()&0xffff0000 | uint32(binary.LittleEndian.Uint16(data)))
+		m.registers[x86asm.ESP] += 2
+	case x86asm.POPA, x86asm.POPAD:
 		for index, register := range []x86asm.Reg{
 			x86asm.EDI, x86asm.ESI, x86asm.EBP, 0, x86asm.EBX, x86asm.EDX, x86asm.ECX, x86asm.EAX,
 		} {
-			value, err := m.pop()
-			if err != nil {
-				return "", "", err
+			var value uint32
+			if instruction.Op == x86asm.POPA {
+				data, err := m.readMemory(m.registers[x86asm.ESP], 2, 'r')
+				if err != nil {
+					return "", "", err
+				}
+				value = m.registers[register]&0xffff0000 | uint32(binary.LittleEndian.Uint16(data))
+				m.registers[x86asm.ESP] += 2
+			} else {
+				var err error
+				value, err = m.pop()
+				if err != nil {
+					return "", "", err
+				}
 			}
 			if index != 3 {
 				m.registers[register] = value
@@ -5688,13 +5844,23 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		}
 	case x86asm.JMP:
 		target, err := m.branchTarget(instruction.Args[0], next)
+		if pending := m.pendingBranch; pending != nil && pending.site == next-uint32(instruction.Len) {
+			target, err = pending.target, nil
+		}
+		m.pendingBranch = nil
 		if err != nil {
 			return "", "", err
 		}
-		if hook, ok := m.hooks[target]; ok {
-			return m.invokeTailHook(thread, hook)
+		if hook, ok := m.activeHook(target); ok {
+			stop, detail, err := m.invokeTailHook(thread, hook)
+			if stop != "" {
+				m.eip = next - uint32(instruction.Len)
+				m.pendingBranch = &emulatorPendingBranch{m.eip, target}
+			}
+			return stop, detail, err
 		}
 		if imported, ok := m.imports[target]; ok {
+			m.eip = next - uint32(instruction.Len)
 			return "plugin", fmt.Sprintf("unhandled import %s!%s at 0x%08x", imported.module, imported.displayName(), target), nil
 		}
 		m.eip = target
@@ -5820,20 +5986,26 @@ func (m *emulatorX86) execute(thread *starlark.Thread, instruction *x86asm.Inst,
 		}
 	case x86asm.CALL:
 		target, err := m.branchTarget(instruction.Args[0], next)
+		if pending := m.pendingBranch; pending != nil && pending.site == next-uint32(instruction.Len) {
+			target, err = pending.target, nil
+		}
+		m.pendingBranch = nil
 		if err != nil {
 			return "", "", err
 		}
 		m.recordCallTrace(next-uint32(instruction.Len), target)
-		if hook, ok := m.hooks[target]; ok {
+		if hook, ok := m.activeHook(target); ok {
 			stop, detail, err := m.invokeHook(thread, hook)
 			if stop != "" {
 				// A stopped API call has not returned. Re-execute the call when
 				// this context resumes so the hook can observe the wake condition.
 				m.eip = next - uint32(instruction.Len)
+				m.pendingBranch = &emulatorPendingBranch{m.eip, target}
 			}
 			return stop, detail, err
 		}
 		if imported, ok := m.imports[target]; ok {
+			m.eip = next - uint32(instruction.Len)
 			return "plugin", fmt.Sprintf("unhandled import %s!%s at 0x%08x", imported.module, imported.displayName(), target), nil
 		}
 		if err := m.push(next); err != nil {
@@ -6898,6 +7070,11 @@ func (m *emulatorX86) allocateBuiltin(_ *starlark.Thread, _ *starlark.Builtin, a
 			var available bool
 			address, available = m.availableAllocation(m.nextAllocation, uint32(size), uint32(alignment))
 			if !available {
+				// The preferred plugin arena is only a starting point. Large
+				// guest reservations can use free user address space below it.
+				address, available = m.availableAllocation(0x10000, uint32(size), uint32(alignment))
+			}
+			if !available {
 				return nil, fmt.Errorf("allocate: plugin address space exhausted")
 			}
 			m.nextAllocation = address + uint32(size)
@@ -7713,7 +7890,7 @@ func (e *emulatorExecution) runBuiltin(thread *starlark.Thread, _ *starlark.Buil
 	traceEntries, traceCursor := e.machine.traceEntries, e.machine.traceCursor
 	var result starlark.Value
 	var runErr error
-	if hook, ok := e.machine.hooks[e.machine.eip]; ok {
+	if hook, ok := e.machine.activeHook(e.machine.eip); ok {
 		stop, detail, hookErr := e.machine.invokeTailHook(thread, hook)
 		if hookErr != nil {
 			runErr = hookErr
