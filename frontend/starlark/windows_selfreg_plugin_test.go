@@ -122,6 +122,292 @@ check(call("DeleteDC",[dc])==1 and call("DeleteDC",[dc])==0)
 `)
 }
 
+func TestFullPathNameWideCapacityAndFilePart(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+def check(condition):
+    if not condition:
+        fail("GetFullPathNameW check failed")
+machine = emulator.machine(architecture="x86",code=b"\xc3")
+machine.use(kernel32_plugin(module_path="C:\\Games\\GW2\\Gw2.exe"))
+source = machine.allocate(value=binary.encode("..\\GW2\\Gw2.dat",encoding="utf16le",nul=True))
+output = machine.allocate(value=b"\xaa"*128)
+part = machine.allocate(size=4)
+function = machine.resolve_export("kernel32.dll",name="GetFullPathNameW")
+small = machine.call(function,args=[source,1,output,part])
+check(small.reason == "return" and small.value == 21)
+check(machine.read(output,4) == b"\xaa"*4)
+result = machine.call(function,args=[source,64,output,part])
+check(result.reason == "return" and result.value == 20)
+check(machine.read_cstring(output,encoding="utf16le") == "C:\\Games\\GW2\\Gw2.dat")
+check(machine.read_cstring(machine.read_pointer(part),encoding="utf16le") == "Gw2.dat")
+`)
+}
+
+func TestCompletionPortPacketsAndFileReads(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+def check(condition):
+    if not condition:
+        fail("completion port check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    machine.use(kernel32_plugin(files={"C:\\input.bin":b"payload"}))
+    def call(name,args):
+        result = machine.call(machine.resolve_export("kernel32.dll",name=name),args=args)
+        check(result.reason == "return")
+        return result.value
+    port = call("CreateIoCompletionPort",[(1 << (machine.pointer_size*8))-1,0,0,0])
+    check(port != 0)
+    output = machine.allocate(size=32)
+    key = 0x12345678 if architecture == "x86" else 0x123456789abcdef0
+    check(call("PostQueuedCompletionStatus",[port,17,key,0x9876]) == 1)
+    checkpoint = machine.checkpoint() if architecture == "x86" else None
+    check(call("GetQueuedCompletionStatus",[port,output,output+8,output+16,0]) == 1)
+    check(machine.read_u32le(output) == 17 and machine.read_pointer(output+8) == key and machine.read_pointer(output+16) == 0x9876)
+    check(call("GetQueuedCompletionStatus",[port,output,output+8,output+16,0]) == 0)
+    check(machine.read_pointer(output+16) == 0 and call("GetLastError",[]) == 258)
+    if checkpoint != None:
+        machine.restore(checkpoint)
+        check(call("GetQueuedCompletionStatus",[port,output,output+8,output+16,0]) == 1)
+    path = machine.allocate(value=b"C:\\input.bin\x00")
+    file = call("CreateFileA",[path,0x80000000,1,0,3,0x40000000,0])
+    check(call("CreateIoCompletionPort",[file,port,key,0]) == port)
+    overlapped = machine.allocate(size=32)
+    data = machine.allocate(size=7)
+    check(call("ReadFile",[file,data,7,0,overlapped]) == 1)
+    check(machine.read(data,7) == b"payload")
+    check(call("GetQueuedCompletionStatus",[port,output,output+8,output+16,0]) == 1)
+    check(machine.read_u32le(output) == 7 and machine.read_pointer(output+8) == key and machine.read_pointer(output+16) == overlapped)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestMemorySocketSetupAndCompletionPort(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "winsock_plugin")
+def check(condition):
+    if not condition:
+        fail("memory socket setup check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    kernel = kernel32_plugin()
+    network = winsock_plugin(kernel=kernel)
+    machine.use([kernel,network])
+    def call(ordinal,args):
+        result = machine.call(machine.resolve_export("ws2_32.dll",ordinal=ordinal),args=args)
+        check(result.reason == "return")
+        return result.value
+    socket = call(23,[2,1,6])
+    other = call(23,[2,1,6])
+    value = machine.allocate(value=b"\x01\x00\x00\x00")
+    check(call(10,[socket,0x8004667e,value]) == 0)
+    check(network.state["sockets"][socket]["nonblocking"])
+    check(call(21,[socket,0xffff,0x80,value,4]) == 0)
+    check(network.state["sockets"][socket]["linger"] == [1,0])
+    check(call(21,[socket,0xffff,0x80,value,3]) == 0xffffffff)
+    check(call(111,[]) == 10014)
+    address = machine.allocate(size=16)
+    machine.write_u16le(address,2)
+    check(call(2,[socket,address,16]) == 0)
+    check(call(2,[other,address,16]) == 0)
+    local = network.state["sockets"][socket]["local_address"]
+    check(local[2:4] != b"\x00\x00")
+    check(local != network.state["sockets"][other]["local_address"])
+    check(call(2,[socket,address,16]) == 0xffffffff)
+    check(call(111,[]) == 10022)
+    create = machine.resolve_export("kernel32.dll",name="CreateIoCompletionPort")
+    result = machine.call(create,args=[socket,0,123,0])
+    check(result.reason == "return" and result.value != 0)
+    check(network.state["sockets"][socket]["completion_key"] == 123)
+    check(machine.call(create,args=[socket,result.value,456,0]).value == 0)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestConnectExMemoryTransportAndRefusal(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "winsock_plugin")
+def check(condition):
+    if not condition:
+        fail("ConnectEx check failed")
+def exercise(architecture,accept):
+    machine = emulator.machine(architecture=architecture,code=b"\xc3")
+    kernel = kernel32_plugin()
+    peers = []
+    def connect(ip,port,server):
+        check(ip == b"\x7f\x00\x00\x01" and port == 80)
+        peers.append(server)
+        return True
+    network = winsock_plugin(kernel=kernel,connect=connect if accept else None)
+    machine.use([kernel,network])
+    def call(ordinal,args):
+        result = machine.call(machine.resolve_export("ws2_32.dll",ordinal=ordinal),args=args)
+        check(result.reason == "return")
+        return result.value
+    socket = call(23,[2,1,6])
+    address = machine.allocate(value=b"\x02\x00\x00\x50\x7f\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00")
+    check(call(2,[socket,address,16]) == 0)
+    create = machine.resolve_export("kernel32.dll",name="CreateIoCompletionPort")
+    port = machine.call(create,args=[socket,0,123,0]).value
+    output = machine.allocate(size=64)
+    guid = machine.allocate(value=b"\xb9\x07\xa2\x25\xf3\xdd\x60\x46\x8e\xe9\x76\xe5\x8c\x74\x06\x3e")
+    ioctl = machine.resolve_export("ws2_32.dll",name="WSAIoctl")
+    check(machine.call(ioctl,args=[socket,0xc8000006,guid,16,output,machine.pointer_size,output+8,0,0]).value == 0)
+    check(machine.read_u32le(output+8) == machine.pointer_size)
+    function = machine.read_pointer(output)
+    data = machine.allocate(value=b"request")
+    overlapped = machine.allocate(size=32)
+    result = machine.call(function,args=[socket,address,16,data,7,output+8,overlapped])
+    check(result.reason == "return" and result.value == 0)
+    if not accept:
+        check(call(111,[]) == 10061 and len(peers) == 0)
+        check(network.state["sockets"][socket]["channel"] == None)
+        return
+    check(call(111,[]) == 997)
+    check(machine.call(machine.resolve_export("kernel32.dll",name="GetLastError")).value == 997)
+    check(peers[0].read_available() == b"request")
+    check(machine.read_u32le(output+8) == 7)
+    dequeue = machine.resolve_export("kernel32.dll",name="GetQueuedCompletionStatus")
+    check(machine.call(dequeue,args=[port,output+16,output+24,output+32,0]).value == 1)
+    check(machine.read_u32le(output+16) == 7)
+    check(machine.read_pointer(output+24) == 123 and machine.read_pointer(output+32) == overlapped)
+    check(call(19,[socket,data,7,0]) == 7)
+    check(peers[0].read_available() == b"request")
+    read = machine.resolve_export("kernel32.dll",name="ReadFile")
+    buffer = machine.allocate(size=16)
+    check(machine.call(read,args=[socket,buffer,16,0,overlapped]).value == 0)
+    check(kernel.state["last_error"] == 997)
+    check(machine.call(dequeue,args=[port,output+16,output+24,output+32,0]).value == 0)
+    peers[0].write(b"reply")
+    check(machine.call(dequeue,args=[port,output+16,output+24,output+32,0]).value == 1)
+    check(machine.read(buffer,5) == b"reply" and machine.read_u32le(output+16) == 5)
+    check(machine.call(read,args=[socket,buffer,16,0,overlapped]).value == 0)
+    check(call(3,[socket]) == 0)
+    check(machine.call(dequeue,args=[port,output+16,output+24,output+32,0]).value == 0)
+    check(kernel.state["last_error"] == 995)
+    check(machine.read_pointer(output+32) == overlapped)
+    check(machine.read_u32le(overlapped) == 0xc0000120)
+    check(peers[0].read_available() == b"")
+    peers[0].close()
+exercise("x86",True)
+exercise("amd64",True)
+exercise("x86",False)
+`)
+}
+
+func TestMemoryChannelCooperativeWrites(t *testing.T) {
+	architectureScript(t, `
+client,server = channel.memory_pair(maximum=4)
+def check(condition):
+    if not condition:
+        fail("cooperative channel write failed")
+check(client.write_available(b"abcd") == 4 and client.write_available(b"e") == None)
+check(server.read_available() == b"abcd" and client.write_available(b"e") == 1)
+server.close()
+check(client.write_available(b"f") == -1)
+client.close()
+`)
+}
+
+func TestAsyncDNSCompletionDispatchesToWindow(t *testing.T) {
+	thread, globals, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	globals["image"] = &starfile.Bytes{Name: "dns-client", Data: []byte(syntheticRegistryClientPE(t))}
+	_, err = starlark.ExecFile(thread, "async-dns.star", `
+load("@stdlib//windows/selfreg:win32.star", "user32_plugin", "winsock_plugin")
+def check(condition):
+    if not condition:
+        fail("asynchronous DNS completion check failed")
+machine = emulator.x86(code=b"\xc3")
+ui = user32_plugin(image)
+network = winsock_plugin(hosts={"asset.test":[b"\x7f\x00\x00\x01"]},user_interface=ui)
+machine.use([ui,network])
+procedure = machine.allocate(value=b"\x8b\x44\x24\x08\xc2\x10\x00",executable=True)
+ui.state["classes"]["fixture"] = {"atom":1,"procedure":procedure}
+ui.state["windows"][0xe000] = {"class":"fixture","longs":{}}
+name = machine.allocate(value=b"ASSET.test.\x00")
+output = machine.allocate(size=1024)
+dns = machine.resolve_export("ws2_32.dll",ordinal=103)
+task = machine.call(dns,args=[0xe000,0x8001,name,output,1024])
+check(task.reason == "return" and task.value != 0)
+check(machine.read_cstring(machine.read_pointer(output)) == "ASSET.test.")
+check(machine.read_u16le(output+8) == 2 and machine.read_u16le(output+10) == 4)
+addresses = machine.read_pointer(output+12)
+check(machine.read(machine.read_pointer(addresses),4) == b"\x7f\x00\x00\x01")
+message = machine.allocate(size=28)
+peek = machine.resolve_export("user32.dll",name="PeekMessageW")
+check(machine.call(peek,args=[message,0,0,0,1]).value == 1)
+check(machine.read_u32le(message+8) == task.value and machine.read_u32le(message+12) >> 16 == 0)
+dispatch = machine.resolve_export("user32.dll",name="DispatchMessageW")
+result = machine.call(dispatch,args=[message])
+check(result.reason == "return" and result.value == 0x8001)
+machine.call(dns,args=[0xe000,0x8001,name,output,1])
+check(ui.state["messages"][-1]["lparam"] >> 16 == 10055)
+`, globals)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkerWaitDoesNotRecursivelyAdvanceOtherThreads(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+def check(condition):
+    if not condition:
+        fail("cooperative worker wait check failed")
+machine = emulator.x86(code=b"\xc3")
+kernel = kernel32_plugin()
+machine.use(kernel)
+event = machine.call(machine.resolve_export("kernel32.dll",name="CreateEventW"),args=[0,1,0,0]).value
+wait = machine.resolve_export("kernel32.dll",name="WaitForSingleObject")
+code = binary.builder()
+code.append(b"\x6a\x32\x68")
+code.u32le(event)
+code.append(b"\xb8")
+code.u32le(wait)
+code.append(b"\xff\xd0\xeb\xf0")
+entry = machine.allocate(value=code.bytes(),executable=True)
+create = machine.resolve_export("kernel32.dll",name="CreateThread")
+machine.call(create,args=[0,0,entry,0,0,0])
+machine.call(create,args=[0,0,entry,0,0,0])
+check(kernel.state["tick_count"] == 0)
+check(len(kernel.state["threads"]) == 2)
+check(all([t["state"] == "waiting" and t["wait"]["deadline"] == 50 for t in kernel.state["threads"]]))
+`)
+}
+
+func TestMemoryChannelsRestoreWithEmulatorCheckpoint(t *testing.T) {
+	architectureScript(t, `
+def check(condition):
+    if not condition:
+        fail("channel checkpoint check failed")
+def install(machine):
+    pass
+machine = emulator.x86(code=b"\xc3")
+client, server = channel.memory_pair(maximum=16)
+state = {"client":client,"server":server}
+machine.use(emulator.plugin(install,state=state))
+check(server.read_available() == None)
+client.write(b"request")
+checkpoint = machine.checkpoint()
+check(server.read_available() == b"request")
+server.write(b"reply")
+server.close()
+check(client.read_available() == b"reply")
+check(client.read_available() == b"")
+machine.restore(checkpoint)
+check(server.read_available() == b"request")
+check(client.read_available() == None)
+server.close()
+check(client.read_available() == b"")
+`)
+}
+
 func TestLargeVirtualFileBoundedReadAndSeek(t *testing.T) {
 	architectureScript(t, `
 load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")

@@ -302,12 +302,14 @@ type emulatorCheckpointExecution struct {
 // those containers, so replacing them would leave the callbacks attached to
 // state from after the checkpoint.
 type emulatorCheckpoint struct {
-	owner      *emulatorX86
-	machine    *emulatorX86
-	dicts      []emulatorCheckpointDict
-	lists      []emulatorCheckpointList
-	sets       []emulatorCheckpointSet
-	executions []emulatorCheckpointExecution
+	resources    []func() error
+	captureError error
+	owner        *emulatorX86
+	machine      *emulatorX86
+	dicts        []emulatorCheckpointDict
+	lists        []emulatorCheckpointList
+	sets         []emulatorCheckpointSet
+	executions   []emulatorCheckpointExecution
 }
 
 func (c *emulatorCheckpoint) String() string {
@@ -8007,6 +8009,13 @@ func (c *emulatorCheckpoint) capture(value starlark.Value, seenDicts map[*starla
 		return
 	}
 	switch value := value.(type) {
+	case interface{ CaptureCheckpoint() (func() error, error) }:
+		restore, err := value.CaptureCheckpoint()
+		if err != nil {
+			c.captureError = err
+		} else {
+			c.resources = append(c.resources, restore)
+		}
 	case *starlark.Dict:
 		if seenDicts[value] {
 			return
@@ -8072,6 +8081,11 @@ func (c *emulatorCheckpoint) capture(value starlark.Value, seenDicts map[*starla
 }
 
 func (c *emulatorCheckpoint) restoreState(machine *emulatorX86) error {
+	for _, restore := range c.resources {
+		if err := restore(); err != nil {
+			return fmt.Errorf("restore checkpoint resource: %w", err)
+		}
+	}
 	for _, saved := range c.dicts {
 		if err := saved.value.Clear(); err != nil {
 			// Frozen values are immutable configuration reachable from a
@@ -8144,6 +8158,9 @@ func (m *emulatorX86) checkpointBuiltin(_ *starlark.Thread, _ *starlark.Builtin,
 	}
 	for execution := range m.executions {
 		checkpoint.capture(execution, seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
+	}
+	if checkpoint.captureError != nil {
+		return nil, fmt.Errorf("checkpoint resource: %w", checkpoint.captureError)
 	}
 	return checkpoint, nil
 }

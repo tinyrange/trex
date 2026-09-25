@@ -1636,7 +1636,7 @@ def test_winsock_helper_signatures():
     equal(signatures["wahcloseapchelper"], 1)
     equal(signatures["wahopencurrentthread"], 2)
     equal(signatures["wahclosethread"], 1)
-    equal(module["_WINSOCK_ORDINAL_SIGNATURES"], {8: 1, 9: 1, 14: 1, 15: 1, 111: 0, 112: 1, 114: 0, 115: 2, 116: 0})
+    equal(module["_WINSOCK_ORDINAL_SIGNATURES"], {2: 3, 3: 1, 6: 3, 7: 5, 8: 1, 9: 1, 10: 3, 14: 1, 15: 1, 19: 4, 21: 5, 23: 3, 103: 5, 111: 0, 112: 1, 114: 0, 115: 2, 116: 0})
     machine = emulator.x86(code = b"\xc3")
     winsock = module["winsock_plugin"]()
     machine.use([winsock])
