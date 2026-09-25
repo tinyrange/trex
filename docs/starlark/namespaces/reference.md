@@ -2773,6 +2773,18 @@ Creates a bounded 32-bit x86 execution context from a PE image or raw code. Expo
 
 Reads an Apple Partition Map as portable partition file views. block_size explicitly selects the 512-, 1024- or 2048-byte logical map; device_block_size and device_blocks retain independent driver-descriptor geometry. This distinction matters for CDs containing overlapping maps. Each partition exposes its effective block_size: a CDvr-tagged Apple_Driver43_CD record with a matching block-zero driver descriptor uses 2048-byte device units even in a 512-byte map; other records use the selected map units. Validates ER/PM signatures, consistent entry counts, allocated-partition bounds and nonoverlap. Returns partitions with index, raw name/type/processor bytes, start_block, blocks, logical data-range fields, status and boot metadata. data is the complete physical partition view; no inner filesystem is inferred. An out-of-image Apple_Free descriptor retains its declared geometry with data=None and complete=False; allocated partitions must fit fully. Boot metadata is not executed and boot checksums are not verified.
 
+### `filesystem.diskdupe`
+
+`filesystem.diskdupe(file) -> file`
+
+Decodes DiskDupe DDI track maps into a read-only logical disk. Omitted tracks remain unreadable, never zero-filled.
+
+### `filesystem.duplicator`
+
+`filesystem.duplicator(file) -> file`
+
+Decodes version 1 The Duplicator images, including explicit cylinder filler. Cylinder checksums are not verified.
+
 ### `filesystem.efs`
 
 `filesystem.efs(file, maximum_entries=1M) -> record`
@@ -2808,6 +2820,12 @@ Builds a FAT32 volume from a directory and requested layout options. It produces
 `filesystem.gpt(file) -> parsed GPT; filesystem.gpt(size, disk_guid=...) -> builder`
 
 With a file, parses GPT partition metadata; with a size, creates a partition-table builder. Populate the builder with partition contents to produce a complete disk layout.
+
+### `filesystem.hdcopy`
+
+`filesystem.hdcopy(file) -> file`
+
+Decodes standard and extended HD-Copy images in memory with strict RLE validation. Omitted tracks remain unreadable.
 
 ### `filesystem.hfs`
 
