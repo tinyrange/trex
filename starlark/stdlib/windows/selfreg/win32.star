@@ -11851,7 +11851,7 @@ def shell_plugin(module_path, kernel = None):
 
 def gdi32_plugin():
     """Models registration-visible GDI stock objects without a host display."""
-    state = {"next_palette": 0xda000001, "palettes": {}, "next_bitmap": 0xda100001, "bitmaps": {}, "next_brush": 0xdc000001, "brushes": {}, "next_pen": 0xdd000001, "pens": {}, "next_dc": 0xde000001, "dcs": {}}
+    state = {"next_palette": 0xda000001, "palettes": {}, "next_bitmap": 0xda100001, "bitmaps": {}, "next_brush": 0xdc000001, "brushes": {}, "next_pen": 0xdd000001, "pens": {}, "next_font": 0xdf000001, "fonts": {}, "next_dc": 0xde000001, "dcs": {}}
     def callback(event):
         name = event.name.lower()
         if name == "getstockobject":
@@ -11887,7 +11887,7 @@ def gdi32_plugin():
                 return 0
             handle = state["next_dc"]
             state["next_dc"] = handle + 1
-            state["dcs"][handle] = {"compatible": event.args[0], "bitmap": 0xd915}
+            state["dcs"][handle] = {"compatible": event.args[0], "bitmap": 0xd915, "font": 0xd90d, "brush": 0xd900, "pen": 0xd907}
             return handle
         if name == "selectobject":
             dc, handle = event.args
@@ -11898,7 +11898,12 @@ def gdi32_plugin():
                 previous = context["bitmap"]
                 context["bitmap"] = handle
                 return previous
-            fail("SelectObject: unsupported object kind")
+            kind = "font" if handle in state["fonts"] or handle in [0xd90a, 0xd90b, 0xd90c, 0xd90d, 0xd90e, 0xd910, 0xd911] else "pen" if handle in state["pens"] or handle in [0xd906, 0xd907, 0xd908, 0xd913] else "brush" if handle in state["brushes"] or handle & 0xff000000 == 0xdb000000 or handle in range(0xd900, 0xd906) else None
+            if kind == None:
+                return 0
+            previous = context[kind]
+            context[kind] = handle
+            return previous
         if name == "createpen":
             style, width, color = event.args
             if style > 6:
@@ -11907,6 +11912,37 @@ def gdi32_plugin():
             state["next_pen"] = handle + 1
             state["pens"][handle] = {"style": style, "width": width, "color": color & 0xffffff}
             return handle
+        if name in ["createfonta", "createfontw"]:
+            # CreateFont creates a logical descriptor; selecting it into a DC
+            # is what subsequently maps it to an installed physical font.
+            descriptor = binary.builder(capacity = 92)
+            for value in event.args[:5]:
+                descriptor.u32le(value)
+            for value in event.args[5:13]:
+                descriptor.u8(value & 0xff)
+            face = event.machine.read_cstring(event.args[13], encoding = "utf16le" if name.endswith("w") else "ascii") if event.args[13] else ""
+            handle = state["next_font"]
+            state["next_font"] = handle + 1
+            state["fonts"][handle] = {"description": descriptor.bytes(), "face": face[:31]}
+            return handle
+        if name == "createdibsection":
+            if not event.args[1] or not event.args[3]:
+                return 0
+            if event.args[2] or event.args[4] or event.args[5]:
+                event.machine.stop("unsupported-gdi", detail = "CreateDIBSection palette or section mapping")
+                return 0
+            info = windows.bitmap_info(event.machine.read(event.args[1], 40))
+            if info["size"] > 64 << 20:
+                return 0
+            pixels = event.machine.allocate(size = info["size"], name = "gdi.dib-pixels")
+            event.machine.write_pointer(event.args[3], pixels)
+            handle = state["next_bitmap"]
+            state["next_bitmap"] = handle + 1
+            info["pixels"] = pixels
+            state["bitmaps"][handle] = info
+            return handle
+        if name == "gdiflush":
+            return 1
         if name == "createpalette":
             logical = event.args[0]
             if not logical:
@@ -11978,8 +12014,11 @@ def gdi32_plugin():
             # is the native completed-enumeration result when none match.
             return 0
         if name == "deleteobject":
+            state["fonts"].pop(event.args[0], None)
             state["palettes"].pop(event.args[0], None)
-            state["bitmaps"].pop(event.args[0], None)
+            bitmap = state["bitmaps"].pop(event.args[0], None)
+            if bitmap != None and "pixels" in bitmap:
+                event.machine.free(bitmap["pixels"])
             state["brushes"].pop(event.args[0], None)
             state["pens"].pop(event.args[0], None)
             return 1 if event.args[0] else 0
@@ -11987,6 +12026,7 @@ def gdi32_plugin():
 
     def install(machine):
         signatures = {"getstockobject": 1, "createsolidbrush": 1, "createcompatibledc": 1, "deletedc": 1, "createcompatiblebitmap": 3, "selectobject": 2, "createpen": 3, "createpalette": 1, "createdibitmap": 6, "createbitmap": 5, "createpatternbrush": 1, "getpaletteentries": 4, "getdevicecaps": 2, "enumfontfamiliesa": 4, "enumfontfamiliesw": 4, "enumfontfamiliesexa": 5, "enumfontfamiliesexw": 5, "deleteobject": 1}
+        signatures.update({"createfonta": 14, "createfontw": 14, "createdibsection": 6, "gdiflush": 0})
         for name, argc in signatures.items():
             machine.provide_export(callback, module = "gdi32.dll", name = name, argc = argc)
         for imported in machine.imports_named(signatures):
@@ -12747,6 +12787,25 @@ def user32_plugin(file, module_files = {}, kernel = None):
     def rect_empty(rectangle):
         return rectangle[0] >= rectangle[2] or rectangle[1] >= rectangle[3]
 
+    def nonclient_insets(style, menu = False):
+        border = 4 if style & 0x00040000 else 3 if style & 0x00400000 else 1 if style & 0x00800000 else 0
+        caption = 23 if style & 0x00c00000 == 0x00c00000 else 0
+        return [border, border + caption + (19 if menu else 0), border, border]
+
+    def client_origin(handle):
+        x, y = 0, 0
+        for unused in range(128):
+            window = state["windows"].get(handle)
+            if window == None:
+                return [x, y]
+            inset = nonclient_insets(window["style"], window.get("menu", 0) != 0)
+            x += window.get("x", 0) + inset[0]
+            y += window.get("y", 0) + inset[1]
+            if not window["style"] & 0x40000000:
+                return [x, y]
+            handle = window["parent"]
+        fail("cyclic or excessively deep window parent chain")
+
     def new_window(class_name = 0, name = 0, style = 0, parent = 0, identifier = 0):
         handle = state["next_window"]
         state["next_window"] = handle + 1
@@ -12844,6 +12903,8 @@ def user32_plugin(file, module_files = {}, kernel = None):
                 identifier = event.args[9],
             )
             window = state["windows"][handle]
+            for key, value, default in [("x", event.args[4], 0), ("y", event.args[5], 0), ("width", event.args[6], 640), ("height", event.args[7], 480)]:
+                window[key] = default if value == 0x80000000 else value - (1 << 32) if value & 0x80000000 else value
             if event.args[9] in state["menus"]:
                 window["menu"] = event.args[9]
             record = registered_class(event.machine, event.args[1], wide)
@@ -13073,6 +13134,9 @@ def user32_plugin(file, module_files = {}, kernel = None):
         if name == "getdlgctrlid":
             window = state["windows"].get(event.args[0])
             return window["id"] if window != None else 0
+        if name == "isiconic":
+            window = state["windows"].get(event.args[0])
+            return 1 if window != None and window["style"] & 0x20000000 else 0
         if name in ["getparent", "iswindowvisible", "bringwindowtotop", "setforegroundwindow", "setwindowpos"]:
             window = state["windows"].get(event.args[0])
             if name == "getparent":
@@ -13090,12 +13154,31 @@ def user32_plugin(file, module_files = {}, kernel = None):
             desktop = state.get("desktop")
             if desktop == None:
                 desktop = new_window(class_name = 0, name = 0)
+                state["windows"][desktop].update({"x": 0, "y": 0, "width": 1024, "height": 768})
                 state["desktop"] = desktop
             return desktop
         if name in ["getwindowrect", "getclientrect"]:
             if event.args[0] not in state["windows"] or not event.args[1]:
                 return 0
-            write_rect(event.machine, event.args[1], [0, 0, 640, 480])
+            window = state["windows"][event.args[0]]
+            inset = nonclient_insets(window["style"], window.get("menu", 0) != 0)
+            width, height = window.get("width", 640), window.get("height", 480)
+            if name == "getclientrect":
+                rectangle = [0, 0, max(0, width - inset[0] - inset[2]), max(0, height - inset[1] - inset[3])]
+            else:
+                origin = client_origin(event.args[0])
+                x, y = origin[0] - inset[0], origin[1] - inset[1]
+                rectangle = [x, y, x + width, y + height]
+            write_rect(event.machine, event.args[1], rectangle)
+            return 1
+        if name in ["clienttoscreen", "screentoclient"]:
+            if event.args[0] not in state["windows"] or not event.args[1]:
+                return 0
+            point = binary.cursor(event.machine.read(event.args[1], 8))
+            origin = client_origin(event.args[0])
+            direction = 1 if name == "clienttoscreen" else -1
+            event.machine.write_u32le(event.args[1], (point.i32le() + direction * origin[0]) & 0xffffffff)
+            event.machine.write_u32le(event.args[1] + 4, (point.i32le() + direction * origin[1]) & 0xffffffff)
             return 1
         if name in ["enumchildwindows", "enumwindows"]:
             parent = event.args[0] if name == "enumchildwindows" else 0
@@ -13110,7 +13193,20 @@ def user32_plugin(file, module_files = {}, kernel = None):
         if name in ["defwindowproca", "defwindowprocw"]:
             return 0
         if name == "showwindow":
-            return 0
+            window = state["windows"].get(event.args[0])
+            if window == None:
+                return 0
+            previous = 1 if window["style"] & 0x10000000 else 0
+            command = event.args[1]
+            if command == 0:
+                window["style"] &= ~0x10000000
+            else:
+                window["style"] |= 0x10000000
+                if command in [2, 6, 7, 11]:
+                    window["style"] |= 0x20000000
+                elif command in [1, 3, 9, 10]:
+                    window["style"] &= ~0x20000000
+            return previous
         if name == "updatewindow":
             return 1
         if name == "getsystemmenu":
@@ -13218,6 +13314,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
                 0: 1024, 1: 768,       # SM_CXSCREEN, SM_CYSCREEN
                 2: 17, 3: 17,          # SM_CXVSCROLL, SM_CYHSCROLL
                 4: 23, 5: 1, 6: 1,     # SM_CYCAPTION, SM_CXBORDER, SM_CYBORDER
+                7: 3, 8: 3,           # SM_CXDLGFRAME, SM_CYDLGFRAME
                 11: 32, 12: 32,        # SM_CXICON, SM_CYICON
                 13: 32, 14: 32,        # SM_CXCURSOR, SM_CYCURSOR
                 15: 19, 16: 1024, 17: 749,
@@ -13226,6 +13323,18 @@ def user32_plugin(file, module_files = {}, kernel = None):
                 67: 0,                 # SM_CLEANBOOT
             }
             return metrics.get(event.args[0], 0)
+        if name == "adjustwindowrect":
+            if not event.args[0]:
+                if kernel != None:
+                    kernel.state["last_error"] = 87
+                return 0
+            rectangle = read_rect(event.machine, event.args[0])
+            style = event.args[1]
+            # Deterministic nonclient dimensions match GetSystemMetrics above.
+            # Scrollbars are deliberately excluded by this Win32 API contract.
+            inset = nonclient_insets(style, event.args[2] != 0)
+            write_rect(event.machine, event.args[0], [rectangle[0] - inset[0], rectangle[1] - inset[1], rectangle[2] + inset[2], rectangle[3] + inset[3]])
+            return 1
         if name == "getcursorpos":
             if not event.args[0]:
                 return 0
@@ -13258,10 +13367,17 @@ def user32_plugin(file, module_files = {}, kernel = None):
             return 0xda00
         if name == "releasedc":
             return 1
+        if name == "getasynckeystate":
+            # This process model has no injected keyboard or mouse input.
+            return 0
         if name == "getkeyboardlayoutlist":
             if event.args[0] and event.args[1]:
                 event.machine.write_u32le(event.args[1], 0x04090409)
             return 1
+        if name == "getkeyboardlayout":
+            # The process model has one US English input layout, also exposed
+            # by GetKeyboardLayoutList, for every emulated thread.
+            return 0x04090409
         if name in ["monitorfromwindow", "monitorfromrect", "monitorfrompoint"]:
             return 1
         if name == "enumdisplaymonitors":
@@ -13374,6 +13490,17 @@ def user32_plugin(file, module_files = {}, kernel = None):
             if offset >= size:
                 return 0
             return invoke("gdi32.dll", "CreateDIBitmap", [0xda00, header, 4, header + offset, header, 0])
+        if name == "createcursor":
+            instance, hot_x, hot_y, width, height, and_mask, xor_mask = event.args
+            if not width or not height or width > 1024 or height > 1024 or hot_x >= width or hot_y >= height or not and_mask or not xor_mask:
+                return 0
+            stride = ((width + 15) // 16) * 2
+            handle = state["next_image"]
+            state["next_image"] = handle + 1
+            state["images"][handle] = {"instance": instance, "type": 2, "width": width, "height": height, "hot_x": hot_x, "hot_y": hot_y, "stride": stride, "and_mask": event.machine.read(and_mask, stride * height), "xor_mask": event.machine.read(xor_mask, stride * height)}
+            return handle
+        if name == "destroycursor":
+            return 1 if state["images"].pop(event.args[0], None) != None else 0
         if name in ["loadimagea", "loadimagew", "loadcursora", "loadcursorw", "loadicona", "loadiconw"]:
             handle = state["next_image"]
             state["next_image"] = handle + 1
@@ -13474,10 +13601,13 @@ def user32_plugin(file, module_files = {}, kernel = None):
             "RegisterClipboardFormatA": 1, "RegisterClipboardFormatW": 1,
             "RegisterWindowMessageA": 1, "RegisterWindowMessageW": 1,
             "GetSystemMetrics": 1, "GetSysColor": 1, "GetSysColorBrush": 1,
+            "AdjustWindowRect": 3,
             "GetCursorPos": 1, "SetCursorPos": 2,
             "SetWindowsHookExA": 4, "SetWindowsHookExW": 4,
             "UnhookWindowsHookEx": 1, "CallNextHookEx": 4,
             "GetKeyboardLayoutList": 2,
+            "GetKeyboardLayout": 1,
+            "GetAsyncKeyState": 1,
             "GetDC": 1, "ReleaseDC": 2,
             "MonitorFromWindow": 2, "MonitorFromRect": 2, "MonitorFromPoint": 3,
             "EnumDisplayMonitors": 4,
@@ -13488,6 +13618,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
             "IntersectRect": 3, "UnionRect": 3,
             "LoadImageA": 6, "LoadImageW": 6,
             "LoadCursorA": 2, "LoadCursorW": 2,
+            "CreateCursor": 7, "DestroyCursor": 1,
             "LoadIconA": 2, "LoadIconW": 2,
             "LoadBitmapA": 2, "LoadBitmapW": 2,
             "RegisterClassA": 1, "RegisterClassW": 1,
@@ -13498,6 +13629,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
             "CreateWindowExA": 12, "CreateWindowExW": 12,
             "DestroyWindow": 1,
             "IsWindow": 1,
+            "IsIconic": 1,
             "GetActiveWindow": 0,
             "GetForegroundWindow": 0,
             "DefWindowProcA": 4, "DefWindowProcW": 4,
@@ -13531,6 +13663,7 @@ def user32_plugin(file, module_files = {}, kernel = None):
             "GetClassNameA": 3, "GetClassNameW": 3,
             "GetDesktopWindow": 0,
             "GetWindowRect": 2, "GetClientRect": 2,
+            "ClientToScreen": 2, "ScreenToClient": 2,
             "EnumChildWindows": 3, "EnumWindows": 2,
             "GetSystemMenu": 2, "DeleteMenu": 3,
             "CharLowerA": 1, "CharLowerW": 1,
