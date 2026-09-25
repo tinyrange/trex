@@ -31,8 +31,10 @@ type Archive struct {
 }
 type File struct {
 	Header
-	archive *Archive
-	index   int
+	archive      *Archive
+	index        int
+	storedCRC    hash.Hash32
+	storedOffset int64
 }
 
 func Open(source storage.Reader, maximumEntries int) (*Archive, error) {
@@ -172,6 +174,9 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	if off >= f.Size() {
 		return 0, io.EOF
 	}
+	if f.Method == 0 {
+		return f.readStoredAt(p, off)
+	}
 	total := 0
 	for len(p) > 0 && off < f.Size() {
 		page := off / pageSize * pageSize
@@ -198,6 +203,37 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 		return total, io.EOF
 	}
 	return total, nil
+}
+
+// Stored members are already random-access bytes. Do not replay a multi-GB
+// prefix to satisfy a small read near the end. Consecutive reads from offset
+// zero verify the CRC; Verify remains available for arbitrary access patterns.
+func (f *File) readStoredAt(p []byte, off int64) (int, error) {
+	f.archive.mu.Lock()
+	defer f.archive.mu.Unlock()
+	if f.Encrypted || f.Size() != f.PackedSize {
+		return 0, fmt.Errorf("rar: invalid or encrypted stored member %q", f.Name)
+	}
+	requested := len(p)
+	p = p[:min(int64(len(p)), f.Size()-off)]
+	n, err := f.archive.source.ReadAt(p, f.Offset+off)
+	if off == 0 {
+		f.storedCRC = crc32.NewIEEE()
+		f.storedOffset = 0
+	}
+	if f.storedCRC != nil && off == f.storedOffset {
+		f.storedCRC.Write(p[:n])
+		f.storedOffset += int64(n)
+		if f.storedOffset == f.Size() && f.HasCRC && f.storedCRC.Sum32() != f.CRC {
+			return n, fmt.Errorf("rar: %s data CRC mismatch", f.Name)
+		}
+	} else {
+		f.storedCRC = nil
+	}
+	if err == nil && n < requested {
+		err = io.EOF
+	}
+	return n, err
 }
 
 // Verify reads the entire member and verifies its terminator and checksum.

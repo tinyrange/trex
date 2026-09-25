@@ -72,6 +72,7 @@ import (
 	"github.com/tinyrange/trex/installer/installshield"
 	"github.com/tinyrange/trex/installer/installshield/installscript"
 	"github.com/tinyrange/trex/installer/msi"
+	"github.com/tinyrange/trex/installer/nsis"
 	imagestar "github.com/tinyrange/trex/media/image/star"
 	"github.com/tinyrange/trex/renvostar"
 	starcrypto "github.com/tinyrange/trex/script/crypto"
@@ -108,6 +109,8 @@ func predeclared() starlark.StringDict {
 				"cab_set":          starlark.NewBuiltin("cab_set", cabarchive.SetBuiltin),
 				"installer":        starlark.NewBuiltin("installer", installshield.InstallerBuiltin),
 				"installer_probe":  starlark.NewBuiltin("installer_probe", installshield.ProbeBuiltin),
+				"nsis_list":        starlark.NewBuiltin("nsis_list", nsis.ListBuiltin),
+				"nsis":             starlark.NewBuiltin("nsis", nsis.Builtin),
 				"installer_media":  starlark.NewBuiltin("installer_media", installshield.MediaBuiltin),
 				"installscript":    starlark.NewBuiltin("installscript", installscript.Builtin),
 				"installshield":    starlark.NewBuiltin("installshield", installshield.Builtin),
