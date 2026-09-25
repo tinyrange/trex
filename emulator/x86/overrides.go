@@ -52,12 +52,14 @@ func (m *emulatorX86) overrideBuiltin(_ *starlark.Thread, _ *starlark.Builtin, a
 		})
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i] < targets[j] })
-	values := make([]starlark.Value, len(targets))
-	for i, address := range targets {
+	values := make([]starlark.Value, 0, len(targets))
+	for _, address := range targets {
 		hook := m.hooks[address]
 		hook.callback = callback
 		m.hooks[address] = hook
-		values[i] = starlark.MakeUint(uint(address))
+		if !hook.internal {
+			values = append(values, starlark.MakeUint(uint(address)))
+		}
 	}
 	m.hookRules = append(m.hookRules, emulatorHookRule{module: module, name: strings.ToLower(name), ordinal: uint16(ordinal), argc: base.argc, convention: base.convention, callback: callback})
 	return starlark.NewList(values), nil
