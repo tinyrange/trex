@@ -10,6 +10,46 @@ import (
 
 type memory struct{ *bytes.Reader }
 
+type countedMemory struct {
+	memory
+	read int
+}
+
+func (m *countedMemory) ReadAt(p []byte, off int64) (int, error) {
+	n, err := m.memory.ReadAt(p, off)
+	m.read += n
+	return n, err
+}
+
+func TestStoredRangeDoesNotReplayPrefix(t *testing.T) {
+	data := bytes.Repeat([]byte("archive-range"), 300000)
+	source := &countedMemory{memory: memory{bytes.NewReader(append([]byte("Rar!\x1a\x07\x00"), stored4("large", data)...))}}
+	a, err := Open(source, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.read = 0
+	got := make([]byte, 17)
+	offset := int64(len(data) - len(got))
+	if _, err := a.Files[0].ReadAt(got, offset); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data[offset:]) || source.read != len(got) {
+		t.Fatalf("range read fetched %d source bytes, want %d", source.read, len(got))
+	}
+	corrupt := append([]byte(nil), data...)
+	corrupt[len(corrupt)-1] ^= 1
+	bad := append([]byte("Rar!\x1a\x07\x00"), stored4("bad", data)...)
+	copy(bad[len(bad)-len(data):], corrupt)
+	b, err := Open(memory{bytes.NewReader(bad)}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Files[0].ReadAt(make([]byte, len(data)), 0); err == nil {
+		t.Fatal("full stored range did not check CRC")
+	}
+}
+
 func (m memory) Size() int64 { return m.Reader.Size() }
 func block4(kind byte, flags uint16, body []byte) []byte {
 	b := make([]byte, 7)
