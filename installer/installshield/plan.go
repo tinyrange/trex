@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tinyrange/trex/installer/installshield/installscript"
+	"github.com/tinyrange/trex/installer/nsis"
 	wiseinstaller "github.com/tinyrange/trex/installer/wise"
 	starfile "github.com/tinyrange/trex/storage/star"
 	windowspe "github.com/tinyrange/trex/windows/pe"
@@ -23,7 +24,8 @@ func (i *Installer) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 	variablesValue := starlark.Value(starlark.None)
 	localFilesValue := starlark.Value(starlark.None)
 	componentsValue := starlark.Value(starlark.None)
-	if err := starlark.UnpackArgs("installer.plan", args, kwargs, "locations?", &locationsValue, "variables?", &variablesValue, "components?", &componentsValue, "local_files?", &localFilesValue); err != nil {
+	rangesValue := starlark.Value(starlark.None)
+	if err := starlark.UnpackArgs("installer.plan", args, kwargs, "locations?", &locationsValue, "variables?", &variablesValue, "components?", &componentsValue, "local_files?", &localFilesValue, "ranges?", &rangesValue); err != nil {
 		return nil, err
 	}
 	variables, err := installPlanStringMap("variables", variablesValue)
@@ -51,6 +53,40 @@ func (i *Installer) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 			}
 			locations[strings.ToLower(component)] = destination
 		}
+	}
+	if payload, ok := i.payload.(*nsis.Archive); ok {
+		if componentsValue != starlark.None || localFilesValue != starlark.None {
+			return nil, fmt.Errorf("installer.plan: NSIS uses explicit ranges and variables, not components/local_files")
+		}
+		var ranges []nsis.CodeRange
+		if rangesValue != starlark.None {
+			sequence, ok := rangesValue.(starlark.Iterable)
+			if !ok {
+				return nil, fmt.Errorf("installer.plan: ranges must be iterable pairs")
+			}
+			ranges = []nsis.CodeRange{}
+			iter := sequence.Iterate()
+			defer iter.Done()
+			var item starlark.Value
+			for iter.Next(&item) {
+				pair, ok := item.(starlark.Indexable)
+				if !ok || starlark.Len(item) != 2 {
+					return nil, fmt.Errorf("installer.plan: ranges must be pairs")
+				}
+				var start, end int
+				if err := starlark.AsInt(pair.Index(0), &start); err != nil {
+					return nil, err
+				}
+				if err := starlark.AsInt(pair.Index(1), &end); err != nil {
+					return nil, err
+				}
+				ranges = append(ranges, nsis.CodeRange{Start: start, End: end})
+			}
+		}
+		return payload.Plan(locations, variables, ranges)
+	}
+	if rangesValue != starlark.None {
+		return nil, fmt.Errorf("installer.plan: ranges is supported only for NSIS")
 	}
 	if payload, ok := i.payload.(*wiseinstaller.Archive); ok {
 		if components != nil {
