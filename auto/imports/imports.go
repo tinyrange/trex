@@ -34,6 +34,7 @@ import (
 	_ "github.com/tinyrange/trex/filesystem/apm"
 	_ "github.com/tinyrange/trex/filesystem/efs"
 	_ "github.com/tinyrange/trex/filesystem/fat"
+	_ "github.com/tinyrange/trex/filesystem/floppy"
 	_ "github.com/tinyrange/trex/filesystem/gpt"
 	_ "github.com/tinyrange/trex/filesystem/hfs"
 	_ "github.com/tinyrange/trex/filesystem/iso9660"

@@ -48,7 +48,12 @@ func (f ViewFunc) Entries() ([]Entry, error) { return f() }
 type DecodedView struct {
 	Reader storage.Reader
 	Name   string
+	// Optional description of the wrapper, retained during transparent browsing.
+	Format     string
+	Attributes map[string]any
 }
+
+func (v *DecodedView) Description() (string, map[string]any) { return v.Format, v.Attributes }
 
 func (v *DecodedView) Entries() ([]Entry, error) {
 	return []Entry{{Name: v.Name, Kind: "file", Reader: v.Reader}}, nil
@@ -123,6 +128,15 @@ func Identify(source storage.Reader, options Options) (*Result, error) {
 	prefixSize := int64(64 << 10)
 	if known {
 		prefixSize = min(size, prefixSize)
+	}
+	// Sparse readers may limit speculative detection to their readable prefix.
+	// This does not suppress errors from actual reads or detector probes.
+	if sparse, ok := source.(interface{ ContiguousPrefixSize() int64 }); ok {
+		available := sparse.ContiguousPrefixSize()
+		if available < 0 || (known && available > size) {
+			return nil, fmt.Errorf("auto: invalid contiguous prefix size")
+		}
+		prefixSize = min(prefixSize, available)
 	}
 	prefix := make([]byte, prefixSize)
 	n, err := io.ReadFull(io.NewSectionReader(source, 0, prefixSize), prefix)

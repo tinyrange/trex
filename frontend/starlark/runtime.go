@@ -54,6 +54,7 @@ import (
 	filesystemapm "github.com/tinyrange/trex/filesystem/apm"
 	filesystemefs "github.com/tinyrange/trex/filesystem/efs"
 	filesystemfat "github.com/tinyrange/trex/filesystem/fat"
+	filesystemfloppy "github.com/tinyrange/trex/filesystem/floppy"
 	filesystemgpt "github.com/tinyrange/trex/filesystem/gpt"
 	filesystemhfs "github.com/tinyrange/trex/filesystem/hfs"
 	filesystemiso9660 "github.com/tinyrange/trex/filesystem/iso9660"
@@ -187,6 +188,9 @@ func predeclared() starlark.StringDict {
 				"gpt":          starlark.NewBuiltin("gpt", filesystemgpt.GPTBuiltin),
 				"host":         starlark.NewBuiltin("host", filesystemnative.HostBuiltin),
 				"raw_cd":       starlark.NewBuiltin("raw_cd", filesystemrawcd.Builtin),
+				"diskdupe":     starlark.NewBuiltin("diskdupe", filesystemfloppy.Builtin),
+				"hdcopy":       starlark.NewBuiltin("hdcopy", filesystemfloppy.Builtin),
+				"duplicator":   starlark.NewBuiltin("duplicator", filesystemfloppy.Builtin),
 				"iso9660":      starlark.NewBuiltin("iso9660", filesystemiso9660.ISO9660Builtin),
 				"mbr":          starlark.NewBuiltin("mbr", filesystemmbr.MBRBuiltin),
 				"ntfs":         starlark.NewBuiltin("ntfs", filesystemntfs.NTFSBuiltin),
