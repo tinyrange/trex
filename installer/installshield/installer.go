@@ -12,6 +12,7 @@ import (
 
 	cabarchive "github.com/tinyrange/trex/archive/cab"
 	"github.com/tinyrange/trex/installer/installshield/installscript"
+	"github.com/tinyrange/trex/installer/nsis"
 	wiseinstaller "github.com/tinyrange/trex/installer/wise"
 	bytecache "github.com/tinyrange/trex/storage/cache"
 	starfile "github.com/tinyrange/trex/storage/star"
@@ -67,10 +68,12 @@ func (i *Installer) installShieldPackages() []installerPackage {
 func InstallerBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	maximumScan := installerDefaultMaximumScan
+	maximumBytes := int64(512 << 20)
 	cache := true
 	if err := starlark.UnpackArgs("installer", args, kwargs,
 		"file", &value,
 		"maximum_scan?", &maximumScan,
+		"maximum_bytes?", &maximumBytes,
 		"cache?", &cache,
 	); err != nil {
 		return nil, err
@@ -82,7 +85,10 @@ func InstallerBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if maximumScan < cabinetHeaderSize {
 		return nil, fmt.Errorf("installer: maximum_scan must be at least %d", cabinetHeaderSize)
 	}
-	return OpenInstaller(file, maximumScan, cache, bytecache.New(bytecache.DefaultBytes), 1)
+	if maximumBytes <= 0 {
+		return nil, fmt.Errorf("installer: maximum_bytes must be positive")
+	}
+	return openInstaller(file, maximumScan, cache, bytecache.New(bytecache.DefaultBytes), 1, maximumBytes)
 }
 
 // MediaBuiltin plans ordinary disc/diskette InstallShield layouts using the
@@ -122,10 +128,12 @@ func MediaBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 func ProbeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	maximumScan := installerDefaultMaximumScan
+	maximumBytes := int64(512 << 20)
 	cache := true
 	if err := starlark.UnpackArgs("installer_probe", args, kwargs,
 		"file", &value,
 		"maximum_scan?", &maximumScan,
+		"maximum_bytes?", &maximumBytes,
 		"cache?", &cache,
 	); err != nil {
 		return nil, err
@@ -137,7 +145,10 @@ func ProbeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 	if maximumScan < cabinetHeaderSize {
 		return nil, fmt.Errorf("installer_probe: maximum_scan must be at least %d", cabinetHeaderSize)
 	}
-	installer, probeErr := OpenInstaller(file, maximumScan, cache, bytecache.New(bytecache.DefaultBytes), 1)
+	if maximumBytes <= 0 {
+		return nil, fmt.Errorf("installer_probe: maximum_bytes must be positive")
+	}
+	installer, probeErr := openInstaller(file, maximumScan, cache, bytecache.New(bytecache.DefaultBytes), 1, maximumBytes)
 
 	result := starlark.NewDict(7)
 	fields := starlark.StringDict{
@@ -152,6 +163,12 @@ func ProbeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 	}
 	if probeErr != nil {
 		fields["error"] = starlark.String(probeErr.Error())
+		var nsisErr *nsisPayloadError
+		if errors.As(probeErr, &nsisErr) {
+			fields["recognized"] = starlark.True
+			fields["format"] = starlark.String("nsis")
+			fields["offset"] = starlark.MakeInt64(nsisErr.offset)
+		}
 		var versionErr *UnsupportedVersionError
 		if errors.As(probeErr, &versionErr) {
 			fields["recognized"] = starlark.True
@@ -177,7 +194,18 @@ func ProbeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 	return result, nil
 }
 
+type nsisPayloadError struct {
+	offset int64
+	err    error
+}
+
+func (e *nsisPayloadError) Error() string { return e.err.Error() }
+func (e *nsisPayloadError) Unwrap() error { return e.err }
+
 func OpenInstaller(file starfile.File, maximumScan int64, cache bool, store *bytecache.Cache, source uint64) (*Installer, error) {
+	return openInstaller(file, maximumScan, cache, store, source, 512<<20)
+}
+func openInstaller(file starfile.File, maximumScan int64, cache bool, store *bytecache.Cache, source uint64, maximumBytes int64) (*Installer, error) {
 	if file.Size() < cabinetHeaderSize+2 {
 		return nil, fmt.Errorf("installer: file is too short")
 	}
@@ -187,6 +215,17 @@ func OpenInstaller(file starfile.File, maximumScan int64, cache bool, store *byt
 	}
 	if !bytes.Equal(magic, []byte("MZ")) {
 		return nil, fmt.Errorf("installer: input is not a DOS or PE executable")
+	}
+	nsisOffset, nsisErr := nsis.Detect(file, maximumScan)
+	if nsisErr != nil {
+		return nil, nsisErr
+	}
+	if nsisOffset >= 0 {
+		payload, err := nsis.Open(file, nsis.Options{MaxScanBytes: maximumScan}, maximumBytes)
+		if err != nil {
+			return nil, &nsisPayloadError{nsisOffset, err}
+		}
+		return &Installer{format: "nsis", offset: nsisOffset, size: payload.Listing.ContainerSize, container: payload, payload: payload}, nil
 	}
 	if offset, ok := peOverlayOffset(file); ok {
 		outer, recognized, err := openSFX(file, offset)

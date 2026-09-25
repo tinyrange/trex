@@ -2051,7 +2051,7 @@ Reads IBM i 7.5 optical save streams: save groups, EBCDIC object names, descript
 
 ### `archive.installer`
 
-`archive.installer(file, maximum_scan=256MiB, cache=True) -> installer`
+`archive.installer(file, maximum_scan=256MiB, cache=True, maximum_bytes=512MiB) -> installer`
 
 Recognizes a supported installer container, including supported embedded payloads, and returns an inspection object with files and a declarative installation plan. It does not run the installer or apply that plan.
 
@@ -2063,7 +2063,7 @@ Discovers InstallShield packages, including nested packages, from a dictionary m
 
 ### `archive.installer_probe`
 
-`archive.installer_probe(file, maximum_scan=256MiB, cache=True) -> dict`
+`archive.installer_probe(file, maximum_scan=256MiB, cache=True, maximum_bytes=512MiB) -> dict`
 
 Inspects a candidate installer and returns detection details and diagnostics as a dictionary. Use it to distinguish unsupported packaging from a recognized payload before requesting a full plan.
 
@@ -2120,6 +2120,18 @@ Reads level-0 LHA headers and stored lh0 or Huffman/LZSS lh5 payloads. Checks he
 `archive.mac_resource(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
 
 Parses a classic Macintosh resource fork, checking map, reference, name and payload bounds and repeated type groups. Duplicate IDs retain every record in map order; duplicate_ids reports collisions, occurrence is one-based, and later occurrences have ordinal path suffixes. Returns fork attributes and entries with resource_type (four raw bytes), signed id, name (raw bytes or None), attributes, offset, size and data. Uncompressed data is a borrowed view; supported Apple dcmp 0/1/2/3 compressed resources are decoded and validated in memory. Compression requires both attribute bit0 and the a89f6572 payload tag, matching Resource Manager; raw attributes remain available when the bit is set on ordinary data. compressed reports actual decoding, while stored_data and stored_size preserve the original representation. maximum_decoded_bytes bounds total decoded compressed payload bytes and each stored compressed input. Unknown codecs and unsupported token variants fail explicitly. The synthetic path uses hexadecimal type and signed ID without interpreting names as host paths. Payload-specific formats remain separate layers.
+
+### `archive.nsis`
+
+`archive.nsis(file, maximum_bytes=512MiB, maximum_scan=16MiB, maximum_metadata=64MiB, maximum_instructions=1000000) -> nsis`
+
+Decodes NSIS 2 ANSI non-solid stored/DEFLATE metadata and file payloads natively, without running installer code or extracting host files. Stable /files/NNNNNN names identify File instruction indices, preserving duplicate filenames and shared payloads. files lists names; find and indexing return readable files; entries retain name, instruction, source, file and output_directory_hint; instructions, sections and string(offset) expose symbolic metadata for inspection. Directory hints are not resolved destinations. maximum_bytes bounds cumulative unique decoded payload bytes (512 MiB default). Other limits match nsis_list. The same payload is recognized by archive.installer and auto. installer.plan supports selected-section straight-line effects and stops at unresolved control flow; explicit half-open ranges select audited product-policy regions and are reported as explicit_ranges=True. Supported effects include file writes, directories, attributes, string assignments, planned-file copy/deletion, registry values and native WriteUninstaller reconstruction. This is not a general NSIS script VM; callers must reject unresolved plans and supply explicit variables. Solid streams, other codecs, Unicode strings and modified opcode tables are unsupported.
+
+### `archive.nsis_list`
+
+`archive.nsis_list(file, maximum_scan=16MiB, maximum_metadata=64MiB, maximum_instructions=1000000) -> record`
+
+Lists File instructions from the NSIS 2 ANSI non-solid stored/NSIS-DEFLATE metadata layout without executing the installer or reading member contents. Returns format, header_offset, data_offset, header_size, header_compression, instruction_count and ordered entries. Entries retain name, raw_name bytes, instruction index, output_directory_hint, directory_instruction, relative data_offset, absolute offset of the member length word, packed_size, compressed and filetime. Repeated names and payload references are preserved. Directory hints are only the nearest preceding SetOutPath in bytecode order, not resolved installation destinations; variables, shell folders and language references remain symbolic, and literal dollars are doubled. Version-dependent variables remain numeric. This is a listing, not an installation plan or readable file view: no decoded sizes, CRC verification or extraction are claimed. Solid streams, other codecs and Unicode metadata are not supported. Zero limits select defaults; limits bound signature scanning, packed/decoded metadata, rendered text and instruction count.
 
 ### `archive.pack`
 
@@ -4124,7 +4136,7 @@ Methods and attributes: `address`, `kind`, `remove(timeout=30)`, `removed`, `siz
 
 A recognized installer container with payload files and detection metadata. plan returns declarative modifications using caller-supplied locations, variables and component selection. It does not apply the plan or run a host installer.
 
-Methods and attributes: `container`, `files`, `find(path)`, `format`, `installscript`, `offset`, `payload`, `plan(locations={}, variables={}, components=None)`, `size`.
+Methods and attributes: `container`, `files`, `find(path)`, `format`, `installscript`, `offset`, `payload`, `plan(locations={}, variables={}, components=None, local_files=None, ranges=None)`, `size`.
 
 ### `installscript` value
 

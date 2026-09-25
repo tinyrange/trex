@@ -220,6 +220,8 @@ _KERNEL_SIGNATURES = {
     "interlockedexchange": 2,
     "interlockedexchangeadd": 2,
     "initializeslisthead": 1,
+    "interlockedpopentryslist": 1,
+    "interlockedpushentryslist": 2,
     "initonceexecuteonce": 4,
     "interlockedincrement": 1,
     "localalloc": 2,
@@ -378,6 +380,7 @@ _KERNEL_SIGNATURES = {
     "waitformultipleobjectsex": 5,
     "widechartomultibyte": 8,
     "writefile": 5,
+    "writeprocessmemory": 5,
     "writeprivateprofilestringa": 4,
     "writeprivateprofilestringw": 4,
     "writeprofilestringa": 3,
@@ -1308,7 +1311,7 @@ def _virtual_file_entries(files, maximum_source_file_size, directories = []):
 
 def virtual_file_entries(files):
     """Prepares immutable guest file metadata for repeated process models."""
-    return _virtual_file_entries(files, 512 << 20)
+    return _virtual_file_entries(files, (1 << 63) - 1)
 
 def _profile_sections(data):
     """Parses the section and key/value subset shared by INI and setup INF files."""
@@ -1407,7 +1410,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     dns_domain = environment.get("USERDNSDOMAIN", environment.get("DNSDOMAIN", environment.get("DnsDomain", "")))
     volume_facts = {name[:2].upper(): dict(value) for name, value in volumes.items()}
     maximum_file_size = 16 << 20
-    maximum_source_file_size = 512 << 20
+    maximum_source_file_size = (1 << 63) - 1
     paths = _virtual_file_entries(files, maximum_source_file_size, directories = directories) if prepared_file_entries == None else windows.clone_file_entries(prepared_file_entries)
     module_directory = normalized_module.rsplit("\\", 1)[0] if "\\" in normalized_module else windows_directory
     current_directory = environment.get("CurrentDirectory", environment.get("CD", module_directory)).replace("/", "\\").rstrip("\\")
@@ -1423,6 +1426,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return b""
         if "data" not in entry:
             view = binary.view(entry["source"])
+            if view.size > 512 << 20:
+                fail("whole-file materialization exceeds 512 MiB; use bounded file reads")
             entry["data"] = view.slice(0, view.size).bytes()
             entry["size"] = len(entry["data"])
         return entry["data"]
@@ -1432,9 +1437,22 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
 
     state["file_data"] = file_data
 
+    def file_size(path):
+        entry = state["paths"].get(path)
+        return entry.get("size", 0) if entry != None else 0
+
+    def file_range(path, offset, size):
+        entry = state["paths"].get(path)
+        if entry == None or entry.get("directory", False) or offset >= entry["size"]:
+            return b""
+        size = min(size, entry["size"] - offset)
+        if "data" in entry:
+            return entry["data"][offset:offset + size]
+        return binary.view(entry["source"]).slice(offset, size).bytes()
+
     def create_handle(kind, value = {}):
         handle = state["next_handle"]
-        state["next_handle"] = handle + 1
+        state["next_handle"] = handle + 4
         state["handles"][handle] = {"kind": kind, "value": value}
         return handle
 
@@ -2961,7 +2979,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if existing == None:
                 state["last_error"] = 2
                 return 0
-            size = len(entry_data(existing))
+            size = existing.get("size", 0)
             data = binary.builder(capacity = 36)
             data.u32le(0x10 if existing["directory"] else 0x80)
             data.reserve(24)  # creation, access, and write FILETIMEs
@@ -2975,7 +2993,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if opened == None:
                 state["last_error"] = 6
                 return 0xffffffff
-            size = len(file_data(opened["path"]))
+            size = file_size(opened["path"])
             state["file_queries"].append({"api": name, "path": opened["path"], "size": size})
             if args[1]:
                 machine.write_u32le(args[1], size >> 32)
@@ -2986,7 +3004,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if opened == None or not args[1]:
                 state["last_error"] = 6 if opened == None else 87
                 return 0
-            size = len(file_data(opened["path"]))
+            size = file_size(opened["path"])
             state["file_queries"].append({"api": name, "path": opened["path"], "size": size})
             encoded = binary.builder(capacity = 8)
             encoded.u32le(size & 0xffffffff)
@@ -2999,7 +3017,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if opened == None or not args[1]:
                 state["last_error"] = 6 if opened == None else 87
                 return 0
-            size = len(file_data(opened["path"]))
+            size = file_size(opened["path"])
             drive = opened["path"][:2].upper() if len(opened["path"]) >= 2 and opened["path"][1] == ":" else ""
             serial = int(volume_facts.get(drive, {}).get("serial", 0))
             information = binary.builder(capacity = 52)
@@ -3355,11 +3373,10 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             position = opened["offset"]
             if args[4]:
                 position = machine.read_u64le(args[4] + 8)
-                if position > maximum_file_size:
+                if position > maximum_source_file_size:
                     state["last_error"] = 87
                     return 0
-            data = file_data(opened["path"])
-            value = data[position:position + args[2]]
+            value = file_range(opened["path"], position, args[2])
             asynchronous = args[4] != 0 and opened.get("overlapped", False)
             state["file_queries"].append({"api": name, "path": opened["path"], "offset": position, "requested": args[2], "read": len(value), "overlapped": asynchronous})
             machine.write(args[1], value)
@@ -3410,7 +3427,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if args[7]:
                 offset = machine.read_u64le(args[7])
                 if offset == 0xffffffffffffffff:  # FILE_WRITE_TO_END_OF_FILE
-                    position = len(file_data(opened["path"]))
+                    position = file_size(opened["path"])
                 elif offset != 0xfffffffffffffffe:  # FILE_USE_FILE_POINTER_POSITION
                     if offset & (1 << 63):
                         write_io_status(machine, args[4], 0xc000000d, 0)
@@ -3438,9 +3455,9 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             distance = (high << 32) | args[1]
             if distance & (1 << 63):
                 distance -= 1 << 64
-            origin = 0 if args[3] == 0 else (opened["offset"] if args[3] == 1 else len(file_data(opened["path"])))
+            origin = 0 if args[3] == 0 else (opened["offset"] if args[3] == 1 else file_size(opened["path"]))
             position = origin + distance
-            if args[3] > 2 or position < 0 or position > maximum_file_size:
+            if args[3] > 2 or position < 0 or position > maximum_source_file_size:
                 state["last_error"] = 87
                 return 0xffffffff
             opened["offset"] = position
@@ -3457,9 +3474,9 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             distance = (args[2] << 32) | args[1]
             if distance & (1 << 63):
                 distance -= 1 << 64
-            origin = 0 if args[4] == 0 else (opened["offset"] if args[4] == 1 else len(file_data(opened["path"])))
+            origin = 0 if args[4] == 0 else (opened["offset"] if args[4] == 1 else file_size(opened["path"]))
             position = origin + distance
-            if args[4] > 2 or position < 0 or position > maximum_file_size:
+            if args[4] > 2 or position < 0 or position > maximum_source_file_size:
                 state["last_error"] = 87
                 return 0
             opened["offset"] = position
@@ -3564,7 +3581,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             size = (args[3] << 32) | args[4]
             path = opened["path"] if opened != None else None
             if size == 0 and path != None:
-                size = len(file_data(path))
+                size = file_size(path)
             if size <= 0 or size > maximum_file_size:
                 state["last_error"] = 87
                 return 0
@@ -4967,7 +4984,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 readable = False
                 writable = False
                 executable = False
-            address = machine.allocate(size = size, address = requested if requested else None, name = "VirtualAlloc", readable = readable, writable = writable, executable = executable)
+            size = (size + 0xfff) & ~0xfff
+            address = machine.allocate(size = size, address = requested if requested else None, alignment = 0x10000, name = "VirtualAlloc", readable = readable, writable = writable, executable = executable)
             state["virtual_allocations"][address] = {"size": size, "type": allocation_type, "protect": protect}
             state["last_error"] = 0
             return address
@@ -4984,6 +5002,22 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                         return 1
             state["last_error"] = 87
             return 0
+        if name == "writeprocessmemory":
+            process, destination, source, size, written = args
+            if process != (1 << (machine.pointer_size * 8)) - 1:
+                state["last_error"] = 6  # ERROR_INVALID_HANDLE
+                return 0
+            if size:
+                data = machine.read(source, size)
+                # Windows permits debugger-style code patches and restores the
+                # original protections after the copy (including mixed ranges).
+                previous = machine.protect(destination, size, readable = True, writable = True, executable = False)
+                machine.write(destination, data)
+                for region in previous:
+                    machine.protect(region.start, region.size, readable = region.readable, writable = region.writable, executable = region.executable)
+            if written:
+                machine.write_pointer(written, size)
+            return 1
         if name == "virtualprotect":
             if not args[0] or not args[1] or not args[3]:
                 state["last_error"] = 87
@@ -5110,9 +5144,17 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write(args[0], source)
             return args[0]
         if name in ["lstrcpyw", "lstrcpynw"]:
-            wide = name.endswith("w")
-            value = machine.read_cstring(args[1], encoding = "utf16le" if wide else "ascii")
-            _write_string(machine, args[0], value, wide, args[2] if name == "lstrcpynw" else 0)
+            if name == "lstrcpynw" and (args[2] == 0 or args[2] >= 0x80000000):
+                return args[0]
+            source = terminated_data(machine, args[1], 2)
+            if name == "lstrcpynw" and len(source) > args[2] * 2:
+                # The count includes the terminator and measures UTF-16 code
+                # units, not Unicode characters. Truncation still terminates.
+                output = binary.builder(capacity = args[2] * 2)
+                output.append(source[:(args[2] - 1) * 2])
+                output.u16le(0)
+                source = output.bytes()
+            machine.write(args[0], source)
             return args[0]
         if name in ["lstrcata", "lstrcatw"]:
             wide = name.endswith("w")
@@ -5139,6 +5181,23 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         if name == "initializeslisthead":
             machine.write(args[0], b"\x00" * 8)
             return 0
+        if name in ["interlockedpopentryslist", "interlockedpushentryslist"]:
+            if machine.pointer_size != 4:
+                fail("SList push/pop requires the x86 SLIST_HEADER layout")
+            head = args[0]
+            first = machine.read_u32le(head)
+            depth = machine.read_u16le(head + 4)
+            sequence = machine.read_u16le(head + 6)
+            # A semantic callback runs atomically with respect to guest threads.
+            if name == "interlockedpushentryslist":
+                machine.write_u32le(args[1], first)
+                machine.write_u32le(head, args[1])
+                machine.write_u16le(head + 4, (depth + 1) & 0xffff)
+                machine.write_u16le(head + 6, (sequence + 1) & 0xffff)
+            elif first:
+                machine.write_u32le(head, machine.read_u32le(first))
+                machine.write_u16le(head + 4, (depth - 1) & 0xffff)
+            return first
         if name == "initonceexecuteonce":
             if not args[0] or not args[1]:
                 state["last_error"] = 87
