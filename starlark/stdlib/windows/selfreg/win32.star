@@ -117,6 +117,11 @@ _KERNEL_SIGNATURES = {
     "getprofilestringa": 5,
     "getprofilestringw": 5,
     "getcurrentprocess": 0,
+    "getfullpathnamew": 4,
+    "getprocessaffinitymask": 3,
+    "createiocompletionport": 4,
+    "getqueuedcompletionstatus": 5,
+    "postqueuedcompletionstatus": 4,
     "getoemcp": 0,
     "getcurrentprocessid": 0,
     "getcurrentthread": 0,
@@ -337,6 +342,7 @@ _KERNEL_SIGNATURES = {
     "setfiletime": 4,
     "systemtimetofiletime": 2,
     "sleep": 1,
+    "sleepex": 2,
     "switchtothread": 0,
     "terminateprocess": 2,
     "thunkconnect32": 6,
@@ -1554,15 +1560,45 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write_u32le(address, status)
             machine.write_pointer(address + machine.pointer_size, information)
 
-    def complete_overlapped(machine, address, transferred):
+    def complete_overlapped(machine, address, transferred, opened = None, error = 0):
         if not address:
             return
-        write_io_status(machine, address, 0, transferred)
-        completion = state["handles"].get(machine.read_pointer(address + 2 * machine.pointer_size + 8))
+        write_io_status(machine, address, 0xc0000120 if error == 995 else 0, transferred)
+        event_handle = machine.read_pointer(address + 2 * machine.pointer_size + 8)
+        completion = state["handles"].get(event_handle & ~1)
         if type(completion) == "dict" and completion.get("kind") == "event":
             completion["value"]["signaled"] = True
+        if opened != None and opened.get("completion_port") != None and not event_handle & 1:
+            opened["completion_port"]["packets"].append([transferred, opened["completion_key"], address, error])
 
     state["write_file_data"] = write_file_data
+    state["complete_overlapped"] = complete_overlapped
+    state["pending_channel_reads"] = []
+
+    def cancel_channel_reads(machine, socket):
+        remaining = []
+        for request in state["pending_channel_reads"]:
+            if request["socket"] == socket:
+                complete_overlapped(machine, request["overlapped"], 0, socket, error = 995)
+            else:
+                remaining.append(request)
+        state["pending_channel_reads"] = remaining
+
+    state["cancel_channel_reads"] = cancel_channel_reads
+
+    def poll_channel_reads(machine):
+        remaining = []
+        progressed = False
+        for request in state["pending_channel_reads"]:
+            data = request["socket"]["channel"].read_available(maximum = request["size"])
+            if data == None:
+                remaining.append(request)
+                continue
+            machine.write(request["buffer"], data)
+            complete_overlapped(machine, request["overlapped"], len(data), request["socket"])
+            progressed = True
+        state["pending_channel_reads"] = remaining
+        return progressed
 
     def flush_view(machine, address, count = 0):
         view = state["views"].get(address)
@@ -1642,6 +1678,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             kind == "event" and value.get("signaled", False) or
             kind == "mutex" or
             kind == "semaphore" and value.get("count", 0) > 0 or
+            kind == "completion_port" and bool(value["packets"]) or
             kind == "thread" and value.get("state") == "terminated" or
             kind == "thread_reference" and value.get("state") == "terminated" or
             kind == "process_reference" and "exit_code" in value
@@ -1701,6 +1738,17 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         return wait != None and wait.get("handles") == handles and wait.get("all", False) == wait_all
 
     def wait_ready(wait):
+        if "messages" in wait:
+            for message in wait["messages"]:
+                window = wait.get("message_window", 0)
+                minimum = wait.get("message_minimum", 0)
+                maximum = wait.get("message_maximum", 0)
+                if window not in [0, 0xffffffff] and message["window"] != window:
+                    continue
+                if window == 0xffffffff and message["window"] != 0:
+                    continue
+                if minimum == 0 and maximum == 0 or minimum <= message["message"] and message["message"] <= maximum:
+                    return True
         critical_section = wait.get("critical_section")
         if critical_section != None:
             lock = state["critical_sections"].get(critical_section)
@@ -1800,7 +1848,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         previous = state["current_thread"]
         state["current_thread"] = thread
         thread["state"] = "running"
-        result = execution.run(instruction_limit = thread_instruction_limit)
+        result = execution.run(instruction_limit = min(thread_instruction_limit, execution.instruction_limit))
         thread["total_steps"] = thread.get("total_steps", 0) + result.steps
         thread["result"] = result
         thread["state"] = _execution_thread_state(result.reason)
@@ -1828,8 +1876,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         return True
 
     def pump_thread_slice(machine):
-        progressed = False
-        for thread in state["threads"]:
+        progressed = poll_channel_reads(machine)
+        for thread in list(state["threads"]):
             current = state["current_thread"]
             if current != None and thread["handle"] == current["handle"]:
                 continue
@@ -1838,6 +1886,11 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         return progressed
 
     def pump_threads(machine):
+        # Workers suspend at a wait and return control to the outer scheduler.
+        # Recursively pumping here lets a timed-out worker advance virtual time
+        # and run other workers before the original wait can even be recorded.
+        if state["current_thread"] != None:
+            return False
         progressed = False
         # Each pass must either run a newly-created thread or consume a wake.
         # The bound protects malformed targets that continually recreate waits.
@@ -2555,6 +2608,89 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 machine.read(caller_stack, 1)
                 remaining -= amount
             return None
+        if name == "createiocompletionport":
+            file, port, key, concurrency = args
+            entry = state["handles"].get(port) if port else None
+            if port and (type(entry) != "dict" or entry.get("kind") != "completion_port"):
+                state["last_error"] = 6
+                return 0
+            opened = None
+            if file != (1 << (machine.pointer_size * 8)) - 1:
+                opened = file_handle(file)
+                socket_entry = state["handles"].get(file)
+                if type(socket_entry) == "dict" and socket_entry.get("kind") == "socket":
+                    opened = socket_entry["value"]
+                if opened == None:
+                    state["last_error"] = 6
+                    return 0
+                if opened.get("completion_port") != None:
+                    state["last_error"] = 87
+                    return 0
+            if not port:
+                port = create_handle("completion_port", {"packets": [], "concurrency": concurrency})
+                entry = state["handles"][port]
+            if opened != None:
+                opened["completion_port"] = entry["value"]
+                opened["completion_key"] = key
+            return port
+        if name in ["postqueuedcompletionstatus", "getqueuedcompletionstatus"]:
+            entry = state["handles"].get(args[0])
+            if type(entry) != "dict" or entry.get("kind") != "completion_port":
+                state["last_error"] = 6
+                return 0
+            if name == "getqueuedcompletionstatus":
+                poll_channel_reads(machine)
+            packets = entry["value"]["packets"]
+            if name == "postqueuedcompletionstatus":
+                packets.append([args[1], args[2], args[3], 0])
+                return 1
+            if not args[1] or not args[2] or not args[3]:
+                state["last_error"] = 87
+                return 0
+            if not packets and args[4]:
+                pump_threads(machine)
+            if not packets:
+                machine.write_pointer(args[3], 0)
+                if args[4]:
+                    suspend_wait(machine, [args[0]], False, args[4], "I/O completion port wait")
+                state["last_error"] = 258  # WAIT_TIMEOUT
+                return 0
+            current = state["current_thread"]
+            if current != None:
+                current.pop("wait", None)
+            transferred, key, overlapped, error = packets.pop(0)
+            machine.write_u32le(args[1], transferred)
+            machine.write_pointer(args[2], key)
+            machine.write_pointer(args[3], overlapped)
+            state["last_error"] = error
+            return 1 if error == 0 else 0
+        if name == "getfullpathnamew":
+            source, capacity, output, file_part = args
+            path = _dos_nt_path(machine.read_cstring(source, encoding = "utf16le"), state["current_directory"])
+            if path == None:
+                state["last_error"] = 123  # ERROR_INVALID_NAME
+                return 0
+            path = "\\\\" + path[8:] if path.startswith("\\??\\UNC\\") else path[4:]
+            encoded = _encoded(path, True)
+            length = len(encoded) // 2 - 1
+            if capacity <= length:
+                return length + 1
+            machine.write(output, encoded)
+            if file_part:
+                prefix = path[:path.rfind("\\") + 1]
+                machine.write_pointer(file_part, output + len(_encoded(prefix, True, nul = False)) if not path.endswith("\\") else 0)
+            return length
+        if name == "getprocessaffinitymask":
+            if args[0] != (1 << (machine.pointer_size * 8)) - 1:
+                state["last_error"] = 6
+                return 0
+            if not args[1] or not args[2]:
+                state["last_error"] = 87
+                return 0
+            # Match GetSystemInfo's single modeled logical processor.
+            machine.write_pointer(args[1], 1)
+            machine.write_pointer(args[2], 1)
+            return 1
         if name == "getcurrentprocess":
             return (1 << (machine.pointer_size * 8)) - 1
         if name == "getcurrentthreadid":
@@ -2643,10 +2779,13 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1
         if name == "gettickcount":
             return state["tick_count"] & 0xffffffff
-        if name == "sleep":
+        if name == "sleepex" and args[0] and state["current_thread"] != None:
+            suspend_wait(machine, [], False, args[0], "alertable sleep" if args[1] else "sleep")
+            return 0
+        if name in ["sleep", "sleepex"]:
             state["tick_count"] += args[0]
             pump_threads(machine)
-            return None
+            return 0 if name == "sleepex" else None
         if name in ["outputdebugstringa", "outputdebugstringw"]:
             return None
         if name == "switchtothread":
@@ -3366,6 +3505,25 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 return 0xffffffff
             return create_handle("file", {"path": target, "offset": 0, "overlapped": bool(flags & 0x40000000)})
         if name == "readfile":
+            socket_entry = state["handles"].get(args[0])
+            if type(socket_entry) == "dict" and socket_entry.get("kind") == "socket":
+                socket = socket_entry["value"]
+                if socket["channel"] == None:
+                    state["last_error"] = 10057
+                    return 0
+                if not args[1] or not args[4] or args[2] > 8 << 20:
+                    state["last_error"] = 87
+                    return 0
+                if args[3]:
+                    machine.write_u32le(args[3], 0)
+                write_io_status(machine, args[4], 0x103, 0)  # STATUS_PENDING
+                if args[2]:
+                    state["pending_channel_reads"].append({"socket": socket, "buffer": args[1], "size": args[2], "overlapped": args[4]})
+                    poll_channel_reads(machine)
+                else:
+                    complete_overlapped(machine, args[4], 0, socket)
+                state["last_error"] = 997  # ERROR_IO_PENDING
+                return 0
             opened = file_handle(args[0])
             if opened == None or not args[1] or args[2] > maximum_file_size:
                 state["last_error"] = 6 if opened == None else 87
@@ -3384,7 +3542,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 opened["offset"] = position + len(value)
             if args[3]:
                 machine.write_u32le(args[3], len(value))
-            complete_overlapped(machine, args[4], len(value))
+            complete_overlapped(machine, args[4], len(value), opened = opened)
             state["last_error"] = 0
             return 1
         if name == "writefile":
@@ -3408,7 +3566,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             state["file_queries"].append({"api": name, "path": opened["path"], "offset": offset, "written": len(value), "overlapped": asynchronous})
             if args[3]:
                 machine.write_u32le(args[3], len(value))
-            complete_overlapped(machine, args[4], len(value))
+            complete_overlapped(machine, args[4], len(value), opened = opened)
             state["last_error"] = 0
             return 1
         if name == "ntwritefile":
@@ -8477,10 +8635,19 @@ def winsock_helper_plugin():
     return emulator.plugin(install, name = "windows.ws2help", state = state)
 
 _WINSOCK_ORDINAL_SIGNATURES = {
+    2: 3,   # bind
+    3: 1,   # closesocket
+    6: 3,   # getsockname
+    7: 5,   # getsockopt
+    10: 3,  # ioctlsocket
+    21: 5,  # setsockopt
+    23: 3,  # socket
+    103: 5, # WSAAsyncGetHostByName
     8: 1,   # htonl
     9: 1,   # htons
     14: 1,  # ntohl
     15: 1,  # ntohs
+    19: 4,  # send
     111: 0, # WSAGetLastError
     112: 1, # WSASetLastError
     114: 0, # WSAIsBlocking
@@ -8488,11 +8655,264 @@ _WINSOCK_ORDINAL_SIGNATURES = {
     116: 0, # WSACleanup
 }
 
-def winsock_plugin():
-    """Models stable Winsock 1.1 ordinals shared by wsock32 and ws2_32."""
-    state = {"last_error": 0, "started": False}
+def winsock_plugin(hosts = {}, user_interface = None, kernel = None, connect = None):
+    """Models Winsock with explicit DNS data and exclusively in-memory connections.
 
-    def callback(event):
+    connect(address_bytes, port, server_channel) returns True to accept a
+    connection. The provider receives the server end of a memory pair; there
+    is no native networking fallback. Retain mutable server state in a plugin.
+    """
+    state = {"last_error": 0, "started": False, "next_request": 1, "queries": [], "sockets": {}, "next_socket": 0x90000}
+
+    def dispatch(event):
+        if event.name == "#19":
+            socket, data, length, flags = event.args
+            record = state["sockets"].get(socket)
+            if record == None:
+                state["last_error"] = 10038
+                return 0xffffffff
+            if record["channel"] == None:
+                state["last_error"] = 10057
+                return 0xffffffff
+            if flags:
+                state["last_error"] = 10045
+                return 0xffffffff
+            if length > 1 << 20:
+                state["last_error"] = 10055
+                return 0xffffffff
+            if length:
+                written = record["channel"].write_available(event.machine.read(data, length))
+                if written == None or written < 0:
+                    state["last_error"] = 10035 if written == None else 10054
+                    return 0xffffffff
+                return written
+            return length
+        if event.name == "#3":
+            socket = event.args[0]
+            record = state["sockets"].pop(socket, None)
+            if record == None:
+                state["last_error"] = 10038
+                return 0xffffffff
+            if record["channel"] != None:
+                if kernel != None:
+                    kernel.state["cancel_channel_reads"](event.machine, record)
+                record["channel"].close()
+            if kernel != None:
+                kernel.state["handles"].pop(socket, None)
+            return 0
+        if event.name == "#6":
+            socket, output, capacity = event.args
+            record = state["sockets"].get(socket)
+            if record == None:
+                state["last_error"] = 10038
+                return 0xffffffff
+            if record.get("local_address") == None:
+                state["last_error"] = 10022
+                return 0xffffffff
+            if not output or not capacity or event.machine.read_u32le(capacity) < 16:
+                state["last_error"] = 10014
+                return 0xffffffff
+            event.machine.write(output, record["local_address"])
+            event.machine.write_u32le(capacity, 16)
+            return 0
+        if event.name.lower() == "wsaioctl":
+            socket, code, source, size, output, capacity, returned, overlapped, completion = event.args
+            if socket not in state["sockets"]:
+                state["last_error"] = 10038
+                return 0xffffffff
+            if code != 0xc8000006 or overlapped or completion:
+                state["last_error"] = 10045  # WSAEOPNOTSUPP
+                return 0xffffffff
+            if not source or size != 16 or not output or capacity < event.machine.pointer_size or not returned:
+                state["last_error"] = 10014
+                return 0xffffffff
+            if event.machine.read(source, 16) != b"\xb9\x07\xa2\x25\xf3\xdd\x60\x46\x8e\xe9\x76\xe5\x8c\x74\x06\x3e":
+                state["last_error"] = 10022
+                return 0xffffffff
+            event.machine.write_pointer(output, event.machine.resolve_export("mswsock.dll", name = "ConnectEx"))
+            event.machine.write_u32le(returned, event.machine.pointer_size)
+            return 0
+        if event.name.lower() == "connectex":
+            socket, address, size, data, length, sent, overlapped = event.args
+            record = state["sockets"].get(socket)
+            if record == None:
+                state["last_error"] = 10038
+                return 0
+            if record.get("local_address") == None:
+                state["last_error"] = 10022
+                return 0
+            if record["channel"] != None:
+                state["last_error"] = 10056
+                return 0
+            if not address or size < 16 or not overlapped:
+                state["last_error"] = 10014
+                return 0
+            if event.machine.read_u16le(address) != 2:
+                state["last_error"] = 10047
+                return 0
+            ip = event.machine.read(address + 4, 4)
+            if ip == b"\x00\x00\x00\x00":
+                state["last_error"] = 10049
+                return 0
+            port = event.machine.read_u16le(address + 2)
+            port = ((port & 255) << 8) | (port >> 8)
+            if connect == None or kernel == None:
+                state["last_error"] = 10061  # Explicitly refuse unmodeled peers.
+                return 0
+            if data and length > 1 << 20:
+                state["last_error"] = 10055
+                return 0
+            client, server = channel.memory_pair()
+            if not connect(ip, port, server):
+                client.close()
+                server.close()
+                state["last_error"] = 10061
+                return 0
+            record["channel"] = client
+            record["server"] = server
+            record["connected_at"] = kernel.state["tick_count"]
+            record["remote_address"] = event.machine.read(address, 16)
+            if record["local_address"][4:8] == b"\x00\x00\x00\x00":
+                local = binary.builder()
+                local.append(record["local_address"][:4])
+                local.append(b"\x7f\x00\x00\x01")
+                local.append(record["local_address"][8:])
+                record["local_address"] = local.bytes()
+            transferred = length if data else 0
+            if transferred:
+                client.write(event.machine.read(data, transferred))
+            if sent and data:
+                event.machine.write_u32le(sent, transferred)
+            kernel.state["complete_overlapped"](event.machine, overlapped, transferred, record)
+            # Report this as an overlapped operation. Its completion may be
+            # queued before the initiating call returns, as on Windows.
+            state["last_error"] = 997  # WSA_IO_PENDING
+            return 0
+        if event.name == "#2":
+            socket, address, size = event.args
+            record = state["sockets"].get(socket)
+            if record == None:
+                state["last_error"] = 10038
+                return 0xffffffff
+            if not address or size < 16:
+                state["last_error"] = 10014
+                return 0xffffffff
+            if event.machine.read_u16le(address) != 2:
+                state["last_error"] = 10047
+                return 0xffffffff
+            if record.get("local_address") != None:
+                state["last_error"] = 10022
+                return 0xffffffff
+            local = event.machine.read(address, 16)
+            # Local endpoints exist only in this emulated socket namespace.
+            # Allocate a deterministic ephemeral port for INADDR_ANY:0.
+            port_bytes = local[2:4]
+            if port_bytes == b"\x00\x00":
+                port = 49152 + (socket - 0x90000) // 4
+                encoded = binary.builder()
+                encoded.append(local[:2])
+                encoded.u8(port >> 8)
+                encoded.u8(port & 255)
+                encoded.append(local[4:])
+                local = encoded.bytes()
+            for other in state["sockets"].values():
+                if other.get("local_address") == local:
+                    state["last_error"] = 10048
+                    return 0xffffffff
+            record["local_address"] = local
+            return 0
+        if event.name == "#21":
+            socket, level, option, value, size = event.args
+            record = state["sockets"].get(socket)
+            if record == None:
+                state["last_error"] = 10038  # WSAENOTSOCK
+                return 0xffffffff
+            if level == 0xffff and option == 0x7010:  # SO_UPDATE_CONNECT_CONTEXT
+                if record["channel"] == None:
+                    state["last_error"] = 10057  # WSAENOTCONN
+                    return 0xffffffff
+                record["connect_context_updated"] = True
+                return 0
+            if level != 0xffff or option != 0x80:  # SOL_SOCKET, SO_LINGER
+                state["last_error"] = 10042  # WSAENOPROTOOPT
+                return 0xffffffff
+            if not value or size < 4:
+                state["last_error"] = 10014  # WSAEFAULT
+                return 0xffffffff
+            record["linger"] = [event.machine.read_u16le(value), event.machine.read_u16le(value + 2)]
+            return 0
+        if event.name == "#7":
+            socket, level, option, output, size = event.args
+            record = state["sockets"].get(socket)
+            if record == None:
+                state["last_error"] = 10038
+                return 0xffffffff
+            if level != 0xffff or option != 0x700c:  # SOL_SOCKET, SO_CONNECT_TIME
+                state["last_error"] = 10042
+                return 0xffffffff
+            if not output or not size or event.machine.read_u32le(size) < 4:
+                state["last_error"] = 10014
+                return 0xffffffff
+            elapsed = 0xffffffff if record["channel"] == None else (kernel.state["tick_count"] - record["connected_at"]) // 1000
+            event.machine.write_u32le(output, elapsed)
+            event.machine.write_u32le(size, 4)
+            return 0
+        if event.name == "#10":
+            socket, command, argument = event.args
+            record = state["sockets"].get(socket)
+            if record == None:
+                state["last_error"] = 10038
+                return 0xffffffff
+            if command == 0x8004667e:  # FIONBIO
+                record["nonblocking"] = event.machine.read_u32le(argument) != 0
+                return 0
+            state["last_error"] = 10022
+            return 0xffffffff
+        if event.name == "#23":
+            family, kind, protocol = event.args
+            if family != 2 or kind != 1 or protocol not in [0, 6]:
+                state["last_error"] = 10043
+                return 0xffffffff
+            socket = state["next_socket"]
+            state["next_socket"] += 4
+            record = {"family": family, "type": kind, "protocol": protocol, "channel": None, "nonblocking": False}
+            state["sockets"][socket] = record
+            if kernel != None:
+                kernel.state["handles"][socket] = {"kind": "socket", "value": record}
+            return socket
+        if event.name == "#103":
+            if user_interface == None:
+                fail("WSAAsyncGetHostByName requires a window message queue")
+            machine = event.machine
+            window, message, name_address, output, capacity = event.args
+            name = machine.read_cstring(name_address)
+            addresses = hosts.get(name.lower().rstrip("."), [])
+            state["queries"].append({"name": name, "addresses": addresses})
+            request = state["next_request"]
+            state["next_request"] += 1
+            pointer = machine.pointer_size
+            header_size = 16 if pointer == 4 else 32
+            address_list = header_size + pointer
+            address_data = address_list + (len(addresses) + 1) * pointer
+            name_offset = address_data + len(addresses) * 4
+            encoded_name = _encoded(name, False)
+            required = name_offset + len(encoded_name)
+            error = 11001 if not addresses else (10055 if capacity < required else 0)
+            if not error:
+                machine.write(output, b"\x00" * required)
+                machine.write_pointer(output, output + name_offset)
+                machine.write_pointer(output + pointer, output + header_size)
+                machine.write_u16le(output + pointer * 2, 2)  # AF_INET
+                machine.write_u16le(output + pointer * 2 + 2, 4)
+                machine.write_pointer(output + (12 if pointer == 4 else 24), output + address_list)
+                for index, address in enumerate(addresses):
+                    if len(address) != 4:
+                        fail("Winsock host addresses must contain four IPv4 bytes")
+                    machine.write_pointer(output + address_list + index * pointer, output + address_data + index * 4)
+                    machine.write(output + address_data + index * 4, address)
+                machine.write(output + name_offset, encoded_name)
+            user_interface.state["messages"].append({"thread": 0, "window": window, "message": message, "wparam": request, "lparam": (error << 16) | required, "time": 0, "x": 0, "y": 0})
+            return request
         if event.name == "#111":
             return state["last_error"]
         if event.name == "#112":
@@ -8528,7 +8948,19 @@ def winsock_plugin():
             )
         return ((value & 0x00ff) << 8) | ((value & 0xff00) >> 8)
 
+    def callback(event):
+        # Winsock and Win32 expose the same thread error slot. In particular,
+        # callers may retrieve ConnectEx's WSA_IO_PENDING with GetLastError.
+        if kernel != None:
+            state["last_error"] = kernel.state["last_error"]
+        value = dispatch(event)
+        if kernel != None:
+            kernel.state["last_error"] = state["last_error"]
+        return value
+
     def install(machine):
+        machine.provide_export(callback, module = "ws2_32.dll", name = "WSAIoctl", argc = 9)
+        machine.provide_export(callback, module = "mswsock.dll", name = "ConnectEx", argc = 7)
         for ordinal, argc in _WINSOCK_ORDINAL_SIGNATURES.items():
             for module in ["wsock32.dll", "ws2_32.dll"]:
                 machine.provide_export(callback, module = module, ordinal = ordinal, argc = argc)
@@ -12693,7 +13125,17 @@ def user32_plugin(file, module_files = {}, kernel = None):
                 if selected < 0 and message_matches(state["messages"][index], event.args[1], event.args[2], event.args[3]):
                     selected = index
             if selected < 0:
+                if name.startswith("getmessage"):
+                    if kernel != None and kernel.state["current_thread"] != None:
+                        kernel.state["current_thread"]["wait"] = {
+                            "handles": [], "deadline": None,
+                            "messages": state["messages"], "message_window": event.args[1],
+                            "message_minimum": event.args[2], "message_maximum": event.args[3],
+                        }
+                    event.machine.stop("wait", detail = "user32 message wait")
                 return 0
+            if kernel != None and kernel.state["current_thread"] != None:
+                kernel.state["current_thread"].pop("wait", None)
             message = state["messages"][selected]
             write_message(event.machine, event.args[0], message)
             if name.startswith("getmessage") or event.args[4] & 1:  # PM_REMOVE
@@ -12750,8 +13192,24 @@ def user32_plugin(file, module_files = {}, kernel = None):
                 else:
                     event.machine.stop("wait", detail = "user32 message or handle wait")
             return 0x102
-        if name in ["translatemessage", "dispatchmessagea", "dispatchmessagew"]:
-            return 1 if name == "translatemessage" else 0
+        if name == "translatemessage":
+            return 1
+        if name in ["dispatchmessagea", "dispatchmessagew"]:
+            machine = event.machine
+            message = [machine.read_u32le(event.args[0] + index * 4) for index in range(4)]
+            window = state["windows"].get(message[0])
+            if window == None:
+                return 0
+            class_value = window.get("class", 0)
+            record = registered_class(machine, class_value, wide) if type(class_value) == "int" else state["classes"].get(class_value.lower())
+            procedure = window["longs"].get(0xfffffffc, record.get("procedure", 0) if record != None else 0)
+            if not procedure:
+                return 0
+            dispatched = machine.invoke(procedure, args = message)
+            if dispatched.reason != "return":
+                machine.stop(dispatched.reason, detail = dispatched.detail)
+                return 0
+            return dispatched.value
         if name in ["getshellwindow", "getwindow", "findwindowa", "findwindoww", "findwindowexa", "findwindowexw"]:
             # Registration runs before Explorer owns the shell desktop.
             return 0

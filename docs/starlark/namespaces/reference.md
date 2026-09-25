@@ -1819,7 +1819,11 @@ Models opaque Winsock handle-context tables used by ws2_32.
 
 ### `winsock_plugin`
 
-Models stable Winsock 1.1 ordinals shared by wsock32 and ws2_32.
+Models Winsock with explicit DNS data and exclusively in-memory connections.
+
+    connect(address_bytes, port, server_channel) returns True to accept a
+    connection. The provider receives the server end of a memory pair; there
+    is no native networking fallback. Retain mutable server state in a plugin.
 
 ## `windows/symbols.star`
 
@@ -2558,6 +2562,12 @@ Returns a read-only file view of a live block device. Later device changes remai
 `cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_dma=True, overlay_limit=268435456) -> vmm_backend`
 
 Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 2 GiB. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+
+### `channel.memory_pair`
+
+`channel.memory_pair(maximum=1MiB) -> (byte_channel, byte_channel)`
+
+Creates two connected, bounded byte channels entirely in memory, without host sockets or DNS. maximum limits each incoming queue (default 1 MiB, at most 64 MiB). read_available returns None when the peer has no data yet, bytes when data is ready, and empty bytes after the peer closes and its data is drained. write_available returns the byte count, None when capacity is insufficient, or -1 for a closed endpoint; writes are all-or-nothing. write instead raises an error when delivery is unavailable. Emulator checkpoints restore queued data and closed state when endpoints are retained in plugin state.
 
 ### `clock.monotonic`
 
@@ -4028,7 +4038,7 @@ Methods and attributes: `capabilities`, `commit()`, `extents(offset, length)`, `
 
 An owned bidirectional byte transport. read requests a specified amount, read_some returns available bytes within its bound/timeout, write sends bytes, and close releases the endpoint. Channel operations do not imply any particular wire protocol.
 
-Methods and attributes: `close()`, `name`, `read(size, maximum=8MiB)`, `read_some(maximum=64KiB, timeout=30)`, `write(value)`.
+Methods and attributes: `close()`, `name`, `read(size, maximum=8MiB)`, `read_available(maximum=64KiB)`, `read_some(maximum=64KiB, timeout=30)`, `write(value)`, `write_available(value)`.
 
 ### `byte_view` value
 
@@ -4118,7 +4128,7 @@ Methods and attributes: `address`, `kind`, `remove(timeout=30)`, `removed`, `siz
 
 A recognized installer container with payload files and detection metadata. plan returns declarative modifications using caller-supplied locations, variables and component selection. It does not apply the plan or run a host installer.
 
-Methods and attributes: `container`, `files`, `find(path)`, `format`, `installscript`, `offset`, `payload`, `plan(locations={}, variables={}, components=None)`, `size`.
+Methods and attributes: `container`, `files`, `find(path)`, `format`, `installscript`, `offset`, `payload`, `plan(locations={}, variables={}, components=None, local_files=None, ranges=None)`, `size`.
 
 ### `installscript` value
 
