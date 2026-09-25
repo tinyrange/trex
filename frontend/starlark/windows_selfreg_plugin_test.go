@@ -11,6 +11,119 @@ import (
 	"go.starlark.net/starlark"
 )
 
+func TestAdjustWindowRectNonclientDimensions(t *testing.T) {
+	thread, globals, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	globals["image"] = &starfile.Bytes{Name: "window-client", Data: []byte(syntheticRegistryClientPE(t))}
+	_, err = starlark.ExecFile(thread, "window-rect.star", `
+load("@stdlib//windows/selfreg:win32.star", "user32_plugin")
+machine = emulator.x86(code=b"\xc3")
+ui = user32_plugin(image)
+machine.use(ui)
+adjust = machine.resolve_export("user32.dll",name="AdjustWindowRect")
+rect = machine.allocate(size=16)
+def check(style,menu,expected):
+    for index,value in enumerate([0xffffffec,10,620,490]):
+        machine.write_u32le(rect+4*index,value)
+    result=machine.call(adjust,args=[rect,style,1 if menu else 0])
+    if result.reason != "return" or result.value != 1: fail("adjust failed")
+    c=binary.cursor(machine.read(rect,16))
+    actual=[c.i32le(),c.i32le(),c.i32le(),c.i32le()]
+    if actual != expected: fail("rectangle %s != %s" % (actual,expected))
+# Popup has no border; scrollbars do not affect this API's calculation.
+check(0x80000000,False,[-20,10,620,490])
+check(0x80300000,False,[-20,10,620,490])
+check(0x10c20000,False,[-23,-16,623,493])
+check(0x00cf0000,True,[-24,-36,624,494])
+def check_null():
+    if machine.call(adjust,args=[0,0x80000000,0]).value != 0: fail("null RECT accepted")
+check_null()
+def cursor_check():
+    mask=machine.allocate(size=8)
+    machine.write(mask,b"\xff\x00\xff\x00\xff\x00\xff\x00")
+    create=machine.resolve_export("user32.dll",name="CreateCursor")
+    result=machine.call(create,args=[0,1,1,17,2,mask,mask])
+    if result.reason != "return" or not result.value: fail("cursor creation failed")
+    image=ui.state["images"][result.value]
+    machine.write_u32le(mask,0)
+    if image["stride"] != 4 or image["and_mask"] != b"\xff\x00\xff\x00\xff\x00\xff\x00": fail("cursor mask not copied with word stride")
+    destroy=machine.resolve_export("user32.dll",name="DestroyCursor")
+    if machine.call(destroy,args=[result.value]).value != 1: fail("cursor destruction failed")
+cursor_check()
+def coordinate_check():
+    create=machine.resolve_export("user32.dll",name="CreateWindowExA")
+    window=machine.call(create,args=[0,0,0,0x00cf0000,100,200,648,511,0,0,0,0]).value
+    output=machine.allocate(size=16)
+    client=machine.resolve_export("user32.dll",name="GetClientRect")
+    if machine.call(client,args=[window,output]).value != 1: fail("client rect failed")
+    if machine.read_u32le(output+8)!=640 or machine.read_u32le(output+12)!=480: fail("client dimensions disagree with nonclient metrics")
+    machine.write_u32le(output,0xffffffec)
+    machine.write_u32le(output+4,10)
+    forward=machine.resolve_export("user32.dll",name="ClientToScreen")
+    reverse=machine.resolve_export("user32.dll",name="ScreenToClient")
+    if machine.call(forward,args=[window,output]).value!=1: fail("client conversion failed")
+    if machine.read_u32le(output)!=84 or machine.read_u32le(output+4)!=237: fail("wrong screen point")
+    if machine.call(reverse,args=[window,output]).value!=1: fail("screen conversion failed")
+    if machine.read_u32le(output)!=0xffffffec or machine.read_u32le(output+4)!=10: fail("coordinate roundtrip failed")
+coordinate_check()
+`, globals)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+
+func TestGDIMemoryBitmapSelection(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "gdi32_plugin")
+def check(v):
+    if not v: fail("GDI memory bitmap check failed")
+machine=emulator.x86(code=b"\xc3")
+gdi=gdi32_plugin()
+machine.use(gdi)
+def call(name,args):
+    r=machine.call(machine.resolve_export("gdi32.dll",name=name),args=args)
+    check(r.reason=="return")
+    return r.value
+dc=call("CreateCompatibleDC",[0])
+header=machine.allocate(size=40)
+def fill_header():
+    for offset,value in [(0,40),(4,3),(8,0xfffffffe),(12,0x180001)]:
+        machine.write_u32le(header+offset,value)
+fill_header()
+out=machine.allocate(size=4)
+bitmap=call("CreateDIBSection",[dc,header,0,out,0,0])
+pixels=machine.read_u32le(out)
+check(pixels!=0 and bitmap!=0)
+check(gdi.state["bitmaps"][bitmap]["size"]==24)
+machine.write(pixels,b"\x11\x22\x33")
+stock=call("SelectObject",[dc,bitmap])
+check(stock!=0)
+check(call("SelectObject",[dc,stock])==bitmap)
+font=call("CreateFontA",[0xfffffff1,0,0,0,400,0,0,0,1,7,0,0,0x22,0])
+old=call("SelectObject",[dc,font])
+check(call("SelectObject",[dc,old])==font)
+pen=call("CreatePen",[0,1,0x123456])
+check(pen!=font and pen in gdi.state["pens"])
+old_pen=call("SelectObject",[dc,pen])
+check(call("SelectObject",[dc,old_pen])==pen)
+compatible=call("CreateCompatibleBitmap",[dc,2,2])
+check(gdi.state["bitmaps"][compatible]["depth"]==1)
+call("SelectObject",[dc,bitmap])
+compatible_color=call("CreateCompatibleBitmap",[dc,2,2])
+check(gdi.state["bitmaps"][compatible_color]["depth"]==24)
+call("SelectObject",[dc,stock])
+check(call("GdiFlush",[])==1 and machine.read(pixels,3)==b"\x11\x22\x33")
+check(call("DeleteObject",[font])==1 and font not in gdi.state["fonts"])
+check(call("DeleteObject",[pen])==1 and pen not in gdi.state["pens"])
+check(call("DeleteObject",[bitmap])==1 and bitmap not in gdi.state["bitmaps"])
+check(call("DeleteDC",[dc])==1 and call("DeleteDC",[dc])==0)
+`)
+}
+
+
 func testStarlarkStringDict(values map[string]starlark.Value) *starlark.Dict {
 	dict := starlark.NewDict(len(values))
 	for name, value := range values {

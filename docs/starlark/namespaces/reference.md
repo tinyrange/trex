@@ -3291,6 +3291,12 @@ by the image recipe, not inferred from the host.
 
 Inspects DOS batch commands and COPY source declarations using portable media files. Labels, branches, media selection, and external commands remain explicit runtime dependencies; it does not execute the script.
 
+### `windows.bitmap_info`
+
+`windows.bitmap_info(header) -> dict`
+
+Parses the first 40 bytes of an uncompressed 24/32-bit RGB Windows BITMAPINFOHEADER. Returns width, absolute height, depth, DWORD-aligned stride, pixel size, and top_down. Does not allocate pixels or access a display.
+
 ### `windows.catalog_hash`
 
 `windows.catalog_hash(file, algorithm='sha1')`

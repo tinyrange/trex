@@ -40,6 +40,7 @@ func Builtins() starlark.StringDict {
 		"pe_sign":                     peSignBuiltin,
 		"csp_registrations":           cspRegistrationsBuiltin,
 		"font_names":                  fontNamesBuiltin,
+		"bitmap_info":                 bitmapInfoBuiltin,
 		"icon":                        windowsIconBuiltin,
 		"pe":                          peObjectBuiltin,
 		"pe32_executable":             pe32ExecutableBuiltin,
