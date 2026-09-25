@@ -17,7 +17,7 @@ load("@stdlib//windows/selfreg:comcat.star", "component_categories_provider")
 load("@stdlib//windows/selfreg:wer.star", "wer_plugin")
 load("@stdlib//windows/selfreg:appmodel.star", "appmodel_plugin")
 
-def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, process_create_provider = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800):
+def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, process_create_provider = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800, network_hosts = {}, network_connect = None, stack_size = 1 << 20):
     """Runs one target export or executable using semantic system-DLL plugins.
 
     `prepare(machine)` may allocate target memory and return the integer
@@ -67,6 +67,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         image_name = module,
         instruction_limit = instruction_limit,
         memory_limit = memory_limit,
+        stack_size = stack_size,
         trace = trace,
         trace_limit = trace_limit,
         profile = profile,
@@ -374,7 +375,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         crt,
         security,
         network,
-        winsock_plugin(),
+        winsock_plugin(hosts = network_hosts, user_interface = user_interface, kernel = kernel, connect = network_connect),
         winsock_helper_plugin(),
         resources,
         versions,

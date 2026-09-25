@@ -97,7 +97,7 @@ var nativeStarlarkTypes = map[string][]string{
 	"binary.xml_document":      {"bytes(maximum=16MiB)", "root", "with_root(root)"},
 	"binary.xml_node":          {"attribute(name, default=None, namespace='')", "attributes", "bytes(maximum=16MiB)", "child(name, namespace='')", "children", "children_named(name, namespace='')", "direct_text", "name", "namespace", "prefix", "qualified_name", "text", "with_children(children)", "with_text(text)"},
 	"byte_view":                {"bytes(offset=0, size=remaining)", "compare(other, signed=False, exact=False)", "find(needle, start=0, end=size)", "find_all(needle, start=0, end=size, limit=1M)", "find_indices(needles, start=0, end=size)", "size", "slice(offset=0, size=remaining)"},
-	"byte_channel":             {"close()", "name", "read(size, maximum=8MiB)", "read_some(maximum=64KiB, timeout=30)", "write(value)"},
+	"byte_channel":             {"close()", "name", "read(size, maximum=8MiB)", "read_available(maximum=64KiB)", "read_some(maximum=64KiB, timeout=30)", "write(value)", "write_available(value)"},
 	"clock.profiler":           {"counter(name, amount=1)", "measure(name, function, *args, **kwargs)", "report(minimum_coverage=0.95)", "snapshot()", "span(name)"},
 	"clock.span":               {"end() -> elapsed seconds"},
 	"directory":                {"fat_short_path(name)", "files", "find(path)", "get_security(name)", "mkdir(name)", "remove(name)", "set_attributes(name, readonly=False, hidden=False, system=False, archive=False)", "set_security(name, descriptor)", "write(name, value)"},
@@ -137,6 +137,7 @@ var nativeStarlarkTypes = map[string][]string{
 }
 
 var nativeStarlarkSignatures = map[string]string{
+	"channel.memory_pair":               "channel.memory_pair(maximum=1MiB) -> (byte_channel, byte_channel)",
 	"bytes_concat":                      "bytes_concat(parts) -> bytes",
 	"digest":                            "digest(value, algorithm='sha256') -> bytes",
 	"directory":                         "directory() -> directory",

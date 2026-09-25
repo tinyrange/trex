@@ -45,6 +45,7 @@ import (
 	autostar "github.com/tinyrange/trex/auto/star"
 	binaryapi "github.com/tinyrange/trex/binary"
 	binarystar "github.com/tinyrange/trex/binary/star"
+	channelstar "github.com/tinyrange/trex/channel/star"
 	databaseese "github.com/tinyrange/trex/database/ese"
 	databasesqlite "github.com/tinyrange/trex/database/sqlite"
 	debugapi "github.com/tinyrange/trex/debug"
@@ -202,6 +203,7 @@ func predeclared() starlark.StringDict {
 		"vmm":      namespace{name: "vmm", attrs: vmmstar.Builtins()},
 		"crypto":   namespace{name: "crypto", attrs: starcrypto.Builtins()},
 		"debug":    namespace{name: "debug", attrs: debugapi.Builtins()},
+		"channel":  namespace{name: "channel", attrs: channelstar.Builtins()},
 		"emulator": namespace{name: "emulator", attrs: emulatorapi.Builtins()},
 		"json":     namespace{name: "json", attrs: starjson.Builtins()},
 		"html": namespace{
