@@ -31,6 +31,15 @@ func Parse(fn Builtin, r storage.Reader, options auto.Options, kwargs ...starlar
 
 type readFile struct{ storage.Reader }
 
+// Preserve lazy length discovery when a decoded stream crosses the Starlark
+// adapter. A bounded bytes/slice request must not turn into a whole-stream scan.
+func (f *readFile) KnownSize() (int64, bool) {
+	if stream, ok := f.Reader.(interface{ KnownSize() (int64, bool) }); ok {
+		return stream.KnownSize()
+	}
+	return f.Reader.Size(), true
+}
+
 func (*readFile) WriteAt([]byte, int64) (int, error)         { return 0, fmt.Errorf("read-only file") }
 func (*readFile) String() string                             { return "<auto.file>" }
 func (*readFile) Type() string                               { return "file" }
@@ -72,6 +81,9 @@ func values(v starlark.Value) []starlark.Value {
 
 func Parsed(value starlark.Value, options auto.Options) (auto.View, error) {
 	n := &adapter{options: options, folded: value.Type() == "fat" || value.Type() == "ntfs" || value.Type() == "iso" || value.Type() == "udf"}
+	if sensitive, ok := attr(value, "case_sensitive").(starlark.Bool); ok {
+		n.folded = !bool(sensitive)
+	}
 	entries := attr(value, "entries")
 	if entries != nil {
 		_, mapped := value.(starlark.Mapping)
@@ -98,38 +110,7 @@ func Parsed(value starlark.Value, options auto.Options) (auto.View, error) {
 			if kind == "directory" || (mapped && kind != "file" && kind != "hardlink") {
 				reader = nil
 			}
-			attributes := map[string]any{}
-			for _, key := range []string{"link", "mode", "uid", "gid", "mtime", "crc32", "stored_size", "size", "missing_contents", "occurrence", "installer_record", "directory_link", "resource_size", "compressed", "resource_type", "id", "name", "flags", "offset", "attributes", "file_type", "creator", "created", "modified", "finder_flags", "data_checksum", "resource_checksum", "version"} {
-				a := attr(v, key)
-				switch a := a.(type) {
-				case starlark.String:
-					attributes[key] = string(a)
-				case starlark.Bytes:
-					attributes[key] = []byte(a)
-				case starlark.Bool:
-					attributes[key] = bool(a)
-				case starlark.Int:
-					if x, ok := a.Int64(); ok {
-						attributes[key] = x
-					}
-				case *starlark.List:
-					// BACKUP attribute records carry the RMS layout required by
-					// subsequent explicit decoders; retain their kinds and bytes.
-					var records []map[string]any
-					for _, record := range values(a) {
-						kind, kindOK := attr(record, "kind").(starlark.Int)
-						data, dataOK := attr(record, "data").(starlark.Bytes)
-						if kindOK && dataOK {
-							if k, ok := kind.Int64(); ok {
-								records = append(records, map[string]any{"kind": k, "data": []byte(data)})
-							}
-						}
-					}
-					if records != nil {
-						attributes[key] = records
-					}
-				}
-			}
+			attributes := entryAttributes(v)
 			entry := auto.Entry{Name: name, Kind: kind, Reader: reader, Attributes: attributes}
 			if resource, ok := attr(v, "resource").(storage.Reader); ok && kind != "directory" {
 				forks := []auto.Entry{{Name: "resource", Kind: "file", Reader: resource}}
@@ -178,6 +159,42 @@ func Parsed(value starlark.Value, options auto.Options) (auto.View, error) {
 	}
 	return auto.Tree(items, n.options)
 }
+func entryAttributes(v starlark.Value) map[string]any {
+	attributes := map[string]any{}
+	for _, key := range []string{"link", "mode", "uid", "gid", "nlink", "inode", "mtime", "atime", "ctime", "device_high", "device_low", "backup_time", "expiration_time", "effective_time", "crc32", "stored_size", "size", "missing_contents", "occurrence", "installer_record", "directory_link", "resource_size", "compressed", "resource_type", "id", "name", "flags", "offset", "attributes", "file_type", "creator", "created", "modified", "finder_flags", "data_checksum", "resource_checksum", "version"} {
+		a := attr(v, key)
+		switch a := a.(type) {
+		case starlark.String:
+			attributes[key] = string(a)
+		case starlark.Bytes:
+			attributes[key] = []byte(a)
+		case starlark.Bool:
+			attributes[key] = bool(a)
+		case starlark.Int:
+			if x, ok := a.Int64(); ok {
+				attributes[key] = x
+			}
+		case *starlark.List:
+			// BACKUP attribute records carry the RMS layout required by
+			// subsequent explicit decoders; retain their kinds and bytes.
+			var records []map[string]any
+			for _, record := range values(a) {
+				kind, kindOK := attr(record, "kind").(starlark.Int)
+				data, dataOK := attr(record, "data").(starlark.Bytes)
+				if kindOK && dataOK {
+					if k, ok := kind.Int64(); ok {
+						records = append(records, map[string]any{"kind": k, "data": []byte(data)})
+					}
+				}
+			}
+			if records != nil {
+				attributes[key] = records
+			}
+		}
+	}
+	return attributes
+}
+
 func (n *adapter) mappedChildren(mapping starlark.Mapping, dir starlark.Value) ([]auto.Entry, error) {
 	var out []auto.Entry
 	files, err := dir.(starlark.HasAttrs).Attr("files")
@@ -196,13 +213,22 @@ func (n *adapter) mappedChildren(mapping starlark.Mapping, dir starlark.Value) (
 		if !found {
 			return nil, fmt.Errorf("missing directory member %q", name)
 		}
-		child := auto.Entry{Name: path.Base(name), Kind: "file"}
-		if reader, ok := value.(storage.Reader); ok {
-			child.Reader = reader
-		} else {
-			child.Kind = "directory"
-			child.View = n.dirView(mapping, value)
+		kind := textAttr(value, "entry_type")
+		reader, readable := value.(storage.Reader)
+		if kind == "" {
+			kind = "file"
+			if !readable {
+				kind = "directory"
+			}
 		}
+		child := auto.Entry{Name: path.Base(name), Kind: kind, Attributes: entryAttributes(value)}
+		switch kind {
+		case "directory":
+			child.View = n.dirView(mapping, value)
+		case "file", "hardlink":
+			child.Reader = reader
+		}
+
 		out = append(out, child)
 		if len(out) > n.options.MaxEntries {
 			return nil, fmt.Errorf("%w: directory entries", auto.ErrLimit)

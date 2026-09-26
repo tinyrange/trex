@@ -16,7 +16,7 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
-		if decoded.Size() > options.MaxExpandedBytes {
+		if maximum := options.StreamingMaximum(); maximum > 0 && decoded.Size() > maximum {
 			return nil, auto.ErrLimit
 		}
 		return &auto.DecodedView{Reader: decoded}, nil

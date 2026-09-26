@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"path"
 	"strings"
 	"testing"
 
@@ -12,6 +13,80 @@ import (
 
 	"go.starlark.net/starlark"
 )
+
+func TestInstallerSelectsSeparateV5Header(t *testing.T) {
+	for _, layout := range []struct{ header, cabinet string }{{"/", "/"}, {"/Disk1", "/Disk1"}, {"/Disk1", "/"}} {
+		t.Run(layout.header+"-"+layout.cabinet, func(t *testing.T) {
+			header, volumes, _ := installShieldV5Fixture(t)
+			// Both split and inline v5 cabinets carry this version marker.
+			binary.LittleEndian.PutUint32(volumes[1].(*starfile.Bytes).Data[4:], 0x0100500c)
+			container := starlark.NewDict(4)
+			for name, file := range map[string]starfile.File{
+				path.Join(layout.header, "data1.hdr"):  header,
+				path.Join(layout.cabinet, "data1.cab"): volumes[1],
+				"/data2.cab":                           volumes[2],
+				"/Dir/same.bin":                        &starfile.Bytes{Data: []byte("external")},
+			} {
+				if err := container.SetKey(starlark.String(name), file); err != nil {
+					t.Fatal(err)
+				}
+			}
+			payload, packages, format, err := installerNestedPayload(container)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if format != "installshield5" || len(packages) != 1 || packages[0].headerPath != path.Join(layout.header, "data1.hdr") {
+				t.Fatalf("format=%s packages=%+v", format, packages)
+			}
+			value, found, err := payload.Get(starlark.String("/Program Files/Dir/split.bin"))
+			if err != nil || !found {
+				t.Fatal(found, err)
+			}
+			data, err := starfile.ReadAll(value.(starfile.File))
+			if err != nil || string(data) != "a compressed payload split across cabinet volumes" {
+				t.Fatalf("split payload = %q, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestInstallerPreservesInlineV5Header(t *testing.T) {
+	header, volumes, _ := installShieldV5Fixture(t)
+	combined := append([]byte(nil), header.(*starfile.Bytes).Data...)
+	first := volumes[1].(*starfile.Bytes).Data
+	second := volumes[2].(*starfile.Bytes).Data
+	copy(combined[20:60], first[20:60])
+	start := len(combined)
+	combined = append(combined, first[60:]...)
+	combined = append(combined, second[60:]...)
+	binary.LittleEndian.PutUint32(combined[32:], 1)
+	binary.LittleEndian.PutUint32(combined[48:], 0)
+	binary.LittleEndian.PutUint32(combined[0x800+0x100+0x26:], uint32(start))
+	container := starlark.NewDict(2)
+	for name, file := range map[string]starfile.File{
+		"/data1.cab":    &starfile.Bytes{Data: combined},
+		"/Dir/same.bin": &starfile.Bytes{Data: []byte("external")},
+	} {
+		if err := container.SetKey(starlark.String(name), file); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload, packages, format, err := installerNestedPayload(container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != "installshield5" || len(packages) != 1 || packages[0].headerPath != "/data1.cab" {
+		t.Fatalf("format=%s packages=%+v", format, packages)
+	}
+	value, found, err := payload.Get(starlark.String("/Program Files/Dir/split.bin"))
+	if err != nil || !found {
+		t.Fatal(found, err)
+	}
+	data, err := starfile.ReadAll(value.(starfile.File))
+	if err != nil || string(data) != "a compressed payload split across cabinet volumes" {
+		t.Fatalf("inline payload = %q, %v", data, err)
+	}
+}
 
 func uncompressedTestCabinet(name string, payload []byte) []byte {
 	const (

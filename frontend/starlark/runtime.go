@@ -20,10 +20,12 @@ import (
 	"github.com/tinyrange/trex/archive/bff"
 	"github.com/tinyrange/trex/archive/bru"
 	"github.com/tinyrange/trex/archive/bsddump"
+	"github.com/tinyrange/trex/archive/bzip2"
 	cabarchive "github.com/tinyrange/trex/archive/cab"
 	"github.com/tinyrange/trex/archive/cfb"
 	"github.com/tinyrange/trex/archive/compactpro"
 	"github.com/tinyrange/trex/archive/compressed"
+	"github.com/tinyrange/trex/archive/gzip"
 	"github.com/tinyrange/trex/archive/hunk"
 	"github.com/tinyrange/trex/archive/ibmisave"
 	"github.com/tinyrange/trex/archive/irix"
@@ -59,6 +61,7 @@ import (
 	filesystemhfs "github.com/tinyrange/trex/filesystem/hfs"
 	filesystemiso9660 "github.com/tinyrange/trex/filesystem/iso9660"
 	filesystemmbr "github.com/tinyrange/trex/filesystem/mbr"
+	filesystemmds "github.com/tinyrange/trex/filesystem/mds"
 	filesystemnative "github.com/tinyrange/trex/filesystem/native"
 	filesystemntfs "github.com/tinyrange/trex/filesystem/ntfs"
 	filesystemods2 "github.com/tinyrange/trex/filesystem/ods2"
@@ -132,8 +135,8 @@ func predeclared() starlark.StringDict {
 				"bff":              starlark.NewBuiltin("bff", bff.Builtin),
 				"ibmi_save":        starlark.NewBuiltin("ibmi_save", ibmisave.Builtin),
 				"rms_variable":     starlark.NewBuiltin("rms_variable", rms.VariableBuiltin),
-				"gzip":             starlark.NewBuiltin("gzip", compressed.Builtin),
-				"bzip2":            starlark.NewBuiltin("bzip2", compressed.Builtin),
+				"gzip":             starlark.NewBuiltin("gzip", gzip.Builtin),
+				"bzip2":            starlark.NewBuiltin("bzip2", bzip2.Builtin),
 				"compress":         starlark.NewBuiltin("compress", compressed.Builtin),
 				"pack":             starlark.NewBuiltin("pack", compressed.Builtin),
 				"irix_image":       starlark.NewBuiltin("irix_image", irix.ImageBuiltin),
@@ -188,6 +191,7 @@ func predeclared() starlark.StringDict {
 				"gpt":          starlark.NewBuiltin("gpt", filesystemgpt.GPTBuiltin),
 				"host":         starlark.NewBuiltin("host", filesystemnative.HostBuiltin),
 				"raw_cd":       starlark.NewBuiltin("raw_cd", filesystemrawcd.Builtin),
+				"mds":          starlark.NewBuiltin("mds", filesystemmds.Builtin),
 				"diskdupe":     starlark.NewBuiltin("diskdupe", filesystemfloppy.Builtin),
 				"hdcopy":       starlark.NewBuiltin("hdcopy", filesystemfloppy.Builtin),
 				"duplicator":   starlark.NewBuiltin("duplicator", filesystemfloppy.Builtin),

@@ -34,6 +34,8 @@ type isoImage struct {
 	dirIndex    map[uint32]map[string]isoDirRecord
 	pathCache   map[string]isoDirRecord
 	joliet      bool
+	rockRidge   bool
+	suspSkip    int
 }
 
 type isoDirRecord struct {
@@ -41,6 +43,7 @@ type isoDirRecord struct {
 	extent uint32
 	size   uint32
 	flags  byte
+	rr     *rockRidge
 }
 
 func newISOImage(file starfile.File) (*isoImage, error) {
@@ -51,7 +54,8 @@ func newISOImage(file starfile.File) (*isoImage, error) {
 		dirIndex:  make(map[uint32]map[string]isoDirRecord),
 		pathCache: make(map[string]isoDirRecord),
 	}
-	for i := int64(16); ; i++ {
+	var primary isoDirRecord
+	for i := int64(16); i < 256; i++ {
 		if _, err := file.ReadAt(sector, i*2048); err != nil {
 			return nil, err
 		}
@@ -64,6 +68,7 @@ func newISOImage(file starfile.File) (*isoImage, error) {
 			if err != nil {
 				return nil, err
 			}
+			primary = root
 			if !img.joliet {
 				img.root = root
 				img.pathCache["/"] = root
@@ -87,9 +92,22 @@ func newISOImage(file starfile.File) (*isoImage, error) {
 			if img.root.size == 0 {
 				return nil, fmt.Errorf("ISO9660 primary volume descriptor not found")
 			}
+			if primary.size != 0 {
+				root, found, err := img.detectRockRidge(primary)
+				if err != nil {
+					return nil, err
+				}
+				if found {
+					img.root = root
+					img.rockRidge = true
+					img.joliet = false
+				}
+			}
+			img.pathCache["/"] = img.root
 			return img, nil
 		}
 	}
+	return nil, fmt.Errorf("iso: volume descriptor sequence exceeds 240 sectors")
 }
 
 func (i *isoImage) String() string       { return "<iso>" }
@@ -99,8 +117,11 @@ func (i *isoImage) Truth() starlark.Bool { return starlark.True }
 func (i *isoImage) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", i.Type())
 }
-func (i *isoImage) AttrNames() []string { return []string{"find"} }
+func (i *isoImage) AttrNames() []string { return []string{"find", "case_sensitive"} }
 func (i *isoImage) Attr(name string) (starlark.Value, error) {
+	if name == "case_sensitive" {
+		return starlark.Bool(i.rockRidge), nil
+	}
 	if name != "find" {
 		return nil, nil
 	}
@@ -198,10 +219,17 @@ type isoVirtualEntry struct {
 	size   int64
 }
 
+func (i *isoImage) lookupKey(name string) string {
+	if i.rockRidge {
+		return name
+	}
+	return strings.ToLower(name)
+}
+
 func (i *isoImage) lookup(name string) (isoDirRecord, error) {
 	cleaned := path.Clean("/" + strings.TrimPrefix(name, "/"))
 	i.mu.Lock()
-	if record, ok := i.pathCache[strings.ToLower(cleaned)]; ok {
+	if record, ok := i.pathCache[i.lookupKey(cleaned)]; ok {
 		i.mu.Unlock()
 		return record, nil
 	}
@@ -223,7 +251,7 @@ func (i *isoImage) lookup(name string) (isoDirRecord, error) {
 		current = entry
 		if idx == len(parts)-1 {
 			i.mu.Lock()
-			i.pathCache[strings.ToLower(cleaned)] = current
+			i.pathCache[i.lookupKey(cleaned)] = current
 			i.mu.Unlock()
 			return current, nil
 		}
@@ -233,7 +261,7 @@ func (i *isoImage) lookup(name string) (isoDirRecord, error) {
 
 func (i *isoImage) findDirEntry(dir isoDirRecord, name string) (isoDirRecord, bool, error) {
 	key := dir.extent
-	lookup := strings.ToLower(name)
+	lookup := i.lookupKey(name)
 	i.mu.Lock()
 	index := i.dirIndex[key]
 	if index != nil {
@@ -249,7 +277,7 @@ func (i *isoImage) findDirEntry(dir isoDirRecord, name string) (isoDirRecord, bo
 	}
 	index = make(map[string]isoDirRecord, len(entries))
 	for _, entry := range entries {
-		index[strings.ToLower(strings.TrimPrefix(entry.name, "/"))] = entry
+		index[i.lookupKey(strings.TrimPrefix(entry.name, "/"))] = entry
 	}
 
 	i.mu.Lock()
@@ -273,8 +301,12 @@ func (i *isoImage) readDir(dir isoDirRecord) ([]isoDirRecord, error) {
 	}
 	i.mu.Unlock()
 
+	offset := int64(dir.extent) * 2048
+	if dir.size > 64<<20 || offset > i.file.Size() || int64(dir.size) > i.file.Size()-offset {
+		return nil, fmt.Errorf("iso: directory exceeds source or size limit")
+	}
 	data := make([]byte, dir.size)
-	if _, err := i.file.ReadAt(data, int64(dir.extent)*2048); err != nil && err != io.EOF {
+	if _, err := i.file.ReadAt(data, offset); err != nil {
 		return nil, err
 	}
 	var entries []isoDirRecord
@@ -284,10 +316,10 @@ func (i *isoImage) readDir(dir isoDirRecord) ([]isoDirRecord, error) {
 			offset = ((offset / 2048) + 1) * 2048
 			continue
 		}
-		if offset+length > len(data) {
+		if offset+length > len(data) || offset%2048+length > 2048 {
 			return nil, fmt.Errorf("invalid ISO9660 directory record")
 		}
-		record, err := parseISODirRecordWithEncoding(data[offset:offset+length], i.joliet)
+		record, err := i.parseRecord(data[offset : offset+length])
 		if err != nil {
 			return nil, err
 		}
@@ -311,9 +343,10 @@ func parseISODirRecord(record []byte) (isoDirRecord, error) {
 }
 
 func parseISODirRecordWithEncoding(record []byte, joliet bool) (isoDirRecord, error) {
-	if len(record) < 34 || record[0] == 0 {
+	if len(record) < 34 || int(record[0]) < 34 || int(record[0]) > len(record) {
 		return isoDirRecord{}, fmt.Errorf("invalid ISO9660 directory record")
 	}
+	record = record[:int(record[0])]
 	nameLength := int(record[32])
 	nameStart := 33
 	nameEnd := nameStart + nameLength
@@ -329,7 +362,7 @@ func parseISODirRecordWithEncoding(record []byte, joliet bool) (isoDirRecord, er
 }
 
 func (r isoDirRecord) isDir() bool {
-	return r.flags&0x02 != 0
+	return r.kind() == "directory"
 }
 
 func isJolietDescriptor(sector []byte) bool {
@@ -379,10 +412,10 @@ func (d *isoDirectory) Attr(name string) (starlark.Value, error) {
 	if name == "files" {
 		return d.files()
 	}
-	return nil, nil
+	return d.record.attr(name), nil
 }
 func (d *isoDirectory) AttrNames() []string {
-	return []string{"files"}
+	return append([]string{"files"}, isoMetadataAttrs...)
 }
 func (d *isoDirectory) files() (*starlark.List, error) {
 	entries, err := d.image.readDir(d.record)
@@ -445,6 +478,9 @@ type isoFile struct {
 }
 
 func (f *isoFile) ReadAt(p []byte, off int64) (int, error) {
+	if f.record.kind() != "file" {
+		return 0, fmt.Errorf("iso: %s has no regular file data", f.record.kind())
+	}
 	if off < 0 {
 		return 0, fmt.Errorf("negative offset")
 	}
@@ -466,6 +502,9 @@ func (f *isoFile) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 func (f *isoFile) WriteAt(p []byte, off int64) (int, error) {
+	if f.record.kind() != "file" {
+		return 0, fmt.Errorf("iso: %s has no regular file data", f.record.kind())
+	}
 	if off < 0 {
 		return 0, fmt.Errorf("negative offset")
 	}
@@ -474,7 +513,12 @@ func (f *isoFile) WriteAt(p []byte, off int64) (int, error) {
 	}
 	return f.image.file.WriteAt(p, int64(f.record.extent)*2048+off)
 }
-func (f *isoFile) Size() int64 { return int64(f.record.size) }
+func (f *isoFile) Size() int64 {
+	if f.record.rr != nil && f.record.rr.hasLink {
+		return int64(len(f.record.rr.link))
+	}
+	return int64(f.record.size)
+}
 func (f *isoFile) String() string {
 	return fmt.Sprintf("<iso.file %q size=%d>", f.name, f.Size())
 }
@@ -485,10 +529,13 @@ func (f *isoFile) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", f.Type())
 }
 func (f *isoFile) Attr(name string) (starlark.Value, error) {
+	if value := f.record.attr(name); value != nil {
+		return value, nil
+	}
 	return starfile.Attr(f, name), nil
 }
 func (f *isoFile) AttrNames() []string {
-	return starfile.AttrNames()
+	return append(starfile.AttrNames(), isoMetadataAttrs...)
 }
 
 type isoRegionFile struct {

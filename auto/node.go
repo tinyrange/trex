@@ -17,9 +17,13 @@ var ErrNotContainer = errors.New("not a container")
 var ErrLimit = errors.New("auto limit exceeded")
 
 // Options bounds decompression, entry indexing and recursive container traversal.
-// Zero fields use the defaults. No host paths or processes are used by this API.
+// Zero fields use the defaults. MaxExpandedBytes defaults to 512 MiB for
+// decoders that retain expanded data; bounded streaming decoders have no
+// default total-length ceiling. A positive value bounds both kinds of decoder.
+// No host paths or processes are used by this API.
 type Options struct {
-	plans bool
+	plans                bool
+	defaultExpandedLimit bool
 	// Source optionally supplies raw companion files from the containing tree.
 	Source               *SourceContext
 	MaxExpandedBytes     int64
@@ -29,6 +33,7 @@ type Options struct {
 func (o Options) defaults() Options {
 	if o.MaxExpandedBytes <= 0 {
 		o.MaxExpandedBytes = 512 << 20
+		o.defaultExpandedLimit = true
 	}
 	if o.MaxEntries <= 0 {
 		o.MaxEntries = 100000
@@ -37,6 +42,27 @@ func (o Options) defaults() Options {
 		o.MaxDepth = 32
 	}
 	return o
+}
+
+// StreamingMaximum returns the caller's expanded-size limit, or zero when no
+// limit was supplied. Only decoders whose memory use is independent of the
+// decoded length may use this instead of MaxExpandedBytes.
+func (o Options) StreamingMaximum() int64 {
+	if o.MaxExpandedBytes <= 0 || (o.defaultExpandedLimit && o.MaxExpandedBytes == 512<<20) {
+		return 0
+	}
+	return o.MaxExpandedBytes
+}
+
+// WithExpandedMaximum returns a copy with an explicit expanded-size limit.
+// Use it when modifying options received by a detector, including when the
+// requested limit equals the already-populated default. A non-positive maximum
+// restores the default eager limit and uncapped bounded-stream behavior.
+// Other options, including the source context, are preserved and defaulted.
+func (o Options) WithExpandedMaximum(maximum int64) Options {
+	o.MaxExpandedBytes = maximum
+	o.defaultExpandedLimit = false
+	return o.defaults()
 }
 
 type Metadata struct {

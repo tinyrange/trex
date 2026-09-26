@@ -30,7 +30,11 @@ func Entries(file starfile.File) ([]filesystemapi.ArchiveEntry, error) {
 				continue
 			}
 			child := child
-			entries = append(entries, filesystemapi.ArchiveEntry{Name: child.path, Size: child.size, File: &udfFile{image: image, entry: child}})
+			if child.typ == udfFileTypeSymlink {
+				entries = append(entries, filesystemapi.ArchiveEntry{Name: child.path, Size: int64(len(child.link)), Kind: "symlink", Link: child.link, Attributes: map[string]any{"link": child.link, "stored_size": child.size}})
+			} else {
+				entries = append(entries, filesystemapi.ArchiveEntry{Name: child.path, Size: child.size, Kind: "file", File: &udfFile{image: image, entry: child}})
+			}
 		}
 		return nil
 	}

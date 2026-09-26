@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -150,6 +151,9 @@ func TestIndexedReadsAndBoundedCache(t *testing.T) {
 }
 func TestConcatenatedEmptyCorruptAndLimit(t *testing.T) {
 	hello := vector(t, helloHex)
+	if _, err := NewReader(&starfile.Bytes{Data: hello}, -1).ReadAt(make([]byte, 1), 0); err == nil {
+		t.Fatal("negative limit accepted")
+	}
 	for _, b := range [][]byte{hello, append(append([]byte{}, hello...), hello...), {'B', 'Z', 'h', '9', 0x17, 0x72, 0x45, 0x38, 0x50, 0x90, 0, 0, 0, 0}} {
 		want, e := io.ReadAll(std.NewReader(bytes.NewReader(b)))
 		if e != nil {
@@ -165,7 +169,7 @@ func TestConcatenatedEmptyCorruptAndLimit(t *testing.T) {
 		}
 	}
 	r := NewReader(&starfile.Bytes{Data: vector(t, zerosHex)}, 100)
-	if _, e := r.ReadAt(make([]byte, 1), 0); !errors.Is(e, auto.ErrLimit) {
+	if _, e := r.ReadAt(make([]byte, 1), 0); !errors.Is(e, auto.ErrLimit) || !strings.Contains(e.Error(), "maximum_bytes 100") {
 		t.Fatalf("limit %v", e)
 	}
 	bad := append([]byte{}, hello...)
@@ -186,5 +190,31 @@ func TestAutoBzip2NestedContainer(t *testing.T) {
 	raw, e := starfile.ReadAll(node.Reader())
 	if e != nil || !bytes.Equal(raw, b) {
 		t.Fatal("raw bytes", e)
+	}
+}
+
+func TestAutoBeyondDefaultMaximumAndExplicitCap(t *testing.T) {
+	source := &starfile.Bytes{Data: bytes.Repeat(vector(t, zerosHex), 513)}
+	result, err := auto.Identify(source, auto.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := result.View.(*auto.DecodedView).Reader.(*Reader)
+	var got [1]byte
+	if _, err := r.ReadAt(got[:], 512<<20); err != nil || got[0] != 0 {
+		t.Fatal(got, err)
+	}
+	if size := r.Size(); size != 513<<20 {
+		t.Fatal(size, r.err)
+	}
+	if r.cached > cacheBytes {
+		t.Fatal("cache exceeded budget", r.cached)
+	}
+	result, err = auto.Identify(source, auto.Options{MaxExpandedBytes: 512 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := result.View.(*auto.DecodedView).Reader.ReadAt(got[:], 512<<20); !errors.Is(err, auto.ErrLimit) {
+		t.Fatal(err)
 	}
 }

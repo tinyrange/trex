@@ -39,6 +39,7 @@ import (
 	_ "github.com/tinyrange/trex/filesystem/hfs"
 	_ "github.com/tinyrange/trex/filesystem/iso9660"
 	_ "github.com/tinyrange/trex/filesystem/mbr"
+	_ "github.com/tinyrange/trex/filesystem/mds"
 	_ "github.com/tinyrange/trex/filesystem/ntfs"
 	_ "github.com/tinyrange/trex/filesystem/ods2"
 	_ "github.com/tinyrange/trex/filesystem/rawcd"
