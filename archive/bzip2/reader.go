@@ -3,11 +3,12 @@ package bzip2
 import (
 	"bytes"
 	"fmt"
-	"github.com/tinyrange/trex/archive/internal/bzip2"
 	"io"
+	"math"
 	"sort"
 	"sync"
 
+	"github.com/tinyrange/trex/archive/internal/bzip2"
 	"github.com/tinyrange/trex/auto"
 	"github.com/tinyrange/trex/storage"
 )
@@ -46,15 +47,26 @@ type Reader struct {
 	cached  int64
 	tick    uint64
 	level   byte
+	scanned bool
 }
 
+// NewReader creates a bounded-cache reader. A zero maximum permits
+// any decoded length; a positive maximum bounds cumulative expanded bytes.
 func NewReader(source storage.Reader, maximum int64) *Reader {
-	return &Reader{source: source, maximum: maximum}
+	if maximum == 0 {
+		maximum = math.MaxInt64
+	}
+	r := &Reader{source: source, maximum: maximum}
+	if maximum < 0 {
+		r.err = fmt.Errorf("bzip2: maximum_bytes must not be negative")
+		r.once.Do(func() {})
+	}
+	return r
 }
 func (r *Reader) KnownSize() (int64, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.length, r.indexed == len(r.blocks) && r.err == nil && len(r.blocks) > 0
+	return r.length, r.scanned && r.indexed == len(r.blocks) && r.err == nil
 }
 func (r *Reader) Size() int64 {
 	r.mu.Lock()
@@ -66,7 +78,7 @@ func (r *Reader) Size() int64 {
 	}
 	return r.length
 }
-func (r *Reader) init() { r.once.Do(func() { r.err = r.scan() }) }
+func (r *Reader) init() { r.once.Do(func() { r.err = r.scan(); r.scanned = true }) }
 
 func (r *Reader) scan() error {
 	var header [4]byte
@@ -186,6 +198,11 @@ func readBits(data []byte, off int64, n int) uint64 {
 	}
 	return result
 }
+
+func (r *Reader) limitError() error {
+	return fmt.Errorf("bzip2: decoded data exceeds maximum_bytes %d: %w", r.maximum, auto.ErrLimit)
+}
+
 func (r *Reader) decode(i int, keep bool) ([]byte, uint32, int64, error) {
 	b := r.blocks[i]
 	bits := b.end - b.start
@@ -219,17 +236,17 @@ func (r *Reader) decode(i int, keep bool) ([]byte, uint32, int64, error) {
 			encoded[pos/8] |= mask
 		}
 	}
-	decoder := io.LimitReader(bzip2.NewReader(bytes.NewReader(encoded)), r.maximum+1)
+	decoder := io.LimitReader(bzip2.NewReader(bytes.NewReader(encoded)), min(r.maximum, math.MaxInt64-1)+1)
 	if !keep {
 		n, err := io.Copy(io.Discard, decoder)
 		if n > r.maximum {
-			return nil, 0, 0, auto.ErrLimit
+			return nil, 0, 0, r.limitError()
 		}
 		return nil, crc, n, err
 	}
 	data, err := io.ReadAll(decoder)
 	if int64(len(data)) > r.maximum {
-		return nil, 0, 0, auto.ErrLimit
+		return nil, 0, 0, r.limitError()
 	}
 	return data, crc, int64(len(data)), err
 }
@@ -297,7 +314,7 @@ func (r *Reader) ensure(end int64) {
 				return
 			}
 			if result.size > r.maximum-r.length {
-				r.err = auto.ErrLimit
+				r.err = r.limitError()
 				return
 			}
 			i := r.indexed

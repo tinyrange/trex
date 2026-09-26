@@ -22,12 +22,21 @@ func Builtin(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.T
 	var source starlark.Value
 	var tree starlark.Value = starlark.None
 	var sourcePath string
+	var maximum starlark.Value
 	name := ""
-	options := auto.Options{MaxExpandedBytes: 512 << 20, MaxEntries: 100000, MaxDepth: 32}
-	if err := starlark.UnpackArgs("auto", args, kwargs, "source", &source, "name?", &name, "maximum?", &options.MaxExpandedBytes, "maximum_entries?", &options.MaxEntries, "maximum_depth?", &options.MaxDepth, "tree?", &tree, "path?", &sourcePath); err != nil {
+	options := auto.Options{MaxEntries: 100000, MaxDepth: 32}
+	if err := starlark.UnpackArgs("auto", args, kwargs, "source", &source, "name?", &name, "maximum?", &maximum, "maximum_entries?", &options.MaxEntries, "maximum_depth?", &options.MaxDepth, "tree?", &tree, "path?", &sourcePath); err != nil {
 		return nil, err
 	}
-	if options.MaxExpandedBytes <= 0 || options.MaxEntries <= 0 || options.MaxDepth <= 0 {
+	if maximum != nil {
+		if err := starlark.AsInt(maximum, &options.MaxExpandedBytes); err != nil {
+			return nil, fmt.Errorf("auto: maximum: %w", err)
+		}
+		if options.MaxExpandedBytes <= 0 {
+			return nil, fmt.Errorf("auto: limits must be positive")
+		}
+	}
+	if options.MaxEntries <= 0 || options.MaxDepth <= 0 {
 		return nil, fmt.Errorf("auto: limits must be positive")
 	}
 	if tree != starlark.None {

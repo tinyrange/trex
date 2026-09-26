@@ -1865,9 +1865,9 @@ Applies one KD load/unload event to resolver state.
 
 ### `auto`
 
-`auto(source, name='', maximum=512MiB, maximum_entries=100000, maximum_depth=32, tree=None, path='') -> auto`
+`auto(source, name='', maximum=<default>, maximum_entries=100000, maximum_depth=32, tree=None, path='') -> auto`
 
-Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Container paths resolve recursively while file preserves the original bytes. Detectors receive containing-tree context for companion files across directories. For an isolated file, tree and its tree-relative path attach that context explicitly. Companion lookup reads raw entries within the supplied tree without following links or recursively detecting files; dot segments and host paths are not accepted.
+Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. By default eager decoding is limited to 512 MiB while bounded gzip, bzip2 and XZ streams have no total-length ceiling; an explicit positive maximum bounds both kinds. Container paths resolve recursively while file preserves the original bytes. Detectors receive containing-tree context for companion files across directories. For an isolated file, tree and its tree-relative path attach that context explicitly. Companion lookup reads raw entries within the supplied tree without following links or recursively detecting files; dot segments and host paths are not accepted.
 
 ### `auto_plan`
 
@@ -1995,9 +1995,9 @@ Reads full, single-volume historical BSD dumps with 1024-byte records, magic6001
 
 ### `archive.bzip2`
 
-`archive.bzip2(file, maximum_bytes=2GiB) -> file`
+`archive.bzip2(file, maximum_bytes=<unlimited>) -> file`
 
-Decodes all concatenated bzip2 streams, including legacy randomized blocks, into an immutable in-memory file. Validates block and stream checksums and enforces maximum_bytes on decoded output. Randomization is reversed after inverse BWT and before run expansion, with independent state per block. Does not interpret a filesystem or archive inside the stream.
+Opens concatenated bzip2 streams, including legacy randomized blocks, as a lazy read-only file with a bounded decoded block cache. Block and stream checksums are checked during reads; size scans the complete stream. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. Does not interpret an archive inside the stream.
 
 ### `archive.cab`
 
@@ -2031,9 +2031,9 @@ Decodes a UNIX compress (.Z) stream with 9–16-bit LZW codes, legacy or block m
 
 ### `archive.gzip`
 
-`archive.gzip(file, maximum_bytes=2GiB) -> file`
+`archive.gzip(file, maximum_bytes=<unlimited>) -> file`
 
-Decodes all concatenated gzip streams into an immutable in-memory file, validating checksums and enforcing maximum_bytes on decoded output. Does not interpret an archive inside the stream.
+Opens concatenated gzip streams as a lazy read-only file with a 1 MiB decoded cache. Forward reads reuse the decoder; backward reads outside the cache replay it. Checksums are validated as data is consumed; size scans the complete stream without retaining it. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. Does not interpret an archive inside the stream.
 
 ### `archive.hunk_load`
 
@@ -2843,13 +2843,19 @@ Exposes a host directory through the native filesystem backend. This is a host-p
 
 `filesystem.iso9660(file) -> ISO filesystem`
 
-Parses an ISO 9660 filesystem and exposes its directory tree and file views. It does not mount the image or copy its contents to the host.
+Parses an ISO 9660 filesystem and exposes directory and file views. Validated Rock Ridge takes precedence over Joliet, preserving case-sensitive names, POSIX metadata and symbolic-link targets without following links. Joliet and basic ISO names remain available when Rock Ridge is absent. It does not mount or copy the image.
 
 ### `filesystem.mbr`
 
 `filesystem.mbr(file) -> parsed MBR; filesystem.mbr(size, boot_code=None, disk_signature=0, chs=None) -> builder`
 
 With a file, parses the MBR and partitions; with a disk size, creates a builder with optional boot code, signature and CHS geometry. Partition payloads remain caller-supplied.
+
+### `filesystem.mds`
+
+`filesystem.mds(file, images={}) -> mds`
+
+Reads Alcohol MDS v1 descriptor metadata, including sessions, track geometry, pregaps, TOC and companion filenames. Optional images maps declared names (including *.mdf) to portable files. Bound tracks expose raw sectors, logical data or audio, and interleaved P-W subchannels without conversion or copying. auto resolves MDF companions from its source tree. The sessions attribute contains tracks and their byte views.
 
 ### `filesystem.ntfs`
 
@@ -2900,7 +2906,7 @@ Validates an SGI volume-header checksum and returns partition and boot-directory
 
 `filesystem.udf(file) -> UDF filesystem`
 
-Parses a UDF filesystem into directory and file views. Reads resolve the filesystem's on-disk structures without mounting it.
+Parses a UDF filesystem into directory and file views. Symbolic links expose decoded targets and metadata rather than encoded payloads; they are not followed. Reads resolve the filesystem's on-disk structures without mounting it.
 
 ### `filesystem.ufs`
 

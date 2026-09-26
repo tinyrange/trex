@@ -29,6 +29,7 @@ const (
 	udfFileCharParent        = 0x08
 	udfFileTypeDirectory     = 4
 	udfFileTypeRegular       = 5
+	udfFileTypeSymlink       = 12
 	udfAllocShortDescriptors = 0
 	udfAllocLongDescriptors  = 1
 	udfAllocEmbedded         = 3
@@ -78,6 +79,7 @@ type udfFileEntry struct {
 	size     int64
 	embedded []byte
 	extents  []udfExtent
+	link     string
 }
 
 type udfVirtualEntry struct {
@@ -345,6 +347,9 @@ func (i *udfImage) readFileEntry(icb udfExtent, name string) (udfFileEntry, erro
 	flags := binary.LittleEndian.Uint16(icbTag[18:20])
 	allocType := int(flags & 0x0007)
 	size := int64(binary.LittleEndian.Uint64(data[56:64]))
+	if size < 0 {
+		return udfFileEntry{}, fmt.Errorf("udf: file size exceeds signed range")
+	}
 	var eaOff, adOff int
 	var eaLen, adLen uint32
 	if tag == udfTagExtendedFileEntry {
@@ -374,6 +379,7 @@ func (i *udfImage) readFileEntry(icb udfExtent, name string) (udfFileEntry, erro
 	case udfAllocShortDescriptors:
 		for off := 0; off+8 <= len(ads); off += 8 {
 			ext := udfShortAD(ads[off : off+8])
+			ext.partition = icb.partition
 			if ext.length > 0 {
 				entry.extents = append(entry.extents, ext)
 			}
@@ -387,6 +393,19 @@ func (i *udfImage) readFileEntry(icb udfExtent, name string) (udfFileEntry, erro
 		}
 	default:
 		return udfFileEntry{}, fmt.Errorf("udf: unsupported allocation descriptor type %d", allocType)
+	}
+	if entry.typ == udfFileTypeSymlink {
+		if entry.size <= 0 || entry.size > 64<<10 {
+			return udfFileEntry{}, fmt.Errorf("udf: invalid symbolic link size")
+		}
+		data := make([]byte, entry.size)
+		if _, err := i.readFileAt(entry, data, 0); err != nil {
+			return udfFileEntry{}, fmt.Errorf("udf: read symbolic link: %w", err)
+		}
+		entry.link, err = udfSymlinkTarget(data)
+		if err != nil {
+			return udfFileEntry{}, err
+		}
 	}
 	return entry, nil
 }
@@ -431,6 +450,9 @@ func (i *udfImage) readFileAt(entry udfFileEntry, p []byte, off int64) (int, err
 		p = p[:remaining]
 	}
 	if entry.embedded != nil {
+		if off >= int64(len(entry.embedded)) {
+			return 0, io.EOF
+		}
 		n := copy(p, entry.embedded[off:])
 		if n < requested {
 			return n, io.EOF
@@ -511,7 +533,7 @@ func (i *udfImage) extentOffset(extent udfExtent) (int64, error) {
 	if !ok {
 		return 0, fmt.Errorf("udf: partition reference %d not found", extent.partition)
 	}
-	return int64(part.start+extent.block) * i.logicalBlock, nil
+	return (int64(part.start) + int64(extent.block)) * i.logicalBlock, nil
 }
 
 func (i *udfImage) virtualEntries() []udfVirtualEntry {
@@ -669,12 +691,20 @@ type udfFile struct {
 }
 
 func (f *udfFile) ReadAt(p []byte, off int64) (int, error) {
+	if f.entry.typ == udfFileTypeSymlink {
+		return 0, fmt.Errorf("udf: symbolic link has no regular file data")
+	}
 	return f.image.readFileAt(f.entry, p, off)
 }
 func (f *udfFile) WriteAt(_ []byte, _ int64) (int, error) {
 	return 0, fmt.Errorf("udf entry %q is read-only", f.entry.path)
 }
-func (f *udfFile) Size() int64 { return f.entry.size }
+func (f *udfFile) Size() int64 {
+	if f.entry.typ == udfFileTypeSymlink {
+		return int64(len(f.entry.link))
+	}
+	return f.entry.size
+}
 func (f *udfFile) String() string {
 	return fmt.Sprintf("<udf.file %q size=%d>", f.entry.path, f.Size())
 }
@@ -684,8 +714,25 @@ func (f *udfFile) Truth() starlark.Bool { return starlark.True }
 func (f *udfFile) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", f.Type())
 }
-func (f *udfFile) Attr(name string) (starlark.Value, error) { return starfile.Attr(f, name), nil }
-func (f *udfFile) AttrNames() []string                      { return starfile.AttrNames() }
+func (f *udfFile) Attr(name string) (starlark.Value, error) {
+	switch name {
+	case "entry_type":
+		if f.entry.typ == udfFileTypeSymlink {
+			return starlark.String("symlink"), nil
+		}
+		return starlark.String("file"), nil
+	case "link":
+		if f.entry.typ == udfFileTypeSymlink {
+			return starlark.String(f.entry.link), nil
+		}
+	case "stored_size":
+		return starlark.MakeInt64(f.entry.size), nil
+	}
+	return starfile.Attr(f, name), nil
+}
+func (f *udfFile) AttrNames() []string {
+	return append(starfile.AttrNames(), "entry_type", "link", "stored_size")
+}
 
 type udfRegionFile struct {
 	image  *udfImage

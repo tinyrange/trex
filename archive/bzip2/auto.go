@@ -13,7 +13,7 @@ func init() {
 		if !bytes.HasPrefix(prefix, []byte("BZh")) {
 			return nil, auto.ErrNoMatch
 		}
-		decoded := NewReader(source, options.MaxExpandedBytes)
+		decoded := NewReader(source, options.StreamingMaximum())
 		// Validate the first decoded prefix without reading the entire stream.
 		var first [1]byte
 		if _, err := decoded.ReadAt(first[:], 0); err != nil && err != io.EOF {

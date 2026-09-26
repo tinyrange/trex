@@ -419,6 +419,24 @@ func installerNestedPayload(container starlark.Value) (installerPayload, []insta
 		}
 		return nil, nil, "", fmt.Errorf("installer_media: no supported InstallShield package found")
 	}
+	// Version 5 data volumes carry the same version marker as combined
+	// cabinets. A separate header in the package directory takes precedence;
+	// the volume's descriptor fields need not describe an inline catalogue.
+	explicitHeaders := make(map[string]bool)
+	for _, header := range headers {
+		if !header.inline {
+			explicitHeaders[header.directory] = true
+			explicitHeaders[header.root] = true
+		}
+	}
+	selected := headers[:0]
+	for _, header := range headers {
+		if header.inline && header.primary && explicitHeaders[header.directory] {
+			continue
+		}
+		selected = append(selected, header)
+	}
+	headers = selected
 	sort.Slice(headers, func(i, j int) bool {
 		if headers[i].primary != headers[j].primary {
 			return headers[i].primary

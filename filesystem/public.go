@@ -3,12 +3,16 @@ package filesystem
 import starfile "github.com/tinyrange/trex/storage/star"
 
 // ArchiveEntry is a flattened filesystem entry suitable for indexing and web
-// frontends. File is nil for directories.
+// frontends. File is nil for directories, symbolic links and special entries.
+// Empty Kind retains the historical Directory/file interpretation.
 type ArchiveEntry struct {
-	Name      string
-	Size      int64
-	Directory bool
-	File      starfile.File
+	Name       string
+	Size       int64
+	Directory  bool
+	File       starfile.File
+	Kind       string
+	Link       string
+	Attributes map[string]any
 }
 
 // ExtentSpec describes an allocated range in a generated sparse image. An

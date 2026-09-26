@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/tinyrange/trex/storage"
 	"go.starlark.net/starlark"
@@ -31,7 +32,7 @@ func Attr(file File, name string) starlark.Value {
 		})
 	case "bytes", "hex", "binary":
 		return starlark.NewBuiltin(name, func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-			off, size, err := rangeArgs(name, args, kwargs, file.Size())
+			off, size, err := fileRangeArgs(name, args, kwargs, file)
 			if err != nil {
 				return nil, err
 			}
@@ -49,7 +50,7 @@ func Attr(file File, name string) starlark.Value {
 		})
 	case "slice":
 		return starlark.NewBuiltin("slice", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-			off, size, err := rangeArgs("slice", args, kwargs, file.Size())
+			off, size, err := fileRangeArgs("slice", args, kwargs, file)
 			if err != nil {
 				return nil, err
 			}
@@ -220,6 +221,44 @@ func rangeArgs(name string, args starlark.Tuple, kwargs []starlark.Tuple, total 
 	}
 	if off < 0 || size < 0 || off > total || size > total-off {
 		return 0, 0, fmt.Errorf("%s: range outside file", name)
+	}
+	return off, size, nil
+}
+
+// A bounded read of a lazy stream must not scan the whole stream merely to
+// determine its length. ReadAt supplies the actual EOF check. Unbounded reads
+// still request the exact size, as do readers without KnownSize support.
+func fileRangeArgs(name string, args starlark.Tuple, kwargs []starlark.Tuple, file storage.Reader) (int64, int64, error) {
+	stream, ok := file.(interface{ KnownSize() (int64, bool) })
+	if !ok {
+		return rangeArgs(name, args, kwargs, file.Size())
+	}
+	if total, known := stream.KnownSize(); known {
+		return rangeArgs(name, args, kwargs, total)
+	}
+	off := int64(0)
+	var value starlark.Value
+	if err := starlark.UnpackArgs(name, args, kwargs, "off?", &off, "size?", &value); err != nil {
+		return 0, 0, err
+	}
+	if value == nil {
+		return rangeArgs(name, args, kwargs, file.Size())
+	}
+	var size int64
+	if err := starlark.AsInt(value, &size); err != nil {
+		return 0, 0, err
+	}
+	if off < 0 || size < 0 || size > math.MaxInt64-off {
+		return 0, 0, fmt.Errorf("%s: range outside file", name)
+	}
+	// A slice publishes a definite length before any later reads. Check its
+	// endpoint, and also validate offsets of empty reads, without scanning the
+	// unrelated tail of an unknown-size source.
+	if (name == "slice" || size == 0) && off+size > 0 {
+		var last [1]byte
+		if _, err := ReadFullAt(file, last[:], off+size-1); err != nil {
+			return 0, 0, fmt.Errorf("%s: range outside file: %w", name, err)
+		}
 	}
 	return off, size, nil
 }

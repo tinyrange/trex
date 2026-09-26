@@ -1,10 +1,14 @@
 package xz
 
 import (
+	"bytes"
 	"encoding/base64"
+	"errors"
 	"testing"
 
+	"github.com/tinyrange/trex/auto"
 	starfile "github.com/tinyrange/trex/storage/star"
+	encoder "github.com/ulikunitz/xz"
 )
 
 const xzFixtureBase64 = "/Td6WFoAAATm1rRGBMASDiEBFgAAAAAAAAAAAJ3BZqkBAA1oZWxsbyBmcm9tIHh6CgAAAFv5ht3mJ3rmAAEuDgCROcwftvN9AQAAAAAEWVo="
@@ -16,6 +20,36 @@ func xzFixture(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestAutoBeyondDefaultMaximumAndExplicitCap(t *testing.T) {
+	var compressed bytes.Buffer
+	w, err := (encoder.WriterConfig{DictCap: 1 << 20}).NewWriter(&compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source := &starfile.Bytes{Data: bytes.Repeat(compressed.Bytes(), 513)}
+	result, err := auto.Identify(source, auto.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := result.View.(*auto.DecodedView).Reader
+	if size := f.Size(); size != 513<<20 {
+		t.Fatal(size)
+	}
+	var got [1]byte
+	if _, err := f.ReadAt(got[:], (513<<20)-1); err != nil || got[0] != 0 {
+		t.Fatal(got, err)
+	}
+	if _, err := auto.Identify(source, auto.Options{MaxExpandedBytes: 512 << 20}); !errors.Is(err, auto.ErrLimit) {
+		t.Fatal(err)
+	}
 }
 
 func TestXZFileSizeSequentialAndRandomReads(t *testing.T) {

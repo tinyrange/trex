@@ -71,3 +71,32 @@ func TestAutoInstallerSFXAndOrdinaryExecutable(t *testing.T) {
 		t.Fatal(string(data), err)
 	}
 }
+
+func TestAutoInstallerIncludesChildPackagesWithEmptyPrimary(t *testing.T) {
+	header, volumes, external := installShieldV5Fixture(t)
+	payload, err := Open(header, volumes, external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := &Archive{version: 5}
+	installer := &Installer{format: "installshield5", payload: empty, packages: []installerPackage{
+		{root: "/", payload: empty},
+		{root: "/compiler/icc", payload: payload},
+		{root: "/debugger", payload: payload},
+	}}
+	view, err := installerAutoView(installer, auto.Options{MaxEntries: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := auto.FromView(view, "setup.exe", auto.Options{})
+	for _, name := range []string{"compiler/icc/Program Files/Dir/split.bin", "debugger/Program Files/Dir/split.bin"} {
+		member, err := root.Resolve(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := starfile.ReadAll(member.Reader())
+		if err != nil || string(data) != "a compressed payload split across cabinet volumes" {
+			t.Fatalf("%s = %q, %v", name, data, err)
+		}
+	}
+}

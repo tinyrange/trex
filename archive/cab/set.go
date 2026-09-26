@@ -80,14 +80,20 @@ func SetBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 }
 
 func OpenSetWithCache(archives []*Archive, cache bool, store *bytecache.Cache, source uint64) (*Set, error) {
+	if len(archives) == 0 || archives[0] == nil {
+		return nil, fmt.Errorf("cab_set: cabinets must not be empty or nil")
+	}
 	setID := archives[0].setID
 	firstCabinet := archives[0].cabinet
 	for index, archive := range archives {
+		if archive == nil {
+			return nil, fmt.Errorf("cab_set: cabinet %d is nil", index)
+		}
 		if archive.setID != setID {
 			return nil, fmt.Errorf("cab_set: cabinet %d has set ID %d, want %d", index, archive.setID, setID)
 		}
-		if archive.cabinet != firstCabinet+uint16(index) {
-			return nil, fmt.Errorf("cab_set: cabinet %d has sequence %d, want %d", index, archive.cabinet, firstCabinet+uint16(index))
+		if int(archive.cabinet) != int(firstCabinet)+index {
+			return nil, fmt.Errorf("cab_set: cabinet %d has sequence %d, want %d", index, archive.cabinet, int(firstCabinet)+index)
 		}
 	}
 
