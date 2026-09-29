@@ -229,6 +229,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"image.compare":                     "image.compare(left, right, threshold=8, maximum=128MiB, max_pixels=16MiP) -> record",
 	"image.info":                        "image.info(source, maximum=128MiB, max_pixels=16MiP) -> record",
 	"image.pixel":                       "image.pixel(source, x, y, maximum=128MiB, max_pixels=16MiP) -> record",
+	"image.sample":                      "image.sample(source, points, maximum=128MiB, max_pixels=16MiP) -> list[record]",
 	"path.base":                         "path.base(path) -> string",
 	"path.clean":                        "path.clean(path) -> logical absolute path",
 	"path.dir":                          "path.dir(path) -> logical directory path",

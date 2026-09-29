@@ -24,6 +24,7 @@ func Builtins() starlark.StringDict {
 		"compare": starlark.NewBuiltin("image.compare", imageCompareBuiltin),
 		"info":    starlark.NewBuiltin("image.info", imageInfoBuiltin),
 		"pixel":   starlark.NewBuiltin("image.pixel", imagePixelBuiltin),
+		"sample":  starlark.NewBuiltin("image.sample", imageSampleBuiltin),
 	}
 }
 
@@ -112,13 +113,73 @@ func imagePixelBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if x < 0 || y < 0 || x >= bounds.Dx() || y >= bounds.Dy() {
 		return nil, fmt.Errorf("image.pixel: coordinate (%d,%d) is outside %dx%d image", x, y, bounds.Dx(), bounds.Dy())
 	}
+	return imagePixelRecord(decoded, x, y), nil
+}
+
+func imagePixelRecord(decoded image.Image, x, y int) *starvalue.Record {
+	bounds := decoded.Bounds()
 	r, g, b, a := decoded.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
 	return starvalue.NewRecord(starlark.StringDict{
 		"r": starlark.MakeInt(int(r >> 8)),
 		"g": starlark.MakeInt(int(g >> 8)),
 		"b": starlark.MakeInt(int(b >> 8)),
 		"a": starlark.MakeInt(int(a >> 8)),
-	}), nil
+	})
+}
+
+func imageSampleBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var source, pointsValue starlark.Value
+	maximum := int64(defaultImageInputLimit)
+	maxPixels := int64(defaultImagePixelLimit)
+	if err := starlark.UnpackArgs("image.sample", args, kwargs,
+		"source", &source, "points", &pointsValue,
+		"maximum?", &maximum, "max_pixels?", &maxPixels); err != nil {
+		return nil, err
+	}
+	if maxPixels < 1 || maxPixels > 1<<30 {
+		return nil, fmt.Errorf("image.sample: max_pixels must be between 1 and 1 GiPixel")
+	}
+	switch pointsValue.(type) {
+	case *starlark.List, starlark.Tuple:
+	default:
+		return nil, fmt.Errorf("image.sample: points must be a list or tuple of (x, y) pairs")
+	}
+	values := pointsValue.(starlark.Indexable)
+	if int64(values.Len()) > maxPixels {
+		return nil, fmt.Errorf("image.sample: point count %d exceeds max_pixels limit %d", values.Len(), maxPixels)
+	}
+	points := make([]image.Point, values.Len())
+	for i := range points {
+		value := values.Index(i)
+		switch value.(type) {
+		case *starlark.List, starlark.Tuple:
+		default:
+			return nil, fmt.Errorf("image.sample: point %d must be an (x, y) list or tuple", i)
+		}
+		pair := value.(starlark.Indexable)
+		if pair.Len() != 2 {
+			return nil, fmt.Errorf("image.sample: point %d must contain exactly two coordinates", i)
+		}
+		if err := starlark.AsInt(pair.Index(0), &points[i].X); err != nil {
+			return nil, fmt.Errorf("image.sample: point %d x: %w", i, err)
+		}
+		if err := starlark.AsInt(pair.Index(1), &points[i].Y); err != nil {
+			return nil, fmt.Errorf("image.sample: point %d y: %w", i, err)
+		}
+	}
+	decoded, _, err := decodeBoundedImage(source, maximum, maxPixels)
+	if err != nil {
+		return nil, fmt.Errorf("image.sample: %w", err)
+	}
+	bounds := decoded.Bounds()
+	colors := make([]starlark.Value, len(points))
+	for i, point := range points {
+		if point.X < 0 || point.Y < 0 || point.X >= bounds.Dx() || point.Y >= bounds.Dy() {
+			return nil, fmt.Errorf("image.sample: point %d coordinate (%d,%d) is outside %dx%d image", i, point.X, point.Y, bounds.Dx(), bounds.Dy())
+		}
+		colors[i] = imagePixelRecord(decoded, point.X, point.Y)
+	}
+	return starlark.NewList(colors), nil
 }
 
 func imageCompareBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
