@@ -3,6 +3,8 @@ package tararchive
 import (
 	"archive/tar"
 	"bytes"
+	"path"
+	"strings"
 
 	"github.com/tinyrange/trex/auto"
 	"github.com/tinyrange/trex/auto/adapter"
@@ -16,7 +18,9 @@ func init() {
 		}
 		_, err := tar.NewReader(bytes.NewReader(prefix)).Next()
 		if err != nil {
-			if len(prefix) < 1024 || !bytes.Equal(prefix[:1024], make([]byte, 1024)) {
+			// Zero sectors are not a positive archive signature. Accept an empty
+			// archive only when the containing tree supplies an explicit .tar name.
+			if options.Source == nil || !strings.EqualFold(path.Ext(options.Source.Path), ".tar") || len(prefix) < 1024 || !bytes.Equal(prefix[:1024], make([]byte, 1024)) {
 				return nil, auto.ErrNoMatch
 			}
 		}

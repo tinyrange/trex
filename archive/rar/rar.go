@@ -1,8 +1,11 @@
 package rar
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"github.com/tinyrange/trex/archive/internal/rarcodec"
+	"github.com/tinyrange/trex/archive/internal/sfx"
 	"github.com/tinyrange/trex/auto"
 	"github.com/tinyrange/trex/storage"
 	bytecache "github.com/tinyrange/trex/storage/cache"
@@ -281,6 +284,33 @@ func (a *Archive) View(options auto.Options) (auto.View, error) {
 }
 func init() {
 	auto.Register("rar", 10, func(p []byte, r storage.Reader, o auto.Options) (auto.View, error) {
+		if bytes.HasPrefix(p, []byte("MZ")) {
+			candidates, err := sfx.Candidates(r, []byte("Rar!\x1a\x07"), 16<<20)
+			if err != nil {
+				return nil, err
+			}
+			for _, candidate := range candidates {
+				confirmed := false
+				var h [14]byte
+				if _, err := candidate.ReadAt(h[:], 0); err == nil && h[6] == 0 && h[9] == 0x73 {
+					size := int(binary.LittleEndian.Uint16(h[12:]))
+					if size >= 13 {
+						header := make([]byte, size)
+						if _, err := candidate.ReadAt(header, 7); err == nil {
+							confirmed = uint16(crc32.ChecksumIEEE(header[2:])) == binary.LittleEndian.Uint16(header)
+						}
+					}
+				}
+				a, err := Open(candidate, o.MaxEntries)
+				if err == nil {
+					return a.View(o)
+				}
+				if confirmed {
+					return nil, err
+				}
+			}
+			return nil, auto.ErrNoMatch
+		}
 		if len(p) < 7 || string(p[:6]) != "Rar!\x1a\x07" {
 			return nil, auto.ErrNoMatch
 		}

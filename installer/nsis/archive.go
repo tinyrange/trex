@@ -13,6 +13,7 @@ import (
 // duplicate filenames and never pretend a static hint is an install destination.
 type Archive struct {
 	source  storage.Reader
+	payload storage.Reader
 	maximum int64
 	Listing *Listing
 	members map[string]starfile.File
@@ -21,17 +22,24 @@ type Archive struct {
 
 func MemberName(e Entry) string { return fmt.Sprintf("/files/%06d", e.Instruction) }
 
-// Open decodes the independently compressed members with a cumulative bound.
+// Open decodes independent members or a solid stream with cumulative bounds.
 // It does not execute installation code, load native DLLs or write host files.
 func Open(source storage.Reader, options Options, maximumBytes int64) (*Archive, error) {
 	if maximumBytes <= 0 {
 		return nil, fmt.Errorf("nsis: maximum_bytes must be positive")
 	}
+	if options.MaxSolidBytes == 0 || options.MaxSolidBytes > maximumBytes {
+		options.MaxSolidBytes = maximumBytes
+	}
 	listing, err := List(source, options)
 	if err != nil {
 		return nil, err
 	}
-	archive := &Archive{source: source, maximum: maximumBytes, Listing: listing, members: make(map[string]starfile.File)}
+	original := source
+	if listing.solidData != nil {
+		source = &starfile.Bytes{Data: listing.solidData}
+	}
+	archive := &Archive{source: original, payload: source, maximum: maximumBytes, Listing: listing, members: make(map[string]starfile.File)}
 	decoded := make(map[int64]starfile.File)
 	remaining := maximumBytes
 	for _, entry := range listing.Entries {

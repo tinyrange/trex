@@ -49,5 +49,7 @@ import (
 	_ "github.com/tinyrange/trex/filesystem/ultrix"
 	_ "github.com/tinyrange/trex/filesystem/vhdx"
 	_ "github.com/tinyrange/trex/filesystem/xfs"
+	_ "github.com/tinyrange/trex/filesystem/zfs"
 	_ "github.com/tinyrange/trex/installer/installshield"
+	_ "github.com/tinyrange/trex/installer/mozilla"
 )

@@ -11,11 +11,15 @@ import (
 
 func init() {
 	auto.Register("zip", 10, func(prefix []byte, source storage.Reader, options auto.Options) (auto.View, error) {
-		if !bytes.HasPrefix(prefix, []byte("PK\x03\x04")) && !bytes.HasPrefix(prefix, []byte("PK\x05\x06")) && !bytes.HasPrefix(prefix, []byte("PK\x07\x08")) {
+		sfx := bytes.HasPrefix(prefix, []byte("MZ"))
+		if !sfx && !bytes.HasPrefix(prefix, []byte("PK\x03\x04")) && !bytes.HasPrefix(prefix, []byte("PK\x05\x06")) && !bytes.HasPrefix(prefix, []byte("PK\x07\x08")) {
 			return nil, auto.ErrNoMatch
 		}
 		z, err := zip.NewReader(source, source.Size())
 		if err != nil {
+			if sfx {
+				return nil, auto.ErrNoMatch
+			}
 			return nil, err
 		}
 		if len(z.File) > options.MaxEntries {
