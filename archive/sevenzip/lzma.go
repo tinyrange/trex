@@ -55,6 +55,7 @@ type lzmaReader struct {
 	reps       [4]uint32
 	pending    uint32
 	err        error
+	endMarker  bool
 
 	isMatch     [lzmaStateCount][lzmaPositionStates]uint16
 	isRep       [lzmaStateCount]uint16
@@ -411,6 +412,9 @@ func (r *lzmaReader) decodeMatch(positionState uint32) error {
 		}
 	}
 	if r.reps[0] == ^uint32(0) {
+		if r.endMarker {
+			return io.EOF
+		}
 		return fmt.Errorf("lzma: end marker before declared output size %d", r.outputSize)
 	}
 	r.pending = length
