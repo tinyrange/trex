@@ -1,16 +1,14 @@
-package buildenv
+package shell
 
 import (
 	"fmt"
 	"strings"
-
-	"github.com/tinyrange/trex/emulator/shell"
 )
 
 // uname describes this environment's explicit execution target, never the host.
 // Release/version identify the emulator rather than claiming a kernel release.
 // In particular Linux here does not imply glibc, GNU utilities or a full kernel.
-func uname(in shell.Invocation) (int, error) {
+func Uname(in Invocation) (int, error) {
 	selected := make(map[byte]bool)
 	ended := false
 	for _, arg := range in.Args[1:] {
@@ -56,7 +54,7 @@ func uname(in shell.Invocation) (int, error) {
 	_, err := fmt.Fprintln(in.Stdout, strings.Join(fields, " "))
 	return 0, err
 }
-func unameError(in shell.Invocation, arg string) (int, error) {
+func unameError(in Invocation, arg string) (int, error) {
 	_, err := fmt.Fprintf(in.Stderr, "uname: unsupported option or operand %q\n", arg)
 	return 1, err
 }

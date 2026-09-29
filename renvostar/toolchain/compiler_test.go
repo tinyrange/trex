@@ -1,4 +1,4 @@
-package buildenv
+package toolchain
 
 import (
 	"bytes"

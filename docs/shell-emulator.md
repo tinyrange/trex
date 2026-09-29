@@ -19,9 +19,13 @@ on native Linux/amd64; this is not general POSIX or GNU tool compatibility.
 - `emulator/linux`: static ELF64/amd64 loading, BSS initialization, static PIE
   placement, an aligned argv/envp/auxv stack, instruction and memory budgets,
   and a small Linux syscall environment on the existing amd64 processor.
-- `emulator/buildenv`: installs virtual commands into a `MemoryFS`, routes `cc`
-  to Renvo's portable `CompileCommand`, writes outputs back to the same virtual
-  filesystem, and runs generated ELF files in the Linux emulator.
+- `renvostar/toolchain`: portable compiler, linker and archiver command adapters.
+  These execute an invocation; they do not install tools or choose commands.
+- `@stdlib//unix:build.star`: Starlark tool installation, header provisioning,
+  archive population and build-step policy. Its ordinary dictionary binds
+  guest executable paths to immutable command capabilities.
+- `scripts/smoke/hello.star`: pinned download/hash, configure/build/check,
+  full-moon test clock and nine generated-ELF assertions, all in Starlark.
 
 The shell implements functions, loops, case, conditionals, subshells, pipelines,
 command substitution, heredocs, redirections/descriptor duplication, eval,
@@ -31,9 +35,9 @@ and scoped `wait` status collection. Initial utilities include `cat`, `mkdir`, `
 `dirname`, `expr`, `ls`, streaming `sed`, basic `grep`, regular-file `cp`/`mv`, cancellable `sleep`, and normal-format
 `diff`. Additional utilities include byte-oriented `tr`, C whole-line `sort`,
 adjacent-line `uniq`, streaming C-locale `wc`, `touch`, `chmod`, virtual `awk`,
-and virtual `make`. Buildenv also supplies a UTC `date` with an injectable
-`Environment.Now` clock; unsupported timezones and format directives are explicit
-errors. A nil clock uses `time.Now`, converted to UTC without host timezone lookup.
+and virtual `make`. `emulator.shell.date(epoch=...)` supplies a recipe-selected
+UTC clock; unsupported timezones and format directives are explicit errors.
+The Starlark API never implicitly reads the host wall clock.
 `sed` supports transliteration, labels/branches, hold/pattern spaces, nested
 blocks, and deferred file reads. Quoted heredocs preserve literal backslashes. Arithmetic expands
 parameters before parsing and supports signed 64-bit operations, assignments,
@@ -46,35 +50,65 @@ errors, including within `if`, `!`, pipelines and command substitutions. This
 prevents an implementation gap from silently passing as a negative feature probe.
 Compiler diagnostics are genuine nonzero command exits.
 
-## Go API
+## Starlark API
 
-```go
-files, err := shell.NewMemoryFS(64 << 20)
-// Check err.
-environment, err := buildenv.New(files)
-// Check err; New refuses to replace existing tool files.
-result, err := shell.Run(ctx, sourceReader, "./configure", shell.Config{
-    FS: files,
-    Dir: "/source",
-    Env: map[string]string{"PATH": "/bin", "LC_ALL": "C"},
-    Stdout: output,
-    Stderr: diagnostics,
-    Command: environment.Command,
-})
-// Check both err (emulator failure) and result.Status (shell exit status).
+```python
+load("@stdlib//unix:build.star", "install", "run", "check")
+
+files = emulator.shell.filesystem(maximum = 64 << 20)
+commands = install(files, epoch = 948412800)
+files.mkdir("/source")
+files.write("/source/main.c", "int main(void) { return 0; }")
+result = check(run(files, commands, "cc main.c -o app && ./app", dir = "/source"))
+image = files.find("/source/app")  # ordinary portable file
 ```
 
-Populate `/source` before running. Compile with `-tags renvo_bundle` to make
-Renvo's bundled C headers and runtime available. Without that tag, header-free
-C still works but the integration must not pretend a libc/sysroot is present.
-The APIs take only guest paths and portable readers/writers. Caller-provided
-I/O and command handlers must honor cancellation; a blocking arbitrary reader
-cannot be forcibly interrupted by the emulator.
+Compile with `-tags renvo_bundle` for bundled C headers and runtime. A recipe can
+instead construct its own command table using `renvo.compiler(target=...)`,
+`renvo.linker(target=...)`, `renvo.archiver(index=False)`,
+`emulator.shell.date(epoch=...)` and `emulator.shell.uname()`.
+`renvo.headers()` returns an ordinary directory; installation is not implicit.
 
+`emulator.shell.run(files, source, dir='/', env={}, args=[], commands={},
+executable=None, stdin=b'', name='shell', max_steps=100000,
+maximum_output=8MiB, timeout=120)` is the lower-level primitive. Source and stdin
+accept portable files, strings or bytes. Its result contains `status`, `steps`,
+`stdout` and `stderr`. Nonzero exits are data; parser, capability, budget and
+cancellation failures raise errors. Captured stdout and stderr have separate
+byte limits. Runtime resource cancellation and a positive timeout (at most
+3600 seconds) bound the execution; shell jobs are joined before returning.
+In-process compilation remains bounded by the Renvo arena rather than a
+preemptible compiler deadline.
+
+Command tables bind **absolute guest paths**, not marker-file contents. The
+shell checks PATH and execute bits before dispatch. Functions and built-in
+shell utilities keep their normal precedence. The explicit
+`executable=emulator.linux(max_instructions=...)` capability recognizes ELF;
+without it, ELF execution is an unsupported operation. Script loading remains
+in the shell. Each run copies the table before starting workers: pipeline and
+background commands execute portable Go capabilities concurrently, never
+Starlark callbacks. No host executable lookup or implicit environment exists.
+
+The Unix filesystem is shared by shell, compiler and Linux execution; there is
+no copy/export/import between stages. It provides `mkdir(path, mode=0o755,
+mtime=None)`, `write(path, data, mode=0o644, mtime=None)`, `find(path)`, `stat(path)`
+and `remove(path)`. Paths must be canonical absolute guest paths. Writes accept
+ordinary portable files (including archive entries and directory members).
+`find` returns an immutable file snapshot, suitable for `directory.write`,
+parsers, image builders or an explicitly requested final output. It is not a
+live open descriptor. `stat` returns size, permission bits, directory flag and
+Unix-second mtime. Unix inode/open/unlink semantics remain distinct from the
+Windows metadata of `directory()`; no Windows directory is silently copied and
+later mistaken for the live Unix tree.
+
+The Go mechanism API remains `shell.Run(ctx, source, name, shell.Config{...})`,
+with caller-owned byte-channel filesystem handles and readers/writers. There is
+no Go `buildenv.New` or all-in-one build environment. Arbitrary caller I/O must
+honor cancellation; the engine cannot forcibly interrupt a blocking provider.
 
 ## Static object linker
 
-`buildenv.New` installs `/bin/ld`, backed by the portable
+The Starlark `install` recipe binds `/bin/ld` to the portable
 `driver.LinkCommand` API. Sources, relocatable objects, relocations and final
 image construction remain in memory. `cc` object-only linking shares the same
 linker; neither command calls a host linker. The identity explicitly says
@@ -119,8 +153,8 @@ Linux/amd64 Renvo `fopen` requests 0666 atomically, not executable permissions.
 
 `command -v` discovers functions, implemented builtins/utilities and executable
 virtual files without executing them. Plain `command` bypasses function lookup;
-`-p` and `-V` remain unsupported. Callback-only commands need a discoverable file
-in the virtual installation. `buildenv.New` provisions `/tmp` and installs
+`-p` and `-V` remain unsupported. Command capabilities need a discoverable file
+in the virtual installation. The Starlark recipe provisions `/tmp` and installs
 `uname`, whose identity is the explicit Linux/x86_64 target, with emulator release
 `0.0.0-trex`, not the host kernel. No GNU libc or complete kernel is implied.
 
@@ -186,14 +220,14 @@ not yet complete. The tested build uses serial explicit Automake recipes.
 From the trex checkout:
 
 ```sh
-go test -race -tags renvo_bundle ./emulator/shell ./emulator/linux ./emulator/buildenv
-TREX_HELLO_CONFIGURE=help go test -tags renvo_bundle ./emulator/buildenv -run '^TestHelloConfigure$' -count=1
-TREX_HELLO_CONFIGURE=configure go test -tags renvo_bundle ./emulator/buildenv -run '^TestHelloConfigure$' -count=1
-# Full configure/build, seven upstream tests, and same-image native/virtual CLI checks:
-TREX_HELLO_CONFIGURE=build go test -tags renvo_bundle ./emulator/buildenv -run '^TestHelloConfigure$' -count=1
+go test -race -tags renvo_bundle ./emulator/shell ./emulator/linux ./renvostar/toolchain
+# Runnable recipe: configure, build, seven upstream tests, nine virtual ELF cases.
+go run -tags renvo_bundle ./cmd/trex scripts/smoke/hello.star
+# Same recipe plus exact-image native comparisons (Linux/amd64):
+TREX_HELLO_NATIVE=1 go test -tags renvo_bundle ./frontend/starlark -run '^TestHelloRecipeNative$' -count=1 -v
 ```
 
-The network test fetches `hello-2.12.1.tar.gz` from GNU's FTP archive using HTTPS,
+The Starlark recipe fetches `hello-2.12.1.tar.gz` from GNU's FTP archive using HTTPS,
 verifies SHA-256
 `8d99142afd92576f30b0cd7cb42a8dc6809998bc5d607d88761f512e26c7db20`,
 and loads the archive into memory. It runs the original configure without
@@ -201,7 +235,7 @@ patching it or pre-answering cache variables. No downloaded tarball, extracted
 source tree, config log, or compiled intermediate is written to host disk.
 Normal tests are offline; the network workload is explicitly opt-in.
 
-The `build` workload runs the original `make`, `make check`, and `./hello`:
+The recipe runs the original `make`, `make check`, and `./hello`:
 all seven upstream tests pass with zero skips. The injected clock selects a
 full-moon date so the upstream long-greeting test actually runs; no test source
 is patched. It checks the output contains each individual PASS result.

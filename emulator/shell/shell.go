@@ -35,10 +35,12 @@ func unsupported(feature string) error    { return &UnsupportedError{feature} }
 // variables and command-prefix assignments. Its paths are always guest paths.
 // Handlers must honor context cancellation and must never invoke host tools.
 type Invocation struct {
-	Args []string
-	Env  map[string]string
-	Dir  string
-	FS   FileSystem
+	// Executable is the guest path resolved by Commands, separate from argv[0].
+	Executable string
+	Args       []string
+	Env        map[string]string
+	Dir        string
+	FS         FileSystem
 	// Umask is the invoking shell's file creation mask, independent of host state.
 	Umask          fs.FileMode
 	Stdin          io.Reader
@@ -290,7 +292,7 @@ func (s *shell) Get(name string) expand.Variable {
 	case "$":
 		value = "1" // Virtual shell identity, never the host PID.
 	case "@", "*":
-		return expand.Variable{Set: true, Kind: expand.Indexed, List: append([]string(nil), s.params...)}
+		return expand.Variable{Set: true, Kind: expand.Indexed, List: append([]string{}, s.params...)}
 	case "-":
 		if s.errexit {
 			value += "e"

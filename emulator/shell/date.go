@@ -1,15 +1,14 @@
-package buildenv
+package shell
 
 import (
 	"fmt"
-	"github.com/tinyrange/trex/emulator/shell"
 	"strings"
 	"time"
 )
 
 // date deliberately uses no host timezone database or environment. Unsupported
 // zones and directives are capability errors, not misleading command results.
-func (e *Environment) date(in shell.Invocation) (int, error) {
+func Date(in Invocation, clock func() time.Time) (int, error) {
 	args := in.Args[1:]
 	utc := false
 	if len(args) > 0 && (args[0] == "-u" || args[0] == "--utc" || args[0] == "--universal") {
@@ -21,18 +20,18 @@ func (e *Environment) date(in shell.Invocation) (int, error) {
 	}
 	zone := in.Env["TZ"]
 	if !utc && zone != "" && zone != "UTC" && zone != "GMT" && zone != "UTC0" && zone != "GMT0" {
-		return 0, &shell.UnsupportedError{Feature: "date timezone " + zone}
+		return 0, &UnsupportedError{Feature: "date timezone " + zone}
 	}
 	format := "%a %b %e %H:%M:%S UTC %Y"
 	if len(args) > 1 || len(args) == 1 && !strings.HasPrefix(args[0], "+") {
-		return 0, &shell.UnsupportedError{Feature: "date arguments"}
+		return 0, &UnsupportedError{Feature: "date arguments"}
 	}
 	if len(args) == 1 {
 		format = args[0][1:]
 	}
 	now := time.Now
-	if e.Now != nil {
-		now = e.Now
+	if clock != nil {
+		now = clock
 	}
 	value, err := formatDate(now().UTC(), format)
 	if err != nil {
@@ -51,7 +50,7 @@ func formatDate(t time.Time, format string) (string, error) {
 		}
 		i++
 		if i == len(format) {
-			return "", &shell.UnsupportedError{Feature: "date trailing %"}
+			return "", &UnsupportedError{Feature: "date trailing %"}
 		}
 		switch format[i] {
 		case '%':
@@ -75,7 +74,7 @@ func formatDate(t time.Time, format string) (string, error) {
 		default:
 			layout, ok := layouts[format[i]]
 			if !ok {
-				return "", &shell.UnsupportedError{Feature: fmt.Sprintf("date directive %%%c", format[i])}
+				return "", &UnsupportedError{Feature: fmt.Sprintf("date directive %%%c", format[i])}
 			}
 			out.WriteString(t.Format(layout))
 		}

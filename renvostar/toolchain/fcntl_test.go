@@ -1,6 +1,6 @@
 //go:build renvo_bundle
 
-package buildenv
+package toolchain
 
 import "testing"
 

@@ -9,13 +9,20 @@ import (
 
 	binaryapi "github.com/tinyrange/trex/binary"
 	"github.com/tinyrange/trex/emulator/machine"
+	"github.com/tinyrange/trex/emulator/shell"
 	"github.com/tinyrange/trex/emulator/uefi"
 	"github.com/tinyrange/trex/emulator/x86"
 	"go.starlark.net/starlark"
+	"go.starlark.net/starlarkstruct"
 )
 
 func Builtins() starlark.StringDict {
 	values := x86.Builtins()
+	shellValues := shell.StarBuiltins()
+	shellValues["date"] = starlark.NewBuiltin("date", dateCommand)
+	shellValues["uname"] = starlark.NewBuiltin("uname", unameCommand)
+	values["shell"] = &starlarkstruct.Module{Name: "shell", Members: shellValues}
+	values["linux"] = starlark.NewBuiltin("linux", linuxCommand)
 	values["machine"] = starlark.NewBuiltin("machine", Builtin)
 	values["uefi"] = starlark.NewBuiltin("uefi", uefi.Builtin)
 	return values

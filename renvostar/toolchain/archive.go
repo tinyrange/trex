@@ -1,12 +1,13 @@
-package buildenv
+package toolchain
 
 import (
 	"fmt"
+
 	"github.com/tinyrange/trex/emulator/shell"
 	"renvo.dev/driver"
 )
 
-func (e *Environment) archive(in shell.Invocation, index bool) (int, error) {
+func (e *Executor) archive(in shell.Invocation, index bool) (int, error) {
 	args := in.Args[1:]
 	if index {
 		if len(args) != 1 {

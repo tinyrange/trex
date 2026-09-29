@@ -1,11 +1,12 @@
-package buildenv
+package toolchain
 
 import (
 	"errors"
 	"fmt"
-	"github.com/tinyrange/trex/emulator/shell"
 	"io/fs"
 	"path"
+
+	"github.com/tinyrange/trex/emulator/shell"
 	"renvo.dev/driver"
 )
 
@@ -20,7 +21,7 @@ func installHeaders(files *shell.MemoryFS, source driver.SourceFS, dir string) e
 	}
 	entries, ok := source.ReadDir(dir)
 	if !ok {
-		return fmt.Errorf("buildenv: cannot read bundled headers %s", dir)
+		return fmt.Errorf("toolchain: cannot read bundled headers %s", dir)
 	}
 	for _, entry := range entries {
 		name := path.Join(dir, entry.Name)
@@ -37,7 +38,7 @@ func installHeaders(files *shell.MemoryFS, source driver.SourceFS, dir string) e
 		}
 		data, ok := source.ReadFile(name)
 		if !ok {
-			return fmt.Errorf("buildenv: cannot read bundled header %s", name)
+			return fmt.Errorf("toolchain: cannot read bundled header %s", name)
 		}
 		if err := files.WriteFile(name, data, 0444); err != nil {
 			return err

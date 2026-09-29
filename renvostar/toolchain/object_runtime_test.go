@@ -1,17 +1,18 @@
 //go:build renvo_bundle
 
-package buildenv
+package toolchain
 
 import (
 	"bytes"
 	"context"
-	"github.com/tinyrange/trex/emulator/shell"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/tinyrange/trex/emulator/shell"
 )
 
 func TestSeparateLibcObjectRuntime(t *testing.T) {
