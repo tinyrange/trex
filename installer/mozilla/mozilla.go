@@ -30,6 +30,27 @@ func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, erro
 	if err != nil {
 		return nil, auto.ErrNoMatch
 	}
+	// FILE is an application-defined resource type, not a Mozilla signature.
+	// Require framing evidence before reporting corruption in these resources.
+	matched := false
+	for _, resource := range resources {
+		if !strings.HasPrefix(resource.Path, "FILE/") {
+			continue
+		}
+		var h [10]byte
+		if _, err := resource.Data.ReadAt(h[:], 0); err != nil {
+			continue
+		}
+		length := int64(binary.LittleEndian.Uint32(h[:])) == resource.Data.Size()-8
+		zlibHeader := h[8]&15 == 8 && h[8]>>4 <= 7 && (uint16(h[8])<<8|uint16(h[9]))%31 == 0
+		if length || zlibHeader {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return nil, auto.ErrNoMatch
+	}
 	var entries []auto.Entry
 	seen := map[string]bool{}
 	remaining := o.MaxExpandedBytes

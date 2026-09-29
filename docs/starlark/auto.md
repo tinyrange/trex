@@ -36,7 +36,20 @@ exposes a single decoded content file when the payload is an ordinary file.
 An archive node's `Reader()` always returns its original archive bytes.
 
 Built-in detectors cover ZIP, tar, gzip, bzip2, XZ, 7z, ar, CAB, CFB (including
-MSI storage), WIM, SFP, SZDD, KWAJ, FAT, NTFS, ISO9660, UDF, MBR, GPT, and VHDX.
+MSI storage), CPIO, Apple BOM inventories, WIM, SFP, SZDD, KWAJ, FAT, NTFS,
+SquashFS 4.0, ISO9660, UDF, MBR, GPT, and VHDX. See
+`docs/format-support.md` for the supported generations and payload limitations.
+
+Windows Installer package storages are identified as `msi` by their root CLSID.
+Their packed CFB stream names are decoded for browsing: table streams use a
+visible `!` prefix (for example `!File` and `!_StringPool`), and property-stream
+control characters are rendered as `[U+0005]`. Literal `!` and `[` characters
+are escaped to keep names distinct. Each stream retains `cfb_path`,
+`msi_stream_name` (decoded, with the original table marker), and `msi_table`
+metadata. The raw CFB API and payload bytes are unchanged; non-MSI compound
+documents retain their Unicode names. This stream view does not require
+decoding the database tables or supporting their codepage.
+
 Legacy detectors add UNIX compress/pack, LHA, StuffIt (including version 5),
 CompactPro, Tome, Macintosh resource forks, BSD dump, BRU, SGI standalone tape,
 VMS BACKUP, Amiga Hunk objects/load modules, HFS, EFS, historical UFS, XFS v4,
@@ -77,13 +90,22 @@ MZ executables are checked with the existing installer recognizers for embedded
 CABs, InstallShield packages and SFX envelopes, and Wise overlays. Confirmed
 installers expose their payload files and specific format, plus payload offset
 and size metadata; their reader still returns the original EXE. Ordinary EXEs
-remain readable files. Installer recognition may scan beyond the prefix, bounded
+remain readable files; those with resources expose a `pe_resources` view as a
+last-priority fallback. Resource payloads participate in ordinary recursive
+detection. The ANSI Inno Setup Extensions 3.0.6.1 reader exposes declared file
+destinations, not executed setup effects. Installer recognition may scan beyond the prefix, bounded
 by the smaller of 256 MiB and `maximum`. Detection does not execute installers.
 UDF takes precedence on bridge discs. Filesystems that use case-insensitive
 lookup retain that behavior; case-sensitive archive members remain distinct.
-Duplicate archive paths select the first member. Symlinks are metadata entries,
-not traversal instructions. Split archives still require the corresponding
-format's explicit multi-volume API.
+Duplicate archive paths normally select the first member; concatenated CPIO
+uses the last path in archive order. Symlinks are metadata entries, not traversal
+instructions. Split archives require the corresponding format's explicit
+multi-volume API unless the detector supports bounded companion discovery.
+CAB sets can find adjacent members in the supplied source tree, including one
+layer of independent CAB wrappers in the containing directory (the IE_Sn/IE_n
+layout). Inno external slices and literal or wildcard `{src}` files likewise
+require the supplied source tree. Neither detector searches arbitrary host
+paths; missing and ambiguous companions remain explicit.
 
 ## Starlark
 
