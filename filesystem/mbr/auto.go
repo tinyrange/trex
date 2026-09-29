@@ -16,7 +16,8 @@ func init() {
 		found := false
 		for i := 0; i < 4; i++ {
 			p := prefix[446+i*16 : 462+i*16]
-			if p[4] != 0 && binary.LittleEndian.Uint32(p[12:]) != 0 {
+			if (p[0] == 0 || p[0] == 0x80) && p[4] != 0 &&
+				binary.LittleEndian.Uint32(p[8:]) != 0 && binary.LittleEndian.Uint32(p[12:]) != 0 {
 				found = true
 			}
 		}

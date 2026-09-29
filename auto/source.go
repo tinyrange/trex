@@ -13,6 +13,9 @@ import (
 type SourceContext struct {
 	Tree View
 	Path string
+	// Parent identifies this container in its containing tree. Lookup itself
+	// never follows Parent; format-specific companion discovery may use it.
+	Parent *SourceContext
 }
 
 // Lookup opens a companion anywhere within the explicitly supplied tree.
@@ -85,13 +88,13 @@ func (s *SourceContext) File(name string, options Options) (storage.Reader, erro
 func (n *Node) childOptions(name string) Options {
 	o := n.options
 	if n.reader != nil && n.view != nil {
-		o.Source = &SourceContext{Tree: n.view, Path: name}
+		o.Source = &SourceContext{Tree: n.view, Path: name, Parent: o.Source}
 	} else if o.Source != nil {
 		p := name
 		if o.Source.Path != "" {
 			p = o.Source.Path + "/" + name
 		}
-		o.Source = &SourceContext{Tree: o.Source.Tree, Path: p}
+		o.Source = &SourceContext{Tree: o.Source.Tree, Path: p, Parent: o.Source.Parent}
 	}
 	return o
 }

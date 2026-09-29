@@ -55,8 +55,10 @@ func Open(file starfile.File) (*Archive, error) {
 		return nil, fmt.Errorf("cfb: unsupported sector geometry")
 	}
 	a := &Archive{file: file, sector: int64(1) << shift, streams: map[string]*Stream{}}
-	sectors := file.Size()/a.sector - 1
-	if sectors < 1 || file.Size()%a.sector != 0 {
+	// Some producers omit unused padding after the final stream. Metadata
+	// sectors still require full reads; normalStream checks each used extent.
+	sectors := (file.Size() - 1) / a.sector
+	if sectors < 1 {
 		return nil, fmt.Errorf("cfb: truncated sector data")
 	}
 	readSector := func(id uint32) ([]byte, error) {
@@ -260,9 +262,15 @@ func sizedChain(fat []uint32, start uint32, size uint64, blockSize, limit int64)
 	return blocks, nil
 }
 func (a *Archive) normalStream(start uint32, size uint64, name string) (*Stream, error) {
-	b, e := sizedChain(a.fat, start, size, a.sector, a.file.Size()/a.sector-1)
+	b, e := sizedChain(a.fat, start, size, a.sector, (a.file.Size()-1)/a.sector)
 	if e != nil {
 		return nil, e
+	}
+	for i, block := range b {
+		used := min(uint64(a.sector), size-uint64(i)*uint64(a.sector))
+		if (uint64(block)+1)*uint64(a.sector)+used > uint64(a.file.Size()) {
+			return nil, fmt.Errorf("cfb: truncated stream %s", name)
+		}
 	}
 	return &Stream{base: a.file, blocks: b, blockSize: a.sector, bias: a.sector, size: int64(size), name: name}, nil
 }

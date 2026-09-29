@@ -61,7 +61,7 @@ func openSFX(file starfile.File, offset int64) (*sfxArchive, bool, error) {
 		return nil, false, err
 	}
 	if !bytes.Equal(header[:14], []byte("InstallShield\x00")) {
-		return nil, false, nil
+		return openStringSFX(file, offset)
 	}
 	count := binary.LittleEndian.Uint32(header[14:18])
 	if count == 0 || count > 65536 {
