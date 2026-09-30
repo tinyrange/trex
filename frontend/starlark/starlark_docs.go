@@ -81,6 +81,10 @@ func standardLibraryDocumentation() ([]byte, error) {
 }
 
 var nativeStarlarkTypes = map[string][]string{
+	"unix_filesystem": {"mkdir(path, mode=0o755, mtime=None)", "write(path, data, mode=0o644, mtime=None)", "find(path)", "stat(path)", "remove(path)"},
+	"unix_stat":       {"size", "mode", "directory", "mtime"},
+	"shell_result":    {"status", "steps", "stdout", "stderr"},
+
 	"database.ese":             {"info", "tables", "rows(table, maximum=100000)", "index_entries(table, index, maximum=100000)", "verify()"},
 	"auto":                     {"name", "metadata", "file", "files", "find(path)", "page(offset=0, limit=100)", "plans", "bytes(offset=0, size=remaining)", "slice(offset=0, size=remaining)"},
 	"windows.signing_identity": {"certificate (DER bytes; private key is not exposed)"},
@@ -137,6 +141,16 @@ var nativeStarlarkTypes = map[string][]string{
 }
 
 var nativeStarlarkSignatures = map[string]string{
+	"emulator.shell.filesystem": "emulator.shell.filesystem(maximum=64MiB) -> unix_filesystem",
+	"emulator.shell.run":        "emulator.shell.run(files, source, dir='/', env={}, args=[], commands={}, executable=None, stdin=b'', name='shell', max_steps=100000, maximum_output=8MiB, timeout=120) -> shell_result",
+	"emulator.shell.date":       "emulator.shell.date(epoch) -> shell_command",
+	"emulator.shell.uname":      "emulator.shell.uname() -> shell_command",
+	"emulator.linux":            "emulator.linux(max_instructions=10000000) -> shell_command",
+	"renvo.compiler":            "renvo.compiler(target, arena_size=32MiB) -> shell_command",
+	"renvo.linker":              "renvo.linker(target, arena_size=32MiB) -> shell_command",
+	"renvo.archiver":            "renvo.archiver(index=False) -> shell_command",
+	"renvo.headers":             "renvo.headers() -> directory",
+
 	"channel.memory_pair":               "channel.memory_pair(maximum=1MiB) -> (byte_channel, byte_channel)",
 	"bytes_concat":                      "bytes_concat(parts) -> bytes",
 	"digest":                            "digest(value, algorithm='sha256') -> bytes",

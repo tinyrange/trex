@@ -2,6 +2,10 @@ package starlarkfrontend
 
 // Overviews explain the ownership and operations of returned capability values.
 var nativeStarlarkValueDescriptions = map[string]string{
+	"unix_filesystem": "A bounded mutable Unix namespace shared directly by shell, compiler and ELF execution. write accepts ordinary portable file values; find returns an immutable file snapshot rather than a live descriptor. Modes and Unix-second timestamps are explicit. Missing paths and invalid canonical absolute guest paths raise errors; host paths are never accessed.",
+	"unix_stat":       "Unix file metadata: byte size, permission bits, directory flag and Unix-second modification time. Permission bits support virtual probes, not a host security boundary.",
+	"shell_result":    "Completed shell invocation. status is the ordinary numeric exit status, steps is the consumed statement budget, and stdout/stderr are independently bounded captured byte strings. Capability, parser and budget failures raise errors instead of becoming negative feature probes.",
+
 	"database.ese":             "A portable ESE file reader. rows resolves Windows 2000 separated long values. index_entries returns persisted ordered key/data byte pairs: secondary data is the primary bookmark, while primary data is the encoded record. maximum bounds returned entries. verify checks stored pages without running a host database engine.",
 	"auto":                     "A lazy standardized file or directory node. metadata describes the selected source, files lists immediate children, and indexed paths or find recursively enter nested containers. file retains the original bytes; compressed containers expose their decoded children without an extra path component. page reads a bounded child listing. Nodes created by auto_plan expose directory-derived proposals through plans; follow a proposal's path to open its virtual filesystem. Plain auto returns no plans.",
 	"windows.signing_identity": "Opaque RSA code-signing identity. certificate contains the public DER X.509 certificate; private-key material is not exposed by attributes or representations.",

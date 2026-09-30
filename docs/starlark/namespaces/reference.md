@@ -347,6 +347,33 @@ ARM64 UEFI machine with inbox NVMe storage and USB input policy.
     Attach the system disk with bus="nvme". HVF uses the host ARM CPU;
     emulated runs may select accelerator="tcg", cpu="max".
 
+## `unix/build.star`
+
+In-memory Unix build policy. The engine supplies mechanisms, not a tool image.
+
+### `check`
+
+Require a successful command status and retain bounded failure output.
+
+### `install`
+
+Install a selected tool set; return its inspectable path -> action table.
+
+    No hidden marker interpretation: only this table binds executable paths to
+    native capabilities. Files remain in the caller-owned Unix namespace.
+
+### `mkdirs`
+
+Create parents once while constructing a fresh tree.
+
+### `run`
+
+Run a build step with an explicit Linux action and C-locale environment.
+
+### `unpack`
+
+Populate tar entries through portable files, preserving regular-file modes and times.
+
 ## `vmm/automation.star`
 
 Event-driven portable VM automation without implicit sleeps.
@@ -2743,6 +2770,12 @@ Connects a GDB remote-protocol session over an existing byte channel. The return
 
 Waits until one of the supplied selectable values is ready, returning that value, or None on timeout. Read the event from the returned source separately; selection itself does not consume the event.
 
+### `emulator.linux`
+
+`emulator.linux(max_instructions=10000000) -> shell_command`
+
+Creates an ELF execution capability for shell.run(executable=...). Recognizes static Linux/amd64 ELF images, preserves argv[0] independently of the resolved guest path, and uses the same virtual filesystem and inherited streams. Non-ELF input falls back to the shell script loader.
+
 ### `emulator.machine`
 
 `emulator.machine(image|code, architecture='auto', **architecture_options) -> emulator`
@@ -3112,17 +3145,41 @@ Creates a supported QEMU command-line option descriptor. The backend validates a
 
 Compiles a regular expression into a reusable matching object. Invalid patterns fail at compilation rather than at the first match.
 
+### `renvo.archiver`
+
+`renvo.archiver(index=False) -> shell_command`
+
+Creates an in-process archive command capability. index=True supplies ranlib-style arguments; index=False accepts ar-style arguments. Inputs and outputs remain in the invoking Unix filesystem.
+
 ### `renvo.cc`
 
 `renvo.cc(source, input, target, flags=[], arena_size=32MiB) -> compiledModule; input is a virtual source path or list of paths`
 
 Compiles virtual C/C++ sources with the in-process Renvo toolchain for the selected target. Returns a compiledModule containing success/diagnostic information and virtual output bytes.
 
+### `renvo.compiler`
+
+`renvo.compiler(target, arena_size=32MiB) -> shell_command`
+
+Creates an in-process C compiler command capability. The recipe installs and binds its guest path. Invocation arguments, working directory, input and output all use the shell-owned Unix filesystem and streams; no host compiler is invoked.
+
 ### `renvo.go`
 
 `renvo.go(source, input, target, arena_size=32MiB) -> compiledModule`
 
 Compiles a virtual Go source tree with Renvo for the selected target. Returns compilation status and outputs without invoking a host Go compiler.
+
+### `renvo.headers`
+
+`renvo.headers() -> directory`
+
+Exposes bundled libc headers as portable directory files. Requires renvo_bundle; does not install or overwrite files. The recipe chooses where and with which modes to provision them.
+
+### `renvo.linker`
+
+`renvo.linker(target, arena_size=32MiB) -> shell_command`
+
+Creates a portable Renvo linker command capability, without installing an executable or choosing its guest path. Writes outputs into the invoking shell filesystem.
 
 ### `renvo.make`
 
@@ -4238,6 +4295,12 @@ An SFP member with its logical path, entry type, timestamps and stored/unpacked 
 
 Methods and attributes: `binary`, `bytes`, `created_time`, `entry_type`, `file_length`, `flags`, `hex`, `modified_time`, `name`, `parent`, `path`, `payload_offset`, `read`, `record_offset`, `size`, `slice`, `stored_size`.
 
+### `shell_result` value
+
+Completed shell invocation. status is the ordinary numeric exit status, steps is the consumed statement budget, and stdout/stderr are independently bounded captured byte strings. Capability, parser and budget failures raise errors instead of becoming negative feature probes.
+
+Methods and attributes: `status`, `stderr`, `stdout`, `steps`.
+
 ### `tar` value
 
 An ordered tar archive view. entries/files retain metadata and payload views; find(path, occurrence=0) selects repeated paths without losing earlier archive entries.
@@ -4249,6 +4312,18 @@ Methods and attributes: `entries`, `files`, `find(path, occurrence=0)`.
 A tar member with path, type, ownership, permissions, timestamp and link target. Payload reads are relative to the member; entry_type and link distinguish regular content from directories and links.
 
 Methods and attributes: `binary`, `bytes`, `entry_type`, `gid`, `gname`, `hex`, `link`, `mode`, `mtime`, `name`, `path`, `read`, `size`, `slice`, `stored_size`, `uid`, `uname`.
+
+### `unix_filesystem` value
+
+A bounded mutable Unix namespace shared directly by shell, compiler and ELF execution. write accepts ordinary portable file values; find returns an immutable file snapshot rather than a live descriptor. Modes and Unix-second timestamps are explicit. Missing paths and invalid canonical absolute guest paths raise errors; host paths are never accessed.
+
+Methods and attributes: `find(path)`, `mkdir(path, mode=0o755, mtime=None)`, `remove(path)`, `stat(path)`, `write(path, data, mode=0o644, mtime=None)`.
+
+### `unix_stat` value
+
+Unix file metadata: byte size, permission bits, directory flag and Unix-second modification time. Permission bits support virtual probes, not a host security boundary.
+
+Methods and attributes: `directory`, `mode`, `mtime`, `size`.
 
 ### `vm` value
 

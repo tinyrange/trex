@@ -15,9 +15,13 @@ import (
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
-		"go":   starlark.NewBuiltin("go", renvoGoBuiltin),
-		"cc":   starlark.NewBuiltin("cc", renvoCCBuiltin),
-		"make": starlark.NewBuiltin("make", renvoMakeBuiltin),
+		"compiler": starlark.NewBuiltin("compiler", commandBuiltin),
+		"linker":   starlark.NewBuiltin("linker", commandBuiltin),
+		"archiver": starlark.NewBuiltin("archiver", commandBuiltin),
+		"headers":  starlark.NewBuiltin("headers", headersBuiltin),
+		"go":       starlark.NewBuiltin("go", renvoGoBuiltin),
+		"cc":       starlark.NewBuiltin("cc", renvoCCBuiltin),
+		"make":     starlark.NewBuiltin("make", renvoMakeBuiltin),
 	}
 }
 
