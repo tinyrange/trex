@@ -241,6 +241,92 @@ def test_ultrix_label():
     equal(label.partitions[2].data.size, image.size)
     raises(filesystem.ultrix_label, [image.slice(0, 16383)])
 
+def test_openbsd_label_and_ffs1():
+    # Complete disk with a typed FFS1 directory and 32-bit ownership.
+    def extent(offset, value):
+        return (offset, value)
+    raw_label = binary.extents(196, [
+        extent(0, binary.u32le(0x82564557)),
+        extent(40, binary.u32le(512)),
+        extent(60, binary.u32le(128)),
+        extent(84, binary.u32le(128)),
+        extent(114, binary.u16le(1)),
+        extent(132, binary.u32le(0x82564557)),
+        extent(138, binary.u16le(3)),
+        extent(148, binary.u32le(128)),
+        extent(160, b"\x07\x04"),
+        extent(180, binary.u32le(128)),
+    ])
+    checksum = 0
+    for off in range(0, 196, 2):
+        checksum ^= binary.read_u16le(raw_label, off)
+    label_bytes = binary.concat([raw_label.slice(0, 136), binary.u16le(checksum), raw_label.slice(138, 58)])
+    fields = {16: 32, 36: 128, 44: 1, 48: 4096, 52: 512, 56: 8, 116: 1024, 120: 32, 184: 32, 188: 128, 1320: 60, 1324: 2, 1372: 0x11954}
+    root_inode = binary.concat([binary.u16le(0o40755), binary.u16le(2), b"\x00" * 4, binary.u64le(512), b"\x00" * 24, binary.u32le(48), b"\x00" * 84])
+    file_inode = binary.concat([binary.u16le(0o100644), binary.u16le(1), b"\x00" * 4, binary.u64le(3), b"\x00" * 24, binary.u32le(56), b"\x00" * 68, binary.u32le(70000), binary.u32le(80000), b"\x00" * 8])
+    names = binary.concat([
+        binary.u32le(2), binary.u16le(12), b"\x04\x01.\x00\x00\x00",
+        binary.u32le(2), binary.u16le(12), b"\x04\x02..\x00\x00",
+        binary.u32le(3), binary.u16le(488), b"\x08\x04file\x00", b"\x00" * 475,
+    ])
+    disk = binary.extents(128 * 512, [
+        extent(512, label_bytes),
+        extent(32 * 512 + 2 * 128, root_inode),
+        extent(32 * 512 + 3 * 128, file_inode),
+        extent(48 * 512, names),
+        extent(56 * 512, b"abc"),
+    ] + [extent(8192 + off, binary.u32le(value)) for off, value in fields.items()])
+    label = filesystem.openbsd_label(disk)
+    equal(label.sector_size, 512)
+    equal(label.partitions[1].data, None)
+    equal(label.partitions[2].data.size, disk.size)
+    volume = filesystem.ufs(label.partitions[0].data)
+    equal(volume.inode_format, 2)
+    equal(volume.find("/file").uid, 70000)
+    equal(volume.find("/file").gid, 80000)
+    equal(volume.find("/file").data.read(), "abc")
+    equal(auto(disk).find("a/file").file.read(), "abc")
+    raises(filesystem.openbsd_label, [disk.slice(0, disk.size - 1)], message = "past input")
+
+def test_high_sierra():
+    def both32(value):
+        return binary.concat([binary.u32le(value), binary.u32be(value)])
+
+    def record(name, block, size, flags):
+        length = 33 + len(name)
+        length += length % 2
+        return binary.concat([
+            binary.u8(length), b"\x00", both32(block), both32(size),
+            b"\x00" * 6, binary.u8(flags), b"\x00" * 3,
+            binary.u16le(1), binary.u16be(1), binary.u8(len(name)),
+            name, b"\x00" * (length - 33 - len(name)),
+        ])
+
+    image = binary.extents(24 * 2048, [
+        (16 * 2048, binary.concat([both32(16), b"\x01CDROM\x01"])),
+        (16 * 2048 + 88, both32(24)),
+        (16 * 2048 + 136, binary.concat([binary.u16le(2048), binary.u16be(2048)])),
+        (16 * 2048 + 180, record(b"\x00", 20, 2048, 2)),
+        (17 * 2048, binary.concat([both32(17), b"\xffCDROM\x01"])),
+        (20 * 2048, binary.concat([record(b"\x00", 20, 2048, 2), record(b"DIR", 21, 2048, 2)])),
+        (21 * 2048, binary.concat([record(b"\x00", 21, 2048, 2), record(b"FILE.TXT;1", 22, 3, 0)])),
+        (22 * 2048, b"abc"),
+    ])
+    equal(filesystem.iso9660(image).find("dir/file.txt").read(), "abc")
+    equal(auto(image).metadata["format"], "high_sierra")
+    equal(auto(image).find("dir/file.txt").file.read(), "abc")
+    raises(filesystem.iso9660, [image.slice(0, image.size - 1)], message = "volume exceeds")
+    for stride in [2352, 2448]:
+        for mode in [1, 2]:
+            offset = 16 if mode == 1 else 24
+            header = binary.concat([b"\x00", b"\xff" * 10, b"\x00" * 4, binary.u8(mode), b"\x00" * (offset - 16)])
+            raw = binary.extents(24 * stride, [
+                (sector * stride, binary.concat([header, image.slice(sector * 2048, 2048)]))
+                for sector in range(24)
+            ])
+            equal(auto(raw).metadata["format"], "rawcd")
+            equal(auto(raw).find("DIR/FILE.TXT").file.read(), "abc")
+
 def test_lha():
     file = binary.concat([binary.decode("1ad72d6c68302d03000000030000000000000000000466696c65389761626300", "hex")])
     decoded = archive.lha(file)
@@ -316,12 +402,14 @@ def test_bff():
     raises(archive.bff, [file], {"maximum_decoded_bytes": 3})
 
 TEST_SUITE = suite("media_decode", [
+    case("high_sierra", test_high_sierra),
     case("bff", test_bff),
     case("aix_small_ar", test_aix_small_ar),
     case("hunk_load", test_hunk_load),
     case("hunk_objects", test_hunk_objects),
     case("lha", test_lha),
     case("ultrix_label", test_ultrix_label),
+    case("openbsd_label_and_ffs1", test_openbsd_label_and_ffs1),
     case("adcr", test_adcr),
     case("apm", test_apm),
     case("tome", test_tome),

@@ -2876,7 +2876,7 @@ Exposes a host directory through the native filesystem backend. This is a host-p
 
 `filesystem.iso9660(file) -> ISO filesystem`
 
-Parses an ISO 9660 filesystem and exposes directory and file views. Validated Rock Ridge takes precedence over Joliet, preserving case-sensitive names, POSIX metadata and symbolic-link targets without following links. Joliet and basic ISO names remain available when Rock Ridge is absent. It does not mount or copy the image.
+Parses an ISO 9660 or High Sierra filesystem and exposes directory and lazy file views. High Sierra uses case-insensitive names and validates descriptor addresses, both-endian fields and extent bounds. Validated Rock Ridge takes precedence over Joliet, preserving case-sensitive names, POSIX metadata and symbolic-link targets without following links. Joliet and basic ISO names remain available when Rock Ridge is absent. It does not mount or copy the image.
 
 ### `filesystem.mbr`
 
@@ -2923,11 +2923,17 @@ unrelated invalid attribute list prevents a complete namespace read.
 
 Reads Files-11 ODS-2 version1 home blocks, index headers and versioned directory trees. Verifies home/header checksums, primary and backup index maps, file identities, allocation bounds, EOF fields, directory records and traversal limits. Returns entries, files, exact-path find(path), raw home bytes and padded volume_name. Entries retain raw names, version, file_number, sequence, header, record_attributes, characteristics, data and size. Names include ;version, with unsafe bytes percent-escaped; the root self-reference is a directory_link and is not followed. Data is a borrowed read-only extent view; RMS records are not translated and allocation slack is excluded. Supports retrieval formats1/2/3. Extension chains, placement-control pointers, alternate-volume resolution and other ODS generations remain explicit gaps. Opening an ODS-2 view does not validate any enclosing CD-image trailer or decode nested backup savesets.
 
+### `filesystem.openbsd_label`
+
+`filesystem.openbsd_label(file, label_offset=512) -> record`
+
+Reads a version-1 OpenBSD disklabel at label_offset, an explicit byte offset in the complete disk. The default 512 is the common standalone amd64 label location; for an MBR image pass the OpenBSD partition offset plus 512. Validates both magic values, XOR checksum, partition count, 48-bit sector addresses, declared disk/partition bounds and FFS geometry. Sector size is declared by the label, including 4096-byte sectors. Returns sector_size, total_sectors, bound_start, bound_end, uid, type_name, pack_name and partitions. Partitions preserve index, a-z/A-Z name, absolute start_sector, sectors, type, block_size, fragment_size, cylinders_per_group and borrowed read-only data. Empty slots have data=None; overlapping raw c remains present. Requires the complete declared disk; does not guess offsets, mount, repair, construct images or accept other disklabel versions.
+
 ### `filesystem.raw_cd`
 
 `filesystem.raw_cd(file) -> file`
 
-Views a single-track 2352-byte or 2448-byte raw CD as logical 2048-byte sectors. Supports Mode 1 and Mode 2 Form 1, preserving the source without conversion or mounting.
+Views a single-track 2352-byte or 2448-byte raw CD as logical 2048-byte sectors. Supports ISO9660 and High Sierra in Mode 1 and Mode 2 Form 1, preserving the source without conversion or mounting.
 
 ### `filesystem.sgi`
 
@@ -2945,7 +2951,7 @@ Parses a UDF filesystem into directory and file views. Symbolic links expose dec
 
 `filesystem.ufs(file, maximum_entries=1M, maximum_blocks=1M) -> record`
 
-Reads the historical UFS1 filesystem layout used by Ultrix, with a superblock at byte8192 and either byte order. Checks fragment/cylinder-group geometry, inode and data ranges, 512-byte directory records, dot entries, duplicate names and directory cycles. Returns entries, paths, find(path), block_size, fragment_size and groups. Entries preserve inode identity, mode, link count, old 16-bit uid/gid, timestamps, flags, device number and borrowed data views. Reads 12 direct blocks and single/double/triple indirect pointers; zero pointers remain sparse zeroes. maximum_blocks bounds total mapping work, including indirect pointers; maximum_entries bounds reachable paths. Hard-linked files share inode data, symlinks are exposed but not followed, and no device nodes are created. This is the old directory/inode layout, not UFS2 or modern UFS1 extensions; inline symlinks, extended attributes and journal replay are not implemented. Nested archives require separate decoders.
+Reads historical and 4.4BSD UFS1, including OpenBSD FFS1, with a superblock at byte8192 and either byte order. The declared inode format selects old 16-bit ownership/16-bit directory name lengths or modern 32-bit ownership/typed directories and inline symlinks. Checks fragment/cylinder-group geometry, inode and data ranges, 512-byte directory records, dot entries, directory type/inode agreement, duplicate names and directory cycles. Returns entries, paths, find(path), block_size, fragment_size, groups and inode_format. Entries preserve inode identity, mode, link count, ownership, timestamps, flags, device number and borrowed data views. Reads 12 direct blocks and single/double/triple indirect pointers; zero pointers remain sparse zeroes. maximum_blocks bounds mapping work; maximum_entries bounds reachable paths. Hard-linked files share data, symlinks are not followed and device nodes are metadata only. UFS2, unknown inode formats, extended attributes, journal replay and filesystem construction remain unsupported. Nested archives require separate decoders.
 
 ### `filesystem.ultrix_label`
 
