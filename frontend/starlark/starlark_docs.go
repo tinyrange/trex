@@ -208,6 +208,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"filesystem.ufs":                    "filesystem.ufs(file, maximum_entries=1M, maximum_blocks=1M) -> record",
 	"filesystem.ods2":                   "filesystem.ods2(file, maximum_entries=1M, maximum_depth=64) -> record",
 	"filesystem.ultrix_label":           "filesystem.ultrix_label(file) -> record",
+	"filesystem.openbsd_label":          "filesystem.openbsd_label(file, label_offset=512) -> record",
 	"filesystem.xfs":                    "filesystem.xfs(file, maximum_entries=1M) -> record",
 	"archive.gzip":                      "archive.gzip(file, maximum_bytes=<unlimited>) -> file",
 	"archive.bzip2":                     "archive.bzip2(file, maximum_bytes=<unlimited>) -> file",

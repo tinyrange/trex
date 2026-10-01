@@ -7,6 +7,12 @@ import (
 )
 
 func init() {
+	auto.Register("high_sierra", 50, func(prefix []byte, source storage.Reader, options auto.Options) (auto.View, error) {
+		if len(prefix) < 32783 || string(prefix[32769:32774]) == "CD001" || string(prefix[32777:32782]) != "CDROM" {
+			return nil, auto.ErrNoMatch
+		}
+		return adapter.Parse(ISO9660Builtin, source, options)
+	})
 	auto.Register("iso9660", 50, func(prefix []byte, source storage.Reader, options auto.Options) (auto.View, error) {
 		if len(prefix) < 32774 || string(prefix[32769:32774]) != "CD001" {
 			return nil, auto.ErrNoMatch

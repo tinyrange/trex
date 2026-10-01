@@ -41,6 +41,18 @@ func TestSectorViews(t *testing.T) {
 			if n, e := f.ReadAt(got, f.Size()-3); n != 3 || e != io.EOF {
 				t.Fatalf("EOF %d %v", n, e)
 			}
+			// The framing view also recognizes High Sierra logical sectors.
+			hs := []byte{16, 0, 0, 0, 0, 0, 0, 16, 1, 'C', 'D', 'R', 'O', 'M', 1}
+			copy(raw[16*stride+offset:], hs)
+			copy(logical[16*2048:], hs)
+			f, e = Open(&starfile.Bytes{Data: raw})
+			if e != nil {
+				t.Fatal(e)
+			}
+			got = make([]byte, len(logical))
+			if _, e = f.ReadAt(got, 0); e != nil || !bytes.Equal(got, logical) {
+				t.Fatal("High Sierra sector view", e)
+			}
 			if mode == 2 {
 				raw[2*stride+18] = 0x20
 				raw[2*stride+22] = 0x20

@@ -37,7 +37,7 @@ An archive node's `Reader()` always returns its original archive bytes.
 
 Built-in detectors cover ZIP, tar, gzip, bzip2, XZ, 7z, ar, CAB, CFB (including
 MSI storage), CPIO, Apple BOM inventories, WIM, SFP, SZDD, KWAJ, FAT, NTFS,
-SquashFS 4.0, ISO9660, UDF, MBR, GPT, and VHDX. See
+SquashFS 4.0, ISO9660, High Sierra (`high_sierra`), UDF, MBR, GPT, and VHDX. See
 `docs/format-support.md` for the supported generations and payload limitations.
 
 Windows Installer package storages are identified as `msi` by their root CLSID.
@@ -53,7 +53,9 @@ decoding the database tables or supporting their codepage.
 Legacy detectors add UNIX compress/pack, LHA, StuffIt (including version 5),
 CompactPro, Tome, Macintosh resource forks, BSD dump, BRU, SGI standalone tape,
 VMS BACKUP, Amiga Hunk objects/load modules, HFS, EFS, historical UFS, XFS v4,
-ODS-2, Apple partition maps, SGI disk headers and Ultrix partition labels.
+ODS-2, Apple partition maps, SGI disk headers, Ultrix partition labels and
+version-1 OpenBSD disklabels. UFS1 detection covers historical and 4.4BSD
+inode/directory generations, including OpenBSD FFS1.
 AWS detection requires the observed VM/370 volume-header record; other AWS
 tapes remain available through `archive.aws` explicitly.
 
@@ -76,6 +78,15 @@ marked `contains_label`.
 Standalone UFS volumes can retain their parent disk's label: if its partition
 ranges extend beyond this source, detection opens the independently recognized
 UFS volume rather than claiming the input is the complete disk.
+
+OpenBSD labels at byte 512 expose slots `a` through `z`/`A` through `Z`,
+retaining empty slots, absolute sector addresses and filesystem types. Raw slot
+`c` retains its bytes without recursively opening another copy of the label.
+Zero-start FFS slots open directly as filesystems. Standalone FFS volumes whose
+embedded label declares a larger parent disk open as UFS instead. In MBR media,
+the OpenBSD partition therefore remains directly browsable as `partition4`
+(or its actual MBR slot). To inspect its whole-disk label explicitly, use
+`filesystem.openbsd_label(disk, label_offset=partition.offset + 512)`.
 
 Recognition is not installation support or exhaustive nested-format coverage.
 Unsupported confirmed generations and damaged archives report parser errors.
@@ -216,7 +227,7 @@ navigation and encoding selection. Downloads retain the original bytes.
 and special files, and reads directory listings only when requested. Its source
 handle is closed with the Starlark application lifecycle.
 
-### Historical UFS browsing
+### UFS1 browsing
 
 UFS detection validates the superblock and root inode without walking the whole
 volume. Opening a directory validates its records and child inodes, retaining
@@ -226,6 +237,11 @@ remain errors. Unvisited directories have not been validated. Use
 `filesystem.ufs(file)` when explicit full-tree enumeration and validation are
 required. This avoids decoding unrelated directory trees merely to browse a
 single path inside a compressed disk image.
+
+The superblock's inode-format declaration selects the directory and inode
+layout; filenames do not. Modern 4.4BSD directories retain type/name-length
+bytes and use 32-bit inode ownership. Inline symlink targets are readable bytes,
+not followed paths. UFS2 and unknown inode formats remain unsupported.
 
 ### Streaming TAR pages
 

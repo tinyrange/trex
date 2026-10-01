@@ -39,7 +39,7 @@ func AutoView(source storage.Reader, o auto.Options) (auto.View, error) {
 			once.Do(func() {
 				mu.Lock()
 				defer mu.Unlock()
-				children, err := directoryEntries(current, parent, r.order, remaining, r.inode)
+				children, err := directoryEntries(current, parent, r.order, remaining, r.inode, r.modern)
 				if err != nil {
 					resultErr = err
 					return
