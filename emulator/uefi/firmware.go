@@ -28,7 +28,7 @@ type FirmwareOptions struct {
 
 type Firmware struct {
 	physical   cpu.Memory
-	virtualMap []runtimeRange
+	virtualMap runtimeMap
 	stall      func(time.Duration) error
 	graphics   *graphicsOutput
 	machine    *Machine

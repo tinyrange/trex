@@ -21,7 +21,7 @@ func TestCompactLayoutHitTargetsAndFolderToggle(t *testing.T) {
 		t.Fatal("context menu used stale row geometry")
 	}
 	b.key(window.InputEvent{Key: window.KeyEscape}, 20)
-	b.click(4+6*52+20, 40, 1100, 720)
+	b.click(4+5*52+20, 40, 1100, 720)
 	if b.listLeft() != 210 {
 		t.Fatal("Folders button did not reveal tree")
 	}

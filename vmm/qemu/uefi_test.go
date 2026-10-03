@@ -10,6 +10,9 @@ import (
 )
 
 func TestQEMUUEFIFirmwareStarts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("QEMU firmware integration test")
+	}
 	if _, err := exec.LookPath("qemu-system-x86_64"); err != nil {
 		t.Skip("QEMU x86_64 is unavailable")
 	}

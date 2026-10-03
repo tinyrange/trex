@@ -2,7 +2,9 @@ package qemu
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -146,27 +148,54 @@ func (d *qemuDriver) Detach(context.Context) error {
 
 func (d *qemuDriver) Close(ctx context.Context) error {
 	d.closeOnce.Do(func() {
-		select {
-		case <-d.done:
-		default:
+		d.closeErr = stopQEMU(ctx, d.done, func(quitCtx context.Context) error {
 			if d.qmp != nil {
-				quitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				_, _ = d.qmp.Call(quitCtx, "quit", nil)
-				cancel()
-			}
-			select {
-			case <-d.done:
-			case <-ctx.Done():
-				d.cancel()
-				if d.cmd != nil && d.cmd.Process != nil {
-					d.closeErr = d.cmd.Process.Kill()
+				if _, err := d.qmp.Call(quitCtx, "quit", nil); err != nil {
+					return err
 				}
-				<-d.done
+			} else {
+				return fmt.Errorf("QMP is unavailable")
 			}
-		}
+			// Quit can wait for NBD requests to finish; cancellation interrupts
+			// our exports rather than waiting for process exit to cancel them.
+			d.cancel()
+			return nil
+		}, func() error {
+			d.cancel()
+			if d.cmd != nil && d.cmd.Process != nil {
+				return d.cmd.Process.Kill()
+			}
+			return nil
+		})
 		d.releaseTransports()
 	})
 	return d.closeErr
+}
+
+// stopQEMU bounds graceful shutdown even when its caller has no deadline. A
+// failed control channel skips the grace period. After termination, joining
+// done ensures process reaping and transport cleanup have completed.
+func stopQEMU(ctx context.Context, done <-chan struct{}, quit func(context.Context) error, kill func() error) error {
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	grace, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := quit(grace); err == nil {
+		select {
+		case <-done:
+			return nil
+		case <-grace.Done():
+		}
+	}
+	err := kill()
+	<-done
+	if errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	return err
 }
 
 type qemuExtensionValue struct{ driver *qemuDriver }

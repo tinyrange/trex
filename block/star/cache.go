@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	blockpkg "github.com/tinyrange/trex/block"
 	"go.starlark.net/starlark"
 )
 
@@ -29,9 +30,12 @@ type blockCacheEntry struct {
 }
 
 type cachedBlockDevice struct {
-	base      BlockDevice
-	maxBytes  int64
-	chunkSize int64
+	base             BlockDevice
+	maxBytes         int64
+	chunkSize        int64
+	geometry         BlockGeometry
+	baseCapabilities BlockCapabilities
+	baseMu           sync.Mutex // Serializes all backing operations when Concurrent is false.
 
 	mu      sync.Mutex
 	entries map[int64]*blockCacheEntry
@@ -52,7 +56,11 @@ func NewCachedDevice(base BlockDevice, maxBytes, chunkSize int64) (*CachedDevice
 func (d *cachedBlockDevice) Misses() uint64 { return d.misses.Load() }
 
 func newCachedBlockDevice(base BlockDevice, maxBytes, chunkSize int64) (*cachedBlockDevice, error) {
-	if base.Capabilities().Writable {
+	if base == nil {
+		return nil, fmt.Errorf("block.cache: nil base")
+	}
+	capabilities, geometry := base.Capabilities(), base.Geometry()
+	if capabilities.Writable {
 		return nil, fmt.Errorf("block.cache: base must be read-only; place the cache below a writable overlay")
 	}
 	if maxBytes <= 0 || chunkSize <= 0 {
@@ -61,14 +69,19 @@ func newCachedBlockDevice(base BlockDevice, maxBytes, chunkSize int64) (*cachedB
 	if chunkSize > maxBytes {
 		return nil, fmt.Errorf("block.cache: chunk_size exceeds max_bytes")
 	}
-	if logical := int64(base.Geometry().LogicalBlockSize); chunkSize%logical != 0 {
+	if geometry.Size < 0 || geometry.LogicalBlockSize == 0 {
+		return nil, fmt.Errorf("block.cache: invalid base geometry")
+	}
+	if logical := int64(geometry.LogicalBlockSize); chunkSize%logical != 0 {
 		return nil, fmt.Errorf("block.cache: chunk_size must be a multiple of the logical block size")
 	}
 	return &cachedBlockDevice{
-		base:      base,
-		maxBytes:  maxBytes,
-		chunkSize: chunkSize,
-		entries:   make(map[int64]*blockCacheEntry),
+		base:             base,
+		maxBytes:         maxBytes,
+		chunkSize:        chunkSize,
+		geometry:         geometry,
+		baseCapabilities: capabilities,
+		entries:          make(map[int64]*blockCacheEntry),
 	}, nil
 }
 
@@ -94,10 +107,10 @@ func blockCacheBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	return NewValue("cache", cache), nil
 }
 
-func (d *cachedBlockDevice) Geometry() BlockGeometry { return d.base.Geometry() }
+func (d *cachedBlockDevice) Geometry() BlockGeometry { return d.geometry }
 
 func (d *cachedBlockDevice) Capabilities() BlockCapabilities {
-	capabilities := d.base.Capabilities()
+	capabilities := d.baseCapabilities
 	capabilities.Writable = false
 	capabilities.Flush = false
 	capabilities.Zero = false
@@ -130,10 +143,25 @@ func (d *cachedBlockDevice) Prefetch(off, length int64) error {
 
 func (d *cachedBlockDevice) Extents(off, length int64) ([]BlockExtent, error) {
 	extenter, ok := d.base.(blockDeviceExtenter)
-	if !ok || !d.base.Capabilities().Extents {
+	if !ok || !d.baseCapabilities.Extents {
 		return nil, ErrBlockUnsupported
 	}
+	if err := validateBlockRange(d.geometry.Size, off, length); err != nil {
+		return nil, err
+	}
+	if !d.baseCapabilities.Concurrent {
+		d.baseMu.Lock()
+		defer d.baseMu.Unlock()
+	}
 	return extenter.Extents(off, length)
+}
+
+func (d *cachedBlockDevice) readBase(p []byte, off int64) (int, error) {
+	if !d.baseCapabilities.Concurrent {
+		d.baseMu.Lock()
+		defer d.baseMu.Unlock()
+	}
+	return blockpkg.ReadFullAt(d.base, p, off)
 }
 
 func (d *cachedBlockDevice) ReadAt(p []byte, off int64) (int, error) {
@@ -198,7 +226,7 @@ func (d *cachedBlockDevice) chunk(index int64) ([]byte, error) {
 		entry.err = io.EOF
 	} else {
 		entry.data = make([]byte, length)
-		_, entry.err = d.base.ReadAt(entry.data, off)
+		_, entry.err = d.readBase(entry.data, off)
 	}
 
 	d.mu.Lock()

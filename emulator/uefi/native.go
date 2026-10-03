@@ -8,7 +8,6 @@ import (
 	blockstar "github.com/tinyrange/trex/block/star"
 	"github.com/tinyrange/trex/emulator/arm64"
 	"github.com/tinyrange/trex/emulator/cpu"
-	"hash/crc32"
 	"j5.nz/cc/devices/ramfb"
 	"j5.nz/cc/hypervisor"
 	"maps"
@@ -27,7 +26,7 @@ type NativeExecution struct {
 	base                                                        uint64
 	firmware                                                    *Machine
 	gates                                                       map[uint16]string
-	virtualMap                                                  []runtimeRange
+	virtualMap                                                  runtimeMap
 	WindowsDebug                                                bool
 	Modules                                                     map[uint64]NativeModule
 	devices                                                     []hypervisor.MMIODevice
@@ -126,8 +125,6 @@ type NativeModule struct {
 	Name       string
 	Base, Size uint64
 }
-
-type runtimeRange struct{ physical, virtual, size uint64 }
 
 func (m *Machine) StartNative(ctx context.Context) (*NativeExecution, error) {
 	if m.memory == nil || !m.exited {
@@ -468,77 +465,11 @@ func (n *NativeExecution) ReadVirtualMemory(a uint64, b []byte) error {
 }
 
 func (n *NativeExecution) setVirtualAddressMap(a [8]uint64) uint64 {
-	if n.virtualMap != nil || a[1] < 40 || a[1] > 4096 || a[0] == 0 || a[0] > 1<<20 || a[0]%a[1] != 0 || a[2] != 1 {
-		return invalidParameter
+	status, err := n.firmware.setRuntimeMap(n, &n.virtualMap, [4]uint64(a[:4]))
+	if err != nil {
+		n.firmware.err = err
 	}
-	data := n.firmware.get(a[3], a[0])
-	if n.firmware.err != nil {
-		return invalidParameter
-	}
-	var ranges []runtimeRange
-	for offset := uint64(0); offset < a[0]; offset += a[1] {
-		d := data[offset:]
-		p := binary.LittleEndian.Uint64(d[8:])
-		v := binary.LittleEndian.Uint64(d[16:])
-		pages := binary.LittleEndian.Uint64(d[24:])
-		attr := binary.LittleEndian.Uint64(d[32:])
-		if attr>>63 == 0 {
-			continue
-		}
-		if pages == 0 || pages > ^uint64(0)/4096 || p&4095 != 0 || v&4095 != 0 {
-			return invalidParameter
-		}
-		size := pages * 4096
-		if p+size < p || v+size < v {
-			return invalidParameter
-		}
-		for _, r := range ranges {
-			if p < r.physical+r.size && r.physical < p+size {
-				return invalidParameter
-			}
-		}
-		ranges = append(ranges, runtimeRange{p, v, size})
-	}
-	convert := func(p uint64) (uint64, bool) {
-		for _, r := range ranges {
-			if p >= r.physical && p-r.physical < r.size {
-				return r.virtual + p - r.physical, true
-			}
-		}
-		return 0, false
-	}
-	runtime := n.ram[0x500 : 0x500+136]
-	updated := slices.Clone(runtime)
-	for offset := 24; offset < 136; offset += 8 {
-		p := binary.LittleEndian.Uint64(runtime[offset:])
-		v, ok := convert(p)
-		if !ok {
-			return notFound
-		}
-		binary.LittleEndian.PutUint64(updated[offset:], v)
-	}
-	// The system table address is configurable within the firmware layout.
-	table := n.ram[n.firmware.systemTable-n.base : n.firmware.systemTable-n.base+120]
-	system := slices.Clone(table)
-	for _, offset := range []int{24, 88, 112} {
-		p := binary.LittleEndian.Uint64(system[offset:])
-		if p == 0 {
-			continue
-		}
-		v, ok := convert(p)
-		if !ok {
-			return notFound
-		}
-		binary.LittleEndian.PutUint64(system[offset:], v)
-	}
-	binary.LittleEndian.PutUint32(updated[16:], 0)
-	binary.LittleEndian.PutUint32(updated[16:], crc32.ChecksumIEEE(updated))
-	binary.LittleEndian.PutUint32(system[16:], 0)
-	binary.LittleEndian.PutUint32(system[16:], crc32.ChecksumIEEE(system))
-	copy(runtime, updated)
-	copy(table, system)
-	n.virtualMap = ranges
-	return 0
+	return status
 }
 func (n *NativeExecution) Register(name string) (uint64, error) {
 	if len(name) > 1 && name[0] == 'x' {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	cabarchive "github.com/tinyrange/trex/archive/cab"
 	blockpkg "github.com/tinyrange/trex/block"
@@ -121,11 +122,15 @@ func openBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		_ = file.Close()
 		return nil, err
 	}
-	var metrics *lifecycle.Metrics
+	result := &osFile{name: name, file: file, size: info.Size()}
 	if resources, err := lifecycle.ForThread(thread); err == nil {
-		metrics = resources.Metrics()
+		result.metrics = resources.Metrics()
+		if _, err := resources.Add(result); err != nil {
+			_ = result.Close()
+			return nil, fmt.Errorf("open: register file: %w", err)
+		}
 	}
-	return &osFile{name: name, file: file, size: info.Size(), metrics: metrics}, nil
+	return result, nil
 }
 
 const defaultFinalOutputLimit = int64(64 << 30)
@@ -209,10 +214,19 @@ func stdoutBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 }
 
 type osFile struct {
-	name    string
-	file    *os.File
-	size    int64
-	metrics *lifecycle.Metrics
+	name      string
+	file      *os.File
+	size      int64
+	metrics   *lifecycle.Metrics
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// Close releases the owned native handle. Views borrow it until their owning
+// execution ends; closing the same file again is safe during registry cleanup.
+func (f *osFile) Close() error {
+	f.closeOnce.Do(func() { f.closeErr = f.file.Close() })
+	return f.closeErr
 }
 
 func (f *osFile) ReadAt(p []byte, off int64) (int, error) {

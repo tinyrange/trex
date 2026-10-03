@@ -32,22 +32,14 @@ Double-click a row or press Enter to open a directory, archive or file preview.
 Right-click a file or folder for its context menu; Shift+F10 opens the menu from
 the keyboard. Arrow keys select menu commands, Enter activates them, and Escape
 or a click outside dismisses the menu. Right-clicking selects the target without
-opening it. The menu includes Open in trex, Open in system viewer, Save as,
-Copy path, and Up one level, with unavailable actions disabled.
+opening it. The menu includes Open in trex, Save as, Copy path, and Up one
+level, with unavailable actions disabled.
 
-**Open in system viewer** (also Ctrl+Enter or the toolbar button) uses the
-registered desktop file association. Existing host files open directly.
-Archive members first show a Save and Open dialog: choose the full destination
-filename for a retained copy, then the saved file opens in its system handler.
-Save as creates a retained copy without launching it. Existing destinations are
-never overwritten. Cancel leaves the filesystem untouched. No temporary
-extraction or automatic cleanup of saved copies takes place.
-
-These explicit desktop actions use Windows ShellExecute, macOS Launch Services
-through `open`, or the Linux desktop's `xdg-open` handler. They are not used by
-archive parsing, preview, navigation, or any processing stage. On Windows, the
-file's normal shell `open` verb applies, including execution for executable
-files; use Open in trex for the internal preview.
+**Save as** (also Ctrl+Enter or the toolbar button) asks for the full destination
+filename for a retained copy and displays that destination after saving.
+Existing destinations are never overwritten. Cancel leaves the filesystem
+untouched. Text and hex previews run inside trex; no desktop handler or
+external application is launched.
 
 Click the column headings to sort by name, byte size, packed size, modification
 time, or file type. Packed sizes and modification dates are shown only when
@@ -60,7 +52,7 @@ when an item is opened, avoiding reads of every file on a network share.
 | Action | Shortcut |
 | --- | --- |
 | Open selected item | Enter |
-| Open selected file in system viewer | Ctrl+Enter / Command+Enter |
+| Save selected file as | Ctrl+Enter / Command+Enter |
 | Context menu for selection | Shift+F10 |
 | Parent directory, including out of an archive | Backspace / Alt+Up |
 | Back / Forward | Alt+Left / Alt+Right |
@@ -80,7 +72,7 @@ entry and depth limits still apply. Unsupported ordinary files open in the
 preview; malformed recognized containers report their parser error and retain
 the previous location. Previews read at most 64 KiB and choose text or hex from
 the bytes. Browsing and preview do not extract, execute or modify files; saving
-and desktop handoff require the explicit actions described above.
+requires the explicit action described above.
 
 Directory enumeration and parsing run on a worker, keeping the window event
 loop responsive. Navigation waits for an outstanding read to complete. Host
@@ -106,8 +98,21 @@ Set `TREX_BROWSER_ROOT` and `TREX_BROWSER_OPEN` to test a real archive library;
 `TREX_BROWSER_SCREENSHOT` optionally writes the final window screenshot to the
 specified output path. The desktop test requires a display and currently runs
 on Windows/Linux; the macOS main-thread requirement is handled by the command.
-`TREX_BROWSER_VIEWER_FILE` enables `TestSystemViewer` with an existing document;
-it actually launches the associated application and is skipped by default.
 The desktop smoke also verifies independent monospace glyph advances and a
 multi-line hex preview in the same window. `TREX_BROWSER_HEX_SCREENSHOT` writes
 that preview as an optional final screenshot.
+
+The HTTP archive browser uses the same `auto` format discovery and lazy archive
+tree. Select **Browse contents** to detect a container; nested archives remain
+readable files until opened. Registry hives expose keys as directories and
+values as `_values.json`. Its existing access token, request token, mount and
+node limits also apply.
+
+HTTP text, hex and UTF-16 previews display at most 64 KiB, reading one extra
+byte when needed to detect truncation. Unknown decoded lengths remain unknown;
+opening a preview does not scan the entire stream to calculate its size. INF
+and Hive JSON previews require complete input of at most 64 MiB. Larger known
+files or decoded streams report a structured-preview input-limit error rather
+than parsing a partial prefix. Archive links and metadata-only entries show
+their type; **Browse contents** is available for readable files and explicit
+container views.

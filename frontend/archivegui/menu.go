@@ -23,7 +23,6 @@ type popupMenu struct {
 type saveDialog struct {
 	node        *auto.Node
 	destination string
-	open        bool
 }
 
 func bevel(f graphics.Frame, x, y, w, h float32, sunken bool) {
@@ -70,21 +69,11 @@ func (b *browser) perform(status string, action func() (string, error)) {
 	b.status = status
 	b.requests <- request{action: action}
 }
-func (b *browser) openSystem(n *auto.Node, p string) {
+func (b *browser) promptSave(n *auto.Node) {
 	if b.busy || n == nil || n.Reader() == nil {
 		return
 	}
-	if !b.desktop.CanOpen(n.Reader()) {
-		b.promptSave(n, true)
-		return
-	}
-	b.perform("Opening system viewer ...", func() (string, error) { return "Opened " + p + " in system viewer", b.desktop.Open(n.Reader()) })
-}
-func (b *browser) promptSave(n *auto.Node, open bool) {
-	if b.busy || n == nil || n.Reader() == nil {
-		return
-	}
-	b.save = &saveDialog{node: n, destination: b.desktop.SuggestedDestination(n.Name()), open: open}
+	b.save = &saveDialog{node: n, destination: b.desktop.SuggestedDestination(n.Name())}
 	b.focusField(3)
 }
 func (b *browser) confirmSave() {
@@ -96,10 +85,7 @@ func (b *browser) confirmSave() {
 	b.focus = 0
 	b.perform("Saving "+s.node.Name()+" ...", func() (string, error) {
 		message := "Saved " + s.destination
-		if s.open {
-			message += " and opened in system viewer"
-		}
-		return message, b.desktop.Save(s.node.Reader(), s.destination, s.open)
+		return message, b.desktop.Save(s.node.Reader(), s.destination)
 	})
 }
 
@@ -141,8 +127,7 @@ func (b *browser) contextMenu(x, y float32) {
 	readable := n != nil && n.Reader() != nil
 	items := []menuItem{
 		{"Open in trex", n != nil && !b.busy, func() { b.navigate(p, -1) }},
-		{"Open in system viewer     Ctrl+Enter", readable && !b.busy, func() { b.openSystem(n, p) }},
-		{"Save as...", readable && !b.busy, func() { b.promptSave(n, false) }},
+		{"Save as...                Ctrl+Enter", readable && !b.busy, func() { b.promptSave(n) }},
 		{"Copy path", true, func() {
 			if err := window.GetClipboard().SetText(p); err != nil {
 				b.status = "Cannot copy: " + err.Error()
@@ -243,11 +228,7 @@ func (b *browser) drawOverlay(f graphics.Frame, t *uiText) {
 		x, y := b.saveRect()
 		bevel(f, x, y, 560, 210, false)
 		q(x+3, y+3, 554, 25, selection)
-		title := "Save as"
-		if s.open {
-			title = "Save and open in system viewer"
-		}
-		label(title, x+10, y+21, 535, paper)
+		label("Save as", x+10, y+21, 535, paper)
 		label(fmt.Sprintf("Save %s", s.node.Name()), x+14, y+53, 530, ink)
 		label("Destination filename:", x+14, y+79, 530, ink)
 		bevel(f, x+14, y+88, 532, 32, true)
