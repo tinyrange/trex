@@ -3,6 +3,7 @@
 package gzip
 
 import (
+	"bufio"
 	stdgzip "compress/gzip"
 	"fmt"
 	"io"
@@ -20,11 +21,13 @@ const cacheBytes = 1 << 20
 // File retains a one-MiB decoded window and the decoder's bounded state. Size
 // scans the stream when necessary; KnownSize never scans. gzip ISIZE describes
 // only one member modulo 2^32 and is deliberately not used as the file length.
-// Concatenated members and their checksums are checked as they are consumed.
+// Concatenated members, their checksums, and optional all-zero trailing padding
+// are checked as they are consumed.
 type File struct {
 	source      storage.Reader
 	maximum     int64
 	mu          sync.Mutex
+	input       *bufio.Reader
 	decoder     *stdgzip.Reader
 	offset      int64
 	cache       []byte
@@ -61,7 +64,8 @@ func (f *File) reset() error {
 	if size < 0 {
 		return fmt.Errorf("gzip: invalid compressed size")
 	}
-	r := io.NewSectionReader(f.source, 0, size)
+	r := bufio.NewReader(io.NewSectionReader(f.source, 0, size))
+	f.input = r
 	if f.decoder == nil {
 		decoder, err := stdgzip.NewReader(r)
 		if err != nil {
@@ -71,9 +75,50 @@ func (f *File) reset() error {
 	} else if err := f.decoder.Reset(r); err != nil {
 		return fmt.Errorf("gzip: reset decoder: %w", err)
 	}
+	f.decoder.Multistream(false)
 	f.offset = 0
 	f.cache = f.cache[:0]
 	return nil
+}
+
+// readDecoded keeps concatenated members, checks each trailer, and permits only
+// all-zero padding after the final member. IBM distribution media include such
+// padding. A truncated member or any nonzero trailing junk remains an error.
+func (f *File) readDecoded(p []byte) (int, error) {
+	for {
+		n, err := f.decoder.Read(p)
+		if err != io.EOF {
+			return n, err
+		}
+		prefix, err := f.input.Peek(1)
+		if err != nil {
+			return n, err
+		}
+		if prefix[0] == 0 {
+			var tail [32 << 10]byte
+			for {
+				count, err := f.input.Read(tail[:])
+				for _, b := range tail[:count] {
+					if b != 0 {
+						return n, stdgzip.ErrHeader
+					}
+				}
+				if err != nil {
+					return n, err
+				}
+				if count == 0 {
+					return n, io.ErrNoProgress
+				}
+			}
+		}
+		if err := f.decoder.Reset(f.input); err != nil {
+			return n, err
+		}
+		f.decoder.Multistream(false)
+		if n > 0 {
+			return n, nil
+		}
+	}
 }
 
 // read advances the decoder, preserving checksum failures and the exact EOF.
@@ -92,7 +137,7 @@ func (f *File) read(p []byte) (int, error) {
 			p = p[:remaining+1]
 		}
 	}
-	n, err := f.decoder.Read(p)
+	n, err := f.readDecoded(p)
 	if int64(n) > math.MaxInt64-f.offset || (f.maximum > 0 && int64(n) > f.maximum-f.offset) {
 		maximum := f.maximum
 		if maximum == 0 {

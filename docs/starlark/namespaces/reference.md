@@ -2806,6 +2806,48 @@ Creates a bounded 32-bit x86 execution context from a PE image or raw code. Expo
 
 Reads an Apple Partition Map as portable partition file views. block_size explicitly selects the 512-, 1024- or 2048-byte logical map; device_block_size and device_blocks retain independent driver-descriptor geometry. This distinction matters for CDs containing overlapping maps. Each partition exposes its effective block_size: a CDvr-tagged Apple_Driver43_CD record with a matching block-zero driver descriptor uses 2048-byte device units even in a 512-byte map; other records use the selected map units. Validates ER/PM signatures, consistent entry counts, allocated-partition bounds and nonoverlap. Returns partitions with index, raw name/type/processor bytes, start_block, blocks, logical data-range fields, status and boot metadata. data is the complete physical partition view; no inner filesystem is inferred. An out-of-image Apple_Free descriptor retains its declared geometry with data=None and complete=False; allocated partitions must fit fully. Boot metadata is not executed and boot checksums are not verified.
 
+### `filesystem.ckd_attribute_page`
+
+`filesystem.ckd_attribute_page(data) -> record`
+
+Parses one 4096-byte IGW AD page, returning level and cells with decompressed 20-byte key, uninterpreted flags and value bytes. Observed cell flags, including 0xc0, 0xd5, 0xe5 and 0xec, are preserved, not interpreted as liveness. Validates page framing, live-region bounds, group/cell lengths, anchored prefix compression, trailing zero suppression and leaf key ordering. Internal namespace separators may be shortened; full traversal validates actual leaf order. Does not resolve internal child identifiers, traverse a dataset, or decode PDSE members or HFS files.
+
+### `filesystem.ckd_catalog_record`
+
+`filesystem.ckd_catalog_record(data) -> record`
+
+Parses an observed BCS record into kind, name, raw key, ordered type-03 relationship references and nested cells. Data/index component cells expose their names and children; other attributes retain raw bytes. Validates record length, key header, component lengths and subtree bounds.
+
+### `filesystem.ckd_control_interval`
+
+`filesystem.ckd_control_interval(data) -> record`
+
+Decodes one explicitly selected VSAM data control interval (512 to 32768 bytes, multiple of 512). Returns eof, free_offset, free_length and records in data order. A zero CIDF is a software EOF marker; callers must establish the input is a VSAM data CI. Validates CIDF and backwards RDF boundaries, including repeated equal-length records. Rejects unsupported flags and spanning. Does not interpret indexes, RRDS slots, catalog relationships or high-used RBA; not a complete VSAM dataset reader.
+
+### `filesystem.ckd_igw_attributes`
+
+`filesystem.ckd_igw_attributes(data, max_cells=100000) -> list`
+
+Enumerates the bounded active IGW attribute tree of an allocated-page file through native map-chain and child-link validation. Returns exact 20-byte keys, flags and uninterpreted values. Does not carve inactive pages or decode file payloads.
+
+### `filesystem.ckd_scan`
+
+`filesystem.ckd_scan(file, max_tracks=16777216) -> record`
+
+Validates every physical CKD track and exact cylinder-aligned EOF through a portable file. Returns tracks, records, data_bytes, key_bytes and image_bytes; max_tracks bounds the scan. Reads free space and record zero too, and propagates source checksum errors. Does not claim logical dataset decoding.
+
+### `filesystem.ckd_vsam_records`
+
+`filesystem.ckd_vsam_records(data, organization, ci_bytes, used_bytes, cis_per_ca, key_offset=0, key_length=0, index=None, index_ci_bytes=4096, index_used_bytes=0, index_root_rba=0, max_records=100000, max_record_bytes=16777216, max_intervals=1000000, max_bytes=67108864) -> list`
+
+Reads a resolved immutable VSAM data component through portable files. ESDS preserves physical record order; fixed RRDS preserves record numbers across vacant slots; KSDS follows the supplied active index root and verifies strictly increasing keys. Assembles spanned records only within a control area and matching update generation. Returns record number, RBA and unconverted data bytes. Explicit high-used bounds, CI/CA geometry and key metadata are required; allocation size is not substituted for high-used RBA. The optional index is traversed natively using header/section/key compression and active child pointers, excluding free intervals. Enforces interval, record-count, per-record and total-byte budgets. Does not infer catalog metadata, index roots, variable RRDS or extended-address formats.
+
+### `filesystem.ckd_vvr`
+
+`filesystem.ckd_vvr(data) -> record`
+
+Parses an observed primary Z VVDS volume record, returning component, cluster and catalog names, index/data flags, index root RBA, CI size, high-used and allocated byte bounds, control-area geometry, maximum record length and key position/length. Reports ci_addressed and converts qualified extended data-component CI counts to 64-bit byte bounds. Rejects incompatible headers, cell bounds and geometry; extended index roots and multivolume layout remain unsupported.
+
 ### `filesystem.diskdupe`
 
 `filesystem.diskdupe(file) -> file`
@@ -4105,9 +4147,9 @@ Methods and attributes: `binary`, `bytes`, `gid`, `hex`, `mode`, `mtime`, `name`
 
 ### `auto` value
 
-A lazy standardized file or directory node. metadata describes the selected source, files lists immediate children, and indexed paths or find recursively enter nested containers. file retains the original bytes; compressed containers expose their decoded children without an extra path component. page reads a bounded child listing. Nodes created by auto_plan expose directory-derived proposals through plans; follow a proposal's path to open its virtual filesystem. Plain auto returns no plans.
+A lazy standardized file or directory node. metadata describes the selected source and probes its contents; summary returns entry metadata without probing. files lists immediate children, and indexed paths or find recursively enter nested containers. file retains the original bytes; compressed containers expose their decoded children without an extra path component. page reads a bounded child listing. Nodes created by auto_plan expose directory-derived proposals through plans; follow a proposal's path to open its virtual filesystem. Plain auto returns no plans.
 
-Methods and attributes: `bytes(offset=0, size=remaining)`, `file`, `files`, `find(path)`, `metadata`, `name`, `page(offset=0, limit=100)`, `plans`, `slice(offset=0, size=remaining)`.
+Methods and attributes: `bytes(offset=0, size=remaining)`, `file`, `files`, `find(path)`, `metadata`, `name`, `page(offset=0, limit=100)`, `plans`, `slice(offset=0, size=remaining)`, `summary`.
 
 ### `binary.builder` value
 

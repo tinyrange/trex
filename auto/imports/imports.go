@@ -34,6 +34,7 @@ import (
 	_ "github.com/tinyrange/trex/archive/zip"
 	_ "github.com/tinyrange/trex/archive/zstd"
 	_ "github.com/tinyrange/trex/filesystem/apm"
+	_ "github.com/tinyrange/trex/filesystem/ckd"
 	_ "github.com/tinyrange/trex/filesystem/efs"
 	_ "github.com/tinyrange/trex/filesystem/fat"
 	_ "github.com/tinyrange/trex/filesystem/floppy"
