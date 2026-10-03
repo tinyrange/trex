@@ -2602,6 +2602,12 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 2 GiB. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
+### `channel.expose_tcp`
+
+`channel.expose_tcp(channel, port=0) -> tcp_bridge`
+
+Native-only IPv4 loopback bridge for one trusted TCP client. Port zero selects a free port, returned as port. Takes exclusive ownership of the byte channel on success; do not read or write it elsewhere. The listener closes after the first connection; disconnect closes both streams without reconnect or replay. Uses bounded copy buffers. close() interrupts and joins workers; runtime teardown also closes it. The channel must unblock reads and writes on close. TCP is plaintext and has no authentication; other local processes can connect.
+
 ### `channel.memory_pair`
 
 `channel.memory_pair(maximum=1MiB) -> (byte_channel, byte_channel)`
@@ -4366,6 +4372,12 @@ Methods and attributes: `entries`, `files`, `find(path, occurrence=0)`.
 A tar member with path, type, ownership, permissions, timestamp and link target. Payload reads are relative to the member; entry_type and link distinguish regular content from directories and links.
 
 Methods and attributes: `binary`, `bytes`, `entry_type`, `gid`, `gname`, `hex`, `link`, `mode`, `mtime`, `name`, `path`, `read`, `size`, `slice`, `stored_size`, `uid`, `uname`.
+
+### `tcp_bridge` value
+
+An owned native loopback listener forwarding one TCP connection to one byte channel. port is the assigned IPv4 loopback port; close interrupts and joins its workers and closes both transports. The listener is single-use and closes after acceptance. No authentication, protocol interpretation, automatic reconnect, or replay is provided.
+
+Methods and attributes: `close()`, `port`.
 
 ### `unix_filesystem` value
 
