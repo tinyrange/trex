@@ -12,21 +12,10 @@ import (
 	starfile "github.com/tinyrange/trex/storage/star"
 )
 
-type fakeDesktop struct {
-	native   bool
-	opened   int
-	saved    string
-	saveOpen bool
-}
+type fakeDesktop struct{ saved string }
 
-func (d *fakeDesktop) CanOpen(storage.Reader) bool             { return d.native }
-func (d *fakeDesktop) Open(storage.Reader) error               { d.opened++; return nil }
-func (d *fakeDesktop) SuggestedDestination(name string) string { return "/chosen/" + name }
-func (d *fakeDesktop) Save(_ storage.Reader, name string, open bool) error {
-	d.saved = name
-	d.saveOpen = open
-	return nil
-}
+func (d *fakeDesktop) SuggestedDestination(name string) string  { return "/chosen/" + name }
+func (d *fakeDesktop) Save(_ storage.Reader, name string) error { d.saved = name; return nil }
 
 func menuBrowser(t *testing.T) *browser {
 	t.Helper()
@@ -54,15 +43,15 @@ func TestContextMenuAndExplicitDesktopActions(t *testing.T) {
 	if b.menu != nil || b.selected != 0 {
 		t.Fatal("Escape changed selection")
 	}
-	// Second row is binary.bin. Menu Open must request a retained destination.
+	// Second row is binary.bin. Saving requires an explicit retained destination.
 	b.contextMenu(300, 156)
 	if b.selected != 1 || !b.menu.items[1].enabled {
 		t.Fatal("file context state")
 	}
 	b.menu.selected = 1
 	b.key(window.InputEvent{Key: window.KeyEnter}, 20)
-	if b.save == nil || !b.save.open || d.opened != 0 || b.busy {
-		t.Fatal("archive member launched without a destination")
+	if b.save == nil || b.busy || d.saved != "" {
+		t.Fatal("save did not request a destination")
 	}
 	b.insert("/chosen/member.bin")
 	b.confirmSave()
@@ -73,25 +62,14 @@ func TestContextMenuAndExplicitDesktopActions(t *testing.T) {
 	}
 	b.results <- result{action: true, message: message}
 	b.receive()
-	if d.saved != "/chosen/member.bin" || !d.saveOpen || b.loc.path != "/outer.zip/inner.zip" {
+	if d.saved != "/chosen/member.bin" || b.loc.path != "/outer.zip/inner.zip" {
 		t.Fatal("save action lost location")
-	}
-	// A native file can be handed off directly, only on the explicit action.
-	d.native = true
-	n, p := b.target()
-	b.openSystem(n, p)
-	req = <-b.requests
-	if d.opened != 0 {
-		t.Fatal("shell open ran on UI thread")
-	}
-	if _, err := req.action(); err != nil || d.opened != 1 {
-		t.Fatal("native shell action not routed", err)
 	}
 }
 func TestContextMenuDismissalAndClamping(t *testing.T) {
 	b := menuBrowser(t)
 	b.contextMenu(1098, 685)
-	if b.menu == nil || b.menu.x+300 > 1100 || b.menu.y+148 > 720 {
+	if b.menu == nil || b.menu.x+300 > 1100 || b.menu.y+120 > 720 {
 		t.Fatal("menu escaped viewport")
 	}
 	b.menuClick(0, 0)
@@ -104,7 +82,7 @@ func TestContextMenuDismissalAndClamping(t *testing.T) {
 		t.Fatal("keyboard menu navigation")
 	}
 	b.key(window.InputEvent{Key: window.KeyDown}, 20)
-	if b.menu.selected != 3 {
+	if b.menu.selected != 2 {
 		t.Fatal("keyboard selected disabled action")
 	}
 }
@@ -112,10 +90,10 @@ func TestSaveFinalOutputNeverOverwritesAndRejectsShortRead(t *testing.T) {
 	d := nativeDesktop{}
 	dest := filepath.Join(t.TempDir(), "document.txt")
 	r := &starfile.Bytes{Data: []byte("retained document")}
-	if err := d.Save(r, dest, false); err != nil {
+	if err := d.Save(r, dest); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Save(&starfile.Bytes{Data: []byte("replacement")}, dest, false); !errors.Is(err, os.ErrExist) {
+	if err := d.Save(&starfile.Bytes{Data: []byte("replacement")}, dest); !errors.Is(err, os.ErrExist) {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(dest)
@@ -123,7 +101,7 @@ func TestSaveFinalOutputNeverOverwritesAndRejectsShortRead(t *testing.T) {
 		t.Fatal("output overwritten", err)
 	}
 	broken := filepath.Join(t.TempDir(), "broken.txt")
-	if err := d.Save(shortReader{}, broken, false); !errors.Is(err, io.ErrUnexpectedEOF) {
+	if err := d.Save(shortReader{}, broken); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(broken); !errors.Is(err, os.ErrNotExist) {
@@ -135,25 +113,3 @@ type shortReader struct{}
 
 func (shortReader) Size() int64                       { return 100 }
 func (shortReader) ReadAt([]byte, int64) (int, error) { return 0, io.EOF }
-
-// Opt-in shell smoke opens an existing, explicitly selected document using its
-// registered handler. It does not run as part of the ordinary test suite.
-func TestSystemViewer(t *testing.T) {
-	name := os.Getenv("TREX_BROWSER_VIEWER_FILE")
-	if name == "" {
-		t.Skip("set TREX_BROWSER_VIEWER_FILE to an existing document")
-	}
-	s, root, err := OpenDirectory(filepath.Dir(name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	n, err := root.Resolve(filepath.Base(name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := (nativeDesktop{}).Open(n.Reader()); err != nil {
-		t.Fatal(err)
-	}
-	t.Log("Opened in system viewer:", name)
-}

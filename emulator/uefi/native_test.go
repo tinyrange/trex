@@ -54,6 +54,7 @@ func TestNativeRuntimeMapRelocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	fw := *m
+	fw.exited = true // Native continuation requires ExitBootServices.
 	n := &NativeExecution{base: m.ramBase, ram: ram, firmware: &fw}
 	fw.runtimeMemory = n
 	original := append([]byte(nil), ram[0x500:0x500+136]...)

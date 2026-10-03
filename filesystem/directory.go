@@ -286,13 +286,21 @@ func (d *Directory) currentFATShortIndex() (map[string]string, error) {
 	if d.fatShortValid && d.fatShortRev == d.revision {
 		return d.fatShortIndex, d.fatShortErr
 	}
-	children := make(map[string][]string)
+	// FAT builders merge case variants of both directories and files. Build
+	// the same case-insensitive sibling sets before assigning aliases, or a
+	// virtual /PROGRAM FILES plus /Program Files can consume two short names
+	// even though the resulting volume contains just one directory.
+	paths := make(map[string]bool, len(d.dirs)+len(d.files))
 	for name := range d.dirs {
 		if name != "/" {
-			children[path.Dir(name)] = append(children[path.Dir(name)], name)
+			paths[strings.ToLower(name)] = true
 		}
 	}
 	for name := range d.files {
+		paths[strings.ToLower(name)] = true
+	}
+	children := make(map[string][]string)
+	for name := range paths {
 		children[path.Dir(name)] = append(children[path.Dir(name)], name)
 	}
 	index := make(map[string]string, len(d.dirs)+len(d.files))

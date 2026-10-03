@@ -26,7 +26,12 @@ type ReadyByteChannel struct {
 	close    sync.Once
 }
 
+// NewReadyByteChannel bounds queued bytes and their backing storage by maximum.
+// A nonpositive maximum selects the default 8 MiB limit.
 func NewReadyByteChannel(channel ByteChannel, maximum int) *ReadyByteChannel {
+	if maximum <= 0 {
+		maximum = defaultReadyChannelBuffer
+	}
 	value := &ReadyByteChannel{
 		channel: channel,
 		maximum: maximum,
@@ -59,7 +64,7 @@ func (c *ReadyByteChannel) clearReadyLocked() {
 }
 
 func (c *ReadyByteChannel) readLoop() {
-	buffer := make([]byte, 64<<10)
+	buffer := make([]byte, min(c.maximum, 64<<10))
 	for {
 		c.mu.Lock()
 		for c.bufferedLocked() >= c.maximum && c.terminal == nil {
@@ -81,9 +86,17 @@ func (c *ReadyByteChannel) readLoop() {
 		read, err := c.channel.Read(buffer[:available])
 		c.mu.Lock()
 		if read > 0 {
-			if c.offset == len(c.buffer) {
-				c.buffer = c.buffer[:0]
+			// Reclaim consumed prefixes before growing. A consumer need not
+			// drain the queue completely to keep its allocation bounded.
+			if read > cap(c.buffer)-len(c.buffer) && c.offset > 0 {
+				c.buffer = c.buffer[:copy(c.buffer, c.buffer[c.offset:])]
 				c.offset = 0
+			}
+			if needed := len(c.buffer) + read; needed > cap(c.buffer) {
+				capacity := max(needed, cap(c.buffer)+min(cap(c.buffer)/2, c.maximum-cap(c.buffer)))
+				grown := make([]byte, len(c.buffer), capacity)
+				copy(grown, c.buffer)
+				c.buffer = grown
 			}
 			c.buffer = append(c.buffer, buffer[:read]...)
 			c.notifyLocked()

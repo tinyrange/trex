@@ -157,15 +157,14 @@ type toolButton struct {
 }
 
 func (b *browser) toolbar() []toolButton {
-	n, p := b.target()
+	n, _ := b.target()
 	readable := n != nil && n.Reader() != nil && !b.busy
 	return []toolButton{
 		{"Back", "back", b.historyIndex > 0 && !b.busy, func() { b.back(-1) }},
 		{"Forward", "forward", b.historyIndex+1 < len(b.history) && !b.busy, func() { b.back(1) }},
 		{"Up", "up", b.loc.path != "/" && !b.busy, func() { b.navigate(path.Dir(b.loc.path), -1) }},
 		{"Open", "folder", n != nil && !b.busy, b.openSelected},
-		{"View", "view", readable, func() { b.openSystem(n, p) }},
-		{"Save", "save", readable, func() { b.promptSave(n, false) }},
+		{"Save", "save", readable, func() { b.promptSave(n) }},
 		{"Folders", "tree", true, func() { b.showTree = !b.showTree }},
 		{"Info", "info", n != nil, func() {
 			b.status = "Info: " + n.Name() + " | " + fileType(n)
@@ -182,7 +181,7 @@ func (b *browser) mainMenu(index int) {
 	var items []menuItem
 	switch index {
 	case 0:
-		items = []menuItem{{"Open in trex                 Enter", n != nil && !b.busy, func() { b.navigate(p, -1) }}, {"Open in system viewer   Ctrl+Enter", readable, func() { b.openSystem(n, p) }}, {"Save as...", readable, func() { b.promptSave(n, false) }}}
+		items = []menuItem{{"Open in trex                 Enter", n != nil && !b.busy, func() { b.navigate(p, -1) }}, {"Save as...                  Ctrl+Enter", readable, func() { b.promptSave(n) }}}
 	case 1:
 		items = []menuItem{{"Copy path", true, func() {
 			if err := window.GetClipboard().SetText(b.displayPath()); err != nil {
@@ -204,7 +203,7 @@ func (b *browser) mainMenu(index int) {
 		items = []menuItem{{"Go to path...                  Ctrl+L", true, func() { b.focusField(1) }}, {"Up one level                Backspace", b.loc.path != "/" && !b.busy, func() { b.navigate(path.Dir(b.loc.path), -1) }}}
 	case 4:
 		items = []menuItem{{"Keyboard shortcuts", true, func() {
-			b.status = "Enter: Open | Ctrl+Enter: System viewer | Alt+Left/Right: History | Ctrl+L: Path | Ctrl+F: Filter"
+			b.status = "Enter: Open | Ctrl+Enter: Save as | Alt+Left/Right: History | Ctrl+L: Path | Ctrl+F: Filter"
 		}}}
 	default:
 		return

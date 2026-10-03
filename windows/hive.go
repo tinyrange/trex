@@ -3,12 +3,12 @@ package windows
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 	"path"
 	"strings"
 	"unicode/utf16"
 
 	starfile "github.com/tinyrange/trex/storage/star"
+	registry "github.com/tinyrange/trex/windows/registry"
 	"go.starlark.net/starlark"
 )
 
@@ -17,7 +17,7 @@ const hiveBaseBlockSize = 4096
 // Hive versions 1.4 and later store values above this threshold in a db
 // descriptor. Each segment contributes at most this many bytes, excluding
 // the cell's alignment padding.
-const hiveBigDataSegmentSize = 0x3fd8
+const hiveBigDataSegmentSize = registry.BigDataSegmentSize
 
 func hiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
@@ -32,9 +32,9 @@ func hiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, k
 }
 
 type registryHive struct {
-	file             starfile.File
-	rootCell         uint32
-	legacyCellPrefix bool
+	reader   *registry.Hive
+	file     starfile.File
+	rootCell uint32
 }
 
 type hiveKey struct {
@@ -51,23 +51,32 @@ type hiveKey struct {
 }
 
 func newRegistryHive(file starfile.File) (*registryHive, error) {
-	header := make([]byte, hiveBaseBlockSize)
-	if _, err := file.ReadAt(header, 0); err != nil {
+	reader, err := registry.Open(file)
+	if err != nil {
 		return nil, err
 	}
-	if string(header[0:4]) != "regf" {
-		return nil, fmt.Errorf("hive: invalid regf signature")
+	return &registryHive{file: file, rootCell: reader.RootCell(), reader: reader}, nil
+}
+
+func (h *registryHive) portableReader() (*registry.Hive, error) {
+	if h.reader != nil {
+		return h.reader, nil
 	}
-	major := binary.LittleEndian.Uint32(header[0x14:0x18])
-	minor := binary.LittleEndian.Uint32(header[0x18:0x1c])
-	if major != 1 || minor < 1 || minor > 6 {
-		return nil, fmt.Errorf("hive: unsupported registry hive format %d.%d", major, minor)
-	}
-	return &registryHive{
-		file:             file,
-		rootCell:         binary.LittleEndian.Uint32(header[0x24:0x28]),
-		legacyCellPrefix: minor == 1,
-	}, nil
+	// A few internal construction tests instantiate registryHive directly.
+	// Do not cache here: callers may be inspecting a mutable construction view.
+	return registry.Open(h.file)
+}
+
+func portableKey(key hiveKey) registry.Key {
+	return registry.Key{Name: key.name, Cell: key.cell, Flags: key.flags,
+		SecurityCell: key.security, ClassCell: key.classCell, ClassLength: key.classLen,
+		SubkeyList: key.subkeyList, SubkeyCount: key.subkeys, ValueList: key.valueList, ValueCount: key.values}
+}
+
+func scriptingKey(key registry.Key) hiveKey {
+	return hiveKey{name: key.Name, cell: key.Cell, flags: key.Flags,
+		security: key.SecurityCell, classCell: key.ClassCell, classLen: key.ClassLength,
+		subkeyList: key.SubkeyList, subkeys: key.SubkeyCount, valueList: key.ValueList, values: key.ValueCount}
 }
 
 func (h *registryHive) String() string       { return "<windows.hive>" }
@@ -134,28 +143,12 @@ func (h *registryHive) lookup(name string) (hiveKey, error) {
 }
 
 func (h *registryHive) lookupParts(parts []string) (hiveKey, error) {
-	current, err := h.readKey(h.rootCell)
+	reader, err := h.portableReader()
 	if err != nil {
 		return hiveKey{}, err
 	}
-	for _, part := range parts {
-		children, err := h.readSubkeys(current)
-		if err != nil {
-			return hiveKey{}, err
-		}
-		found := false
-		for _, child := range children {
-			if strings.EqualFold(child.name, part) {
-				current = child
-				found = true
-				break
-			}
-		}
-		if !found {
-			return hiveKey{}, fmt.Errorf("hive: path %q not found", registryDisplayPath(parts))
-		}
-	}
-	return current, nil
+	key, err := reader.LookupParts(parts)
+	return scriptingKey(key), err
 }
 
 func registryPathParts(value starlark.Value) ([]string, error) {
@@ -200,143 +193,62 @@ func registryDisplayPath(parts []string) string {
 }
 
 func (h *registryHive) readKey(cell uint32) (hiveKey, error) {
-	data, err := h.readCell(cell)
+	reader, err := h.portableReader()
 	if err != nil {
 		return hiveKey{}, err
 	}
-	if len(data) < 0x4c || string(data[0:2]) != "nk" {
-		return hiveKey{}, fmt.Errorf("hive: cell 0x%x is not a key node", cell)
-	}
-	flags := binary.LittleEndian.Uint16(data[0x02:0x04])
-	nameLength := int(binary.LittleEndian.Uint16(data[0x48:0x4a]))
-	nameStart := 0x4c
-	nameEnd := nameStart + nameLength
-	if nameEnd > len(data) {
-		return hiveKey{}, fmt.Errorf("hive: invalid key name length")
-	}
-	return hiveKey{
-		name:       hiveName(data[nameStart:nameEnd], flags),
-		cell:       cell,
-		flags:      flags,
-		security:   binary.LittleEndian.Uint32(data[0x2c:0x30]),
-		classCell:  binary.LittleEndian.Uint32(data[0x30:0x34]),
-		classLen:   binary.LittleEndian.Uint16(data[0x4a:0x4c]),
-		subkeys:    binary.LittleEndian.Uint32(data[0x14:0x18]),
-		subkeyList: binary.LittleEndian.Uint32(data[0x1c:0x20]),
-		values:     binary.LittleEndian.Uint32(data[0x24:0x28]),
-		valueList:  binary.LittleEndian.Uint32(data[0x28:0x2c]),
-	}, nil
+	key, err := reader.ReadKey(cell)
+	return scriptingKey(key), err
 }
 
 func (h *registryHive) readKeySecurity(key hiveKey) ([]byte, error) {
-	if key.security == 0xffffffff {
-		return nil, nil
-	}
-	data, err := h.readCell(key.security)
+	reader, err := h.portableReader()
 	if err != nil {
 		return nil, err
 	}
-	if len(data) < 0x14 || string(data[:2]) != "sk" {
-		return nil, fmt.Errorf("hive: security cell for key %q is invalid", key.name)
-	}
-	length := int(binary.LittleEndian.Uint32(data[0x10:0x14]))
-	if length > len(data)-0x14 {
-		return nil, fmt.Errorf("hive: truncated security descriptor for key %q", key.name)
-	}
-	return append([]byte(nil), data[0x14:0x14+length]...), nil
+	return reader.KeySecurity(portableKey(key))
 }
 
 func (h *registryHive) readKeyClass(key hiveKey) ([]byte, error) {
-	if key.classLen == 0 || key.classCell == 0xffffffff {
-		return nil, nil
-	}
-	data, err := h.readCell(key.classCell)
+	reader, err := h.portableReader()
 	if err != nil {
 		return nil, err
 	}
-	if int(key.classLen) > len(data) {
-		return nil, fmt.Errorf("hive: truncated class data for key %q", key.name)
-	}
-	return append([]byte(nil), data[:key.classLen]...), nil
+	return reader.KeyClass(portableKey(key))
 }
 
 func (h *registryHive) readSubkeys(key hiveKey) ([]hiveKey, error) {
-	if key.subkeys == 0 || key.subkeyList == 0xffffffff {
-		return nil, nil
-	}
-	cells, err := h.readSubkeyList(key.subkeyList)
-	if err != nil {
-		return nil, fmt.Errorf("hive: key %q subkey list cell 0x%x: %w", key.name, key.subkeyList, err)
-	}
-	keys := make([]hiveKey, 0, len(cells))
-	for _, cell := range cells {
-		child, err := h.readKey(cell)
-		if err != nil {
-			return nil, fmt.Errorf("hive: key %q child cell 0x%x: %w", key.name, cell, err)
-		}
-		keys = append(keys, child)
-	}
-	return keys, nil
-}
-
-func (h *registryHive) readSubkeyList(cell uint32) ([]uint32, error) {
-	data, err := h.readCell(cell)
+	reader, err := h.portableReader()
 	if err != nil {
 		return nil, err
 	}
-	if len(data) < 4 {
-		return nil, fmt.Errorf("hive: invalid subkey list")
+	keys, err := reader.ReadSubkeys(portableKey(key))
+	if err != nil {
+		return nil, err
 	}
-	signature := string(data[0:2])
-	count := int(binary.LittleEndian.Uint16(data[2:4]))
-	var cells []uint32
-	switch signature {
-	case "lf", "lh":
-		for offset, i := 4, 0; i < count; offset, i = offset+8, i+1 {
-			if offset+4 > len(data) {
-				return nil, fmt.Errorf("hive: truncated %s subkey list", signature)
-			}
-			cells = append(cells, binary.LittleEndian.Uint32(data[offset:offset+4]))
-		}
-	case "li":
-		for offset, i := 4, 0; i < count; offset, i = offset+4, i+1 {
-			if offset+4 > len(data) {
-				return nil, fmt.Errorf("hive: truncated li subkey list")
-			}
-			cells = append(cells, binary.LittleEndian.Uint32(data[offset:offset+4]))
-		}
-	case "ri":
-		for offset, i := 4, 0; i < count; offset, i = offset+4, i+1 {
-			if offset+4 > len(data) {
-				return nil, fmt.Errorf("hive: truncated ri subkey list")
-			}
-			more, err := h.readSubkeyList(binary.LittleEndian.Uint32(data[offset : offset+4]))
-			if err != nil {
-				return nil, err
-			}
-			cells = append(cells, more...)
-		}
-	default:
-		return nil, fmt.Errorf("hive: unsupported subkey list %q", signature)
+	out := make([]hiveKey, len(keys))
+	for i, key := range keys {
+		out[i] = scriptingKey(key)
 	}
-	return cells, nil
+	return out, nil
+}
+
+func (h *registryHive) valueCells(key hiveKey) ([]uint32, error) {
+	reader, err := h.portableReader()
+	if err != nil {
+		return nil, err
+	}
+	return reader.ValueCells(portableKey(key))
 }
 
 func (h *registryHive) readValues(key hiveKey) (starlark.IterableMapping, error) {
-	values := starlark.NewDict(int(key.values))
-	if key.values == 0 || key.valueList == 0xffffffff {
-		return values, nil
-	}
-	list, err := h.readCell(key.valueList)
+	cells, err := h.valueCells(key)
 	if err != nil {
 		return nil, err
 	}
-	needed := int(key.values) * 4
-	if needed > len(list) {
-		return nil, fmt.Errorf("hive: truncated value list")
-	}
-	for offset := 0; offset < needed; offset += 4 {
-		value, err := h.readValue(binary.LittleEndian.Uint32(list[offset : offset+4]))
+	values := starlark.NewDict(len(cells))
+	for _, cell := range cells {
+		value, err := h.readValue(cell)
 		if err != nil {
 			return nil, err
 		}
@@ -355,50 +267,29 @@ type hiveValue struct {
 }
 
 func (h *registryHive) readValue(cell uint32) (hiveValue, error) {
-	data, err := h.readCell(cell)
+	reader, err := h.portableReader()
 	if err != nil {
 		return hiveValue{}, err
 	}
-	if len(data) < 0x14 || string(data[0:2]) != "vk" {
-		return hiveValue{}, fmt.Errorf("hive: cell 0x%x is not a value node", cell)
-	}
-	nameLength := int(binary.LittleEndian.Uint16(data[0x02:0x04]))
-	dataLengthRaw := binary.LittleEndian.Uint32(data[0x04:0x08])
-	dataCell := binary.LittleEndian.Uint32(data[0x08:0x0c])
-	valueType := binary.LittleEndian.Uint32(data[0x0c:0x10])
-	flags := binary.LittleEndian.Uint16(data[0x10:0x12])
-	nameStart := 0x14
-	nameEnd := nameStart + nameLength
-	if nameEnd > len(data) {
-		return hiveValue{}, fmt.Errorf("hive: invalid value name length")
-	}
-	valueData, err := h.readValueData(dataLengthRaw, dataCell)
+	value, err := reader.ReadValue(cell)
 	if err != nil {
 		return hiveValue{}, err
 	}
-	return hiveValue{
-		name:  hiveValueName(data[nameStart:nameEnd], flags),
-		typ:   valueType,
-		raw:   valueData,
-		value: hiveValueToStarlark(valueType, valueData),
-	}, nil
+	name := value.Name
+	if name == "" {
+		name = "(default)"
+	}
+	return hiveValue{name: name, typ: value.Type, raw: value.Data, value: hiveValueToStarlark(value.Type, value.Data)}, nil
 }
 
 func (h *registryHive) readValueRecords(key hiveKey) (starlark.IterableMapping, error) {
-	values := starlark.NewDict(int(key.values))
-	if key.values == 0 || key.valueList == 0xffffffff {
-		return values, nil
-	}
-	list, err := h.readCell(key.valueList)
+	cells, err := h.valueCells(key)
 	if err != nil {
 		return nil, err
 	}
-	needed := int(key.values) * 4
-	if needed > len(list) {
-		return nil, fmt.Errorf("hive: truncated value list")
-	}
-	for offset := 0; offset < needed; offset += 4 {
-		value, err := h.readValue(binary.LittleEndian.Uint32(list[offset : offset+4]))
+	values := starlark.NewDict(len(cells))
+	for _, cell := range cells {
+		value, err := h.readValue(cell)
 		if err != nil {
 			return nil, err
 		}
@@ -415,102 +306,19 @@ func (h *registryHive) readValueRecords(key hiveKey) (starlark.IterableMapping, 
 }
 
 func (h *registryHive) readValueData(lengthRaw uint32, cell uint32) ([]byte, error) {
-	inline := lengthRaw&0x80000000 != 0
-	length := int(lengthRaw & 0x7fffffff)
-	if length == 0 {
-		return nil, nil
-	}
-	if inline {
-		if length > 4 {
-			return nil, fmt.Errorf("hive: invalid inline value length")
-		}
-		data := make([]byte, 4)
-		binary.LittleEndian.PutUint32(data, cell)
-		return data[:length], nil
-	}
-	data, err := h.readCell(cell)
+	reader, err := h.portableReader()
 	if err != nil {
 		return nil, err
 	}
-	var version [4]byte
-	if _, err := h.file.ReadAt(version[:], 24); err != nil {
-		return nil, err
-	}
-	segmented := length > hiveBigDataSegmentSize && binary.LittleEndian.Uint32(version[:]) >= 4
-	if segmented || length > len(data) {
-		if len(data) < 8 || string(data[:2]) != "db" {
-			return nil, fmt.Errorf("hive: truncated value data")
-		}
-		count := int(binary.LittleEndian.Uint16(data[2:4]))
-		if count != (length+hiveBigDataSegmentSize-1)/hiveBigDataSegmentSize {
-			return nil, fmt.Errorf("hive: invalid large-value segment count %d", count)
-		}
-		listCell := binary.LittleEndian.Uint32(data[4:8])
-		list, err := h.readCell(listCell)
-		if err != nil {
-			return nil, fmt.Errorf("hive: read large-value segment list: %w", err)
-		}
-		if count < 1 || count > len(list)/4 {
-			return nil, fmt.Errorf("hive: truncated large-value segment list")
-		}
-		value := make([]byte, 0, length)
-		for index := 0; index < count && len(value) < length; index++ {
-			segmentCell := binary.LittleEndian.Uint32(list[index*4 : index*4+4])
-			segment, err := h.readCell(segmentCell)
-			if err != nil {
-				return nil, fmt.Errorf("hive: read large-value segment %d: %w", index, err)
-			}
-			needed := min(length-len(value), hiveBigDataSegmentSize)
-			if len(segment) < hiveBigDataSegmentSize {
-				return nil, fmt.Errorf("hive: truncated large-value segment %d", index)
-			}
-			value = append(value, segment[:needed]...)
-		}
-		if len(value) != length {
-			return nil, fmt.Errorf("hive: large value has %d bytes, want %d", len(value), length)
-		}
-		return value, nil
-	}
-	return data[:length], nil
+	return reader.ReadValueData(lengthRaw, cell)
 }
 
 func (h *registryHive) readCell(cell uint32) ([]byte, error) {
-	offset := int64(hiveBaseBlockSize + cell)
-	if offset < hiveBaseBlockSize || offset > h.file.Size()-4 {
-		return nil, fmt.Errorf("hive: cell 0x%x header at 0x%x exceeds %d-byte file", cell, offset, h.file.Size())
+	reader, err := h.portableReader()
+	if err != nil {
+		return nil, err
 	}
-	header := make([]byte, 4)
-	if n, err := h.file.ReadAt(header, offset); n != len(header) {
-		if err == nil {
-			err = io.ErrUnexpectedEOF
-		}
-		return nil, fmt.Errorf("hive: read cell 0x%x header at 0x%x: %w", cell, offset, err)
-	}
-	size := int64(int32(binary.LittleEndian.Uint32(header)))
-	if size == 0 {
-		return nil, fmt.Errorf("hive: empty cell 0x%x", cell)
-	}
-	if size < 0 {
-		size = -size
-	}
-	prefix := int64(0)
-	if h.legacyCellPrefix {
-		prefix = 4
-	}
-	if size < 4+prefix {
-		return nil, fmt.Errorf("hive: invalid cell 0x%x size %d", cell, size)
-	}
-	if size > h.file.Size()-offset {
-		return nil, fmt.Errorf("hive: cell 0x%x size %d at 0x%x exceeds %d-byte file", cell, size, offset, h.file.Size())
-	}
-	data := make([]byte, int(size)-4-int(prefix))
-	if n, err := h.file.ReadAt(data, offset+4+prefix); n != len(data) {
-		if err == nil {
-			err = io.ErrUnexpectedEOF
-		}
-		return nil, fmt.Errorf("hive: read cell 0x%x body at 0x%x: %w", cell, offset+4+prefix, err)
-	}
-	return data, nil
+	return reader.ReadCell(cell)
 }
 
 func hiveName(raw []byte, flags uint16) string {
@@ -655,4 +463,22 @@ func (k *registryKey) files() (*starlark.List, error) {
 		values[idx] = starlark.String(path.Join(k.path, child.name))
 	}
 	return starlark.NewList(values), nil
+}
+
+// hiveTraversal bounds whole-tree exports separately from per-key index reads.
+// State belongs to one traversal, so repeated API calls remain independent.
+type hiveTraversal map[uint32]bool
+
+func (seen hiveTraversal) enter(key hiveKey, depth int) error {
+	if depth > 512 {
+		return fmt.Errorf("registry hive: key nesting exceeds 512")
+	}
+	if seen[key.cell] {
+		return fmt.Errorf("registry hive: cyclic or repeated key cell %#x", key.cell)
+	}
+	if len(seen) >= 1<<20 {
+		return fmt.Errorf("registry hive: key traversal exceeds entry limit")
+	}
+	seen[key.cell] = true
+	return nil
 }

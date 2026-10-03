@@ -410,6 +410,13 @@ type hiveRawValue struct {
 }
 
 func (h *registryHive) appendPatches(key hiveKey, keyParts []string, patches *starlark.List) error {
+	return h.appendPatchesVisited(key, keyParts, patches, make(hiveTraversal))
+}
+
+func (h *registryHive) appendPatchesVisited(key hiveKey, keyParts []string, patches *starlark.List, seen hiveTraversal) error {
+	if err := seen.enter(key, len(keyParts)); err != nil {
+		return err
+	}
 	keyPath := registryDisplayPath(keyParts)
 	values, err := h.readRawValues(key)
 	if err != nil {
@@ -430,7 +437,7 @@ func (h *registryHive) appendPatches(key hiveKey, keyParts []string, patches *st
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
-		if err := h.appendPatches(child, childParts, patches); err != nil {
+		if err := h.appendPatchesVisited(child, childParts, patches, seen); err != nil {
 			return err
 		}
 	}
@@ -438,6 +445,13 @@ func (h *registryHive) appendPatches(key hiveKey, keyParts []string, patches *st
 }
 
 func (h *registryHive) appendRawPatches(key hiveKey, keyParts []string, patches *starlark.List) error {
+	return h.appendRawPatchesVisited(key, keyParts, patches, make(hiveTraversal))
+}
+
+func (h *registryHive) appendRawPatchesVisited(key hiveKey, keyParts []string, patches *starlark.List, seen hiveTraversal) error {
+	if err := seen.enter(key, len(keyParts)); err != nil {
+		return err
+	}
 	keyPath := registryDisplayPath(keyParts)
 	values, err := h.readRawValues(key)
 	if err != nil {
@@ -469,7 +483,7 @@ func (h *registryHive) appendRawPatches(key hiveKey, keyParts []string, patches 
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
-		if err := h.appendRawPatches(child, childParts, patches); err != nil {
+		if err := h.appendRawPatchesVisited(child, childParts, patches, seen); err != nil {
 			return err
 		}
 	}
@@ -477,6 +491,13 @@ func (h *registryHive) appendRawPatches(key hiveKey, keyParts []string, patches 
 }
 
 func (h *registryHive) appendKeys(key hiveKey, keyParts []string, keys *starlark.List) error {
+	return h.appendKeysVisited(key, keyParts, keys, make(hiveTraversal))
+}
+
+func (h *registryHive) appendKeysVisited(key hiveKey, keyParts []string, keys *starlark.List, seen hiveTraversal) error {
+	if err := seen.enter(key, len(keyParts)); err != nil {
+		return err
+	}
 	keyPath := registryDisplayPath(keyParts)
 	if err := keys.Append(starlark.String(keyPath)); err != nil {
 		return err
@@ -487,7 +508,7 @@ func (h *registryHive) appendKeys(key hiveKey, keyParts []string, keys *starlark
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
-		if err := h.appendKeys(child, childParts, keys); err != nil {
+		if err := h.appendKeysVisited(child, childParts, keys, seen); err != nil {
 			return err
 		}
 	}
@@ -495,6 +516,13 @@ func (h *registryHive) appendKeys(key hiveKey, keyParts []string, keys *starlark
 }
 
 func (h *registryHive) appendKeyMetadata(key hiveKey, keyParts []string, keys *starlark.List) error {
+	return h.appendKeyMetadataVisited(key, keyParts, keys, make(hiveTraversal))
+}
+
+func (h *registryHive) appendKeyMetadataVisited(key hiveKey, keyParts []string, keys *starlark.List, seen hiveTraversal) error {
+	if err := seen.enter(key, len(keyParts)); err != nil {
+		return err
+	}
 	keyPath := registryDisplayPath(keyParts)
 	classData, err := h.readKeyClass(key)
 	if err != nil {
@@ -529,7 +557,7 @@ func (h *registryHive) appendKeyMetadata(key hiveKey, keyParts []string, keys *s
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
-		if err := h.appendKeyMetadata(child, childParts, keys); err != nil {
+		if err := h.appendKeyMetadataVisited(child, childParts, keys, seen); err != nil {
 			return err
 		}
 	}
@@ -537,20 +565,13 @@ func (h *registryHive) appendKeyMetadata(key hiveKey, keyParts []string, keys *s
 }
 
 func (h *registryHive) readRawValues(key hiveKey) ([]hiveRawValue, error) {
-	if key.values == 0 || key.valueList == 0xffffffff {
-		return nil, nil
-	}
-	list, err := h.readCell(key.valueList)
+	cells, err := h.valueCells(key)
 	if err != nil {
 		return nil, err
 	}
-	needed := int(key.values) * 4
-	if needed > len(list) {
-		return nil, fmt.Errorf("hive_patches: truncated value list")
-	}
-	values := make([]hiveRawValue, 0, key.values)
-	for offset := 0; offset < needed; offset += 4 {
-		value, err := h.readRawValue(binary.LittleEndian.Uint32(list[offset : offset+4]))
+	values := make([]hiveRawValue, 0, len(cells))
+	for _, cell := range cells {
+		value, err := h.readRawValue(cell)
 		if err != nil {
 			return nil, err
 		}
@@ -560,31 +581,19 @@ func (h *registryHive) readRawValues(key hiveKey) ([]hiveRawValue, error) {
 }
 
 func (h *registryHive) readRawValue(cell uint32) (hiveRawValue, error) {
-	data, err := h.readCell(cell)
+	reader, err := h.portableReader()
 	if err != nil {
 		return hiveRawValue{}, err
 	}
-	if len(data) < 0x14 || string(data[0:2]) != "vk" {
-		return hiveRawValue{}, fmt.Errorf("hive_patches: cell 0x%x is not a value node", cell)
-	}
-	nameLength := int(binary.LittleEndian.Uint16(data[0x02:0x04]))
-	dataLengthRaw := binary.LittleEndian.Uint32(data[0x04:0x08])
-	dataCell := binary.LittleEndian.Uint32(data[0x08:0x0c])
-	valueType := binary.LittleEndian.Uint32(data[0x0c:0x10])
-	flags := binary.LittleEndian.Uint16(data[0x10:0x12])
-	nameStart := 0x14
-	nameEnd := nameStart + nameLength
-	if nameEnd > len(data) {
-		return hiveRawValue{}, fmt.Errorf("hive_patches: invalid value name length")
-	}
-	valueData, err := h.readValueData(dataLengthRaw, dataCell)
+	value, err := reader.ReadValue(cell)
 	if err != nil {
 		return hiveRawValue{}, err
 	}
-	return hiveRawValue{
-		name:  hiveValueName(data[nameStart:nameEnd], flags),
-		value: registryData{typ: valueType, data: append([]byte(nil), valueData...)},
-	}, nil
+	name := value.Name
+	if name == "" {
+		name = "(default)"
+	}
+	return hiveRawValue{name: name, value: registryData{typ: value.Type, data: value.Data}}, nil
 }
 
 func registryPatchDict(keyPath string, keyParts []string, name string, data registryData) (*starlark.Dict, error) {
