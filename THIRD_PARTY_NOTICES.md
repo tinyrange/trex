@@ -10,6 +10,8 @@ licences:
 | `golang.org/x/arch` | BSD-3-Clause |
 | `golang.org/x/sys` | BSD-3-Clause |
 | `golang.org/x/text` | BSD-3-Clause |
+| `github.com/benhoyt/goawk` (virtual filesystem; process execution disabled) | MIT |
+| `mvdan.cc/sh/v3` (syntax, expansion and pattern packages only) | BSD-3-Clause |
 
 The copyright and licence notices required for compiled trex binaries are
 reproduced in [docs/dependency-licenses.md](docs/dependency-licenses.md).

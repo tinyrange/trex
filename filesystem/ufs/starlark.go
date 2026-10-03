@@ -21,7 +21,7 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 	if err != nil {
 		return nil, err
 	}
-	return EntryRecord(volume.Entries, starlark.StringDict{"block_size": starlark.MakeUint(uint(volume.BlockSize)), "fragment_size": starlark.MakeUint(uint(volume.FragmentSize)), "groups": starlark.MakeUint(uint(volume.Groups))}), nil
+	return EntryRecord(volume.Entries, starlark.StringDict{"block_size": starlark.MakeUint(uint(volume.BlockSize)), "fragment_size": starlark.MakeUint(uint(volume.FragmentSize)), "groups": starlark.MakeUint(uint(volume.Groups)), "inode_format": starlark.MakeInt64(int64(volume.InodeFormat))}), nil
 }
 
 // EntryRecord exposes the common historical inode tree for UFS and BSD dumps.

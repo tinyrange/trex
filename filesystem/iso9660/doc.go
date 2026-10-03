@@ -1,4 +1,7 @@
-// Package iso9660 parses ISO 9660 optical-disc filesystems.
+// Package iso9660 parses ISO 9660 and High Sierra optical-disc filesystems.
+// High Sierra uses CDROM descriptors and six-byte directory dates; its names
+// use case-insensitive lookup without ISO9660's Joliet or Rock Ridge extensions.
+// Logical blocks may be 512, 1024 or 2048 bytes. Files remain lazy source views.
 //
 // A primary tree declaring Rock Ridge through SUSP SP/ER takes precedence over
 // Joliet. Rock Ridge names retain their case and lookup is case-sensitive;

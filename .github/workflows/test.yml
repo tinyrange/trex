@@ -3,6 +3,7 @@ name: test
 on:
   pull_request:
   push:
+  merge_group:
 
 permissions:
   contents: read
@@ -71,3 +72,23 @@ jobs:
           path: local/renvo-reactos*
           if-no-files-found: warn
           retention-days: 14
+
+  hello-memory-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify virtual Unix build mechanisms with the bundled compiler
+        run: |
+          go test -race -tags renvo_bundle ./emulator/shell ./emulator/linux ./renvostar/toolchain
+          go test -race -tags renvo_bundle ./frontend/starlark -run '^TestUnixBuildRecipe$' -count=1
+      - name: Build original GNU Hello and compare the same ELF natively
+        env:
+          TREX_HELLO_NATIVE: "1"
+        run: go test -tags renvo_bundle ./frontend/starlark -run '^TestHelloRecipeNative$' -count=1 -v

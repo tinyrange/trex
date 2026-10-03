@@ -1,6 +1,7 @@
-// Package ufs reads the historical UFS1 layout used by Ultrix media.
+// Package ufs reads historical and 4.4BSD UFS1 (including OpenBSD FFS1).
 // Geometry and inode layout facts are documented by NetBSD's sys/ufs/ffs/fs.h
-// and sys/ufs/ufs/dinode.h; this reader never mounts a filesystem.
+// and OpenBSD's sys/ufs/{ffs/fs.h,ufs/dinode.h,ufs/dir.h}.
+// This reader never mounts a filesystem.
 package ufs
 
 import (
@@ -15,13 +16,15 @@ import (
 type Entry struct {
 	Path, Kind                                 string
 	Inode                                      uint32
-	Mode, Links, UID, GID                      uint16
+	Mode, Links                                uint16
+	UID, GID                                   uint32
 	Accessed, Modified, Changed, Flags, Device uint32
 	Data                                       starfile.File
 }
 type Volume struct {
 	Entries                         []Entry
 	BlockSize, FragmentSize, Groups uint32
+	InodeFormat                     int32
 }
 type reader struct {
 	file                                                                 starfile.File
@@ -30,6 +33,9 @@ type reader struct {
 	limit                                                                uint64
 	remaining                                                            int
 	cache                                                                map[uint32]Entry
+	modern                                                               bool
+	inodeFormat                                                          int32
+	maxSymlink                                                           uint64
 }
 
 func (r *reader) rangeOK(offset, size uint64) bool {
@@ -123,8 +129,12 @@ func (r *reader) inode(number uint32) (Entry, error) {
 	}
 	e.Mode = r.order.Uint16(raw[:])
 	e.Links = r.order.Uint16(raw[2:])
-	e.UID = r.order.Uint16(raw[4:])
-	e.GID = r.order.Uint16(raw[6:])
+	e.UID = uint32(r.order.Uint16(raw[4:]))
+	e.GID = uint32(r.order.Uint16(raw[6:]))
+	if r.modern {
+		e.UID = r.order.Uint32(raw[112:])
+		e.GID = r.order.Uint32(raw[116:])
+	}
 	e.Accessed = r.order.Uint32(raw[16:])
 	e.Modified = r.order.Uint32(raw[24:])
 	e.Changed = r.order.Uint32(raw[32:])
@@ -151,7 +161,10 @@ func (r *reader) inode(number uint32) (Entry, error) {
 	if e.Links == 0 {
 		return e, fmt.Errorf("ufs: directory references unlinked inode")
 	}
-	if e.Kind == "file" || e.Kind == "directory" || e.Kind == "symlink" {
+	if e.Kind == "symlink" && r.modern && size < r.maxSymlink {
+		// Short links occupy the direct/indirect pointer area, not disk blocks.
+		e.Data = &starfile.Bytes{Data: append([]byte(nil), raw[40:40+size]...)}
+	} else if e.Kind == "file" || e.Kind == "directory" || e.Kind == "symlink" {
 		var err error
 		e.Data, err = r.contents(raw[:], size)
 		if err != nil {
@@ -165,19 +178,21 @@ func (r *reader) inode(number uint32) (Entry, error) {
 	return e, nil
 }
 
-// Open enumerates historical UFS1 directories, preserving hard-link inode
+// Open enumerates UFS1 directories, preserving hard-link inode
 // identities. maximumBlocks bounds total data/indirect mapping work; file
 // contents remain borrowed views, and zero pointers remain sparse zeroes.
+// The declared inode format selects historical or 4.4BSD inode/directory
+// semantics. Short 4.4BSD symlinks are exposed as bytes, never followed.
 func Open(file starfile.File, maximumEntries, maximumBlocks int) (*Volume, error) {
 	r, root, err := openReader(file, maximumEntries, maximumBlocks)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := Walk(root, r.order, maximumEntries, r.inode)
+	entries, err := walk(root, r.order, maximumEntries, r.inode, r.modern)
 	if err != nil {
 		return nil, err
 	}
-	return &Volume{Entries: entries, BlockSize: r.block, FragmentSize: r.fragment, Groups: r.groups}, nil
+	return &Volume{Entries: entries, BlockSize: r.block, FragmentSize: r.fragment, Groups: r.groups, InodeFormat: r.inodeFormat}, nil
 }
 
 func openReader(file starfile.File, maximumEntries, maximumBlocks int) (*reader, Entry, error) {
@@ -195,12 +210,24 @@ func openReader(file starfile.File, maximumEntries, maximumBlocks int) (*reader,
 	case binary.BigEndian.Uint32(sb[1372:]) == 0x11954:
 		order = binary.BigEndian
 	default:
-		return nil, Entry{}, fmt.Errorf("ufs: expected historical UFS1 superblock")
+		return nil, Entry{}, fmt.Errorf("ufs: expected UFS1 superblock")
 	}
 	r := reader{file: file, order: order, block: order.Uint32(sb[48:]), fragment: order.Uint32(sb[52:]), groups: order.Uint32(sb[44:]), ipg: order.Uint32(sb[184:]), fpg: order.Uint32(sb[188:]), inodeBase: order.Uint32(sb[16:]), groupOffset: order.Uint32(sb[24:]), groupMask: order.Uint32(sb[28:]), remaining: maximumBlocks, cache: map[uint32]Entry{}}
+	r.inodeFormat = int32(order.Uint32(sb[1324:]))
+	switch r.inodeFormat {
+	case -1, 0: // 4.2BSD; old media may leave the later format field zero.
+	case 2: // FS_44INODEFMT
+		r.modern = true
+		r.maxSymlink = uint64(order.Uint32(sb[1320:]))
+		if r.maxSymlink > 60 {
+			return nil, Entry{}, fmt.Errorf("ufs: invalid inline symlink capacity")
+		}
+	default:
+		return nil, Entry{}, fmt.Errorf("ufs: unsupported inode format %d", r.inodeFormat)
+	}
 	r.limit = uint64(order.Uint32(sb[36:])) * uint64(r.fragment)
 	if r.block < 4096 || r.block > 65536 || r.block&(r.block-1) != 0 || r.fragment < 512 || r.fragment > r.block || r.fragment&(r.fragment-1) != 0 || r.block/r.fragment > 8 || order.Uint32(sb[56:]) != r.block/r.fragment || order.Uint32(sb[116:]) != r.block/4 || order.Uint32(sb[120:]) != r.block/128 || r.groups == 0 || r.ipg == 0 || r.fpg == 0 || r.inodeBase == 0 || r.ipg%(r.block/128) != 0 || r.limit > uint64(file.Size()) || r.limit < 8192+1376 {
-		return nil, Entry{}, fmt.Errorf("ufs: invalid historical geometry")
+		return nil, Entry{}, fmt.Errorf("ufs: invalid UFS1 geometry")
 	}
 	if uint64(r.inodeBase)*uint64(r.fragment)+uint64(r.ipg)*128 > uint64(r.fpg)*uint64(r.fragment) {
 		return nil, Entry{}, fmt.Errorf("ufs: inode table exceeds group")

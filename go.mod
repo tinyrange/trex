@@ -3,6 +3,7 @@ module github.com/tinyrange/trex
 go 1.25.5
 
 require (
+	github.com/benhoyt/goawk v1.32.0
 	github.com/therootcompany/xz v1.0.1
 	github.com/tinyrange/gowin v0.0.0-20260809233042-3f02e7d42a2d
 	go.starlark.net v0.0.0-20260630144053-529d8e869a14
@@ -10,6 +11,7 @@ require (
 	golang.org/x/sys v0.43.0
 	golang.org/x/text v0.36.0
 	j5.nz/cc v0.0.0
+	mvdan.cc/sh/v3 v3.12.0
 	renvo.dev v0.0.0
 )
 

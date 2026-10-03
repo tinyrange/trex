@@ -21,6 +21,32 @@ establish that its members have no additional layers. Inspect names and headers
 of every member, open further containers, and read their files fully too.
 These helpers do not install software, mount filesystems or call host decoders.
 
+## High Sierra optical discs
+
+`filesystem.iso9660(file)` also reads High Sierra (`CDROM`) descriptors and
+directory records. `auto(file)` identifies these discs as `high_sierra`.
+Names use case-insensitive lookup and omit the `;1` version suffix. The reader
+validates both-endian descriptor addresses, logical block sizes (512, 1024 or
+2048 bytes), declared volume bounds and file extents; extended-attribute blocks
+are skipped before accessing payloads. Files stay lazy views of the source.
+`filesystem.raw_cd` and automatic raw-CD views accept High Sierra in Mode 1
+or Mode 2 Form 1 sectors, with either 2352-byte or 2448-byte framing.
+
+```starlark
+disc = filesystem.iso9660(source)
+readme = disc.find("readme.txt")
+print(readme.read())
+```
+
+Joliet, Rock Ridge and El Torito are ISO9660 extensions and are not applied to
+High Sierra records. Filesystem reading does not establish support for nested
+archive formats or operating-system installation.
+Layout facts follow the High Sierra descriptor declarations and directory
+record notes in Linux's
+[ISO filesystem header](https://github.com/torvalds/linux/blob/master/include/uapi/linux/iso_fs.h).
+The reader and synthetic fixtures are implemented independently in Go and
+Starlark.
+
 ## AIX layer boundaries
 
 `archive.ar` also reads AIX small indexed archives (`<aiaff>`), following their
@@ -622,7 +648,8 @@ recovered inode numbers. The reader cross-checks dumped inode membership
 against recovered records and the allocation map. Ultrix4.5 ROOT additionally
 decodes223 reachable paths; all payloads have been read and hashed.
 
-`filesystem.ufs` reads the old inode/directory generation used by Ultrix.
+`filesystem.ufs` reads the old inode/directory generation used by Ultrix and
+the 4.4BSD generation used by OpenBSD FFS1.
 It uses the superblock at8192, UFS1 magic at superblock1372, declared fragment
 and cylinder-group geometry, and128-byte inodes. It does not infer a modern
 UFS2 layout from a filename. Format references are NetBSD's
@@ -644,7 +671,36 @@ names often omit archive suffixes: ULTBASE420 decompresses as Unix compress
 and then opens explicitly as classic tar (975 entries,753 regular files
 read in the REPL). A name/ustar-only archive probe would miss that tar layer.
 ROOT has a different header and remains a separate format investigation.
-UFS2, modern inode extensions and inline symlink variants are not implemented.
+UFS2, extended attributes and journal replay are not implemented.
+
+### OpenBSD installation images
+
+Version-1 OpenBSD disklabels are available as
+`filesystem.openbsd_label(disk, label_offset=partition.offset + 512)` for
+amd64 MBR media. Labels validate both magic values and the XOR checksum, retain
+empty and overlapping slots, and expose absolute 48-bit sector addresses with
+borrowed file views. The supplied file is the complete disk, because partition
+offsets are disk-relative. The reader accepts declared 512- and 4096-byte sectors;
+it does not construct a disk or infer an installed operating system.
+
+FFS1 selects the 4.4BSD layout from `fs_inodefmt=2`, with typed directory
+records, 32-bit UID/GID fields, and inline symlinks in the inode pointer area.
+The historical directory layout remains selected for legacy inode formats.
+Hard links share data views; symlinks are never followed. Format facts follow
+OpenBSD's [disklabel](https://github.com/openbsd/src/blob/master/sys/sys/disklabel.h),
+[superblock](https://github.com/openbsd/src/blob/master/sys/ufs/ffs/fs.h),
+[inode](https://github.com/openbsd/src/blob/master/sys/ufs/ufs/dinode.h), and
+[directory](https://github.com/openbsd/src/blob/master/sys/ufs/ufs/dir.h) declarations.
+
+The OpenBSD 7.9 amd64 `install79.img` has a FAT12 EFI partition and an FFS1
+OpenBSD partition. Native inspection reads 18 FFS files (807,873,520 bytes),
+including the distribution archives, without mounting or extraction. This is
+media decoding, not installation or boot support. All 13 distribution members
+present in FFS and both EFI loaders match the image's SHA256 manifest. Native
+gzip/TAR browsing also reads an ELF header from `base79.tgz`'s first payload,
+`./usr/lib/libLLVM.so.9.0`; this is a bounded nested read, not validation of the
+whole decompressed archive. FFS builders and 4Kn image construction are separate
+capabilities.
 
 The Ultrix3.1D DECstation image is a complete601374720-byte disk, not a
 single UFS volume. Its root filesystem occupies only20971520 bytes. The

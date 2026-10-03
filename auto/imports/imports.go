@@ -44,6 +44,7 @@ import (
 	_ "github.com/tinyrange/trex/filesystem/mds"
 	_ "github.com/tinyrange/trex/filesystem/ntfs"
 	_ "github.com/tinyrange/trex/filesystem/ods2"
+	_ "github.com/tinyrange/trex/filesystem/openbsd"
 	_ "github.com/tinyrange/trex/filesystem/rawcd"
 	_ "github.com/tinyrange/trex/filesystem/sgi"
 	_ "github.com/tinyrange/trex/filesystem/squashfs"

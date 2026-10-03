@@ -24,6 +24,18 @@ also tested. `examples/renvo.star` is the larger compilation demonstration,
 and `renvo_support.star` is a helper library, not a command. See
 [renvo](../docs/renvo.md) for constraints and supported targets.
 
+## Build GNU Hello in memory (network required)
+
+```console
+go run -tags renvo_bundle ./cmd/trex scripts/smoke/hello.star
+```
+
+The Starlark recipe pins and hashes the source, installs a virtual tool set,
+then runs configure, make and all seven upstream tests. Nine CLI cases exercise
+the generated ELF. Sources and intermediate products remain in memory; no host
+shell or compiler is used. See [the shell/build guide](../docs/shell-emulator.md)
+for the optional native same-image comparison and explicit compatibility limits.
+
 ## Inspect caller-owned input
 
 ```console

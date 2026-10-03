@@ -396,6 +396,9 @@ func (r isoDirRecord) attr(name string) starlark.Value {
 var isoMetadataAttrs = []string{"entry_type", "link", "mode", "uid", "gid", "nlink", "inode", "mtime", "atime", "ctime", "created", "backup_time", "expiration_time", "effective_time", "device_high", "device_low"}
 
 func (i *isoImage) parseRecord(raw []byte) (isoDirRecord, error) {
+	if i.highSierra {
+		return i.highSierraRecord(raw)
+	}
 	record, err := parseISODirRecordWithEncoding(raw, i.joliet)
 	if err != nil {
 		return record, err
