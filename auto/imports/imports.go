@@ -58,4 +58,5 @@ import (
 	_ "github.com/tinyrange/trex/installer/installshield"
 	_ "github.com/tinyrange/trex/installer/mozilla"
 	_ "github.com/tinyrange/trex/installer/msi"
+	_ "github.com/tinyrange/trex/windows"
 )

@@ -3049,6 +3049,12 @@ Decodes image metadata and returns dimensions and format information within inpu
 
 Returns the color of one decoded image pixel at x,y. Coordinates must be inside the image; input size and decoded pixel limits apply.
 
+### `image.sample`
+
+`image.sample(source, points, maximum=128MiB, max_pixels=16MiP) -> list[record]`
+
+Decodes the source once per call and returns r/g/b/a color records in point order, using the same 8-bit alpha-premultiplied channels as image.pixel. points must be a list or tuple of (x,y) lists or tuples with integer coordinates inside the image; duplicate points are preserved. maximum bounds encoded bytes; max_pixels bounds both decoded image pixels and point count. An empty selection returns an empty list after validating the image. No decoded image is cached between calls.
+
 ### `json.decode`
 
 `json.decode(value, maximum=64MiB) -> value`

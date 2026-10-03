@@ -177,6 +177,7 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 	if err != nil {
 		return fail(err)
 	}
+	driver.qmp = startQMPClient(qmpParent, driver.qmpEvent)
 	driver.extra = append(driver.extra, qmpChild)
 	qmpFD := 2 + len(driver.extra)
 	args = append(args, "-chardev", fmt.Sprintf("socket,id=trx-qmp,fd=%d", qmpFD), "-mon", "chardev=trx-qmp,mode=control")
@@ -358,11 +359,9 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 	}
 	driver.extra = nil
 	go driver.waitProcess()
-	if setter, ok := qmpParent.(interface{ SetDeadline(time.Time) error }); ok {
-		_ = setter.SetDeadline(time.Now().Add(15 * time.Second))
-		defer setter.SetDeadline(time.Time{})
-	}
-	driver.qmp, err = newQMPClient(parent, qmpParent, driver.qmpEvent)
+	startup, startupCancel := context.WithTimeout(ctx, 15*time.Second)
+	err = driver.qmp.negotiate(startup)
+	startupCancel()
 	if err != nil {
 		_ = driver.Close(context.Background())
 		return nil, &vmmapi.Error{Code: vmmapi.ErrorBackend, Message: "initialize QMP", Detail: driver.stderr.String(), Err: err}
