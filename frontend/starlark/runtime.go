@@ -47,6 +47,7 @@ import (
 	autostar "github.com/tinyrange/trex/auto/star"
 	binaryapi "github.com/tinyrange/trex/binary"
 	binarystar "github.com/tinyrange/trex/binary/star"
+	channelnative "github.com/tinyrange/trex/channel/native"
 	channelstar "github.com/tinyrange/trex/channel/star"
 	databaseese "github.com/tinyrange/trex/database/ese"
 	databasesqlite "github.com/tinyrange/trex/database/sqlite"
@@ -95,6 +96,8 @@ import (
 
 func predeclared() starlark.StringDict {
 	nativeIO := storagenative.Builtins()
+	channelBuiltins := channelstar.Builtins()
+	channelBuiltins["expose_tcp"] = starlark.NewBuiltin("expose_tcp", channelnative.ExposeTCPBuiltin)
 	if ccapi.Available() {
 		vmmstar.RegisterBackend("cc.v1", ccapi.Capabilities())
 	}
@@ -221,7 +224,7 @@ func predeclared() starlark.StringDict {
 		"vmm":      namespace{name: "vmm", attrs: vmmstar.Builtins()},
 		"crypto":   namespace{name: "crypto", attrs: starcrypto.Builtins()},
 		"debug":    namespace{name: "debug", attrs: debugapi.Builtins()},
-		"channel":  namespace{name: "channel", attrs: channelstar.Builtins()},
+		"channel":  namespace{name: "channel", attrs: channelBuiltins},
 		"emulator": namespace{name: "emulator", attrs: emulatorapi.Builtins()},
 		"json":     namespace{name: "json", attrs: starjson.Builtins()},
 		"html": namespace{
