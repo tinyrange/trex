@@ -77,6 +77,16 @@ media and commands for `smoke/reactos.star` and
 `smoke/reactos_custom_account.star`, including screenshot and report outputs.
 These are QEMU integration tests, separate from in-process PE emulation.
 
+## Windows 1.01 native computer use
+
+`examples/windows_101_computer.star` builds the installed DOS/Windows image and
+a native Win16 computer-use agent from caller-supplied floppy images. The
+[computer-use guide](../docs/windows-101-computer-use.md) covers connection,
+keyboard/mouse gesture helpers, offline REPL wire documentation, and a native
+Paint drawing. Optional `video=boot-and-paint.mp4` records continuously from
+BIOS boot using FFmpeg; `repl=true` enters the public trex REPL. No StarAgent or
+private SDK is needed. No original Microsoft media or installed image is bundled.
+
 ## Debugging and transport integration
 
 | Script under `debug/` | Purpose / requirements |

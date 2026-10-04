@@ -222,7 +222,7 @@ func qemuCapabilities() []string {
 		"debugger.gdb", "disk", "disk.bus.auto", "disk.bus.floppy", "disk.bus.ide", "disk.bus.virtio", "disk.bus.nvme", "disk.geometry.chs",
 		"disk.snapshot", "display.capturable", "display.interactive", "extension.qemu.v1",
 		"input.key", "input.pointer", "input.text", "lifecycle.pause", "lifecycle.powerdown",
-		"lifecycle.reset", "lifecycle.stop", "network.bridge", "network.nat", "screenshot",
+		"lifecycle.reset", "lifecycle.stop", "network.bridge", "network.nat", "screenshot", "video.record",
 	})
 }
 
