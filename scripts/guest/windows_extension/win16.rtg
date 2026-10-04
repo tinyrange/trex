@@ -1,0 +1,243 @@
+@import "msdos.rtg"
+
+go backend {
+    func nePutWord(data []byte, at int, value int) {
+        data[at]=byte(value)
+        data[at+1]=byte(value>>8)
+    }
+    func neAppendWord(data []byte, value int) []byte {
+        return append(data,byte(value),byte(value>>8))
+    }
+    func neExit(out *RTGEmitter, status RTGRegister) {
+        _ = status
+        out.Bytes3(0xb8,0,0x4c)
+        out.Bytes2(0xcd,0x21)
+    }
+
+    func neCall(out *RTGEmitter, module int, ordinal int) {
+        out.Byte(0x9a)
+        out.AbsoluteReloc(out.Len(), module*65536+ordinal, 16)
+        out.Uint16(0xffff)
+        out.Uint16(0)
+    }
+    // The static-call lowering leaves the first source argument on top.
+    // Reverse those words in place for Pascal callee cleanup. Far pointers
+    // use segment, offset in source order (offset on top at the native call).
+    func neStaticCall(out *RTGEmitter, id int, words int) {
+        dll := out.StaticImportDLL(id)
+        name := out.StaticImportName(id)
+        module := 0
+        ordinal := 0
+        count := 0
+        if dll == "USER" {
+            module = 2
+            if name == "OpenComm" { ordinal = 200; count = 4 }
+            if name == "BuildCommDCB" { ordinal = 213; count = 4 }
+            if name == "SetCommState" { ordinal = 201; count = 2 }
+            if name == "ReadComm" { ordinal = 204; count = 4 }
+            if name == "WriteComm" { ordinal = 205; count = 4 }
+            if name == "CloseComm" { ordinal = 207; count = 1 }
+            if name == "GetCommError" { ordinal = 203; count = 3 }
+            if name == "PeekMessage" { ordinal = 109; count = 6 }
+            if name == "TranslateMessage" { ordinal = 113; count = 2 }
+            if name == "DispatchMessage" { ordinal = 114; count = 2 }
+        }
+        if dll == "KERNEL" {
+            module = 1
+            if name == "_lopen" { ordinal = 85; count = 3 }
+            if name == "_lcreat" { ordinal = 83; count = 3 }
+            if name == "_lclose" { ordinal = 81; count = 1 }
+            if name == "_lread" { ordinal = 82; count = 4 }
+            if name == "_lwrite" { ordinal = 86; count = 4 }
+            if name == "LoadModule" { ordinal = 45; count = 4 }
+        }
+        if ordinal == 0 { panic("unsupported Win16 import") }
+        if words != count { panic("Win16 Pascal import argument count mismatch") }
+        out.Bytes2(0x89,0xe6) // mov si,sp
+        for i := 0; i < count/2; i++ {
+            out.Bytes3(0x8b,0x44,byte(2*i)) // mov ax,[si+first]
+            out.Bytes3(0x8b,0x54,byte(2*(count-1-i))) // mov dx,[si+last]
+            out.Bytes3(0x89,0x54,byte(2*i))
+            out.Bytes3(0x89,0x44,byte(2*(count-1-i)))
+        }
+        neCall(out,module,ordinal)
+        out.Bytes2(0x1e,0x07) // Renvo near copies require ES=DS.
+    }
+    func neDS(out *RTGEmitter) {
+        out.Bytes2(0x8c,0xd8) // mov ax,ds
+        out.Byte(0xc3)
+    }
+    func neStart(out *RTGEmitter, stateOffset int) bool {
+        _ = stateOffset
+        neCall(out,1,91)
+        out.Bytes2(0x09,0xc0)
+        out.Bytes2(0x75,5)
+        out.Bytes3(0xb8,1,0x4c)
+        out.Bytes2(0xcd,0x21)
+        out.Bytes2(0x31,0xc0)
+        out.Byte(0x50)
+        neCall(out,1,30)
+        out.Byte(0x57)
+        neCall(out,2,5)
+        out.Bytes2(0x09,0xc0)
+        out.Bytes2(0x75,5)
+        out.Bytes3(0xb8,2,0x4c)
+        out.Bytes2(0xcd,0x21)
+        out.Byte(0xfc)
+        out.Bytes2(0x1e,0x07) // ES=DS before Go global initialization.
+        return true
+    }
+    func neEntry(out *RTGEmitter, parameterCount int, stateOffset int) bool {
+        _ = out
+        _ = stateOffset
+        return parameterCount == 0
+    }
+    func neImageVersion(out *RTGEmitter, version int) []byte {
+        // Separate near code and automatic data address spaces. Keep the
+        // first 16 data bytes reserved for the Windows instance header.
+        for i := 0; i < out.AbsoluteRelocationCount(); i++ {
+            at := out.AbsoluteRelocationOffset(i)
+            target, ok := RTGResolveAbsoluteRelocation(out,
+                out.AbsoluteRelocationKind(i), out.AbsoluteRelocationAddend(i),
+                16, 16+len(out.Data()))
+            if ok { nePutWord(out.Code(),at,target) }
+        }
+        neFixups := []int{}
+        for i := 0; i < out.AbsoluteRelocationCount(); i++ {
+            if out.AbsoluteRelocationKind(i) == 16 {
+                value := out.AbsoluteRelocationAddend(i)
+                neFixups = append(neFixups, out.AbsoluteRelocationOffset(i)+0x100, value/65536, value&65535)
+            }
+        }
+        code := make([]byte,0x100)
+        code = append(code,out.Code()...)
+        data := make([]byte,16)
+        data = append(data,out.Data()...)
+        memory := len(data)+out.BSSSize()
+        if len(code) > 0xffff {
+            out.RejectImageSize(false,len(code),0xffff)
+            return nil
+        }
+        if memory+512+4096 > 0xfffe {
+            out.RejectImageSize(true,memory+512+4096,0xfffe)
+            return nil
+        }
+        header := make([]byte,1280)
+        header[0]='M'
+        header[1]='Z'
+        nePutWord(header,8,32)
+        nePutWord(header,0x18,0x40)
+        nePutWord(header,0x10,0x100) // DOS stub stack within its load segment.
+        nePutWord(header,0x3c,0x400)
+        copy(header[0x200:],[]byte{0x0e,0x1f,0xba,14,0,0xb4,9,0xcd,0x21,0xb8,1,0x4c,0xcd,0x21})
+        copy(header[0x20e:],[]byte("This program requires Microsoft Windows.\r\n$"))
+        n:=0x400
+        header[n]='N'
+        header[n+1]='E'
+        header[n+2]=4
+        if version >= 0x300 { header[n+2]=5 }
+        nePutWord(header,n+4,0x72)
+        nePutWord(header,n+6,2)
+        flags := 6
+        if version >= 0x300 { flags = 0x302 } // Multiple data; Windows GUI application.
+        nePutWord(header,n+0xc,flags)
+        nePutWord(header,n+0xe,2)
+        nePutWord(header,n+0x10,512)
+        nePutWord(header,n+0x12,4096)
+        nePutWord(header,n+0x14,0x100)
+        nePutWord(header,n+0x16,1)
+        nePutWord(header,n+0x1a,2)
+        nePutWord(header,n+0x1c,2)
+        nePutWord(header,n+0x1e,2)
+        nePutWord(header,n+0x20,1)
+        nePutWord(header,n+0x2c,n+0x74)
+        nePutWord(header,n+0x22,0x40)
+        nePutWord(header,n+0x24,0x50)
+        nePutWord(header,n+0x50,4)
+        nePutWord(header,n+0x26,0x54)
+        nePutWord(header,n+0x28,0x60)
+        nePutWord(header,n+0x2a,0x64)
+        nePutWord(header,n+0x32,4)
+        header[n+0x36]=2 // Windows executable
+        nePutWord(header,n+0x3e,version)
+        nePutWord(header,n+0x40,80)
+        nePutWord(header,n+0x42,len(code))
+        nePutWord(header,n+0x44,0x170)
+        nePutWord(header,n+0x46,len(code))
+        dataOffset := RTGAlignValue(1280+len(code)+2+(len(neFixups)/3)*8,16)
+        nePutWord(header,n+0x48,dataOffset/16)
+        nePutWord(header,n+0x4a,len(data))
+        nePutWord(header,n+0x4c,0x51)
+        nePutWord(header,n+0x4e,memory)
+        header[n+0x54]=7
+        copy(header[n+0x55:],[]byte("TREXEXT"))
+        // Offset zero means SELF to the Windows 1 loader. Reserve that empty
+        // import name and start KERNEL at 1 (not 0), USER at 8.
+        nePutWord(header,n+0x60,1)
+        nePutWord(header,n+0x62,8)
+        header[n+0x65]=6
+        copy(header[n+0x66:],[]byte("KERNEL"))
+        header[n+0x6c]=4
+        copy(header[n+0x6d:],[]byte("USER"))
+        result := append(header,code...)
+        result = neAppendWord(result,len(neFixups)/3)
+        for i:=0;i<len(neFixups);i+=3 {
+            result=append(result,3,1)
+            result=neAppendWord(result,neFixups[i])
+            result=neAppendWord(result,neFixups[i+1])
+            result=neAppendWord(result,neFixups[i+2])
+        }
+        for len(result)<dataOffset { result=append(result,0) }
+        result=append(result,data...)
+        nePutWord(result,2,len(result)&511)
+        nePutWord(result,4,(len(result)+511)/512)
+        nePutWord(result,12,65535)
+        return result
+    }
+    func neImage(out *RTGEmitter) []byte { return neImageVersion(out, 0) }
+    func neImage3(out *RTGEmitter) []byte { return neImageVersion(out, 0x300) }
+}
+runtime win16 {
+ emit_entry_start = go neStart
+ emit_entry = go neEntry
+ emit_exit = go neExit
+ emit_static_call = go neStaticCall
+}
+format windows_ne {
+ kind = "windows-ne"
+ byte_order = little
+ address_bits = 16
+ code_offset = 0x100
+ image = go neImage
+}
+target windows/8086 {
+ family = native_v1
+ os = windows
+ arch = i8086
+ abi = renvo_8086
+ runtime = win16
+ executable = windows_ne
+ arena_default = 512
+ build_tags = [windows,win16,i8086]
+ capabilities = [hosted,executable,heap]
+}
+
+// Windows 3.x must not prompt for compatibility with a pre-3.0 application.
+format windows_ne3 {
+ kind = "windows-ne"
+ byte_order = little
+ address_bits = 16
+ code_offset = 0x100
+ image = go neImage3
+}
+target windows3/8086 {
+ family = native_v1
+ os = windows
+ arch = i8086
+ abi = renvo_8086
+ runtime = win16
+ executable = windows_ne3
+ arena_default = 512
+ build_tags = [windows,win16,i8086]
+ capabilities = [hosted,executable,heap]
+}
