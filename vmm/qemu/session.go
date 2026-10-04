@@ -137,6 +137,11 @@ func (d *qemuDriver) Extension(_ context.Context, name string) (starlark.Value, 
 }
 
 func (d *qemuDriver) Detach(context.Context) error {
+	d.recordMu.Lock()
+	defer d.recordMu.Unlock()
+	if d.recording != nil && !d.recording.Stats().Done {
+		return fmt.Errorf("cannot detach a VM with an active recording")
+	}
 	if len(d.exports) != 0 {
 		return &vmmapi.Error{Code: vmmapi.ErrorUnsupported, Message: "cannot detach a VM whose NBD exports are owned by this runtime"}
 	}

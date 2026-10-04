@@ -3,10 +3,12 @@
 - Repository code and committed scripts must not delegate supported
   functionality to host parsing, mounting, extraction, conversion, debugger,
   or image-building tools.
-- The only production-code exception for launching an external process is QEMU
-  acting as the emulator and debugging target. QEMU or software running inside
-  the guest must not substitute for missing image construction, parsing, or
-  conversion functionality.
+- Production-code exceptions for launching external processes are QEMU acting
+  as the emulator/debugging target and FFmpeg solely for encoding QEMU video
+  recordings. Stream frames and encoded output through pipes/in-memory
+  abstractions, never intermediate host files. This does not authorize arbitrary
+  FFmpeg commands or other host conversion tools. QEMU or guest software must
+  not substitute for missing image construction, parsing, or conversion logic.
 - Do not extract inputs or create host files to transfer intermediate data
   between processing stages. Explicit final outputs requested by the user,
   including complete disk images, screenshots, traces, and reports, are

@@ -197,7 +197,7 @@ func main() {
 			if overflow || !parse(n) {
 				bad()
 			} else {
-				dispatch()
+				dispatchCall()
 			}
 			n = 0
 			overflow = false

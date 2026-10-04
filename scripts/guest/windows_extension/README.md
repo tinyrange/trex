@@ -35,6 +35,18 @@ segment/stack bounds, import-name resolution, and native-call relocations.
 Fresh guest integration remains necessary. The private repository supplies
 `scripts/smoke/windows_extension.star` and `windows_extension_client.star`.
 
+## Windows 1.01 computer use
+
+`compile_win16(computer_use=True)` builds a separate native computer-use endpoint
+with `ping`, `launch`, and bounded `input_events` batches. USER journal playback
+handles keyboard/mouse routing; the host only captures the framebuffer. The
+client helpers provide click, drag, key chords, and a US-layout text subset.
+This build targets Windows 1.01, not the later Win16 hook ABI. It does not
+advertise the file-service APIs; combining both currently exceeds the near-code
+segment limit. See [the public demo guide](../../../docs/windows-101-computer-use.md)
+for the standalone public trex script, explicit media arguments, REPL wire
+documentation, native-input constraints, and continuous FFmpeg boot recording.
+
 ## Native PE endpoint (in progress)
 
 `build_pe.star` builds `win32/` with the shared bounded wire parser. Discovery

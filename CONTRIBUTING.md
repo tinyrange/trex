@@ -10,8 +10,11 @@ derive an implementation or test fixture.
 
 Changes must keep format handling inside trex. Do not add production wrappers
 around host parsing, mounting, extraction, conversion, debugger, or image
-building tools. QEMU may be launched only as the emulator or debugging target.
-Core APIs must remain independent of host paths, processes, and sockets.
+building tools. QEMU may be launched as the emulator or debugging target;
+FFmpeg is also permitted solely to encode QEMU video recordings through the
+bounded streaming recording backend. No intermediate frame files or arbitrary
+FFmpeg command interface are allowed. Core APIs must remain independent of
+host paths, processes, and sockets.
 
 Before opening a pull request, run:
 

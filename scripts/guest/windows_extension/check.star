@@ -2,7 +2,7 @@
 load("//tests:testing.star", "equal", "true")
 load("//scripts/guest/windows_extension:build.star", "compile_win16")
 
-def check_image(image, windows3):
+def check_image(image, windows3, computer_use = False):
     equal(image[:2], b"MZ")
     ne = binary.read_u32le(image, 0x3c)
     equal(image[ne:ne + 2], b"NE")
@@ -45,7 +45,9 @@ def check_image(image, windows3):
         true(module in [1, 2] and ordinal > 0)
         imported[(module, ordinal)] = True
     # InitTask, LoadModule, native file read/write, COM open/read/write, message pump.
-    for symbol in [(1, 91), (1, 45), (1, 82), (1, 86), (2, 200), (2, 204), (2, 205), (2, 109)]:
+    symbols = [(1, 91), (1, 45), (2, 200), (2, 204), (2, 205), (2, 109)]
+    symbols += [(1, 51), (1, 52), (2, 121), (2, 179)] if computer_use else [(1, 82), (1, 86)]
+    for symbol in symbols:
         true(symbol in imported, "missing native import " + str(symbol))
     data_at = binary.read_u16le(image, segments + 8) << shift
     data_size = binary.read_u16le(image, segments + 10)
@@ -60,3 +62,5 @@ def main(args):
     for windows3 in [False, True]:
         check_image(compile_win16(root, windows3 = windows3), windows3)
         print("PASS Win16 native image", "3.x" if windows3 else "1.x/2.x")
+    check_image(compile_win16(root, computer_use = True), False, computer_use = True)
+    print("PASS Windows 1.01 computer-use image and journal imports")

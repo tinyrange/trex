@@ -2608,6 +2608,18 @@ Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 an
 
 Native-only IPv4 loopback bridge for one trusted TCP client. Port zero selects a free port, returned as port. Takes exclusive ownership of the byte channel on success; do not read or write it elsewhere. The listener closes after the first connection; disconnect closes both streams without reconnect or replay. Uses bounded copy buffers. close() interrupts and joins workers; runtime teardown also closes it. The channel must unblock reads and writes on close. TCP is plaintext and has no authentication; other local processes can connect.
 
+### `channel.extension`
+
+`channel.extension(channel, timeout=5) -> extension`
+
+Discovers a synchronous v1 device over an exclusively owned byte channel with deadlines. Exposes manifest-declared methods with positional/keyword arguments and type checks. close() closes the channel. No host SDK, sockets, futures, retry or reconnect. Malformed replies, transport errors and timeout close it with outcome uncertain; ordinary device ERR leaves it usable. help(device) shows the manifest. For complete framing, discovery, value grammar, bounds and native input examples: print(channel.extension_protocol()).
+
+### `channel.extension_protocol`
+
+`channel.extension_protocol() -> string`
+
+Returns the complete offline synchronous v1 wire specification, including the Windows 1.01 native input payload. Print it in the REPL; no connection or I/O required.
+
 ### `channel.memory_pair`
 
 `channel.memory_pair(maximum=1MiB) -> (byte_channel, byte_channel)`
@@ -4391,11 +4403,17 @@ Unix file metadata: byte size, permission bits, directory flag and Unix-second m
 
 Methods and attributes: `directory`, `mode`, `mtime`, `size`.
 
+### `video_recording` value
+
+Continuous wall-clock video capture, independent of script input. stop() finalizes and returns the MP4 file; repeated stop returns the same video. close() aborts/discards. stats contains frames, duplicated (missed sampling slots filled with the previous frame), elapsed seconds and done. Stop before stopping/closing the VM; VM teardown aborts owned recorders. QEMU requires FFmpeg with libx264; no audio or host display server. Captures into a fixed letterboxed canvas at a fixed rate. Upscaling uses integer factors; sources larger than the canvas downscale with nearest-neighbor. Default is 1440x900/30fps, libx264 CRF10/YUV420. lossless=True uses libx264rgb CRF0/RGB without color subsampling; the encoded canvas is pixel-exact, but browser playback is not guaranteed. Guest resolution changes are supported. duration auto-finalizes; output/capture/encoder failures are reported by stop, not silently accepted as success. Bounds: even dimensions 2..4096, at most 4096x2160 pixels, 1..60 fps, maximum 1KiB..512MiB, duration (0,3600] seconds. For boot capture: start_paused=True, recorder=vm.record(), vm.resume(), then video=recorder.stop().
+
+Methods and attributes: `close()`, `stats`, `stop() -> file`.
+
 ### `vm` value
 
 A live virtual machine. Input helpers send guest keys, text or pointer events; screenshot captures the display. pause/resume/reset/powerdown/shutdown/stop control lifecycle, wait observes completion and next_event consumes events. channel and debugger open declared guest endpoints; extensions expose backend-specific features. Check capabilities before using optional operations.
 
-Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `reset(timeout=30)`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
+Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `record(width=1440, height=900, fps=30, maximum=64MiB, duration=600, lossless=False)`, `reset(timeout=30)`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
 
 ### `vmm_backend` value
 

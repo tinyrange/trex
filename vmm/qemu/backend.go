@@ -112,6 +112,9 @@ type qemuDriver struct {
 	done          chan struct{}
 	mu            sync.Mutex
 	inputMu       sync.Mutex
+	captureMu     sync.Mutex
+	recordMu      sync.Mutex
+	recording     *qemuRecording
 	exit          vmmapi.Result
 	detached      bool
 
@@ -535,6 +538,11 @@ func (d *qemuDriver) cleanupLaunch() {
 func (d *qemuDriver) releaseTransports() {
 	d.transportOnce.Do(func() {
 		d.cancel()
+		d.recordMu.Lock()
+		if d.recording != nil {
+			_ = d.recording.Close()
+		}
+		d.recordMu.Unlock()
 		for _, export := range d.exports {
 			export.Close()
 		}

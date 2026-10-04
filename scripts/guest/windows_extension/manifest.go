@@ -1,3 +1,5 @@
+//go:build !computer_use
+
 package main
 
 const manifest = "API\t1\t1024\nABOUT\tsNative Win16; ASCII paths; hex file data; launch only; no process wait/capture/cancel\nFN\tping\tstr\tsReadiness\nEND\nFN\topen_file\tint\tsOpen read/write/create; create truncates\nARG\tpath\tstr\ts\nARG\tmode\tstr\ts\nEND\nFN\tread_file\tstr\tsRead 0..256 bytes as hex; empty at EOF\nARG\thandle\tint\ts\nARG\tcount\tint\ts\nEND\nFN\twrite_file\tint\tsWrite 0..256 hex bytes; return byte count\nARG\thandle\tint\ts\nARG\tdata\tstr\ts\nEND\nFN\tclose_file\tnone\tsClose file\nARG\thandle\tint\ts\nEND\nFN\tfind_first\tany\tsStart search; name_hex and attributes or None\nARG\tpattern\tstr\ts\nEND\nFN\tfind_next\tany\tsNext entry or None\nEND\nFN\tmkdir\tnone\tsMake directory\nARG\tpath\tstr\ts\nEND\nFN\trmdir\tnone\tsRemove empty directory\nARG\tpath\tstr\ts\nEND\nFN\tremove\tnone\tsDelete file\nARG\tpath\tstr\ts\nEND\nFN\trename\tnone\tsRename\nARG\told_path\tstr\ts\nARG\tnew_path\tstr\ts\nEND\nFN\tlaunch\tmap\tsLoad native Windows EXE; returns instance, not exit status\nARG\tpath\tstr\ts\nARG\ttail\tstr\ts\nEND\nDONE\n"
