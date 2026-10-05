@@ -34,7 +34,7 @@ func stringList(value starlark.Value, name string) ([]string, error) {
 }
 
 func renvoCCBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var source *filesystem.Directory
+	var source starlark.Value
 	var input starlark.Value
 	var target string
 	var flags starlark.Value = starlark.Tuple{}
@@ -64,7 +64,10 @@ func renvoCCBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 	}
 	command := append([]string{"cc"}, options...)
 	command = append(command, inputs...)
-	fs := &sourceFs{dir: source.Snapshot()}
+	fs, err := newSourceFS(source)
+	if err != nil {
+		return nil, err
+	}
 	result, err := driver.CompileCommand(&driver.CommandRequest{Filesystem: fs, Args: command, Target: target, ArenaSize: arenaSize})
 	if fs.err != nil {
 		return nil, fs.err
@@ -76,7 +79,7 @@ func renvoCCBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 }
 
 func renvoMakeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var source *filesystem.Directory
+	var source starlark.Value
 	input := "Makefile"
 	var target, output string
 	var targets starlark.Value = starlark.Tuple{}
@@ -91,7 +94,10 @@ func renvoMakeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if err != nil {
 		return nil, err
 	}
-	fs := &sourceFs{dir: source.Snapshot()}
+	fs, err := newSourceFS(source)
+	if err != nil {
+		return nil, err
+	}
 	makepath := fs.resolvePath(input)
 	contents, ok := fs.ReadFile(makepath)
 	if fs.err != nil {

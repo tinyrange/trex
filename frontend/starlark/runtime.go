@@ -84,6 +84,8 @@ import (
 	"github.com/tinyrange/trex/renvostar"
 	starcrypto "github.com/tinyrange/trex/script/crypto"
 	starjson "github.com/tinyrange/trex/script/json"
+	scsnative "github.com/tinyrange/trex/scs/native"
+	scsstar "github.com/tinyrange/trex/scs/star"
 	storagenative "github.com/tinyrange/trex/storage/native"
 	ccapi "github.com/tinyrange/trex/vmm/cc"
 	qemuapi "github.com/tinyrange/trex/vmm/qemu"
@@ -107,6 +109,7 @@ func predeclared() starlark.StringDict {
 	windowsBuiltins := windowsapi.Builtins()
 	windowsBuiltins["kd"] = starlark.NewBuiltin("kd", kd.Builtin)
 	return starlark.StringDict{
+		"scs":       namespace{name: "scs", attrs: scsstar.Builtins(scsnative.CreateOptimized, scsnative.Open, scsnative.GitTransport)},
 		"auto":      starlark.NewBuiltin("auto", autostar.Builtin),
 		"auto_plan": starlark.NewBuiltin("auto_plan", autostar.PlanBuiltin),
 		"archive": namespace{

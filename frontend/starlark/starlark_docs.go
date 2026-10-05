@@ -81,6 +81,9 @@ func standardLibraryDocumentation() ([]byte, error) {
 }
 
 var nativeStarlarkTypes = map[string][]string{
+	"scs.repository":  {"empty()", "checkout(name)", "checkout_git(revision='HEAD', catalog='git')", "clone(url, catalog='git', max_pack_bytes=256MiB, max_native_bytes=512GiB)", "git_refs(catalog='git')", "refs()", "checkpoint()", "file()", "close()"},
+	"workspace":       {"open_file(path)", "read_file(path, line_start=None, line_end=None, output_limit=None)", "write_file(path, content)", "replace(path, old, new)", "list_dir(path)", "stat(path)", "glob(pattern)", "search(pattern, ...)", "mkdir(path)", "rename(old, new)", "delete(path)", "chmod(path, mode)", "symlink(path, target)", "readlink(path)", "readonly()", "view()", "fork()", "snapshot()", "publish(name)"},
+	"file":            {"size", "read()", "bytes(offset=0, size=remaining)", "binary(offset=0, size=remaining)", "hex(offset=0, size=remaining)", "slice(offset=0, size=remaining)", "splice(offset, remove, value)"},
 	"unix_filesystem": {"mkdir(path, mode=0o755, mtime=None)", "write(path, data, mode=0o644, mtime=None)", "find(path)", "stat(path)", "remove(path)"},
 	"unix_stat":       {"size", "mode", "directory", "mtime"},
 	"shell_result":    {"status", "steps", "stdout", "stderr"},

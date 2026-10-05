@@ -1,7 +1,9 @@
 package renvostar
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	gopath "path"
 	"slices"
 	"strings"
@@ -32,7 +34,7 @@ func renvoGoBuiltin(
 	kwargs []starlark.Tuple,
 ) (starlark.Value, error) {
 	var (
-		source    *filesystem.Directory
+		source    starlark.Value
 		input     string
 		target    string
 		arenaSize uint64 = 32 * 1024 * 1024
@@ -56,6 +58,7 @@ func renvoGoBuiltin(
 }
 
 type sourceFs struct {
+	tree filesystem.Tree
 	dir  filesystem.Snapshot
 	err  error
 	base string
@@ -69,75 +72,125 @@ func (s *sourceFs) resolvePath(path string) string {
 	return gopath.Clean(path)
 }
 
-// PathExists implements [driver.SourceFS].
-func (s *sourceFs) PathExists(path string) bool {
-	path = s.resolvePath(path)
-	if slices.Contains(s.dir.Directories, path) {
+// newSourceFS captures a stable project view without enumerating SCS trees.
+func newSourceFS(source starlark.Value) (*sourceFs, error) {
+	provider, ok := source.(filesystem.TreeSource)
+	if !ok {
+		return nil, fmt.Errorf("source: got %s, want a project tree", source.Type())
+	}
+	tree, err := provider.SnapshotTree()
+	if err != nil {
+		return nil, err
+	}
+	return &sourceFs{tree: tree, dir: filesystem.Snapshot{Files: map[string]filesystem.FileRecord{}}}, nil
+}
+func (s *sourceFs) recordError(err error) {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && s.err == nil {
+		s.err = err
+	}
+}
+func (s *sourceFs) PathExists(name string) bool {
+	name = s.resolvePath(name)
+	if slices.Contains(s.dir.Directories, name) {
 		return true
 	}
-	if _, ok := s.dir.Files[path]; ok {
+	if _, ok := s.dir.Files[name]; ok {
 		return true
+	}
+	if s.tree != nil {
+		_, err := s.tree.Lookup(strings.TrimPrefix(name, "/"))
+		s.recordError(err)
+		return err == nil
 	}
 	return false
 }
-
-// ReadDir implements [driver.SourceFS].
-func (s *sourceFs) ReadDir(path string) ([]driver.DirEntry, bool) {
-	path = s.resolvePath(path)
-
-	// first check if path is a directory
-	if !slices.Contains(s.dir.Directories, path) {
+func (s *sourceFs) ReadDir(name string) ([]driver.DirEntry, bool) {
+	name = s.resolvePath(name)
+	entries := map[string]driver.DirEntry{}
+	exists := slices.Contains(s.dir.Directories, name)
+	if s.tree != nil {
+		info, err := s.tree.Lookup(strings.TrimPrefix(name, "/"))
+		s.recordError(err)
+		if err == nil && info.Kind == "dir" {
+			base, err := s.tree.ReadDir(strings.TrimPrefix(name, "/"))
+			s.recordError(err)
+			if err != nil {
+				return nil, false
+			}
+			exists = true
+			for _, e := range base {
+				entries[e.Name] = driver.DirEntry{Name: e.Name, IsDir: e.Kind == "dir"}
+			}
+		}
+	}
+	if !exists {
 		return nil, false
 	}
-
-	// collect all entries in the directory
-	entries := []driver.DirEntry{}
 	for _, dir := range s.dir.Directories {
-		if dir != path && gopath.Dir(dir) == path {
-			entries = append(entries, driver.DirEntry{Name: gopath.Base(dir), IsDir: true})
+		if dir != name && gopath.Dir(dir) == name {
+			child := gopath.Base(dir)
+			entries[child] = driver.DirEntry{Name: child, IsDir: true}
 		}
 	}
 	for file := range s.dir.Files {
-		if gopath.Dir(file) == path {
-			entries = append(entries, driver.DirEntry{Name: gopath.Base(file), IsDir: false})
+		if gopath.Dir(file) == name {
+			child := gopath.Base(file)
+			entries[child] = driver.DirEntry{Name: child}
 		}
 	}
-
-	slices.SortFunc(entries, func(a, b driver.DirEntry) int { return strings.Compare(a.Name, b.Name) })
-	return entries, true
-}
-
-// ReadFile implements [driver.SourceFS].
-func (s *sourceFs) ReadFile(path string) ([]byte, bool) {
-	path = s.resolvePath(path)
-
-	f, ok := s.dir.Files[path]
-	if !ok {
-		return nil, false
+	out := make([]driver.DirEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e)
 	}
-
-	if f.File != nil {
-		data, err := starfile.ReadAll(f.File)
+	slices.SortFunc(out, func(a, b driver.DirEntry) int { return strings.Compare(a.Name, b.Name) })
+	return out, true
+}
+func (s *sourceFs) ReadFile(name string) ([]byte, bool) {
+	name = s.resolvePath(name)
+	if file, ok := s.dir.Files[name]; ok {
+		if file.File == nil {
+			return file.Data, true
+		}
+		data, err := starfile.ReadAll(file.File)
+		s.recordError(err)
 		if err != nil {
-			if s.err == nil {
-				s.err = fmt.Errorf("read %s: %w", path, err)
-			}
 			return nil, false
 		}
-		f.Data, f.File = data, nil
-		s.dir.Files[path] = f
+		file.Data, file.File = data, nil
+		s.dir.Files[name] = file
 		return data, true
 	}
-	return f.Data, true
+	if s.tree == nil {
+		return nil, false
+	}
+	info, err := s.tree.Lookup(strings.TrimPrefix(name, "/"))
+	s.recordError(err)
+	if err != nil || info.Kind != "file" {
+		return nil, false
+	}
+	file, err := s.tree.OpenFile(strings.TrimPrefix(name, "/"))
+	s.recordError(err)
+	if err != nil {
+		return nil, false
+	}
+	data, err := starfile.ReadAll(file)
+	s.recordError(err)
+	if err != nil {
+		return nil, false
+	}
+	s.dir.Files[name] = filesystem.FileRecord{Data: data, Size: int64(len(data))}
+	return data, true
 }
 
 var (
 	_ driver.SourceFS = &sourceFs{}
 )
 
-func compileModule(source *filesystem.Directory, input string, target string, arenaSize uint64) (*compiledModule, error) {
-	snapshot := source.Snapshot()
-	fs := &sourceFs{dir: snapshot}
+func compileModule(source starlark.Value, input string, target string, arenaSize uint64) (*compiledModule, error) {
+	fs, err := newSourceFS(source)
+	if err != nil {
+		return nil, err
+	}
 
 	result, err := driver.Compile(&driver.Request{
 		Input:      []string{input},

@@ -9,6 +9,9 @@ import (
 // Each native entry point needs an explicit contract. Do not replace missing
 // descriptions with boilerplate: generation must fail until the API is documented.
 var nativeStarlarkDescriptions = map[string]string{
+	"scs.create":                "Creates a new exclusively locked native SCSREPO3 repository file without overwriting existing data. File paths and durability are native backend authority; stored contents use the portable SCS engine. Repositories close at execution teardown or explicit close. See docs/scs.md for publication, Git cloning and limits.",
+	"scs.open":                  "Opens a native SCSREPO2/3 repository with exclusive ownership. Paged indexes load lazily and are verified as accessed. Opening may repair an incomplete tail; it is not a forensic read-only operation. Complete corruption fails rather than being silently discarded.",
+	"scs.memory":                "Creates a bounded volatile SCSREPO3 repository, or reopens an existing portable repository file into independent paged memory. Defaults to 512 MiB of addressable storage, not a total-process memory quota. Published roots can be preserved as a standalone file via repository.file(); Sync does not make memory survive process exit.",
 	"emulator.shell.filesystem": "Creates a caller-owned bounded Unix namespace shared by shell, compiler and Linux commands. write accepts portable files; find returns an immutable portable file snapshot. Paths are canonical absolute guest paths, never host paths.",
 	"emulator.shell.run":        "Executes POSIX shell source in the supplied Unix filesystem. Copies the recipe-owned absolute-path command table before concurrent workers start; no Starlark callback runs on a worker. Source/stdin accept files, strings or bytes. Returns status, steps, stdout and stderr; emulator failures raise errors. Output limits apply per stream. Runtime cancellation and timeout cancel and join shell jobs; compilation is arena-bounded, not preemptible.",
 	"emulator.shell.date":       "Creates a UTC date command with an explicit fixed Unix-second clock. It reads no host timezone or implicit wall clock; unsupported zones and format directives fail explicitly.",
@@ -333,6 +336,9 @@ var nativeStarlarkDescriptions = map[string]string{
 }
 
 var nativeStarlarkAdditionalSignatures = map[string]string{
+	"scs.create":               "scs.create(path) -> scs.repository",
+	"scs.open":                 "scs.open(path) -> scs.repository",
+	"scs.memory":               "scs.memory(file=None, max_bytes=512MiB) -> scs.repository",
 	"auto_plan":                "auto_plan(source, name='', maximum=512MiB, maximum_entries=100000, maximum_depth=32, tree=None, path='') -> auto",
 	"archive.ibmi_save":        "archive.ibmi_save(file, maximum_entries=100000) -> record",
 	"archive.bff":              "archive.bff(file, maximum_entries=1M, maximum_decoded_bytes=512MiB) -> record",

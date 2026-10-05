@@ -5,6 +5,8 @@ licences:
 
 | Dependency | Licence |
 | --- | --- |
+| `github.com/go-git/go-git/v5` (wire protocol and pack decoding) | Apache-2.0 |
+| `github.com/pjbgf/sha1cd` (collision-detecting Git hashes; bundled notices retained) | Apache-2.0 and bundled component terms |
 | `github.com/therootcompany/xz` | CC0-1.0 |
 | `go.starlark.net` | BSD-3-Clause |
 | `golang.org/x/arch` | BSD-3-Clause |
@@ -30,4 +32,14 @@ Nicholas Waples' rardecode v2.4.1 under BSD-2-Clause; the original license is
 retained there and reproduced in the binary-distribution notices. The 7z x86
 BCJ filter adapts explicitly public-domain code from the existing XZ dependency.
 Zstandard uses the existing `github.com/klauspost/compress` dependency; its
-notices are also retained below. No additional Go module dependency was added.
+notices are also retained below. The archive Zstandard support itself added no
+additional Go module dependency.
+
+SCS repository, Git and workspace scripting code in `scs/` is adapted from the
+`tinyrange/scs` (`j5.nz/scs`) source at commit
+`b4ddba5e0f388def4163d8e44860b95153af8c43`. Its existing tests and storage
+invariants were retained; backend boundaries, file/tree adapters and lazy Git
+checkout were changed for trex. The SCS repository owner confirmed ownership
+and authorized licensing this incorporation under Apache-2.0. A copy of the
+licence is retained in `scs/LICENSE`; dependency notices retain their own terms.
+See [the integration guide](docs/scs.md) for scope and limitations.

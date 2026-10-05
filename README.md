@@ -37,6 +37,12 @@ Start with the [quickstart](docs/starlark/quickstart.md), executable
 
 ## Capabilities
 
+[SCS Git project workspaces](docs/scs.md) natively clone Git history into
+content-addressed virtual trees. Immutable file readers, lazy path access and
+shared forks feed in-process Renvo builds without a host checkout or extraction;
+publication and repository ownership stay explicit. See the guide for memory
+limits, first-publication costs, experimental format and provenance caveats.
+
 [Legacy-media inspection](docs/starlark/legacy-media.md) composes native
 filesystem, archive and compression readers in the Starlark REPL. Layered
 inputs remain in memory; decoding does not imply installation planning.

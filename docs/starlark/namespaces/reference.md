@@ -3265,6 +3265,24 @@ Evaluates supported Renvo make recipes against a virtual source tree and rebuild
 
 Returns a snapshot of runtime resource statistics for diagnostics and benchmarking. Counters describe the running runtime, not just one image recipe.
 
+### `scs.create`
+
+`scs.create(path) -> scs.repository`
+
+Creates a new exclusively locked native SCSREPO3 repository file without overwriting existing data. File paths and durability are native backend authority; stored contents use the portable SCS engine. Repositories close at execution teardown or explicit close. See docs/scs.md for publication, Git cloning and limits.
+
+### `scs.memory`
+
+`scs.memory(file=None, max_bytes=512MiB) -> scs.repository`
+
+Creates a bounded volatile SCSREPO3 repository, or reopens an existing portable repository file into independent paged memory. Defaults to 512 MiB of addressable storage, not a total-process memory quota. Published roots can be preserved as a standalone file via repository.file(); Sync does not make memory survive process exit.
+
+### `scs.open`
+
+`scs.open(path) -> scs.repository`
+
+Opens a native SCSREPO2/3 repository with exclusive ownership. Paged indexes load lazily and are verified as accessed. Opening may repair an incomplete tail; it is not a forensic read-only operation. Complete corruption fails rather than being silently discarded.
+
 ### `testing.attempt`
 
 `testing.attempt(callback, args=None, kwargs=None) -> record(ok, value, error)`
@@ -4277,6 +4295,12 @@ A bounded 32-bit guest execution context. run/call/invoke execute modeled instru
 
 Methods and attributes: `accelerate_loop(address, pattern=None, size=0, digest=None, normalize_relative=False, maximum_instructions=1Mi)`, `accelerate_region(entry, start, size, digest, reenter=False, maximum_instructions=1Mi)`, `accelerate_runtime_region(anchor, size, digest, entry_offset=0, anchor_mask=None, name='runtime executable region', normalize_relative=True, reenter=False, maximum_instructions=1Mi)`, `allocate(size=0, value=None, address=None, alignment=16, name='plugin', readable=True, writable=True, executable=False)`, `call(address, args=[], registers={})`, `call_export(name, args=[], registers={})`, `call_trace(reset=False)`, `checkpoint()`, `code_trace(watch, reset=False)`, `configure_call_trace(enabled=True, limit=unchanged, start=0, size=0, reset=True)`, `configure_trace(enabled=True, limit=unchanged, reset=True)`, `entry`, `free(address)`, `get_register(name)`, `hook(...) and use(plugins)`, `imports`, `imports_named(names)`, `invoke(address, args=[], registers={})`, `load_module(image, name)`, `mappings`, `memory_writes(watch, reset=False)`, `modules`, `override(callback, module, name|ordinal, wrap=False)`, `profile(limit=256, reset=False)`, `protect(address, size, readable=True, writable=False, executable=False)`, `provide_export(callback=None, module, name|ordinal, argc=0, convention='stdcall', value=None, writable=True)`, `provide_exports(callback, module, signatures, convention='stdcall')`, `read_cbytes(address, maximum=32KiB, require_terminator=True, unit_width=1)`, `read_f32be(address)`, `read_f32le(address)`, `read_f64be(address)`, `read_f64le(address)`, `read_i16be(address)`, `read_i16le(address)`, `read_i32be(address)`, `read_i32le(address)`, `read_i64be(address)`, `read_i64le(address)`, `read_i8(address)`, `read_u16be(address)`, `read_u16le(address)`, `read_u32be(address)`, `read_u32le(address)`, `read_u64be(address)`, `read_u64le(address)`, `read_u8(address)`, `restore(checkpoint)`, `rewrite(address, pattern=None, size=0, digest=None, callback, name='inline rewrite', normalize_relative=False)`, `run()`, `set_register(name, value)`, `snapshot()`, `spawn(address, args=[], registers={})`, `stack`, `stop(reason, detail='')`, `transfer(address, esp=None, ebp=None, return_address=None)`, `transform(anchor, size, digest, callback, anchor_mask=None, name='runtime transformation', normalize_relative=True)`, `u32_multiply_accumulate(destination, source, count, scalar, carry=0, subtract=False)`, `watch_code(address, size, limit=4096, stack_bytes=0, captures={})`, `watch_memory(address, size, limit=4096)`, `write_f32be(address, value)`, `write_f32le(address, value)`, `write_f64be(address, value)`, `write_f64le(address, value)`, `write_i16be(address, value)`, `write_i16le(address, value)`, `write_i32be(address, value)`, `write_i32le(address, value)`, `write_i64be(address, value)`, `write_i64le(address, value)`, `write_i8(address, value)`, `write_u16be(address, value)`, `write_u16le(address, value)`, `write_u32be(address, value)`, `write_u32le(address, value)`, `write_u64be(address, value)`, `write_u64le(address, value)`, `write_u8(address, value)`.
 
+### `file` value
+
+Portable random-access byte value. Reader-backed SCS files and slices borrow their repository lifetime and are immutable versions. read/bytes explicitly materialize data; slice and splice compose borrowed ranges without eager payload reads. splice returns a new file, not an edit to its source; write it back explicitly. Existing file implementations may offer additional format-specific attributes.
+
+Methods and attributes: `binary(offset=0, size=remaining)`, `bytes(offset=0, size=remaining)`, `hex(offset=0, size=remaining)`, `read()`, `size`, `slice(offset=0, size=remaining)`, `splice(offset, remove, value)`.
+
 ### `gdb` value
 
 A live remote-debugging session. continue, step, interrupt and wait change or observe target execution; register and memory operations use the selected thread/context. Breakpoints and watchpoints return removable handles. with_state/with_register temporarily modify target state around a callback; packet and monitor expose protocol-specific control.
@@ -4354,6 +4378,12 @@ Methods and attributes: `name`, `properties`.
 A validated QEMU option descriptor with its value/properties. It is interpreted by the backend at launch, not executed by a shell.
 
 Methods and attributes: `name`, `properties`.
+
+### `scs.repository` value
+
+Owns portable SCS storage and immutable objects. clone imports full advertised Git history natively, retaining no host checkout or pack spool; compressed transport stays in bounded paged memory. Git checkout is lazy. Native workspace publication is distinct from Git commits and does not push. file returns an immutable standalone repository artifact only for snapshot-capable backends (memory); publish live edits first. Opening/checkpointing can repair derived state. No GC, synchronization or format-stability promise.
+
+Methods and attributes: `checkout(name)`, `checkout_git(revision='HEAD', catalog='git')`, `checkpoint()`, `clone(url, catalog='git', max_pack_bytes=256MiB, max_native_bytes=512GiB)`, `close()`, `empty()`, `file()`, `git_refs(catalog='git')`, `refs()`.
 
 ### `sfp` value
 
@@ -4498,3 +4528,9 @@ Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, 
 Opaque RSA code-signing identity. certificate contains the public DER X.509 certificate; private-key material is not exposed by attributes or representations.
 
 Methods and attributes: `certificate (DER bytes; private key is not exposed)`.
+
+### `workspace` value
+
+An SCS capability over a live root. open_file returns a stable immutable trex file version; write_file accepts files, strings or bytes, reusing same-repository content without reading its payload. readonly shares live state, view captures an independent immutable root, and fork creates independent writable state after durable snapshot. Only publish changes named roots, with conflict detection; explicit publication survives later script errors. Paths cannot traverse parents and symlinks are never followed. Renvo source consumers capture a lazy stable tree view.
+
+Methods and attributes: `chmod(path, mode)`, `delete(path)`, `fork()`, `glob(pattern)`, `list_dir(path)`, `mkdir(path)`, `open_file(path)`, `publish(name)`, `read_file(path, line_start=None, line_end=None, output_limit=None)`, `readlink(path)`, `readonly()`, `rename(old, new)`, `replace(path, old, new)`, `search(pattern, ...)`, `snapshot()`, `stat(path)`, `symlink(path, target)`, `view()`, `write_file(path, content)`.
