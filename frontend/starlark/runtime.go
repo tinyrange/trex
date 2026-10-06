@@ -25,6 +25,7 @@ import (
 	"github.com/tinyrange/trex/archive/cfb"
 	"github.com/tinyrange/trex/archive/compactpro"
 	"github.com/tinyrange/trex/archive/compressed"
+	"github.com/tinyrange/trex/archive/cpio"
 	"github.com/tinyrange/trex/archive/gzip"
 	"github.com/tinyrange/trex/archive/hunk"
 	"github.com/tinyrange/trex/archive/ibmisave"
@@ -57,6 +58,7 @@ import (
 	filesystemapm "github.com/tinyrange/trex/filesystem/apm"
 	filesystemckd "github.com/tinyrange/trex/filesystem/ckd"
 	filesystemefs "github.com/tinyrange/trex/filesystem/efs"
+	filesystemext4 "github.com/tinyrange/trex/filesystem/ext4"
 	filesystemfat "github.com/tinyrange/trex/filesystem/fat"
 	filesystemfloppy "github.com/tinyrange/trex/filesystem/floppy"
 	filesystemgpt "github.com/tinyrange/trex/filesystem/gpt"
@@ -144,6 +146,9 @@ func predeclared() starlark.StringDict {
 				"ibmi_save":        starlark.NewBuiltin("ibmi_save", ibmisave.Builtin),
 				"rms_variable":     starlark.NewBuiltin("rms_variable", rms.VariableBuiltin),
 				"gzip":             starlark.NewBuiltin("gzip", gzip.Builtin),
+				"gzip_members":     starlark.NewBuiltin("gzip_members", gzip.MembersBuiltin),
+				"cpio":             starlark.NewBuiltin("cpio", cpio.Builtin),
+				"cpio_build":       starlark.NewBuiltin("cpio_build", cpio.BuildBuiltin),
 				"bzip2":            starlark.NewBuiltin("bzip2", bzip2.Builtin),
 				"compress":         starlark.NewBuiltin("compress", compressed.Builtin),
 				"pack":             starlark.NewBuiltin("pack", compressed.Builtin),
@@ -186,6 +191,8 @@ func predeclared() starlark.StringDict {
 			attrs: starlark.StringDict{
 				"fat":                  starlark.NewBuiltin("fat", filesystemfat.FATBuiltin),
 				"efs":                  starlark.NewBuiltin("efs", filesystemefs.Builtin),
+				"ext4":                 starlark.NewBuiltin("ext4", filesystemext4.Builtin),
+				"ext4_build":           starlark.NewBuiltin("ext4_build", filesystemext4.BuildBuiltin),
 				"hfs":                  starlark.NewBuiltin("hfs", filesystemhfs.Builtin),
 				"ufs":                  starlark.NewBuiltin("ufs", filesystemufs.Builtin),
 				"ods2":                 starlark.NewBuiltin("ods2", filesystemods2.Builtin),

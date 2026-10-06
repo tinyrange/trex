@@ -58,16 +58,17 @@ func RegisterBackend(id string, capabilities []string) {
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
-		"backends":  starlark.NewBuiltin("backends", vmmBackendsBuiltin),
-		"channel":   starlark.NewBuiltin("channel", vmmChannelBuiltin),
-		"disk":      starlark.NewBuiltin("disk", vmmDiskBuiltin),
-		"display":   starlark.NewBuiltin("display", vmmDisplayBuiltin),
-		"machine":   starlark.NewBuiltin("machine", vmmMachineBuiltin),
-		"network":   starlark.NewBuiltin("network", vmmNetworkBuiltin),
-		"switch":    starlark.NewBuiltin("switch", switchBuiltin),
-		"workspace": starlark.NewBuiltin("workspace", workspaceBuiltin),
-		"start":     starlark.NewBuiltin("start", vmmStartBuiltin),
-		"validate":  starlark.NewBuiltin("validate", vmmValidateBuiltin),
+		"backends":   starlark.NewBuiltin("backends", vmmBackendsBuiltin),
+		"channel":    starlark.NewBuiltin("channel", vmmChannelBuiltin),
+		"disk":       starlark.NewBuiltin("disk", vmmDiskBuiltin),
+		"display":    starlark.NewBuiltin("display", vmmDisplayBuiltin),
+		"machine":    starlark.NewBuiltin("machine", vmmMachineBuiltin),
+		"linux_boot": starlark.NewBuiltin("linux_boot", linuxBootBuiltin),
+		"network":    starlark.NewBuiltin("network", vmmNetworkBuiltin),
+		"switch":     starlark.NewBuiltin("switch", switchBuiltin),
+		"workspace":  starlark.NewBuiltin("workspace", workspaceBuiltin),
+		"start":      starlark.NewBuiltin("start", vmmStartBuiltin),
+		"validate":   starlark.NewBuiltin("validate", vmmValidateBuiltin),
 	}
 }
 
@@ -187,6 +188,11 @@ func (v *vmmMachineValue) Truth() starlark.Bool  { return starlark.True }
 func (v *vmmMachineValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: %s", v.Type()) }
 func (v *vmmMachineValue) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "boot":
+		if v.machine.Boot == nil {
+			return starlark.None, nil
+		}
+		return &linuxBootValue{boot: *v.machine.Boot}, nil
 	case "architecture":
 		return starlark.String(v.machine.Architecture), nil
 	case "memory":
@@ -221,7 +227,7 @@ func (v *vmmMachineValue) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (v *vmmMachineValue) AttrNames() []string {
-	return []string{"architecture", "channels", "cpus", "disks", "display", "memory", "networks", "required_capabilities", "start_paused"}
+	return []string{"architecture", "boot", "channels", "cpus", "disks", "display", "memory", "networks", "required_capabilities", "start_paused"}
 }
 
 func vmmDiskBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -368,6 +374,7 @@ func vmmChannelBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 
 func vmmMachineBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var architecture string
+	var bootValue starlark.Value = starlark.None
 	var memory int64
 	cpus := 1
 	var disksValue, networksValue, channelsValue, requiredValue *starlark.List
@@ -377,6 +384,7 @@ func vmmMachineBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		"architecture", &architecture,
 		"memory", &memory,
 		"cpus?", &cpus,
+		"boot?", &bootValue,
 		"disks?", &disksValue,
 		"networks?", &networksValue,
 		"display?", &displayValue,
@@ -391,6 +399,14 @@ func vmmMachineBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		return nil, fmt.Errorf("machine: display is %s, want vmm_display", displayValue.Type())
 	}
 	machine := VMMMachine{Architecture: architecture, Memory: memory, CPUs: cpus, Display: display.display, StartPaused: startPaused}
+	if bootValue != starlark.None {
+		boot, ok := bootValue.(*linuxBootValue)
+		if !ok {
+			return nil, fmt.Errorf("machine: boot must be vmm_linux_boot or None")
+		}
+		copy := boot.boot
+		machine.Boot = &copy
+	}
 	if err := appendTypedList(disksValue, "disks", func(index int, value starlark.Value) error {
 		disk, ok := value.(*vmmDiskValue)
 		if !ok {

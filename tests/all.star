@@ -8,7 +8,10 @@ load(":media_decode_test.star", media_decode = "TEST_SUITE")
 
 load(":scs_test.star", scs = "TEST_SUITE")
 
+load(":linux_test.star", linux = "TEST_SUITE")
+
 TEST_SUITES = [
+    linux,
     scs,
     media_decode,
     reactos,

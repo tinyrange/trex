@@ -112,6 +112,9 @@ func validateVMM(machine VMMMachine, backend VMMBackend) []VMMValidationIssue {
 	for _, capability := range machine.RequiredCapabilities {
 		require(capability, "required_capabilities", "required capability", true)
 	}
+	if machine.Boot != nil {
+		require("boot.linux", "boot", "direct Linux boot", true)
+	}
 	if machine.StartPaused {
 		require("lifecycle.pause", "start_paused", "paused startup", true)
 	}
@@ -165,6 +168,9 @@ func validateVMMCore(machine VMMMachine) []VMMValidationIssue {
 	}
 	if machine.CPUs <= 0 {
 		add("machine.cpus", "cpus", "CPU count must be positive")
+	}
+	if err := machine.Boot.Validate(); err != nil {
+		add("machine.boot", "boot", err.Error())
 	}
 	diskNames := make(map[string]int)
 	units := make(map[string]int)

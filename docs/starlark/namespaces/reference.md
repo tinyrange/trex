@@ -347,6 +347,56 @@ ARM64 UEFI machine with inbox NVMe storage and USB input policy.
     Attach the system disk with bus="nvme". HVF uses the host ARM CPU;
     emulated runs may select accelerator="tcg", cpu="max".
 
+## `unix/alpine.star`
+
+Basic Alpine APK v2 handling. Policy stays in Starlark, formats in Go.
+
+Inputs are caller-pinned: read_package requires an independently trusted full
+APK SHA-256. Embedded signatures are retained for inspection, not interpreted
+as authentication. This is image construction, not an apk-tools replacement:
+install scripts/triggers are returned and never silently executed or discarded.
+
+### `install_plan`
+
+Return dependency-ordered payloads and explicit install-effect records.
+
+    Inspired by pkg2's declarative package plans, not its guest script runner.
+    No effect is executed. Each record retains its original script file and
+    trigger patterns; unknown control effects are retained as phase "other".
+    A consumer must implement or explicitly replace every relevant effect.
+    Dependency cycles and ambiguous virtual providers require caller policy.
+
+### `merge`
+
+Merge package payloads; conflicting files/effects require explicit policy.
+
+### `parse_index`
+
+Parse APKINDEX text, retaining dependency/provides/checksum fields.
+
+### `read_index`
+
+Read a trusted pinned APKINDEX.tar.gz; package signatures are not trust.
+
+### `read_package`
+
+Validate pinned APK v2 and return metadata, entries and install effects.
+
+### `select`
+
+Select exact name -> version pins, never whichever release is newest.
+
+    Dependency resolution is deliberately separate: pins must include the
+    desired closure; validate_dependencies checks it after reading packages.
+
+### `validate_dependencies`
+
+Check bare/exact dependencies, virtual provides and conflicts.
+
+    Range/tilde constraints fail explicitly: this basic pinned policy does not
+    implement apk version ordering or silently relax unsupported constraints.
+    External capabilities must be explicitly named by the caller.
+
 ## `unix/build.star`
 
 In-memory Unix build policy. The engine supplies mechanisms, not a tool image.
@@ -373,6 +423,46 @@ Run a build step with an explicit Linux action and C-locale environment.
 ### `unpack`
 
 Populate tar entries through portable files, preserving regular-file modes and times.
+
+## `unix/initramfs.star`
+
+Declarative Linux initramfs construction using native newc file views.
+
+### `build`
+
+Build an uncompressed initramfs; supplied /init must be executable.
+
+    Entries use Unix on-disk mode bits. Parent directories are supplied by
+    the native builder. No payload is extracted or mounted on the host.
+
+## `unix/kernel.star`
+
+Distribution kernel selection and initramfs module policy; no host modprobe.
+
+### `build_initramfs`
+
+Build a caller-defined initramfs with a validated module closure.
+
+    Firmware, decompression/insmod, and init policy remain explicit caller
+    inputs; resolving dependencies does not execute or autoload the modules.
+
+### `modules`
+
+Resolve modules.dep and softdep in dependency-before-dependent order.
+
+    Only selected softdeps are interpreted; malformed records for selected
+    modules fail. Repeated softdep records accumulate. Builtins need no payload.
+    Crypto/device aliases are not guessed: aliases pins alias -> module name
+    (e.g. crc32c -> crc32c_generic), avoiding hardware-dependent provider choice.
+    Unknown dependencies and cycles fail; this does not execute modprobe.
+
+### `select`
+
+Select one Alpine vmlinuz and its exact lib/modules release directory.
+
+### `x86_header`
+
+Inspect Linux x86 boot protocol 2.04+; return the borrowed kernel.
 
 ## `vmm/automation.star`
 
@@ -2056,11 +2146,29 @@ Decodes a single-volume CompactPro archive, including self-extractors whose data
 
 Decodes a UNIX compress (.Z) stream with 9–16-bit LZW codes, legacy or block mode and packing realignment at width changes or resets. Enforces maximum_bytes; the format has no checksum, so enclosing size/checksum metadata should be validated separately. zero_padding=True explicitly accepts a final incomplete all-zero code after at least one decoded literal, for fixed-block media packages such as Ultrix setld subsets. It does not trim input bytes, suppress nonzero truncated codes or strip decoded zeroes. Use this option only with independent container and inventory validation; the default retains strict incomplete-code checks.
 
+### `archive.cpio`
+
+`archive.cpio(file, maximum_entries=100000) -> list[dict]`
+
+Reads ASCII CPIO into flat metadata dictionaries without following links or instantiating special files. Supports newc, CRC newc, odc and concatenated archives; maximum_entries bounds the index. Regular data is exposed as lazy file views.
+
+### `archive.cpio_build`
+
+`archive.cpio_build(entries) -> file`
+
+Constructs a deterministic Linux-compatible newc archive from Unix entry dictionaries. Preserves modes, ownership, timestamps, symbolic links, hardlinks and device numbers. Synthesizes missing parent directories, rejects duplicate or unsafe paths, and borrows payload readers without extracting them.
+
 ### `archive.gzip`
 
 `archive.gzip(file, maximum_bytes=<unlimited>) -> file`
 
 Opens concatenated gzip streams as a lazy read-only file with a 1 MiB decoded cache. Forward reads reuse the decoder; backward reads outside the cache replay it. Checksums are validated as data is consumed; size scans the complete stream without retaining it. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. Does not interpret an archive inside the stream.
+
+### `archive.gzip_members`
+
+`archive.gzip_members(file, maximum_bytes=512MiB, maximum_members=1024) -> list[file]`
+
+Validates individual gzip members and returns exact compressed-member file views. CRC and size checks cover every member; maximum_bytes bounds total expanded data and maximum_members bounds indexing. No expanded payload is retained. Trailing junk is rejected.
 
 ### `archive.hunk_load`
 
@@ -2884,6 +2992,18 @@ Decodes version 1 The Duplicator images, including explicit cylinder filler. Cyl
 
 Reads an IRIX EFS volume into entries and case-sensitive paths, resolving direct and indirect extents without mounting. find(path) returns an entry or None; entries expose data, entry_type, size, inode, mode, uid, gid and modified. Accepts a trimmed free tail only when the allocation bitmap proves the omitted region is free and all referenced extents fit the original input. Symlink data remains the link target and is never followed; device entries have no data.
 
+### `filesystem.ext4`
+
+`filesystem.ext4(file, maximum_entries=100000, maximum_depth=32) -> record`
+
+Reads a clean ext2/3/4 image without mounting. Returns flat entry records with Unix metadata and lazy file data; symbolic links and device nodes are metadata, never followed. Handles multi-level extents, sparse/unwritten ranges, indirect blocks, indexed directories, 64-bit descriptors and metadata checksums. Rejects unsupported incompatible features and images requiring journal replay. Positive entry/depth limits bound traversal.
+
+### `filesystem.ext4_build`
+
+`filesystem.ext4_build(entries, size, label='', uuid='') -> file`
+
+Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. Preserves ownership, permissions, links and devices. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes.
+
 ### `filesystem.fat`
 
 `filesystem.fat(file) -> FAT filesystem`
@@ -3331,9 +3451,15 @@ Describes a guest disk or optical medium backed by a file or block device, inclu
 
 Describes the requested guest display mode and whether support is mandatory. This is part of a portable machine specification.
 
+### `vmm.linux_boot`
+
+`vmm.linux_boot(kernel, initramfs=None, command_line='')`
+
+Creates portable direct Linux boot intent from borrowed immutable kernel and optional initramfs files plus a command line. Requires backend boot.linux capability; QEMU supports Linux hosts and x86 guests using anonymous inherited descriptors.
+
 ### `vmm.machine`
 
-`vmm.machine(architecture, memory, cpus=1, disks=[], networks=[], display=vmm.display('none'), channels=[], start_paused=False, required_capabilities=[])`
+`vmm.machine(architecture, memory, cpus=1, disks=[], networks=[], display=vmm.display('none'), channels=[], start_paused=False, required_capabilities=[], boot=None)`
 
 Creates a portable machine specification from architecture, memory, CPUs, storage, networking and channels. It does not start a VM.
 
@@ -4469,11 +4595,17 @@ A guest display requirement. mode selects the requested display arrangement and 
 
 Methods and attributes: `mode`, `required`.
 
+### `vmm_linux_boot` value
+
+Direct Linux boot intent containing borrowed immutable kernel and optional initramfs files and a command line. These inputs remain portable; a capable backend owns their transport and lifetime.
+
+Methods and attributes: `command_line`, `initramfs`, `kernel`.
+
 ### `vmm_machine` value
 
 A portable VM specification, not a live VM. It records architecture, resources, disks, networks, channels, display and required capabilities for backend validation and vmm.start.
 
-Methods and attributes: `architecture`, `channels`, `cpus`, `disks`, `display`, `memory`, `networks`, `required_capabilities`, `start_paused`.
+Methods and attributes: `architecture`, `boot`, `channels`, `cpus`, `disks`, `display`, `memory`, `networks`, `required_capabilities`, `start_paused`.
 
 ### `vmm_network` value
 
