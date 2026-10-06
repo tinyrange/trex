@@ -71,6 +71,7 @@ type Channel struct {
 }
 
 type Machine struct {
+	Boot                 *LinuxBoot
 	Architecture         string
 	Memory               int64
 	CPUs                 int

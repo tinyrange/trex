@@ -245,3 +245,22 @@ no source implementation was copied. The upstream notice is retained here:
 > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
+
+
+## Linux image and Alpine package foundations
+
+CPIO newc, ext filesystem metadata/checksum layouts and the x86 boot header
+follow the Linux kernel's format documentation. Implementations and synthetic
+fixtures are native and independent; no external filesystem or package tool is
+invoked or linked.
+
+The Apache-2.0 repository `tinyrange/pkg2`, pinned at
+`fc584d5fed9ed3f0a29826dd8b3c3d675a2be0ca`, was consulted for Alpine's Starlark
+metadata handling, virtual-provide planning and explicit script/trigger plans.
+The new `unix/alpine.star` is independently implemented; no source files were
+copied. The older guest runner and disabled version-matching behavior are not
+incorporated. The Apache License 2.0 is retained in this repository's LICENSE.
+
+Upstream apk-tools format/version behavior was inspected as a reference only.
+No GPL implementation is copied, translated or linked; unsupported version
+range constraints are explicitly rejected by the basic pinned policy.

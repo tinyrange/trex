@@ -248,11 +248,15 @@ func (f *Entry) Attr(name string) (starlark.Value, error) {
 		return starlark.String(f.header.Gname), nil
 	case "mtime":
 		return starlark.MakeInt64(f.header.ModTime.Unix()), nil
+	case "major":
+		return starlark.MakeInt64(f.header.Devmajor), nil
+	case "minor":
+		return starlark.MakeInt64(f.header.Devminor), nil
 	case "stored_size":
 		return starlark.MakeInt64(f.storedSize), nil
 	}
 	return starfile.Attr(f, name), nil
 }
 func (f *Entry) AttrNames() []string {
-	return []string{"binary", "bytes", "entry_type", "gid", "gname", "hex", "link", "mode", "mtime", "name", "path", "read", "size", "slice", "stored_size", "uid", "uname"}
+	return []string{"binary", "bytes", "entry_type", "gid", "gname", "hex", "link", "major", "minor", "mode", "mtime", "name", "path", "read", "size", "slice", "stored_size", "uid", "uname"}
 }

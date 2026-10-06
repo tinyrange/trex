@@ -20,7 +20,7 @@ import (
 	blockstar "github.com/tinyrange/trex/block/star"
 	channelpkg "github.com/tinyrange/trex/channel"
 	"github.com/tinyrange/trex/lifecycle"
-	starfile "github.com/tinyrange/trex/storage/star"
+	"github.com/tinyrange/trex/storage"
 	vmmapi "github.com/tinyrange/trex/vmm"
 )
 
@@ -162,6 +162,26 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 		display += ",zoom-to-fit=on"
 	}
 	args = append(args, "-display", display)
+	if machine.Boot != nil {
+		if err := machine.Boot.Validate(); err != nil {
+			return fail(err)
+		}
+		for _, input := range []struct {
+			name string
+			file storage.Reader
+		}{{"kernel", machine.Boot.Kernel}, {"initrd", machine.Boot.Initramfs}} {
+			if input.file == nil {
+				continue
+			}
+			file, err := fileToMemfd("trex-linux-"+input.name, input.file)
+			if err != nil {
+				return fail(err)
+			}
+			driver.extra = append(driver.extra, file)
+			args = append(args, "-"+input.name, qemuInheritedFDPath(2+len(driver.extra)))
+		}
+		args = append(args, "-append", machine.Boot.CommandLine)
+	}
 	if backend.firmware == "uefi" {
 		firmware, err := qemuUEFIFirmware(machine.Architecture, backend.binary)
 		if err != nil {
@@ -381,12 +401,12 @@ func qemuExportName(index int) (string, error) {
 	return fmt.Sprintf("trx-disk-%d-%x", index, token), nil
 }
 
-func fileToMemfd(name string, source starfile.File) (*os.File, error) {
+func fileToMemfd(name string, source storage.Reader) (*os.File, error) {
 	file, err := qemuCreateAnonymousFile(name)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := io.Copy(file, io.NewSectionReader(source, 0, source.Size())); err != nil {
+	if _, err := io.CopyN(file, io.NewSectionReader(source, 0, source.Size()), source.Size()); err != nil {
 		file.Close()
 		return nil, err
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,6 +117,14 @@ func (b *qemuBackend) ID() string                 { return "qemu.v1" }
 func (b *qemuBackend) Capabilities() []string     { return append([]string(nil), b.capabilities...) }
 func (b *qemuBackend) Validate(machine vmmapi.Machine) []vmmapi.ValidationIssue {
 	var issues []vmmapi.ValidationIssue
+	if machine.Boot != nil {
+		if runtime.GOOS != "linux" || (machine.Architecture != "i386" && machine.Architecture != "x86_64") {
+			issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.linux_boot", Field: "boot", Message: "direct Linux boot currently requires a Linux host and x86 guest"})
+		}
+		if err := machine.Boot.Validate(); err != nil {
+			issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.linux_boot", Field: "boot", Message: err.Error()})
+		}
+	}
 	switch machine.Architecture {
 	case "i386", "x86_64", "aarch64":
 	default:
@@ -217,13 +226,17 @@ func Available() bool { return qemuNativeAvailable() }
 func Capabilities() []string { return qemuCapabilities() }
 
 func qemuCapabilities() []string {
-	return normalizedCapabilities([]string{
+	capabilities := []string{
 		"channel.console", "channel.custom", "channel.debugger", "channel.serial",
 		"debugger.gdb", "disk", "disk.bus.auto", "disk.bus.floppy", "disk.bus.ide", "disk.bus.virtio", "disk.bus.nvme", "disk.geometry.chs",
 		"disk.snapshot", "display.capturable", "display.interactive", "extension.qemu.v1",
 		"input.key", "input.pointer", "input.text", "lifecycle.pause", "lifecycle.powerdown",
 		"lifecycle.reset", "lifecycle.stop", "network.bridge", "network.nat", "screenshot", "video.record",
-	})
+	}
+	if runtime.GOOS == "linux" {
+		capabilities = append(capabilities, "boot.linux")
+	}
+	return normalizedCapabilities(capabilities)
 }
 
 func qemuBackendBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -346,6 +359,7 @@ func qemuOptionBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		return nil, fmt.Errorf("option: invalid option name %q", name)
 	}
 	reserved := map[string]bool{
+		"-kernel": true, "-initrd": true, "-append": true,
 		"-accel": true, "-blockdev": true, "-chardev": true, "-daemonize": true,
 		"-display": true, "-drive": true, "-gdb": true, "-incoming": true,
 		"-m": true, "-machine": true, "-monitor": true, "-pidfile": true,
