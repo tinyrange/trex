@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"github.com/tinyrange/trex/compression/lzvn"
 	"github.com/tinyrange/trex/storage"
 	"hash/adler32"
 	"io"
@@ -62,14 +63,23 @@ func Open(r storage.Reader) (*Image, error) {
 			continue
 		}
 		if len(b) >= 8 && string(b[:4]) == "comp" {
-			if string(b[4:8]) != "lzss" || len(b) < 384 {
+			if (string(b[4:8]) != "lzss" && string(b[4:8]) != "lzvn") || len(b) < 384 {
 				return nil, fmt.Errorf("darwin: unsupported compressed cache")
 			}
 			size, packed := binary.BigEndian.Uint32(b[12:]), binary.BigEndian.Uint32(b[16:])
 			if uint64(packed) != uint64(len(b)-384) {
 				return nil, fmt.Errorf("darwin: packed length mismatch")
 			}
-			out, err := decodeLZSS(b[384:], int(size))
+			if size < 32 || size > MaxKernelSize {
+				return nil, fmt.Errorf("darwin: decoded size outside bounds")
+			}
+			var out []byte
+			var err error
+			if string(b[4:8]) == "lzvn" {
+				out, err = lzvn.Decode(b[384:], int(size), nil)
+			} else {
+				out, err = decodeLZSS(b[384:], int(size))
+			}
 			if err != nil {
 				return nil, err
 			}

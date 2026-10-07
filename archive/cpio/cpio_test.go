@@ -2,6 +2,7 @@ package cpio
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -124,7 +125,7 @@ func TestBoundsAndChecksums(t *testing.T) {
 		t.Fatal("accepted truncated payload")
 	}
 	b = append(record("070701", "a", "", 1, 0100644, 1), record("070701", "b", "", 2, 0100644, 1)...)
-	if _, err = Open(b, &starfile.Bytes{Data: b}, auto.Options{MaxEntries: 1}); err != auto.ErrLimit {
+	if _, err = Open(b, &starfile.Bytes{Data: b}, auto.Options{MaxEntries: 1}); !errors.Is(err, auto.ErrLimit) {
 		t.Fatalf("entry limit: %v", err)
 	}
 }

@@ -2118,7 +2118,7 @@ Reads full, single-volume historical BSD dumps with 1024-byte records, magic6001
 
 ### `archive.bzip2`
 
-`archive.bzip2(file, maximum_bytes=<unlimited>) -> file`
+`archive.bzip2(file, maximum_bytes=<unlimited>, cache=False) -> file`
 
 Opens concatenated bzip2 streams, including legacy randomized blocks, as a lazy read-only file with a bounded decoded block cache. Block and stream checksums are checked during reads; size scans the complete stream. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. cache=True requires explicit positive maximum_bytes, eagerly validates every member to EOF, and returns an immutable paged RAM snapshot supporting random access without replay or host files; integrity or overflow failures return no partial result. Does not interpret an archive inside the stream.
 
@@ -2154,9 +2154,9 @@ Decodes a UNIX compress (.Z) stream with 9–16-bit LZW codes, legacy or block m
 
 ### `archive.cpio`
 
-`archive.cpio(file, maximum_entries=100000) -> list[dict]`
+`archive.cpio(file, maximum_entries=100000, apple_double=False) -> list[dict]`
 
-Reads ASCII CPIO into flat metadata dictionaries without following links or instantiating special files. Supports newc, CRC newc, odc and concatenated archives; maximum_entries bounds the index. Regular data is exposed as lazy file views.
+Indexes ASCII CPIO directly into flat metadata dictionaries using bounded forward metadata reads, without following links or instantiating special files. Supports newc, CRC newc, odc and concatenated archives; maximum_entries bounds original records, with contextual limit errors. Regular data is borrowed. archive identifies the trailer-delimited hardlink namespace. apple_double=True explicitly folds ._ sidecars into finder_info, resource and named xattrs using bounded ATTR decoding; malformed metadata and missing targets fail rather than discarding data.
 
 ### `archive.cpio_build`
 
@@ -2409,6 +2409,12 @@ Wraps a file with caller-supplied attributes while retaining its bytes. Use this
 `binary.appledouble(file) -> dict[int,file]`
 
 Parses AppleDouble version 2 headers and returns an integer-entry-ID dictionary of borrowed files. Validates table bounds, duplicate IDs and non-overlapping extents. Preserves unknown entries without interpreting them. FinderInfo (9), resource fork (2) and any ATTR extension remain raw bytes; does not apply metadata or modify files.
+
+### `binary.appledouble_metadata`
+
+`binary.appledouble_metadata(file) -> dict(finder_info, resource, xattrs, other)`
+
+Decodes FinderInfo, resource forks and macOS ATTR named attributes as separate borrowed views. Absolute ATTR offsets, 64 KiB header/table bound, names, duplicate attributes and overlapping data extents are checked. Unknown entry IDs are retained in other. Does not apply metadata or follow links.
 
 ### `binary.base64`
 

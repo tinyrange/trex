@@ -170,12 +170,16 @@ func buildTree(records []treeRecord, maxKey uint16, compare byte) ([]byte, error
 			return nil, err
 		}
 	}
-	total := max(8, len(nodes)*2)
 	// A single header map describes this deliberately bounded tree (no map nodes).
 	mapSize := treeNodeSize - 14 - 106 - 128 - 8
-	if total > mapSize*8 || total*treeNodeSize > 256<<20 {
-		return nil, fmt.Errorf("hfsx: B-tree metadata limit")
+	limit := min(mapSize*8, (256<<20)/treeNodeSize)
+	// Prefer 100% spare nodes for guest growth, but do not reject a valid
+	// populated catalog solely because that optional reserve exceeds the
+	// metadata ceiling. Keep at least eight free nodes and the same ceiling.
+	if len(nodes) > limit-8 {
+		return nil, fmt.Errorf("hfsx: B-tree metadata limit: %d used nodes plus growth reserve", len(nodes))
 	}
+	total := min(max(8, len(nodes)*2), limit)
 	out := make([]byte, total*treeNodeSize)
 	write := func(id uint32, kind, height byte, rows [][]byte) {
 		n := out[int(id)*treeNodeSize : (int(id)+1)*treeNodeSize]

@@ -103,9 +103,17 @@ func (p *pc) installDarwin(boot *vmm.DarwinBoot) error {
 	}
 	systemID[6] = (systemID[6] & 15) | 0x40
 	systemID[8] = (systemID[8] & 63) | 0x80
+	// XNU2782 early_random requires 64 firmware entropy bytes before the
+	// first kernel log. PE_get_random_seed consumes /chosen/random-seed
+	// and clears it in the guest tree. Supply fresh cryptographic entropy,
+	// never a fixed seed, hardware identity, or caller SMC key.
+	seed := make([]byte, 64)
+	if _, err := rand.Read(seed); err != nil {
+		return fmt.Errorf("cc: Darwin firmware entropy: %w", err)
+	}
 	memoryProps := map[string][]byte{"Kernel-__TEXT": darwin.Range(uint32(img.Base), uint32(img.End-img.Base))}
 	tree := node("/", map[string][]byte{"compatible": darwin.CString("ACPI"), "model": darwin.CString("ACPI"), "board-id": darwin.CString("TREX-CCPC"), "#address-cells": darwin.U32(2), "#size-cells": darwin.U32(2)},
-		node("chosen", map[string][]byte{"boot-args": darwin.CString(boot.CommandLine), "boot-file": darwin.CString("kernelcache")}, node("memory-map", memoryProps)),
+		node("chosen", map[string][]byte{"boot-args": darwin.CString(boot.CommandLine), "boot-file": darwin.CString("kernelcache"), "random-seed": seed}, node("memory-map", memoryProps)),
 		node("efi", map[string][]byte{"firmware-abi": darwin.CString("EFI64"), "firmware-vendor": p.ram[vendor : vendor+20], "firmware-revision": darwin.U32(1)},
 			node("platform", map[string][]byte{"FSBFrequency": darwin.U64(busHz), "system-id": systemID}),
 			node("runtime-services", map[string][]byte{"table": darwin.U64(runtime | 0xffffff8000000000)}),
