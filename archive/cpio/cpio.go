@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"path"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -24,7 +23,20 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 	if len(prefix) < 6 || !magic(string(prefix[:6])) {
 		return nil, auto.ErrNoMatch
 	}
-	limit := options.MaxEntries
+	entries, err := Read(source, options.MaxEntries)
+	if err != nil {
+		return nil, err
+	}
+	return auto.Tree(entries, options)
+}
+
+// Read indexes the flat archive directly, retaining borrowed payloads and Unix
+// metadata. Later duplicate paths replace earlier ones; archive identifies the
+// trailer-delimited hardlink namespace. No directory adapter is constructed.
+func Read(source storage.Reader, limit int) ([]auto.Entry, error) {
+	if source == nil || source.Size() < 0 {
+		return nil, fmt.Errorf("cpio: invalid source")
+	}
 	if limit <= 0 {
 		limit = 100000
 	}
@@ -48,15 +60,17 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 		}
 		links = map[linkKey]*linkGroup{}
 	}
-	read := func(off, n int64) ([]byte, error) {
-		if off < 0 || n < 0 || off > size || n > size-off {
-			return nil, io.ErrUnexpectedEOF
-		}
-		b := make([]byte, n)
-		_, err := io.ReadFull(io.NewSectionReader(source, off, n), b)
-		return b, err
+	metadata := metadataReader{source: source, size: size}
+	read := metadata.read
+	prefix, err := read(0, 6)
+	if err != nil {
+		return nil, err
+	}
+	if !magic(string(prefix)) {
+		return nil, auto.ErrNoMatch
 	}
 	count := 0
+	var archive uint64
 	for pos < size {
 		// Never reread header bytes: compressed portable readers may have to replay
 		// the entire stream for a backward read, even one of only a few bytes.
@@ -65,14 +79,23 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 			return nil, err
 		}
 		if first[0] == 0 {
-			pos++
+			padding, err := read(pos, min(int64(metadataBuffer), size-pos))
+			if err != nil {
+				return nil, err
+			}
+			for _, b := range padding {
+				if b != 0 {
+					break
+				}
+				pos++
+			}
 			continue
 		}
-		rest, err := read(pos+1, 5)
+		signature, err := read(pos, 6)
 		if err != nil {
 			return nil, err
 		}
-		sig := string(append(first, rest...))
+		sig := string(signature)
 		if !magic(sig) {
 			return nil, fmt.Errorf("cpio: invalid header at %d", pos)
 		}
@@ -84,15 +107,15 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 		if err != nil {
 			return nil, err
 		}
-		var fields []uint64
+		var fields [13]uint64
 		if sig == "070707" {
 			at := 0
-			for _, width := range []int{6, 6, 6, 6, 6, 6, 6, 11, 6, 11} {
+			for index, width := range [...]int{6, 6, 6, 6, 6, 6, 6, 11, 6, 11} {
 				v, e := number(h[at:at+width], 8)
 				if e != nil {
 					return nil, e
 				}
-				fields = append(fields, v)
+				fields[index] = v
 				at += width
 			}
 		} else {
@@ -101,7 +124,7 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 				if e != nil {
 					return nil, e
 				}
-				fields = append(fields, v)
+				fields[at/8] = v
 			}
 		}
 		var ino, mode, uid, gid, nlink, mtime, length, dev, minor, rdev, rminor, namesize, check uint64
@@ -144,11 +167,12 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 				return nil, fmt.Errorf("cpio: invalid trailer")
 			}
 			finish()
+			archive++
 			continue
 		}
 		count++
 		if count > limit {
-			return nil, auto.ErrLimit
+			return nil, fmt.Errorf("cpio: entry limit %d at %q (offset %d): %w", limit, name, dataOffset, auto.ErrLimit)
 		}
 		if strings.HasPrefix(name, "/") {
 			return nil, fmt.Errorf("cpio: absolute path")
@@ -165,7 +189,7 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 			}
 			continue
 		}
-		entry := auto.Entry{Name: name, Attributes: map[string]any{"mode": mode, "uid": uid, "gid": gid, "mtime": mtime, "inode": ino, "nlink": nlink, "device": dev, "device_minor": minor, "rdev": rdev, "rdev_minor": rminor}}
+		entry := auto.Entry{Name: name, Attributes: map[string]any{"archive": archive, "mode": mode, "uid": uid, "gid": gid, "mtime": mtime, "inode": ino, "nlink": nlink, "device": dev, "device_minor": minor, "rdev": rdev, "rdev_minor": rminor}}
 		var reader storage.Reader = io.NewSectionReader(source, dataOffset, int64(length))
 		if sig == "070702" {
 			reader = &checkedReader{Reader: reader, want: uint32(check)}
@@ -180,9 +204,18 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 			if length > 65536 {
 				return nil, auto.ErrLimit
 			}
-			target, e := io.ReadAll(io.NewSectionReader(reader, 0, int64(length)))
+			target, e := read(dataOffset, int64(length))
 			if e != nil {
 				return nil, e
+			}
+			if sig == "070702" {
+				var sum uint32
+				for _, b := range target {
+					sum += uint32(b)
+				}
+				if sum != uint32(check) {
+					return nil, fmt.Errorf("cpio: checksum mismatch for symlink %q", name)
+				}
 			}
 			entry.Kind = "symlink"
 			entry.Attributes["target"] = string(target)
@@ -210,24 +243,39 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 		entries = append(entries, entry)
 	}
 	finish()
-	var selected []auto.Entry
+	selected := entries[:0]
 	for i, e := range entries {
 		if latest[e.Name] == i {
 			selected = append(selected, e)
 		}
 	}
-	return auto.Tree(selected, options)
+	clear(entries[len(selected):])
+	return selected, nil
 }
 
 func magic(s string) bool { return s == "070701" || s == "070702" || s == "070707" }
 func number(b []byte, base int) (uint64, error) {
-	// ParseUint accepts a leading +; ASCII CPIO numeric fields do not.
+	// CPIO fields have at most eleven octal or eight hexadecimal digits, so
+	// validated input cannot overflow uint64. Reject signs and spaces.
+	var value uint64
 	for _, c := range b {
-		if !(c >= '0' && c <= '7' || base == 16 && (c >= '8' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F')) {
+		var digit byte
+		switch {
+		case c >= '0' && c <= '9':
+			digit = c - '0'
+		case c >= 'a' && c <= 'f':
+			digit = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			digit = c - 'A' + 10
+		default:
 			return 0, fmt.Errorf("cpio: invalid numeric field")
 		}
+		if int(digit) >= base {
+			return 0, fmt.Errorf("cpio: invalid numeric field")
+		}
+		value = value*uint64(base) + uint64(digit)
 	}
-	return strconv.ParseUint(string(b), base, 64)
+	return value, nil
 }
 
 type checkedReader struct {

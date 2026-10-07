@@ -5,6 +5,7 @@ package lzfse
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/tinyrange/trex/compression/lzvn"
 	"github.com/tinyrange/trex/storage"
 	"io"
 	"math"
@@ -299,7 +300,7 @@ func decode(b block, src, history []byte) ([]byte, error) {
 		return src, nil
 	}
 	if b.kind == "bvxn" {
-		return decodeLZVN(src, int(b.size), history)
+		return lzvn.Decode(src, int(b.size), history)
 	}
 	lt, err := table(b.freq[104:], 1024, nil, nil)
 	if err != nil {

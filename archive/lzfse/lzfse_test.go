@@ -2,6 +2,7 @@ package lzfse
 
 import (
 	"bytes"
+	"github.com/tinyrange/trex/compression/lzvn"
 	"io"
 	"testing"
 )
@@ -116,7 +117,7 @@ func TestLZVNAndMalformedStreams(t *testing.T) {
 		t.Fatal("invalid history distance accepted")
 	}
 	for _, tokens := range [][]byte{{0xf3, 6, 0, 0, 0, 0, 0, 0, 0}, {0x1e}, {0xe3, 'a'}} {
-		if _, err := decodeLZVN(tokens, 3, nil); err == nil {
+		if _, err := lzvn.Decode(tokens, 3, nil); err == nil {
 			t.Fatal("invalid LZVN accepted")
 		}
 	}
