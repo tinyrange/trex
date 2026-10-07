@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	binaryapi "github.com/tinyrange/trex/binary"
+	"github.com/tinyrange/trex/binary/androidboot"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	starfile "github.com/tinyrange/trex/storage/star"
 	windowsapi "github.com/tinyrange/trex/windows"
@@ -63,6 +64,7 @@ func binaryScalarCodecNamed(name string) (binaryScalarCodec, bool) {
 
 func Builtins() starlark.StringDict {
 	attrs := starlark.StringDict{
+		"android_boot":         starlark.NewBuiltin("android_boot", androidboot.Builtin),
 		"annotate":             starlark.NewBuiltin("annotate", binaryAnnotateBuiltin),
 		"appledouble":          starlark.NewBuiltin("appledouble", appleDoubleBuiltin),
 		"appledouble_metadata": starlark.NewBuiltin("appledouble_metadata", appleDoubleMetadataBuiltin),

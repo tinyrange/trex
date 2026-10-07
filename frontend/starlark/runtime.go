@@ -27,6 +27,7 @@ import (
 	"github.com/tinyrange/trex/archive/compactpro"
 	"github.com/tinyrange/trex/archive/compressed"
 	"github.com/tinyrange/trex/archive/cpio"
+	"github.com/tinyrange/trex/archive/crx"
 	"github.com/tinyrange/trex/archive/gzip"
 	"github.com/tinyrange/trex/archive/hunk"
 	"github.com/tinyrange/trex/archive/ibmisave"
@@ -61,6 +62,7 @@ import (
 	debugapi "github.com/tinyrange/trex/debug"
 	emulatorapi "github.com/tinyrange/trex/emulator"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
+	"github.com/tinyrange/trex/filesystem/androidlp"
 	filesystemapm "github.com/tinyrange/trex/filesystem/apm"
 	filesystemckd "github.com/tinyrange/trex/filesystem/ckd"
 	filesystemefs "github.com/tinyrange/trex/filesystem/efs"
@@ -123,6 +125,7 @@ func predeclared() starlark.StringDict {
 		"archive": namespace{
 			name: "archive",
 			attrs: starlark.StringDict{
+				"crx":              starlark.NewBuiltin("crx", crx.Builtin),
 				"ar":               starlark.NewBuiltin("ar", ararchive.Builtin),
 				"cab":              starlark.NewBuiltin("cab", cabarchive.Builtin),
 				"cfb":              starlark.NewBuiltin("cfb", cfb.Builtin),
@@ -237,6 +240,7 @@ func predeclared() starlark.StringDict {
 				"ntfs_record":          starlark.NewBuiltin("ntfs_record", filesystemntfs.RecordBuiltin),
 				"udf":                  starlark.NewBuiltin("udf", filesystemudf.UDFBuiltin),
 				"vhdx":                 starlark.NewBuiltin("vhdx", filesystemvhdx.VHDXBuiltin),
+				"android_super":        starlark.NewBuiltin("android_super", androidlp.Builtin),
 			},
 		},
 		"firmware": namespace{name: "firmware", attrs: acpistar.Builtins()},

@@ -1,5 +1,29 @@
 # Third-party format references
 
+## Chrome packages and Android recovery filesystems
+
+The CRX3 envelope, signed-data framing, and developer-ID derivation follow
+Chromium's [CRX3 schema](https://chromium.googlesource.com/chromium/src/+/main/components/crx_file/crx3.proto)
+and [verifier](https://chromium.googlesource.com/chromium/src/+/main/components/crx_file/crx_verifier.cc).
+Signature verification is independently implemented with Go's standard crypto
+packages; it does not pin a Chrome Web Store signing key.
+
+Android logical-partition metadata versions 10.0–10.2 follow AOSP's
+[liblp declarations](https://android.googlesource.com/platform/system/core/+/refs/heads/main/fs_mgr/liblp/include/liblp/metadata_format.h).
+Boot and vendor-boot versions 3–4 follow AOSP's
+[bootimg.h](https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/include/bootimg/bootimg.h).
+These readers validate structural bounds and liblp checksums, not AVB trust.
+
+EROFS inode, directory, compression-index, and checksum layouts were checked
+against Linux's [EROFS structures](https://github.com/torvalds/linux/blob/master/fs/erofs/erofs_fs.h)
+and compression mapping rules in `fs/erofs/zmap.c`. The Go implementation and
+synthetic regression fixtures are independently written; no kernel decoder is
+copied, linked, or invoked. LZ4 block decoding follows the published
+[block format](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md).
+Real-media checks used the signed Device Recovery Utility extension and ASUS
+Googlebook 14 recovery build `16452207_CL3B.260622.271.R1`, without incorporating
+their contents into the repository.
+
 ## Legacy Microsoft setup media
 
 Office media supplied the fixtures for the native SZ/KWAJ adaptations. The
