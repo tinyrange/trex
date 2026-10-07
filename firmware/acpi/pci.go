@@ -74,9 +74,21 @@ func (p PCIRoot) AML() ([]byte, error) {
 	for _, v := range []uint16{0, uint16(p.FirstBus), uint16(p.LastBus), 0, uint16(p.LastBus) - uint16(p.FirstBus) + 1} {
 		bus = binary.LittleEndian.AppendUint16(bus, v)
 	}
-	resources := append(bus, 0x8a, 43, 0, 0, 0x0c, 1)
-	for _, v := range []uint64{0, p.MemoryBase, p.MemoryBase + p.MemorySize - 1, 0, p.MemorySize} {
-		resources = binary.LittleEndian.AppendUint64(resources, v)
+	resources := bus
+	end := p.MemoryBase + p.MemorySize - 1
+	// Prefer DWord descriptors for windows that fit below 4 GiB. Older
+	// ACPI PCI roots (including Lion's AppleACPIPlatform) ignore QWord
+	// memory windows while accepting the equivalent DWord producer range.
+	if end <= 0xffffffff && p.MemorySize <= 0xffffffff {
+		resources = append(resources, 0x87, 23, 0, 0, 0x0c, 1)
+		for _, v := range []uint32{0, uint32(p.MemoryBase), uint32(end), 0, uint32(p.MemorySize)} {
+			resources = binary.LittleEndian.AppendUint32(resources, v)
+		}
+	} else {
+		resources = append(resources, 0x8a, 43, 0, 0, 0x0c, 1)
+		for _, v := range []uint64{0, p.MemoryBase, end, 0, p.MemorySize} {
+			resources = binary.LittleEndian.AppendUint64(resources, v)
+		}
 	}
 	if p.Legacy {
 		// DWord I/O window; 65536 bytes cannot fit in a Word descriptor.
@@ -90,7 +102,7 @@ func (p PCIRoot) AML() ([]byte, error) {
 	body = append(body, amlName("_CRS", amlPackage([]byte{0x11}, buffer))...)
 	routes := []byte{byte(len(p.Interrupts))}
 	for _, r := range p.Interrupts {
-		if r.Device > 31 || r.Pin > 3 || r.Interrupt < 32 {
+		if r.Device > 31 || r.Pin > 3 {
 			return nil, fmt.Errorf("invalid PCI interrupt route")
 		}
 		row := []byte{4}

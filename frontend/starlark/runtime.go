@@ -18,6 +18,7 @@ import (
 	"github.com/tinyrange/trex/archive/arsenic"
 	"github.com/tinyrange/trex/archive/aws"
 	"github.com/tinyrange/trex/archive/bff"
+	"github.com/tinyrange/trex/archive/bom"
 	"github.com/tinyrange/trex/archive/bru"
 	"github.com/tinyrange/trex/archive/bsddump"
 	"github.com/tinyrange/trex/archive/bzip2"
@@ -29,10 +30,13 @@ import (
 	"github.com/tinyrange/trex/archive/gzip"
 	"github.com/tinyrange/trex/archive/hunk"
 	"github.com/tinyrange/trex/archive/ibmisave"
+	"github.com/tinyrange/trex/archive/im4p"
 	"github.com/tinyrange/trex/archive/irix"
 	"github.com/tinyrange/trex/archive/kwaj"
 	"github.com/tinyrange/trex/archive/lha"
+	"github.com/tinyrange/trex/archive/lzfse"
 	"github.com/tinyrange/trex/archive/macresource"
+	"github.com/tinyrange/trex/archive/pbzx"
 	"github.com/tinyrange/trex/archive/rar"
 	"github.com/tinyrange/trex/archive/rms"
 	"github.com/tinyrange/trex/archive/sevenzip"
@@ -40,8 +44,10 @@ import (
 	"github.com/tinyrange/trex/archive/stuffit"
 	"github.com/tinyrange/trex/archive/szdd"
 	"github.com/tinyrange/trex/archive/tome"
+	"github.com/tinyrange/trex/archive/udif"
 	"github.com/tinyrange/trex/archive/vmsbackup"
 	"github.com/tinyrange/trex/archive/wim"
+	"github.com/tinyrange/trex/archive/xar"
 	"github.com/tinyrange/trex/archive/xz"
 	ziparchive "github.com/tinyrange/trex/archive/zip"
 	"github.com/tinyrange/trex/archive/zstd"
@@ -147,6 +153,12 @@ func predeclared() starlark.StringDict {
 				"rms_variable":     starlark.NewBuiltin("rms_variable", rms.VariableBuiltin),
 				"gzip":             starlark.NewBuiltin("gzip", gzip.Builtin),
 				"gzip_members":     starlark.NewBuiltin("gzip_members", gzip.MembersBuiltin),
+				"pbzx":             starlark.NewBuiltin("pbzx", pbzx.Builtin),
+				"im4p":             starlark.NewBuiltin("im4p", im4p.Builtin),
+				"bom":              starlark.NewBuiltin("bom", bom.Builtin),
+				"lzfse":            starlark.NewBuiltin("lzfse", lzfse.Builtin),
+				"xar":              starlark.NewBuiltin("xar", xar.Builtin),
+				"udif":             starlark.NewBuiltin("udif", udif.Builtin),
 				"cpio":             starlark.NewBuiltin("cpio", cpio.Builtin),
 				"cpio_build":       starlark.NewBuiltin("cpio_build", cpio.BuildBuiltin),
 				"bzip2":            starlark.NewBuiltin("bzip2", bzip2.Builtin),
@@ -194,6 +206,7 @@ func predeclared() starlark.StringDict {
 				"ext4":                 starlark.NewBuiltin("ext4", filesystemext4.Builtin),
 				"ext4_build":           starlark.NewBuiltin("ext4_build", filesystemext4.BuildBuiltin),
 				"hfs":                  starlark.NewBuiltin("hfs", filesystemhfs.Builtin),
+				"hfs_build":            starlark.NewBuiltin("hfs_build", filesystemhfs.BuildBuiltin),
 				"ufs":                  starlark.NewBuiltin("ufs", filesystemufs.Builtin),
 				"ods2":                 starlark.NewBuiltin("ods2", filesystemods2.Builtin),
 				"ultrix_label":         starlark.NewBuiltin("ultrix_label", filesystemultrix.Builtin),

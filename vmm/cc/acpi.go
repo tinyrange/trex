@@ -126,7 +126,14 @@ func (p *pc) installACPI() error {
 	if err != nil {
 		return err
 	}
-	pciAML, err := (acpi.PCIRoot{Legacy: true, MemoryBase: 0xc0000000, MemorySize: 0x3ec00000}).AML()
+	root := acpi.PCIRoot{Legacy: true, MemoryBase: 0xc0000000, MemorySize: 0x3ec00000}
+	if p.pciIDE != nil && p.pciIDE.ich7 {
+		root.Interrupts = []acpi.PCIInterrupt{{Device: 1, Pin: 0, Interrupt: 16}}
+	}
+	if p.uhci != nil {
+		root.Interrupts = append(root.Interrupts, acpi.PCIInterrupt{Device: 3, Pin: 0, Interrupt: 17})
+	}
+	pciAML, err := root.AML()
 	if err != nil {
 		return err
 	}
@@ -148,6 +155,13 @@ func (p *pc) installACPI() error {
 		// children's interrupt resources.
 		dev.Parent = `\_SB.PCI0`
 		data, err := dev.AML()
+		if err != nil {
+			return err
+		}
+		aml = append(aml, data...)
+	}
+	if p.smc != nil {
+		data, err := (acpi.ISADevice{Name: "SMC0", ID: "APP0001", Ports: [][2]uint16{{smcBase, 32}}, IRQs: []uint8{6}}).AML()
 		if err != nil {
 			return err
 		}
@@ -203,7 +217,7 @@ func (p *pc) installACPI() error {
 	roots := []uint32{fadtAddr, madtAddr}
 	if p.hpet != nil {
 		body := make([]byte, 20)
-		binary.LittleEndian.PutUint32(body, uint32(hpetCapabilities&0xffffffff))
+		binary.LittleEndian.PutUint32(body, uint32(p.hpet.read(0, p.now())&0xffffffff))
 		body[5] = 64 // System-memory GAS, 64-bit registers.
 		binary.LittleEndian.PutUint64(body[8:], hpetAddress)
 		binary.LittleEndian.PutUint16(body[17:], 128)

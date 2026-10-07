@@ -2,6 +2,8 @@ package cc
 
 import (
 	"encoding/binary"
+	"fmt"
+	"github.com/tinyrange/trex/emulator/cpu"
 
 	"j5.nz/cc/hypervisor"
 )
@@ -12,8 +14,10 @@ import (
 // BARs and a PCI interrupt pin are not advertised.
 // The synthetic identity selects the guest's generic PCI IDE class driver.
 type pciIDE struct {
+	ich7          bool
 	config        [256]byte
 	reads, writes uint64 // Dwords touched, for bounded device inspection.
+	trace         []any  // Last 32 configuration transfers, including stopped guest PC.
 	bm            [16]byte
 }
 
@@ -32,6 +36,9 @@ func newPCIIDE() *pciIDE {
 }
 
 func (d *pciIDE) write(offset int, value byte) {
+	if d.ich7 && d.writeICH7(offset, value) {
+		return
+	}
 	switch offset {
 	case 4:
 		d.config[offset] = value & 5 // I/O decoding and bus mastering.
@@ -45,9 +52,9 @@ func (d *pciIDE) write(offset int, value byte) {
 }
 
 func (p *pc) pciIO(ex hypervisor.X86Exit) error {
-	oldCommand := byte(0)
+	oldConfig := [256]byte{}
 	if p.pciIDE != nil {
-		oldCommand = p.pciIDE.config[4]
+		oldConfig = p.pciIDE.config
 	}
 	for i := uint32(0); i < ex.Count; i++ {
 		data := ex.Data[int(i)*int(ex.Size) : int(i+1)*int(ex.Size)]
@@ -72,12 +79,73 @@ func (p *pc) pciIO(ex hypervisor.X86Exit) error {
 				}
 				value = p.pciIDE.config[offset]
 			}
+			if port >= 0xcfc && port <= 0xcff && p.pciDisplay != nil && p.pciAddress&0xffffff00 == 0x80001000 {
+				offset := int(p.pciAddress&0xfc) + port - 0xcfc
+				if ex.Write {
+					p.pciDisplay.write(offset, data[j])
+				}
+				value = p.pciDisplay.config[offset]
+			}
+			if port >= 0xcfc && port <= 0xcff && p.uhci != nil && p.pciAddress&0xffffff00 == 0x80001800 {
+				offset := int(p.pciAddress&0xfc) + port - 0xcfc
+				if ex.Write {
+					p.uhci.writeConfig(offset, data[j])
+				}
+				value = p.uhci.config[offset]
+			}
 			if !ex.Write {
 				data[j] = value
 			}
 		}
 	}
-	if p.ide != nil && p.pciIDE != nil && oldCommand != p.pciIDE.config[4] {
+	if p.pciIDE != nil && ex.Port >= 0xcfc && ex.Port <= 0xcff && p.pciAddress&0xffffff00 == 0x80000800 {
+		row := map[string]any{"offset": int64(p.pciAddress&0xfc) + int64(ex.Port-0xcfc), "write": ex.Write, "data": fmt.Sprintf("%x", ex.Data)}
+		if p.cpu != nil && p.darwin != nil {
+			r, err := p.cpu.Registers()
+			if err != nil {
+				return err
+			}
+			row["pc"] = int64(r.Rip)
+			row["sp"] = int64(r.Rsp)
+			row["bp"] = int64(r.Rbp)
+			if p.darwin != nil {
+				s, err := p.cpu.SystemRegisters()
+				if err != nil {
+					return err
+				}
+				mem := efiMemory{p: p, system: &s}
+				frames := []any{}
+				bp := r.Rbp
+				for n := 0; n < 6 && bp != 0; n++ {
+					var frame [16]byte
+					if err := mem.ReadMemory(bp, frame[:], cpu.Read); err != nil {
+						break
+					}
+					ret := binary.LittleEndian.Uint64(frame[8:])
+					frames = append(frames, map[string]any{"bp": int64(bp), "return": int64(ret)})
+					next := binary.LittleEndian.Uint64(frame[:])
+					if next <= bp {
+						break
+					}
+					bp = next
+				}
+				row["frames"] = frames
+			}
+		}
+		if len(p.pciIDE.trace) == 32 {
+			copy(p.pciIDE.trace, p.pciIDE.trace[1:])
+			p.pciIDE.trace = p.pciIDE.trace[:31]
+		}
+		p.pciIDE.trace = append(p.pciIDE.trace, row)
+	}
+	if p.ide != nil && p.pciIDE != nil && oldConfig != p.pciIDE.config {
+		old := *p.pciIDE
+		old.config = oldConfig
+		if old.primaryIRQ() != p.pciIDE.primaryIRQ() && p.cpu != nil {
+			if err := p.cpu.SetIRQ(old.primaryIRQ(), false); err != nil {
+				return err
+			}
+		}
 		if err := p.ide.signal(p.ide.pending); err != nil {
 			return err
 		}
@@ -87,7 +155,7 @@ func (p *pc) pciIO(ex hypervisor.X86Exit) error {
 }
 
 func (p *pc) ideIO(ex hypervisor.X86Exit) error {
-	if p.pciIDE != nil && p.pciIDE.config[4]&1 == 0 {
+	if p.pciIDE != nil && !p.pciIDE.primaryEnabled() {
 		if !ex.Write {
 			for i := range ex.Data {
 				ex.Data[i] = 0xff

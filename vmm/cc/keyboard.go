@@ -18,7 +18,10 @@ type ps2byte struct {
 
 func (d *driver) AbsolutePointer(ctx context.Context) (bool, error) {
 	var active bool
-	err := d.call(ctx, func() error { active = d.pc.input.active(); return nil })
+	err := d.call(ctx, func() error {
+		active = d.pc.input.active() || (d.pc.uhci != nil && d.pc.uhci.devices[1].configuration != 0)
+		return nil
+	})
 	return active, err
 }
 
@@ -259,6 +262,9 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 				}
 			}
 			return d.call(ctx, func() error {
+				if d.pc.uhci != nil {
+					return d.pc.uhci.devices[1].point(uint16(input.X), uint16(input.Y), buttons, input.Wheel)
+				}
 				return d.pc.input.pointer(uint32(input.X*65535/32767), uint32(input.Y*65535/32767), buttons, int32(input.Wheel))
 			})
 		}
@@ -284,7 +290,7 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 		return d.call(ctx, func() error { return d.pc.keyboard.mouseMove(int(input.X), -int(input.Y), buttons) })
 	}
 	if input.Kind == "key" {
-		return d.call(ctx, func() error { return d.pc.keyboard.key(input.Key, input.Down) })
+		return d.call(ctx, func() error { return d.pc.keyEvent(input.Key, input.Down) })
 	}
 	if input.Kind != "keys" {
 		return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "cc input supports key transitions and key chords"}
@@ -296,7 +302,7 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 	}
 	if err := d.call(ctx, func() error {
 		for _, key := range input.Keys {
-			if err := d.pc.keyboard.key(key, true); err != nil {
+			if err := d.pc.keyEvent(key, true); err != nil {
 				return err
 			}
 		}
@@ -315,7 +321,7 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 	remaining := len(input.Keys)
 	releaseKeys := func() error {
 		for remaining > 0 {
-			if err := d.pc.keyboard.key(input.Keys[remaining-1], false); err != nil {
+			if err := d.pc.keyEvent(input.Keys[remaining-1], false); err != nil {
 				return err
 			}
 			remaining--

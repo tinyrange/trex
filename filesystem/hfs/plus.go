@@ -111,7 +111,7 @@ func plusComponent(b []byte) string {
 	}
 	return s
 }
-func openPlus(file starfile.File, maximum int) (*Volume, error) {
+func openPlus(file starfile.File, maximum int, raw bool) (*Volume, error) {
 	var h [512]byte
 	if _, err := starfile.ReadFullAt(file, h[:], 1024); err != nil {
 		return nil, err
@@ -188,6 +188,9 @@ func openPlus(file starfile.File, maximum int) (*Volume, error) {
 		e.Modified = be.Uint32(data[16:])
 		e.Backup = be.Uint32(data[28:])
 		e.FinderInfo = append([]byte(nil), data[48:80]...)
+		e.UID, e.GID = be.Uint32(data[32:]), be.Uint32(data[36:])
+		e.AdminFlags, e.OwnerFlags = data[40], data[41]
+		e.Mode, e.Special = be.Uint16(data[42:]), be.Uint32(data[44:])
 		if kind == 1 {
 			e.Kind = "directory"
 		} else {
@@ -214,5 +217,17 @@ func openPlus(file starfile.File, maximum int) (*Volume, error) {
 	if err != nil {
 		return nil, err
 	}
-	return finishPaths(v, ids, plusComponent)
+	if err := r.attributes(h[352:432], v, ids, maximum*4); err != nil {
+		return nil, err
+	}
+	if _, err := finishPaths(v, ids, plusComponent); err != nil {
+		return nil, err
+	}
+	if err := decodeCompressed(v, raw); err != nil {
+		return nil, err
+	}
+	if err := plusLinks(v, raw); err != nil {
+		return nil, err
+	}
+	return v, nil
 }

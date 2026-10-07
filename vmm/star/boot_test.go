@@ -66,3 +66,38 @@ assertion = "boot" in dir(machine) and machine.boot.command_line == boot.command
 		t.Fatal("boot intent lost during composition or introspection")
 	}
 }
+
+func TestDarwinBootValidationBeforeLaunch(t *testing.T) {
+	kernel := &starfile.Bytes{Name: "kernel", Data: []byte("kernel")}
+	for _, tc := range []struct {
+		name  string
+		boot  *vmmapi.DarwinBoot
+		linux *vmmapi.LinuxBoot
+		caps  []string
+		valid bool
+	}{
+		{"supported", &vmmapi.DarwinBoot{Kernel: kernel}, nil, []string{"boot.darwin"}, true},
+		{"missing-capability", &vmmapi.DarwinBoot{Kernel: kernel}, nil, nil, false},
+		{"missing-kernel", &vmmapi.DarwinBoot{}, nil, []string{"boot.darwin"}, false},
+		{"bad-smc-key-length", &vmmapi.DarwinBoot{Kernel: kernel, SMCOSK: make([]byte, 63)}, nil, []string{"boot.darwin"}, false},
+		{"explicit-smc-key", &vmmapi.DarwinBoot{Kernel: kernel, SMCOSK: make([]byte, 64)}, nil, []string{"boot.darwin"}, true},
+		{"nul-command-line", &vmmapi.DarwinBoot{Kernel: kernel, CommandLine: "-v\x00-s"}, nil, []string{"boot.darwin"}, false},
+		{"conflicting-intents", &vmmapi.DarwinBoot{Kernel: kernel}, &vmmapi.LinuxBoot{Kernel: kernel}, []string{"boot.darwin", "boot.linux"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			thread, _, _ := newStarlarkRuntime("-")
+			resources, _ := lifecycle.ForThread(thread)
+			defer resources.Close()
+			backend := &fakeVMMBackend{capabilities: tc.caps}
+			machine := &vmmMachineValue{machine: VMMMachine{Architecture: "x86_64", Memory: 256 << 20, CPUs: 1, Display: VMMDisplay{Mode: "none"}, Boot: tc.linux, DarwinBoot: tc.boot}}
+			_, err := vmmStartBuiltin(thread, nil, starlark.Tuple{machine, &fakeVMMBackendValue{backend: backend}}, nil)
+			if tc.valid {
+				if err != nil || backend.starts != 1 {
+					t.Fatal(err, backend.starts)
+				}
+			} else if err == nil || backend.starts != 0 {
+				t.Fatal("invalid boot reached backend", err, backend.starts)
+			}
+		})
+	}
+}

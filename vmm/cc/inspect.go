@@ -27,6 +27,11 @@ func (d *driver) Extension(ctx context.Context, name string) (starlark.Value, er
 		"read_physical": starlark.NewBuiltin("cc.read_physical", i.readPhysical),
 		"disk":          starlark.NewBuiltin("cc.disk", i.disk),
 		"state":         starlark.NewBuiltin("cc.state", i.state),
+		"symbol":        starlark.NewBuiltin("cc.symbol", i.symbol),
+		"symbols":       starlark.NewBuiltin("cc.symbols", i.symbols),
+		"symbolize":     starlark.NewBuiltin("cc.symbolize", i.symbolize),
+		"read_virtual":  starlark.NewBuiltin("cc.read_virtual", i.readVirtual),
+		"disassemble":   starlark.NewBuiltin("cc.disassemble", i.disassemble),
 	}), nil
 }
 
@@ -139,10 +144,22 @@ func (p *pc) inspectState() (starlark.Value, error) {
 		}
 		timer = map[string]any{"config": int64(h.config), "counter": int64(h.counter(p.now())), "status": int64(h.status), "timers": comparators}
 	}
+	var smcState any
+	if s := p.smc; s != nil {
+		smcState = map[string]any{"status": int(s.status), "result": int(s.result), "command": int(s.command), "argument_bytes": s.argumentSize, "requests": s.trace}
+	}
+	var usbState any
+	if u := p.uhci; u != nil {
+		devices := []any{}
+		for n, d := range u.devices {
+			devices = append(devices, map[string]any{"port": n, "port_status": int(u.ports[n]), "address": int(d.address), "configuration": int(d.configuration), "controls": int64(d.controls), "reports": int64(d.reports), "pending": len(d.pending), "requests": d.trace})
+		}
+		usbState = map[string]any{"command": int(u.command), "status": int(u.status), "interrupt": int(u.interrupt), "frame": int(u.frame), "base": int64(u.base), "transactions": int64(u.transactions), "frames": int64(u.frames), "fault": u.fault, "config": fmt.Sprintf("%x", u.config[:]), "devices": devices}
+	}
 	var network any
 	var pciIDE any
 	if d := p.pciIDE; d != nil {
-		pciIDE = map[string]any{"config": fmt.Sprintf("%x", d.config[:64]), "read_dwords": fmt.Sprintf("%016x", d.reads), "write_dwords": fmt.Sprintf("%016x", d.writes), "bus_master": fmt.Sprintf("%x", d.bm)}
+		pciIDE = map[string]any{"config": fmt.Sprintf("%x", d.config[:]), "read_dwords": fmt.Sprintf("%016x", d.reads), "write_dwords": fmt.Sprintf("%016x", d.writes), "bus_master": fmt.Sprintf("%x", d.bm), "configuration_accesses": d.trace}
 	}
 	if n := p.nic; n != nil {
 		network = map[string]any{"tx": int64(n.tx), "rx": int64(n.rx), "command": int(n.command), "isr": int(n.isr), "imr": int(n.imr), "start": int(n.start), "stop": int(n.stop), "current": int(n.current), "boundary": int(n.boundary), "mac": fmt.Sprintf("%x", n.physical)}
@@ -155,10 +172,11 @@ func (p *pc) inspectState() (starlark.Value, error) {
 		"virtio_input": map[string]any{"status": int(p.input.status), "reports": int64(p.input.reports), "queue_ready": p.input.queues[0].ready, "used": int(p.input.queues[0].written), "descriptor": int64(p.input.queues[0].desc), "available": int64(p.input.queues[0].avail), "pending": len(p.input.pending)},
 		"ata_failures": failures, "ata_last_command": int(p.ide.lastCommand), "ata_dma_pending": p.ide.dmaPending, "ata_irq_pending": p.ide.pending,
 		"pci_address": int64(p.pciAddress), "pci_ide": pciIDE,
-		"network": network, "hpet": timer,
+		"network": network, "hpet": timer, "smc": smcState, "usb": usbState,
 		"pc": int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
-		"cr2": int64(s.Cr2), "cr4": int64(s.Cr4),
+		"cr2": int64(s.Cr2), "cr4": int64(s.Cr4), "efer": int64(s.Efer), "gs_base": int64(s.Gs.Base),
 		"registers": registers, "idt_base": int64(s.Idt.Base),
+		"console": string(p.console), "darwin": p.darwin,
 		"efi": p.efiTrace, "last_bios": p.lastService, "ata_commands": int64(p.ide.commands),
 		"ata_task": fmt.Sprintf("%x", p.ide.task), "vga_accesses": int64(p.vga.accesses),
 		"keyboard_commands": keyboard, "rtc": p.rtcTrace, "interrupts": interrupts,

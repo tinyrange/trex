@@ -2098,6 +2098,12 @@ Reads an AWS tape image into logical records and tape marks, checking block fram
 
 Reads single-volume AIX by-name backup archives with extended name records (FS_NAME_X=11), checking every header checksum, record and security bounds, declared sizes and end framing. Stored payloads, raw headers and ACL/PCL bytes remain borrowed file views; packed Huffman bodies decode natively using the enclosing logical size and a cumulative decoded-byte limit. Entries preserve original names, paths, modes, inode/link identity, owners, device numbers and timestamps without applying them. The returned trailer retains final unused distribution-block bytes, which may be nonzero. This initial generation handles exact-end or 1KiB-rounded distribution archives; other record generations, continuation volumes and larger physical tails fail explicitly. It does not run scripts, plan installation, interpret XCOFF or validate uncompressed file contents with a nonexistent payload checksum.
 
+### `archive.bom`
+
+`archive.bom(file, maximum_entries=1M) -> list[record]`
+
+Returns every flat Apple BOMStore path-inventory record, including architecture variants sharing a path and trailing leaf-chain nodes missing from branch indexes. Records preserve kind, BOM ID, mode, uid/gid, mtime, declared size, architecture, checksum or link target/device number. BOM describes metadata only and has no file contents. maximum_entries bounds indexing. The auto tree preserves duplicate variants under %00bom-variants with bom_path metadata.
+
 ### `archive.bru`
 
 `archive.bru(file, maximum_entries=1M) -> record`
@@ -2114,7 +2120,7 @@ Reads full, single-volume historical BSD dumps with 1024-byte records, magic6001
 
 `archive.bzip2(file, maximum_bytes=<unlimited>) -> file`
 
-Opens concatenated bzip2 streams, including legacy randomized blocks, as a lazy read-only file with a bounded decoded block cache. Block and stream checksums are checked during reads; size scans the complete stream. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. Does not interpret an archive inside the stream.
+Opens concatenated bzip2 streams, including legacy randomized blocks, as a lazy read-only file with a bounded decoded block cache. Block and stream checksums are checked during reads; size scans the complete stream. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. cache=True requires explicit positive maximum_bytes, eagerly validates every member to EOF, and returns an immutable paged RAM snapshot supporting random access without replay or host files; integrity or overflow failures return no partial result. Does not interpret an archive inside the stream.
 
 ### `archive.cab`
 
@@ -2160,9 +2166,9 @@ Constructs a deterministic Linux-compatible newc archive from Unix entry diction
 
 ### `archive.gzip`
 
-`archive.gzip(file, maximum_bytes=<unlimited>) -> file`
+`archive.gzip(file, maximum_bytes=<unlimited>, cache=False) -> file`
 
-Opens concatenated gzip streams as a lazy read-only file with a 1 MiB decoded cache. Forward reads reuse the decoder; backward reads outside the cache replay it. Checksums are validated as data is consumed; size scans the complete stream without retaining it. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. Does not interpret an archive inside the stream.
+Opens concatenated gzip streams as a lazy read-only file with a 1 MiB decoded cache. Forward reads reuse the decoder; backward reads outside the cache replay it. Checksums are validated as data is consumed; size scans the complete stream without retaining it. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. cache=True requires explicit positive maximum_bytes, eagerly validates every member to EOF, and returns an immutable paged RAM snapshot supporting random access without replay or host files; integrity or overflow failures return no partial result. Does not interpret an archive inside the stream.
 
 ### `archive.gzip_members`
 
@@ -2187,6 +2193,12 @@ Reads concatenated classic Amiga and EHF HUNK_UNIT object libraries, preserving 
 `archive.ibmi_save(file, maximum_entries=100000) -> record`
 
 Reads IBM i 7.5 optical save streams: save groups, EBCDIC object names, descriptor types, raw headers and stored sections. Preserves logical sizes, opaque addresses and uninterpreted object trailers without inventing restored contents. Validates page framing and section bounds; standalone 528-byte SAVF transport and other release layouts are not supported. Auto browsing exposes named object directories and downloadable stored bytes; this is structural decoding, not object restoration.
+
+### `archive.im4p`
+
+`archive.im4p(file) -> record`
+
+Parses an ASN.1 IM4P firmware envelope with bounded DER depth/node counts. Returns payload_type, description, borrowed payload, extras (original optional DER records) and expected_size (LZFSE metadata when present, otherwise zero). Does not decrypt, decompress, authenticate signatures or infer a filesystem; pass payload explicitly to archive.lzfse or the appropriate format reader.
 
 ### `archive.installer`
 
@@ -2254,6 +2266,12 @@ Returns the decoded KWAJ file together with its original name, method and compre
 
 Reads level-0 LHA headers and stored lh0 or Huffman/LZSS lh5 payloads. Checks header byte sums, file CRC-16, declared sizes, terminal marker, path components and duplicate paths. Returns entries, files and find(path). Entries preserve raw name/header bytes, the packed DOS timestamp, DOS attributes, method, CRC, decoded data and a borrowed stored view. Backslashes become path separators; parent traversal and empty components are rejected. maximum_entries bounds records; maximum_decoded_bytes bounds total decoded bytes and each stored payload. Other header levels, directory records, compression methods and self-extractors are explicit gaps. Nested containers are not automatically decoded.
 
+### `archive.lzfse`
+
+`archive.lzfse(file, maximum_bytes=<unlimited>) -> file`
+
+Opens Apple LZFSE v1/v2, LZVN and stored-block streams as a read-only file. Bounds block size/count and retains a 64 MiB decoded cache plus 256 KiB match history. Backward reads outside cache replay preceding dependent blocks. Validates entropy states, source/output lengths, match distances and end marker; LZFSE has no content checksum. Explicit maximum_bytes bounds total decoded bytes. No host or C decoder is used.
+
 ### `archive.mac_resource`
 
 `archive.mac_resource(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
@@ -2277,6 +2295,12 @@ Lists File instructions from the NSIS 2 ANSI non-solid stored/NSIS-DEFLATE metad
 `archive.pack(file, maximum_bytes=2GiB) -> file`
 
 Decodes a UNIX pack (1f1e) Huffman stream, checking its symbol tree, end marker, padding and declared output size. Enforces maximum_bytes and returns a file; useful for compressed IRIX manual pages nested inside inst images.
+
+### `archive.pbzx`
+
+`archive.pbzx(file, maximum_bytes=<unlimited>) -> file`
+
+Opens chunked Apple installer payloads as a lazy read-only concatenated file. Validates decoded/stored chunk lengths, XZ indexes and final short-chunk framing; stored chunks are borrowed. Uses a 64 MiB decoded cache and 64 MiB per-chunk bound. Omitted maximum_bytes has no total decoded ceiling; explicit positive limits are enforced. Read complete contents to force XZ checksums. Parse the resulting CPIO separately.
 
 ### `archive.rar`
 
@@ -2326,6 +2350,12 @@ With a directory, serializes its entries into tar bytes, optionally compressed. 
 
 Reads classic kc0001 Apple installer Tome catalogs and decodes both forks using chunked InstaCompOne in memory. Validates catalog counts, unique IDs, payload ranges, nonoverlap, exact fork sizes, both decoded-fork checksums and complete compressed-input consumption. Returns entries with ID, raw name bytes, reversible ID-qualified paths, file type/creator, Finder flags, version, Mac-epoch dates, decoded data/resource files and original stored views. maximum_decoded_bytes bounds total decoded output and each stored fork. Catalog checksum values are preserved as data_checksum and resource_checksum; checksums_verified is True after validation. Supports the observed 00010000 binary and 00000000 seven-bit-text chunk framing, plus stored chunks selected by a leading 01 byte, with retained 32KiB history and command-aligned 64KiB blocks; other encodings fail explicitly. Resource maps and nested archives require separate decoders. Installer code never runs. catalog_kind distinguishes file catalogs (1) from individual-resource catalogs (2). Kind2 exposes resource_type and signed resource_id, with the decoded resource payload in data and an empty resource fork; file-only metadata is omitted. Unknown catalog kinds are rejected.
 
+### `archive.udif`
+
+`archive.udif(file) -> record`
+
+Opens XML-backed, single-segment UDIF v4 disk images. Returns disk (complete logical disk), original xml and trailer, BLKX tables (name, offset, size, raw), and verify(). Raw, zero-fill, ignored, zlib and bzip2 chunks use bounded caches. verify() reads stored data and checks declared data-fork, table and master CRC32s; ignored sectors are excluded from table checksums. Rejects encryption, segmented images, unsupported codecs and overlapping/gapped maps. Does not authenticate signatures or infer filesystems.
+
 ### `archive.vmsbackup`
 
 `archive.vmsbackup(file, maximum_blocks=1M, maximum_records=1M, maximum_block_size=16MiB, maximum_files=1M, maximum_attributes=256) -> record`
@@ -2343,6 +2373,12 @@ Reads a complete single-volume VMS BACKUP block stream, validating header CRC-16
 `archive.wim(file) -> wim`
 
 Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image.
+
+### `archive.xar`
+
+`archive.xar(file, maximum_entries=100000) -> record`
+
+Indexes XAR v1 without extraction. Returns entries, files, original decoded toc, raw heap and find(path). Entries preserve path, kind, ID, mode, uid/gid, link target, encoding, raw/data file views, size and verify(). Verifies declared compressed-TOC checksum on open; member verify() checks archived/extracted checksums and exact decoded lengths. Supports stored, zlib and bzip2 members. Safe paths, XML depth/size, heap extents and index sizes are bounded. Signature metadata remains in TOC/heap but signatures are not authenticated.
 
 ### `archive.xz`
 
@@ -2367,6 +2403,12 @@ Opens a Zstandard stream as a portable file with a 64 MiB decoder window limit. 
 `binary.annotate(file, attrs) -> file`
 
 Wraps a file with caller-supplied attributes while retaining its bytes. Use this to attach construction metadata without rebuilding the file's contents.
+
+### `binary.appledouble`
+
+`binary.appledouble(file) -> dict[int,file]`
+
+Parses AppleDouble version 2 headers and returns an integer-entry-ID dictionary of borrowed files. Validates table bounds, duplicate IDs and non-overlapping extents. Preserves unknown entries without interpreting them. FinderInfo (9), resource fork (2) and any ATTR extension remain raw bytes; does not apply metadata or modify files.
 
 ### `binary.base64`
 
@@ -2493,6 +2535,24 @@ Encodes a 8-bit signed integer as 1 bytes in single-byte order. Returns new byte
 `binary.layout(format, names=None) -> binary.layout`
 
 Compiles a fixed-size binary layout from a format string and optional field names. The returned value encodes records or decodes a source at a byte offset.
+
+### `binary.macho`
+
+`binary.macho(file, architecture="x86_64") -> record`
+
+Inspects a bounded little-endian Mach-O64 x86_64 image, optionally selected from a big-endian fat32/fat64 universal container. Exposes the selected borrowed file, segments (name, address, size, file_offset, file_size, flags), and original symbols (name, address, type, section, description). at(address, size) returns borrowed file-backed virtual bytes; zero-fill, unmapped, ambiguous and overflowing ranges fail. Header, command, string and symbol counts and aggregate symbol-name allocations are bounded. Does not relocate, link or execute the image.
+
+### `binary.plist`
+
+`binary.plist(source) -> value`
+
+Decodes bounded XML 1.0 or bplist00 property lists into dict/list, bytes, string, bool, int64, float and opaque round-trippable plist_date values. Binary null becomes None; unsupported UID and 16-byte integers fail explicitly. Enforces 64MiB input/decoded data, 100000 visited values and depth128, validates reference/offset bounds, rejects cycles, duplicate keys and invalid Unicode. Does not follow XML external entities.
+
+### `binary.plist_encode`
+
+`binary.plist_encode(value) -> file`
+
+Encodes supported plist values as deterministic XML1.0 in an in-memory file. Preserves plist_date values from decoding. Enforces aggregate conversion/output byte, node and depth limits, including dictionary keys. Rejects None, non-finite floats, non-string keys, invalid XML characters and integers outside int64.
 
 ### `binary.read_f32be`
 
@@ -2706,9 +2766,9 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 ### `cc.backend`
 
-`cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_dma=True, overlay_limit=268435456) -> vmm_backend`
+`cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456) -> vmm_backend`
 
-Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 2 GiB. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 2 GiB. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
 ### `channel.expose_tcp`
 
@@ -3042,9 +3102,15 @@ Decodes standard and extended HD-Copy images in memory with strict RLE validatio
 
 ### `filesystem.hfs`
 
-`filesystem.hfs(file, maximum_entries=1M) -> record`
+`filesystem.hfs(file, maximum_entries=1M, raw_forks=False) -> record`
 
-Reads a classic HFS volume's catalog and extent-overflow records without mounting. Returns raw volume name, entries, paths and exact find(path) lookup. Every regular entry exposes separate data and resource fork views, their sizes, raw name bytes, catalog/parent IDs, Finder information, flags and Mac-epoch timestamps. Path components percent-escape non-ASCII/control bytes, slash and percent, keeping legacy names reversible without assuming a script encoding. HFS Plus and fragmented extents-file bootstrap are not yet supported; compressed resources require a separate resource decoder. Aliases are not followed.
+Reads classic HFS, HFS+/HFSX and embedded HFS+ volumes without mounting. Returns raw volume name, entries, paths and exact find(path). Entries expose distinct data/resource forks, xattrs, reversible escaped paths, Finder/catalog metadata, Unix modes/uid/gid and link targets. Hardlink inode aliases share decoded inode contents while raw_data/raw_resource retain physical alias forks. Symlinks are not followed. Inline and fork-backed attributes have independent extent-overflow support. decmpfs types 3/4 (inline/resource zlib with stored-block escape) decode lazily with exact lengths; other compression types fail unless raw_forks=True explicitly requests physical forensic forks. compression_type identifies decoded files. Does not mount, repair or execute filesystem contents.
+
+### `filesystem.hfs_build`
+
+`filesystem.hfs_build(entries, size, label="Untitled") -> file`
+
+Builds a bounded unjournaled case-sensitive HFSX version-5 volume natively in memory from UNIX entry dictionaries. size is the volume byte length; payloads are borrowed file/string/bytes values. Entries support path, mode, uid, gid, mtime, data, target, hardlink, major, minor, finder_info (32 bytes), resource, xattrs (name to file/bytes), owner_flags and admin_flags. Preserves regular-file hardlinks through native private inodes; directory hardlinks are unsupported. Paths use POSIX components (colon becomes catalog slash); names use HFS canonical decomposition. Allocation, catalog and attribute trees include free growth nodes with bounded metadata. Does not build partitions, journal, execute guest tools or write intermediate host files.
 
 ### `filesystem.host`
 
@@ -3438,6 +3504,12 @@ Lists the VMM backends registered in this runtime and their advertised capabilit
 `vmm.channel(kind, name, required=True)`
 
 Describes a named VM byte channel of the requested kind. required determines whether lack of backend support is a validation failure.
+
+### `vmm.darwin_boot`
+
+`vmm.darwin_boot(kernel, command_line='', smc_osk=b'') -> vmm_darwin_boot`
+
+Creates an unslid amd64 XNU v2 direct handoff from an immutable original kernelcache or Mach-O executable. Supports amd64 fat slices and Apple comp/lzss caches with checksum validation. Native cc requires Linux/amd64 KVM, x86_64 and no UEFI image execution; QEMU rejects this intent. No guest bootloader is executed or kernel instructions patched. RAM disks are not supported. Optional smc_osk must be empty or exactly 64 bytes; it is explicit caller-supplied SMC material, never bundled or logged. Native cc exposes SMC APP0001/IRQ6 and omits OSK0/OSK1 when no material is supplied. Verified scope is Lion HFS-root boot to launchd and a visible single-user shell, not keyboard input, a desktop or a complete installation.
 
 ### `vmm.disk`
 

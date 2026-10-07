@@ -138,6 +138,14 @@ func (d *ide) command(command byte) error {
 			word(63, modes)
 		}
 		word(53, 1)
+		if d.dmaEnabled {
+			// ATA field-validity bit 1 covers the multiword DMA timing data.
+			// Advertising word 63 without it makes original IOATADevConfig
+			// (and other standards-compliant clients) select PIO instead.
+			word(53, 3)
+			word(65, 120) // Minimum MWDMA cycle time, modes 0..2 supported.
+			word(66, 120) // Recommended cycle time, in nanoseconds.
+		}
 		word(54, uint16(d.geometry.Cylinders))
 		word(55, uint16(d.geometry.Heads))
 		word(56, uint16(d.geometry.Sectors))

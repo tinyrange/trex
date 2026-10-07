@@ -24,6 +24,13 @@ type Entry struct {
 	ID, Parent, Created, Modified, Backup uint32
 	Flags                                 uint16
 	FinderInfo                            []byte
+	CompressionType                       uint32
+	UID, GID, Special                     uint32
+	Mode                                  uint16
+	OwnerFlags, AdminFlags                byte
+	RawData, RawResource                  starfile.File
+	Target                                string
+	Xattrs                                map[string]starfile.File
 	Data, Resource                        starfile.File
 }
 type Volume struct {
@@ -161,7 +168,16 @@ func component(name []byte) string {
 }
 
 func Open(file starfile.File, maximumEntries int) (*Volume, error) {
-	if maximumEntries <= 0 || maximumEntries > int(^uint(0)>>1)/3 {
+	return open(file, maximumEntries, false)
+}
+
+// OpenRaw preserves physical forks even for compressed files. It is an explicit
+// forensic view, not a decoded empty-file substitute.
+func OpenRaw(file starfile.File, maximumEntries int) (*Volume, error) {
+	return open(file, maximumEntries, true)
+}
+func open(file starfile.File, maximumEntries int, raw bool) (*Volume, error) {
+	if maximumEntries <= 0 || maximumEntries > int(^uint(0)>>1)/4 {
 		return nil, fmt.Errorf("hfs: invalid entry limit")
 	}
 	var m [162]byte
@@ -169,7 +185,7 @@ func Open(file starfile.File, maximumEntries int) (*Volume, error) {
 		return nil, err
 	}
 	if be.Uint16(m[:]) == 0x482b || be.Uint16(m[:]) == 0x4858 {
-		return openPlus(file, maximumEntries)
+		return openPlus(file, maximumEntries, raw)
 	}
 	if be.Uint16(m[:]) != 0x4244 {
 		return nil, fmt.Errorf("hfs: expected classic HFS signature")
@@ -182,7 +198,7 @@ func Open(file starfile.File, maximumEntries int) (*Volume, error) {
 			return nil, fmt.Errorf("hfs: invalid embedded HFS+ range")
 		}
 		embedded := filesystem.NewGeneratedImage("embedded HFS+", size, []filesystem.ExtentSpec{{Start: 0, Size: size, File: file, Offset: base}})
-		return openPlus(embedded, maximumEntries)
+		return openPlus(embedded, maximumEntries, raw)
 	}
 	r := reader{file: file, base: int64(be.Uint16(m[28:])) * 512, block: int64(be.Uint32(m[20:])), blocks: uint32(be.Uint16(m[18:])), overflow: map[forkKey][]extent{}}
 	if r.block < 512 || r.block%512 != 0 || r.blocks == 0 || r.base < 1536 || r.base > file.Size() || int64(r.blocks)*r.block > file.Size()-r.base || m[36] > 27 {

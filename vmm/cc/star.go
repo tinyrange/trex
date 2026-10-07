@@ -21,13 +21,14 @@ func Builtins() starlark.StringDict {
 	return starlark.StringDict{"backend": starlark.NewBuiltin("cc.backend", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		acpi, pciIDE, hpet, uefi := false, false, false, false
 		ideDMA := true
+		ideModel := "synthetic"
 		overlayLimit := int64(256 << 20)
-		if err := starlark.UnpackArgs("cc.backend", args, kwargs, "acpi?", &acpi, "uefi?", &uefi, "hpet?", &hpet, "pci_ide?", &pciIDE, "ide_dma?", &ideDMA, "overlay_limit?", &overlayLimit); err != nil {
+		if err := starlark.UnpackArgs("cc.backend", args, kwargs, "acpi?", &acpi, "uefi?", &uefi, "hpet?", &hpet, "pci_ide?", &pciIDE, "ide_model?", &ideModel, "ide_dma?", &ideDMA, "overlay_limit?", &overlayLimit); err != nil {
 			return nil, err
 		}
 		if overlayLimit <= 0 {
 			return nil, fmt.Errorf("cc.backend: overlay_limit must be positive")
 		}
-		return &Backend{UEFI: uefi, ACPI: acpi, HPET: hpet, PCIIDE: pciIDE, PIOOnly: !ideDMA, OverlayLimit: overlayLimit}, nil
+		return &Backend{UEFI: uefi, ACPI: acpi, HPET: hpet, PCIIDE: pciIDE, IDEModel: ideModel, PIOOnly: !ideDMA, OverlayLimit: overlayLimit}, nil
 	})}
 }
