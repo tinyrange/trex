@@ -16,6 +16,7 @@ package = mirror_file(
 )
 ```
 
+`cache=""` selects the native user cache directory's `trex` folder.
 `key` is opaque and is hashed before forming a cache path. `sha256` and `size`
 are optional verification facts, although immutable release indexes should
 provide both when possible. `size=-1` means unknown. `maximum` is always
@@ -33,3 +34,12 @@ when every mirror fails. Each attempt resumes the retained partial download
 when byte ranges are supported, and still verifies the complete size and digest.
 `timeout` limits each HTTP request, including reading its body; cancellation
 of the calling context stops further attempts.
+
+`validate=None` optionally supplies a synchronous Starlark callback that checks
+format-specific invariants before a completed download is published and whenever
+a cached object is reopened. It must return `None` to accept or raise an error
+to reject the content. A rejected download is reset before trying another mirror;
+a rejected cached object is removed and downloaded again. Validation can run more
+than once, so it should only inspect content. Its argument is a borrowed,
+read-only portable file that becomes unusable after the call; do not retain it
+or derived views. Parsing should use the native format readers.

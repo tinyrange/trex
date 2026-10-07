@@ -147,6 +147,7 @@ var nativeStarlarkTypes = map[string][]string{
 }
 
 var nativeStarlarkSignatures = map[string]string{
+	"archive.crx":               "archive.crx(file) -> record(id, version, files, entries)",
 	"emulator.shell.filesystem": "emulator.shell.filesystem(maximum=64MiB) -> unix_filesystem",
 	"emulator.shell.run":        "emulator.shell.run(files, source, dir='/', env={}, args=[], commands={}, executable=None, stdin=b'', name='shell', max_steps=100000, maximum_output=8MiB, timeout=120) -> shell_result",
 	"emulator.shell.date":       "emulator.shell.date(epoch) -> shell_command",
@@ -170,7 +171,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"json.decode":                       "json.decode(value, maximum=64MiB) -> value",
 	"hex":                               "hex(value, width=0) -> string",
 	"http_file":                         "http_file(urls, size=None, name='HTTP range file', chunk_bytes=4MiB, cache_bytes=256MiB) -> file; omitted size uses HEAD discovery",
-	"mirror_file":                       "mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0) -> file",
+	"mirror_file":                       "mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file",
 	"open":                              "open(name) -> file",
 	"repl":                              "repl() -> None",
 	"windows.reactos_record":            "windows.reactos_record(kind, fields) -> bytes",

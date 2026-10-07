@@ -89,3 +89,34 @@ func TestVerifyEmptyAndTruncatedEntry(t *testing.T) {
 		t.Fatalf("short reader: %v", err)
 	}
 }
+
+func TestBoundedWindowForwardBackwardAndLargeReads(t *testing.T) {
+	payload := make([]byte, 3*decodedWindow+317)
+	for i := range payload {
+		payload[i] = byte(i*31 + i/997)
+	}
+	for _, method := range []uint16{zip.Store, zip.Deflate} {
+		f := testEntry(t, payload, method, false)
+		for _, span := range [][2]int{{decodedWindow - 13, 91}, {2*decodedWindow + 17, 211}, {7, 89}, {0, len(payload)}, {13, 129}, {len(payload) - 19, 47}} {
+			got := make([]byte, span[1])
+			want := payload[span[0]:min(len(payload), span[0]+span[1])]
+			n, err := f.ReadAt(got, int64(span[0]))
+			if n != len(want) || !bytes.Equal(got[:n], want) || (err != nil && err != io.EOF) {
+				t.Fatalf("method %d span %v: n=%d err=%v", method, span, n, err)
+			}
+			if (err == io.EOF) != (len(want) < len(got)) {
+				t.Fatalf("incorrect EOF for %v: %v", span, err)
+			}
+			if len(f.data) > decodedWindow || cap(f.data) > 2*decodedWindow {
+				t.Fatalf("unbounded cache: len=%d cap=%d", len(f.data), cap(f.data))
+			}
+		}
+		if err := f.Verify(); err != nil || !f.verified {
+			t.Fatalf("verification after replay: %v", err)
+		}
+		bad := testEntry(t, payload, method, true)
+		if err := bad.Verify(); err == nil || len(bad.data) > decodedWindow {
+			t.Fatalf("bounded verification accepted corrupt CRC: %v", err)
+		}
+	}
+}

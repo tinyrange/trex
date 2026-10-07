@@ -1984,7 +1984,7 @@ Applies one KD load/unload event to resolver state.
 
 `auto(source, name='', maximum=<default>, maximum_entries=100000, maximum_depth=32, tree=None, path='') -> auto`
 
-Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. By default eager decoding is limited to 512 MiB while bounded gzip, bzip2 and XZ streams have no total-length ceiling; an explicit positive maximum bounds both kinds. Container paths resolve recursively while file preserves the original bytes. Detectors receive containing-tree context for companion files across directories. For an isolated file, tree and its tree-relative path attach that context explicitly. Companion lookup reads raw entries within the supplied tree without following links or recursively detecting files; dot segments and host paths are not accepted.
+Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Native EROFS supports compact/extended inodes, flat/inline data and LZ4 full/compact indexes including 2-byte packs and big physical clusters. EROFS views verify superblock CRC32C and reject unsupported incompatible features; source bytes must remain unchanged while views are used. summary returns current entry metadata without detecting or reading its payload; metadata additionally detects the payload format. Use summary for directory inventories. By default eager decoding is limited to 512 MiB while bounded gzip, bzip2 and XZ streams have no total-length ceiling; an explicit positive maximum bounds both kinds. Container paths resolve recursively while file preserves the original bytes. Detectors receive containing-tree context for companion files across directories. For an isolated file, tree and its tree-relative path attach that context explicitly. Companion lookup reads raw entries within the supplied tree without following links or recursively detecting files; dot segments and host paths are not accepted.
 
 ### `auto_plan`
 
@@ -2040,9 +2040,9 @@ Creates a lazy random-access file over HTTP byte ranges with a bounded in-memory
 
 ### `mirror_file`
 
-`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0) -> file`
+`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file`
 
-Opens a cached download or tries the supplied mirror URLs, checking the requested size and SHA-256 when supplied. The cache and key identify persistent native-backend storage; the result is a file, not extracted contents.
+Opens a cached download or tries the supplied mirror URLs, checking the requested size and SHA-256 when supplied. The cache and key identify persistent native-backend storage; cache='' uses the native user cache directory's trex folder. An optional validate(file) callback runs synchronously before publication and on cache hits: it must return None to accept or raise an error to reject. The borrowed read-only file is usable only during the callback; do not retain it or derived views. Failed validation prevents publication; invalid cached objects are downloaded again. The result is a file, not extracted contents.
 
 ### `open`
 
@@ -2163,6 +2163,12 @@ Indexes ASCII CPIO directly into flat metadata dictionaries using bounded forwar
 `archive.cpio_build(entries) -> file`
 
 Constructs a deterministic Linux-compatible newc archive from Unix entry dictionaries. Preserves modes, ownership, timestamps, symbolic links, hardlinks and device numbers. Synthesizes missing parent directories, rejects duplicate or unsafe paths, and borrows payload readers without extracting them.
+
+### `archive.crx`
+
+`archive.crx(file) -> record(id, version, files, entries)`
+
+Verifies a CRX3 envelope and returns its developer ID, format version and ZIP entries as portable files without extraction. Checks all RSA/SHA-256 and P-256 ECDSA/SHA-256 signatures and requires a matching developer key. Header decoding is bounded to 1MiB. Does not pin a Chrome Web Store publisher key or parse legacy CRX2 packages. The source must remain open while reading entries.
 
 ### `archive.gzip`
 
@@ -2390,13 +2396,19 @@ Decodes an XZ stream into a file, rejecting decoder dictionaries above max_dicti
 
 `archive.zip(file) -> zip`
 
-Parses a ZIP archive and exposes member files through files or entries. Members expose name/path and entry_type; complete reads validate decoded size and CRC, including exact-sized reads. Call entry.verify() to force complete validation, including empty entries. Data stays in memory rather than being extracted into a host directory.
+Parses a ZIP archive and exposes member files through files or entries. Members expose name/path, entry_type, compressed_size and compression_method. Complete reads validate decoded size and CRC; entry.verify() forces complete validation, including empty entries. Each member retains a bounded 8 MiB decoded window; backward reads outside it restart decompression. No host extraction occurs.
 
 ### `archive.zstd`
 
 `archive.zstd(file) -> file`
 
 Opens a Zstandard stream as a portable file with a 64 MiB decoder window limit. Frame headers provide decoded sizes when available; streams without content sizes require a counting pass. Reads and seeks replay decompression without extracting host files.
+
+### `binary.android_boot`
+
+`binary.android_boot(file) -> record`
+
+Reads Android boot and vendor_boot v3/v4 headers, exposing bounded section files, command_line, version and page_size. Vendor v4 includes ramdisk fragments with type and board identifiers, plus a bootconfig section. Validates section/table bounds; does not decompress ramdisks or authenticate AVB signatures.
 
 ### `binary.annotate`
 
@@ -2991,6 +3003,12 @@ Loads an ARM64 EFI image into a configurable in-process interpreter. Runs stop a
 `emulator.x86(image|code, base=0x1000, entry=None, instruction_limit=2M, memory_limit=32MiB, stack_size=1MiB, call_depth_limit=1024, trace=False, trace_limit=4096, profile=False, profile_interval=256, profile_limit=16384, image_name='main', fs_base=0, segment_size=4096)`
 
 Creates a bounded 32-bit x86 execution context from a PE image or raw code. Exposes guest registers, memory, hooks and snapshots; unsupported behavior returns structured stops rather than executing host code.
+
+### `filesystem.android_super`
+
+`filesystem.android_super(file, slot=0, devices={}) -> record`
+
+Reads raw Android super-partition metadata versions 10.0–10.2 with geometry/header/table SHA256 validation and backup fallback. Exposes groups, physical devices and logical partition files composed from linear/zero extents. slot chooses a metadata slot; devices supplies additional physical files by name. Views borrow their inputs; sparse wrappers and EROFS traversal are separate formats.
 
 ### `filesystem.apm`
 

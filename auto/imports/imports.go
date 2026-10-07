@@ -41,6 +41,7 @@ import (
 	_ "github.com/tinyrange/trex/filesystem/apm"
 	_ "github.com/tinyrange/trex/filesystem/ckd"
 	_ "github.com/tinyrange/trex/filesystem/efs"
+	_ "github.com/tinyrange/trex/filesystem/erofs"
 	_ "github.com/tinyrange/trex/filesystem/ext4"
 	_ "github.com/tinyrange/trex/filesystem/fat"
 	_ "github.com/tinyrange/trex/filesystem/floppy"
