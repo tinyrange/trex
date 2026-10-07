@@ -273,7 +273,8 @@ func (*File) AttrNames() []string                        { return starfile.AttrN
 
 func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var source, maximum starlark.Value
-	if err := starlark.UnpackArgs("gzip", args, kwargs, "file", &source, "maximum_bytes?", &maximum); err != nil {
+	var cache bool
+	if err := starlark.UnpackArgs("gzip", args, kwargs, "file", &source, "maximum_bytes?", &maximum, "cache?", &cache); err != nil {
 		return nil, err
 	}
 	reader, ok := source.(storage.Reader)
@@ -288,6 +289,13 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 		if limit <= 0 {
 			return nil, fmt.Errorf("gzip: maximum_bytes must be positive")
 		}
+	}
+	if cache {
+		r, err := Materialize(reader, limit)
+		if err != nil {
+			return nil, err
+		}
+		return starfile.NewReader("gzip.cached", r), nil
 	}
 	return Open(reader, limit)
 }

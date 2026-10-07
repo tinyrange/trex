@@ -115,6 +115,9 @@ func validateVMM(machine VMMMachine, backend VMMBackend) []VMMValidationIssue {
 	if machine.Boot != nil {
 		require("boot.linux", "boot", "direct Linux boot", true)
 	}
+	if machine.DarwinBoot != nil {
+		require("boot.darwin", "boot", "direct Darwin boot", true)
+	}
 	if machine.StartPaused {
 		require("lifecycle.pause", "start_paused", "paused startup", true)
 	}
@@ -168,6 +171,14 @@ func validateVMMCore(machine VMMMachine) []VMMValidationIssue {
 	}
 	if machine.CPUs <= 0 {
 		add("machine.cpus", "cpus", "CPU count must be positive")
+	}
+	if machine.Boot != nil && machine.DarwinBoot != nil {
+		add("machine.boot", "boot", "Linux and Darwin boot requests are mutually exclusive")
+	}
+	if machine.DarwinBoot != nil {
+		if err := machine.DarwinBoot.Validate(); err != nil {
+			add("machine.boot", "boot", err.Error())
+		}
 	}
 	if err := machine.Boot.Validate(); err != nil {
 		add("machine.boot", "boot", err.Error())

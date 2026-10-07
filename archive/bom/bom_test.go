@@ -6,7 +6,8 @@ import (
 	"testing"
 )
 
-func fixture(branch bool) []byte {
+func fixture(branch bool) []byte { return variantFixture(branch, false, false) }
+func variantFixture(branch, variants, tail bool) []byte {
 	b := make([]byte, 32)
 	pointers := []pointer{{}}
 	add := func(data []byte) uint32 {
@@ -16,7 +17,11 @@ func fixture(branch bool) []byte {
 		return id
 	}
 	var pairs [][2]uint32
-	for i, name := range []string{".", "hello", "link"} {
+	names := []string{".", "hello", "link"}
+	if variants {
+		names = append(names, "hello")
+	}
+	for i, name := range names {
 		meta := make([]byte, 27)
 		meta[0] = 1
 		if i == 0 {
@@ -29,6 +34,7 @@ func fixture(branch bool) []byte {
 			be.PutUint32(meta[27:], 6)
 			copy(meta[31:], "hello")
 		}
+		be.PutUint16(meta[2:], uint16(i))
 		be.PutUint16(meta[4:], 0644)
 		be.PutUint32(meta[6:], 501)
 		be.PutUint32(meta[18:], 17)
@@ -46,6 +52,10 @@ func fixture(branch bool) []byte {
 		kid := add(key)
 		pairs = append(pairs, [2]uint32{iid, kid})
 	}
+	allPairs := pairs
+	if tail {
+		pairs = pairs[:len(pairs)-1]
+	}
 	leaf := make([]byte, 12+8*len(pairs))
 	be.PutUint16(leaf, 1)
 	be.PutUint16(leaf[2:], uint16(len(pairs)))
@@ -54,7 +64,18 @@ func fixture(branch bool) []byte {
 		be.PutUint32(leaf[16+i*8:], p[1])
 	}
 	child := add(leaf)
-	count := uint32(3)
+	count := uint32(len(allPairs))
+	if tail {
+		last := allPairs[len(allPairs)-1]
+		node := make([]byte, 20)
+		be.PutUint16(node, 1)
+		be.PutUint16(node[2:], 1)
+		be.PutUint32(node[8:], child)
+		be.PutUint32(node[12:], last[0])
+		be.PutUint32(node[16:], last[1])
+		next := add(node)
+		be.PutUint32(b[pointers[child].off+4:], next)
+	}
 	if branch {
 		node := make([]byte, 20)
 		be.PutUint16(node[2:], 1)
@@ -129,6 +150,42 @@ func TestMalformedBOM(t *testing.T) {
 		mutate(b)
 		if _, err := Open(b, &starfile.Bytes{Data: b}, auto.Options{}); err == nil {
 			t.Fatal("accepted malformed BOM")
+		}
+	}
+}
+
+func TestTrailingLeafAndArchitectureVariants(t *testing.T) {
+	for _, tail := range []bool{false, true} {
+		b := variantFixture(true, true, tail)
+		records, err := Read(&starfile.Bytes{Data: b}, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(records) != 4 {
+			t.Fatalf("dropped records: %d", len(records))
+		}
+		var variants int
+		for _, e := range records {
+			if e.Name == "hello" {
+				variants++
+			}
+		}
+		if variants != 2 {
+			t.Fatal("architecture variants lost")
+		}
+		root := auto.Open(&starfile.Bytes{Data: b}, "Bom", auto.Options{})
+		n, err := root.Resolve("%00bom-variants/4")
+		if err != nil || n.Summary().Attributes["bom_path"] != "hello" {
+			t.Fatalf("variant tree %v %v", n, err)
+		}
+		if tail {
+			// The partial final leaf must point back to its predecessor.
+			index := be.Uint32(b[16:])
+			last := be.Uint32(b[index+4+14*8:]) // leaf after four sets of metadata blocks
+			be.PutUint32(b[last+8:], 0)
+			if _, err := Read(&starfile.Bytes{Data: b}, 100); err == nil {
+				t.Fatal("accepted disconnected leaf chain")
+			}
 		}
 	}
 }

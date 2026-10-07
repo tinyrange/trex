@@ -18,11 +18,15 @@ const biosPort = 0xf1
 // Interrupt entries execute small real-mode ROM routines; native execution
 // retains all mode switches and executes the original boot sector and loader.
 type pc struct {
+	darwin        map[string]any
+	darwinSymbols map[string]uint64
+	serial        [8]byte
 	efiTrace      []any
 	efi           *uefi.Firmware
 	efiMemory     *efiMemory
 	acpi          *acpiPM
 	hpet          *hpet
+	smc           *smc
 	nic           *ne2000
 	framebuffer   []byte
 	input         *virtioInput
@@ -52,9 +56,15 @@ type pc struct {
 	videoPacket   videoPacket
 	pciAddress    uint32
 	pciIDE        *pciIDE
+	pciDisplay    *pciDisplay
+	uhci          *uhci
 }
 
 func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) (*pc, error) {
+	return newPCBoot(cpu, ram, disk, now, true)
+}
+
+func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time, legacyBoot bool) (*pc, error) {
 	p := &pc{cpu: cpu, ram: ram, disk: disk, now: now, started: now(), mode: 3, ports: make(map[uint16]byte)}
 	p.cmos[0x0a], p.cmos[0x0b] = 0x26, 2
 	p.geometry = vmm.CHSGeometry{Cylinders: int(disk.Device.Geometry().Size / 512 / 16 / 63), Heads: 16, Sectors: 63}
@@ -114,6 +124,9 @@ func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) 
 		ram[i+1] = 7
 	}
 	p.vga.syncText()
+	if !legacyBoot {
+		return p, nil
+	}
 	if n, err := disk.Device.ReadAt(ram[0x7c00:0x7e00], 0); err != nil || n != 512 {
 		return nil, fmt.Errorf("read boot sector: %w", err)
 	}

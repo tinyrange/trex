@@ -58,17 +58,18 @@ func RegisterBackend(id string, capabilities []string) {
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
-		"backends":   starlark.NewBuiltin("backends", vmmBackendsBuiltin),
-		"channel":    starlark.NewBuiltin("channel", vmmChannelBuiltin),
-		"disk":       starlark.NewBuiltin("disk", vmmDiskBuiltin),
-		"display":    starlark.NewBuiltin("display", vmmDisplayBuiltin),
-		"machine":    starlark.NewBuiltin("machine", vmmMachineBuiltin),
-		"linux_boot": starlark.NewBuiltin("linux_boot", linuxBootBuiltin),
-		"network":    starlark.NewBuiltin("network", vmmNetworkBuiltin),
-		"switch":     starlark.NewBuiltin("switch", switchBuiltin),
-		"workspace":  starlark.NewBuiltin("workspace", workspaceBuiltin),
-		"start":      starlark.NewBuiltin("start", vmmStartBuiltin),
-		"validate":   starlark.NewBuiltin("validate", vmmValidateBuiltin),
+		"backends":    starlark.NewBuiltin("backends", vmmBackendsBuiltin),
+		"channel":     starlark.NewBuiltin("channel", vmmChannelBuiltin),
+		"disk":        starlark.NewBuiltin("disk", vmmDiskBuiltin),
+		"display":     starlark.NewBuiltin("display", vmmDisplayBuiltin),
+		"machine":     starlark.NewBuiltin("machine", vmmMachineBuiltin),
+		"linux_boot":  starlark.NewBuiltin("linux_boot", linuxBootBuiltin),
+		"darwin_boot": starlark.NewBuiltin("darwin_boot", darwinBootBuiltin),
+		"network":     starlark.NewBuiltin("network", vmmNetworkBuiltin),
+		"switch":      starlark.NewBuiltin("switch", switchBuiltin),
+		"workspace":   starlark.NewBuiltin("workspace", workspaceBuiltin),
+		"start":       starlark.NewBuiltin("start", vmmStartBuiltin),
+		"validate":    starlark.NewBuiltin("validate", vmmValidateBuiltin),
 	}
 }
 
@@ -189,6 +190,9 @@ func (v *vmmMachineValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhasha
 func (v *vmmMachineValue) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "boot":
+		if v.machine.DarwinBoot != nil {
+			return &darwinBootValue{boot: *v.machine.DarwinBoot}, nil
+		}
 		if v.machine.Boot == nil {
 			return starlark.None, nil
 		}
@@ -400,12 +404,16 @@ func vmmMachineBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	}
 	machine := VMMMachine{Architecture: architecture, Memory: memory, CPUs: cpus, Display: display.display, StartPaused: startPaused}
 	if bootValue != starlark.None {
-		boot, ok := bootValue.(*linuxBootValue)
-		if !ok {
-			return nil, fmt.Errorf("machine: boot must be vmm_linux_boot or None")
+		switch boot := bootValue.(type) {
+		case *linuxBootValue:
+			copy := boot.boot
+			machine.Boot = &copy
+		case *darwinBootValue:
+			copy := boot.boot
+			machine.DarwinBoot = &copy
+		default:
+			return nil, fmt.Errorf("machine: boot must be vmm_linux_boot, vmm_darwin_boot or None")
 		}
-		copy := boot.boot
-		machine.Boot = &copy
 	}
 	if err := appendTypedList(disksValue, "disks", func(index int, value starlark.Value) error {
 		disk, ok := value.(*vmmDiskValue)

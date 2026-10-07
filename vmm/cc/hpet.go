@@ -13,7 +13,8 @@ const hpetCapabilities uint64 = 10000000<<32 | 0x8086<<16 | 1<<13 | 2<<8 | 1
 const hpetTimerCapabilities uint64 = 0x00f00000<<32 | 1<<5 | 1<<4
 
 // hpet implements three 64-bit comparators at 100 MHz. Interrupts use the
-// IOAPIC; legacy replacement and FSB delivery are not advertised.
+// IOAPIC; FSB delivery is not advertised. Legacy replacement is advertised
+// only when the accelerator can suppress its PIT output.
 // Register semantics follow Intel HPET specification 1.0a.
 type hpet struct {
 	config, status uint64
@@ -21,6 +22,7 @@ type hpet struct {
 	started        time.Time
 	timers         [3]hpetTimer
 	setIRQ         func(uint32, bool) error
+	setLegacy      func(bool) error
 }
 type hpetTimer struct {
 	config, match, period uint64
@@ -95,12 +97,24 @@ func (h *hpet) expire(i int, now time.Time) {
 		}
 	}
 }
+
+// irq uses the accelerator's legacy input line numbers (IRQ0 is routed to
+// IOAPIC pin 2 by the PC interrupt controller), not the programmable timer route.
+func (h *hpet) irq(i int) uint32 {
+	if h.config&2 != 0 && i < 2 {
+		if i == 0 {
+			return 0
+		}
+		return 8
+	}
+	return uint32(h.timers[i].config >> 9 & 31)
+}
 func (h *hpet) delivery(i int) func() error {
 	t := h.timers[i]
-	irq := uint32(t.config >> 9 & 31)
+	irq := h.irq(i)
 	shared := false
 	for j, other := range h.timers {
-		if j != i && other.asserted && uint32(other.config>>9&31) == irq {
+		if j != i && other.asserted && h.irq(j) == irq {
 			shared = true
 		}
 	}
@@ -145,6 +159,9 @@ func (h *hpet) deadline() (int, time.Time) {
 func (h *hpet) read(reg uint64, now time.Time) uint64 {
 	switch reg {
 	case 0:
+		if h.setLegacy != nil {
+			return hpetCapabilities | 1<<15
+		}
 		return hpetCapabilities
 	case 0x10:
 		return h.config
@@ -169,9 +186,9 @@ func (h *hpet) lower(i int) error {
 	if !t.asserted {
 		return nil
 	}
-	irq := uint32(t.config >> 9 & 31)
+	irq := h.irq(i)
 	for j, other := range h.timers {
-		if j != i && other.asserted && uint32(other.config>>9&31) == irq {
+		if j != i && other.asserted && h.irq(j) == irq {
 			t.asserted = false
 			return nil
 		}
@@ -187,9 +204,33 @@ func (h *hpet) write(reg, value, mask uint64, now time.Time) error {
 	merged := old&^mask | value&mask
 	switch reg {
 	case 0x10:
+		config := merged & 1
+		if h.setLegacy != nil {
+			config = merged & 3
+		}
+		if (h.config^config)&2 != 0 {
+			// Drain latched outputs on their old routes before changing ownership.
+			for i := range h.timers {
+				if err := h.lower(i); err != nil {
+					return err
+				}
+			}
+			if err := h.setLegacy(config&2 != 0); err != nil {
+				return err
+			}
+		}
 		h.base = h.counter(now)
 		h.started = now
-		h.config = merged & 1
+		h.config = config
+		// Pending level status follows the newly selected route.
+		for i := range h.timers {
+			if h.status&(1<<i) != 0 && h.timers[i].config&6 == 6 && !h.timers[i].asserted {
+				if err := h.setIRQ(h.irq(i), true); err != nil {
+					return err
+				}
+				h.timers[i].asserted = true
+			}
+		}
 		for i := range h.timers {
 			h.arm(i, now)
 		}
@@ -220,7 +261,7 @@ func (h *hpet) write(reg, value, mask uint64, now time.Time) error {
 			}
 			t.config = merged & (2 | 4 | 8 | 64 | 256 | 0x3e00)
 			if h.status&(1<<i) != 0 && t.config&6 == 6 {
-				if err := h.setIRQ(uint32(t.config>>9&31), true); err != nil {
+				if err := h.setIRQ(h.irq(i), true); err != nil {
 					return err
 				}
 				t.asserted = true

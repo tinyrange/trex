@@ -18,13 +18,15 @@ type Backend struct {
 	ACPI, PCIIDE, HPET, UEFI bool
 	// PIOOnly disables the PCI IDE disk's DMA capability.
 	PIOOnly bool
+	// IDEModel selects synthetic (default) or the native ich7-pata profile.
+	IDEModel string
 	// OverlayLimit bounds dirty snapshot memory; zero uses 256 MiB.
 	OverlayLimit int64
 }
 
 func Available() bool { return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" }
 func Capabilities() []string {
-	return []string{"disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
+	return []string{"boot.darwin", "disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
 }
 func (*Backend) ID() string             { return "cc.v1" }
 func (*Backend) Capabilities() []string { return Capabilities() }
@@ -32,6 +34,26 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	var issues []vmm.ValidationIssue
 	add := func(field, message string) {
 		issues = append(issues, vmm.ValidationIssue{Code: "cc.unsupported", Field: field, Message: message, Backend: b.ID()})
+	}
+	if b.IDEModel != "" && b.IDEModel != "synthetic" && b.IDEModel != "ich7-pata" {
+		add("ide_model", "IDE model must be synthetic or ich7-pata")
+	}
+	if b.IDEModel == "ich7-pata" && !b.PCIIDE && !b.UEFI {
+		add("ide_model", "ich7-pata requires PCI IDE")
+	}
+	if m.Boot != nil {
+		add("boot", "cc does not support Linux direct boot")
+	}
+	if m.DarwinBoot != nil {
+		if len(m.Networks) != 0 {
+			add("networks", "Darwin SMC and NE2000 require distinct I/O resources; networking is not supported in this profile")
+		}
+		if b.UEFI || m.Architecture != "x86_64" {
+			add("boot", "Darwin direct boot requires x86_64 without UEFI image execution")
+		}
+		if err := m.DarwinBoot.Validate(); err != nil {
+			add("boot", err.Error())
+		}
 	}
 	if b.UEFI && m.Architecture != "x86_64" {
 		add("architecture", "cc UEFI requires x86_64")
@@ -132,7 +154,12 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	if err != nil {
 		return nil, err
 	}
-	if err = configureCPUArchitecture(cpu, m.Architecture == "x86_64"); err != nil {
+	if m.DarwinBoot != nil {
+		err = configureDarwinCPU(cpu)
+	} else {
+		err = configureCPUArchitecture(cpu, m.Architecture == "x86_64")
+	}
+	if err != nil {
 		cpu.Close()
 		return nil, err
 	}
@@ -147,7 +174,7 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		cpu.Close()
 		return nil, err
 	}
-	platform, err := newPC(cpu, ram[:m.Memory], disk, time.Now)
+	platform, err := newPCBoot(cpu, ram[:m.Memory], disk, time.Now, m.DarwinBoot == nil)
 	if err != nil {
 		cpu.Close()
 		return nil, err
@@ -155,16 +182,36 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	platform.framebuffer = ram[m.Memory : uint64(m.Memory)+ramfb.Size]
 	if b.PCIIDE || b.UEFI {
 		platform.pciIDE = newPCIIDE()
-		platform.ide.dmaEnabled = !b.PIOOnly
-		platform.ide.irq = func(irq uint32, level bool) error {
-			if level {
-				platform.pciIDE.bm[2] |= 4
-			}
-			return cpu.SetIRQ(irq, level && platform.pciIDE.config[4]&1 != 0)
+		if b.IDEModel == "ich7-pata" {
+			platform.pciIDE = newICH7PATA()
 		}
+		platform.ide.dmaEnabled = !b.PIOOnly
+		platform.ide.irq = platform.setIDEIRQ
 	}
 	if b.HPET {
 		platform.hpet = newHPET(platform.now(), cpu.SetIRQ)
+		if m.DarwinBoot != nil {
+			if legacy, ok := cpu.(interface{ SetLegacyTimerReplacement(bool) error }); ok {
+				platform.hpet.setLegacy = func(enabled bool) error {
+					if err := legacy.SetLegacyTimerReplacement(enabled); err != nil {
+						return err
+					}
+					if enabled && platform.rtcIRQ {
+						if err := cpu.SetIRQ(8, false); err != nil {
+							return err
+						}
+						platform.rtcIRQ = false
+					}
+					platform.rtcNext = time.Time{}
+					return nil
+				}
+			}
+		}
+	}
+	if m.DarwinBoot != nil {
+		platform.smc = newSMC(m.DarwinBoot.SMCOSK)
+		platform.pciDisplay = newPCIDisplay()
+		platform.uhci = newUHCI(platform.inputMemory, cpu.SetIRQ)
 	}
 	if b.ACPI || b.PCIIDE || b.HPET || b.UEFI || m.Architecture == "x86_64" {
 		if err = platform.installACPI(); err != nil {
@@ -184,6 +231,12 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	}
 	if b.UEFI {
 		if err = platform.installUEFI(); err != nil {
+			cpu.Close()
+			return nil, err
+		}
+	}
+	if m.DarwinBoot != nil {
+		if err = platform.installDarwin(m.DarwinBoot); err != nil {
 			cpu.Close()
 			return nil, err
 		}

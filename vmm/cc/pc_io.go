@@ -20,8 +20,8 @@ func (p *pc) runDevices(ctx context.Context) (hypervisor.X86Exit, error) {
 			// Bulk disk data can use hundreds of native exits per sector.
 			// Leave control-port writes to the outer loop so timer changes
 			// immediately recompute their native execution deadline.
-			if ex.Port == 0x1f0 {
-				return true, p.ideIO(ex)
+			if ex.Port == p.ideDataPort() {
+				return p.routeIDE(ex)
 			}
 			return false, nil
 		case hypervisor.X86ExitMMIO:
@@ -41,6 +41,11 @@ func (p *pc) runWithHandler(ctx context.Context, handle func(hypervisor.X86Exit)
 			return hypervisor.X86Exit{}, err
 		}
 		now := p.now()
+		if p.uhci != nil {
+			if err := p.uhci.poll(now); err != nil {
+				return hypervisor.X86Exit{}, err
+			}
+		}
 		if p.acpi != nil {
 			if err := p.acpi.poll(now); err != nil {
 				return hypervisor.X86Exit{}, err
@@ -60,7 +65,7 @@ func (p *pc) runWithHandler(ctx context.Context, handle func(hypervisor.X86Exit)
 		var deliver func() error
 		var commit func()
 		rate := p.cmos[0xa] & 15
-		if p.cmos[0xb]&0x40 == 0 || rate < 3 {
+		if p.cmos[0xb]&0x40 == 0 || rate < 3 || (p.hpet != nil && p.hpet.config&2 != 0) {
 			p.rtcNext = time.Time{}
 		} else {
 			period := time.Second * time.Duration(uint64(1)<<(rate-1)) / 32768
@@ -113,11 +118,17 @@ func (p *pc) runWithHandler(ctx context.Context, handle func(hypervisor.X86Exit)
 }
 
 func (p *pc) handleIO(ex hypervisor.X86Exit) error {
+	if ex.Port >= 0x3f8 && ex.Port <= 0x3ff {
+		return p.serialIO(ex)
+	}
 	if p.efi != nil && ex.Port == efiPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		return p.efiCall()
 	}
 	if p.acpi != nil && ex.Port >= 0xcf8 && ex.Port <= 0xcff {
 		return p.pciIO(ex)
+	}
+	if p.uhci != nil && p.uhci.config[4]&1 != 0 && uint32(ex.Port) >= p.uhci.ioBase() && uint32(ex.Port) < p.uhci.ioBase()+32 {
+		return p.uhci.io(ex, p.now())
 	}
 	if p.pciIDE != nil && p.pciIDE.config[4]&1 != 0 {
 		base := p.pciIDE.busMasterBase()
@@ -130,6 +141,9 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 	}
 	if p.acpi != nil && ex.Port >= acpiPMBase && ex.Port < acpiPMBase+12 {
 		return p.acpi.io(ex, p.now())
+	}
+	if p.smc != nil && ex.Port >= smcBase && ex.Port < smcBase+32 {
+		return p.smc.io(ex)
 	}
 	if p.nic != nil && ex.Port >= 0x300 && ex.Port <= 0x31f {
 		return p.nic.io(ex)
@@ -146,8 +160,8 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 	if ex.Port >= 0x3b0 && ex.Port <= 0x3df {
 		return p.vga.io(ex)
 	}
-	if ex.Port >= 0x1f0 && ex.Port <= 0x1f7 || ex.Port == 0x3f6 {
-		return p.ideIO(ex)
+	if handled, err := p.routeIDE(ex); handled {
+		return err
 	}
 	if ex.Port == biosPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		return p.bios()

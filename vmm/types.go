@@ -72,6 +72,7 @@ type Channel struct {
 
 type Machine struct {
 	Boot                 *LinuxBoot
+	DarwinBoot           *DarwinBoot
 	Architecture         string
 	Memory               int64
 	CPUs                 int

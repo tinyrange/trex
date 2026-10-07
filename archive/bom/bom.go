@@ -30,7 +30,31 @@ func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, erro
 	if !bytes.HasPrefix(prefix, []byte("BOMStore")) {
 		return nil, auto.ErrNoMatch
 	}
-	limit := o.MaxEntries
+	entries, err := Read(source, o.MaxEntries)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var treeEntries []auto.Entry
+	for i := range entries {
+		e := &entries[i]
+		if e.Name == "." {
+			continue
+		}
+		if seen[e.Name] {
+			e.Attributes["bom_path"] = e.Name
+			e.Name = fmt.Sprintf("%%00bom-variants/%v", e.Attributes["bom_id"])
+		} else {
+			seen[e.Name] = true
+		}
+		treeEntries = append(treeEntries, *e)
+	}
+	return auto.Tree(treeEntries, o)
+}
+
+// Read returns every flat inventory record, including architecture variants
+// sharing a path. A BOM is metadata, never a substitute for payload contents.
+func Read(source storage.Reader, limit int) ([]auto.Entry, error) {
 	if limit <= 0 {
 		limit = 100000
 	}
@@ -46,7 +70,7 @@ func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, erro
 	if err != nil {
 		return nil, err
 	}
-	if be.Uint32(h[8:]) != 1 {
+	if string(h[:8]) != "BOMStore" || be.Uint32(h[8:]) != 1 {
 		return nil, fmt.Errorf("bom: unsupported version")
 	}
 	index, err := read(uint64(be.Uint32(h[16:])), uint64(be.Uint32(h[20:])))
@@ -121,7 +145,23 @@ func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, erro
 	records := map[uint32]*record{}
 	var order []uint32
 	var keyCount uint64
-	for len(pending) > 0 {
+	leafLinks := map[uint32][2]uint32{}
+	followingLinks := false
+	for {
+		if len(pending) == 0 {
+			// Apple's branch index can omit the final partial leaf. The leaf
+			// chain is authoritative; retain branch validation, then follow
+			// its missing tails rather than dropping inventory records.
+			followingLinks = true
+			for _, link := range leafLinks {
+				if link[0] != 0 && !visited[link[0]] {
+					pending = append(pending, link[0])
+				}
+			}
+			if len(pending) == 0 {
+				break
+			}
+		}
 		id := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
 		if visited[id] {
@@ -138,6 +178,12 @@ func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, erro
 		leaf, n := be.Uint16(b), int(be.Uint16(b[2:]))
 		if leaf > 1 || n > (len(b)-12)/8 {
 			return nil, fmt.Errorf("bom: invalid tree node")
+		}
+		if followingLinks && leaf != 1 {
+			return nil, fmt.Errorf("bom: leaf chain points to branch")
+		}
+		if leaf == 1 {
+			leafLinks[id] = [2]uint32{be.Uint32(b[4:]), be.Uint32(b[8:])}
 		}
 		keyCount += uint64(n)
 		for i := 0; i < n; i++ {
@@ -204,6 +250,34 @@ func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, erro
 			order = append(order, r.id)
 		}
 	}
+	// Validate the complete doubly-linked leaf chain, including tails missing
+	// from the branch index. Multiple heads and cycles are malformed.
+	var head uint32
+	for id, link := range leafLinks {
+		if link[1] == 0 {
+			if head != 0 {
+				return nil, fmt.Errorf("bom: multiple leaf chain heads")
+			}
+			head = id
+		} else if back, ok := leafLinks[link[1]]; !ok || back[0] != id {
+			return nil, fmt.Errorf("bom: inconsistent leaf backlink")
+		}
+		if link[0] != 0 {
+			if next, ok := leafLinks[link[0]]; !ok || next[1] != id {
+				return nil, fmt.Errorf("bom: inconsistent leaf forward link")
+			}
+		}
+	}
+	seenLeaves := map[uint32]bool{}
+	for id := head; id != 0; id = leafLinks[id][0] {
+		if seenLeaves[id] {
+			return nil, fmt.Errorf("bom: cyclic leaf chain")
+		}
+		seenLeaves[id] = true
+	}
+	if len(seenLeaves) != len(leafLinks) {
+		return nil, fmt.Errorf("bom: disconnected leaf chain")
+	}
 	// Apple also counts internal separator keys in some BOM generations.
 	if uint32(len(records)) != expected && keyCount != uint64(expected) {
 		return nil, fmt.Errorf("bom: path count mismatch: %d != %d", len(records), expected)
@@ -240,7 +314,6 @@ func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, erro
 		return name, nil
 	}
 	var entries []auto.Entry
-	seenPaths := map[string]bool{}
 	for _, id := range order {
 		r := records[id]
 		name, err := resolve(id, map[uint32]bool{})
@@ -251,14 +324,9 @@ func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, erro
 			if r.entry.Kind != "directory" {
 				return nil, fmt.Errorf("bom: invalid root")
 			}
-			continue
 		}
-		if seenPaths[name] {
-			return nil, fmt.Errorf("bom: duplicate inventory path")
-		}
-		seenPaths[name] = true
 		r.entry.Name = name
 		entries = append(entries, r.entry)
 	}
-	return auto.Tree(entries, o)
+	return entries, nil
 }

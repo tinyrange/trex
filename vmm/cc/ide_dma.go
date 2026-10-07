@@ -54,7 +54,7 @@ func (p *pc) busMasterIO(ex hypervisor.X86Exit) error {
 // or disk, and each buffer must stay within its specified 64 KiB window.
 func (p *pc) tryIDEDMA() error {
 	d, ata := p.pciIDE, p.ide
-	if d == nil || ata == nil || !ata.dmaPending || d.bm[0]&1 == 0 || d.config[4]&5 != 5 {
+	if d == nil || ata == nil || !ata.dmaPending || d.bm[0]&1 == 0 || d.config[4]&5 != 5 || !d.primaryEnabled() {
 		return nil
 	}
 	d.bm[2] |= 1

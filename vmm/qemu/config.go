@@ -117,6 +117,9 @@ func (b *qemuBackend) ID() string                 { return "qemu.v1" }
 func (b *qemuBackend) Capabilities() []string     { return append([]string(nil), b.capabilities...) }
 func (b *qemuBackend) Validate(machine vmmapi.Machine) []vmmapi.ValidationIssue {
 	var issues []vmmapi.ValidationIssue
+	if machine.DarwinBoot != nil {
+		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.darwin_boot", Field: "boot", Message: "Darwin direct boot is not supported by this backend"})
+	}
 	if machine.Boot != nil {
 		if runtime.GOOS != "linux" || (machine.Architecture != "i386" && machine.Architecture != "x86_64") {
 			issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.linux_boot", Field: "boot", Message: "direct Linux boot currently requires a Linux host and x86 guest"})
