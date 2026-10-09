@@ -126,7 +126,7 @@ func (p *pc) installACPI() error {
 	if err != nil {
 		return err
 	}
-	root := acpi.PCIRoot{Legacy: true, MemoryBase: 0xc0000000, MemorySize: 0x3ec00000}
+	root := acpi.PCIRoot{Legacy: true, MemoryBase: pciMemoryBase, MemorySize: 0x3ec00000}
 	if p.pciIDE != nil && p.pciIDE.ich7 {
 		root.Interrupts = []acpi.PCIInterrupt{{Device: 1, Pin: 0, Interrupt: 16}}
 	}

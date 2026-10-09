@@ -14,6 +14,11 @@ import (
 	"j5.nz/cc/hypervisor"
 )
 
+// Low RAM stops before PCI MMIO; additional RAM starts above the 32-bit
+// device window. Host backing remains compact across the physical hole.
+const pciMemoryBase = 0xc0000000
+const highRAMBase = 1 << 32
+
 type Backend struct {
 	ACPI, PCIIDE, HPET, UEFI bool
 	// PIOOnly disables the PCI IDE disk's DMA capability.
@@ -70,8 +75,15 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if m.CPUs != 1 {
 		add("cpus", "cc PC requires one CPU")
 	}
-	if m.Memory < 16<<20 || m.Memory > 2<<30 || m.Memory%4096 != 0 {
-		add("memory", "memory must be page-aligned and between 16 MiB and 2 GiB")
+	maxMemory := int64(pciMemoryBase)
+	if m.Architecture == "x86_64" {
+		maxMemory = 8 << 30
+	}
+	if b.UEFI {
+		maxMemory = 2 << 30 // Keep the native UEFI execution profile unchanged.
+	}
+	if m.Memory < 16<<20 || m.Memory > maxMemory || m.Memory%4096 != 0 {
+		add("memory", fmt.Sprintf("memory must be page-aligned and between 16 MiB and %d GiB", maxMemory>>30))
 	}
 	if len(m.Disks) != 1 {
 		add("disks", "cc PC requires one primary IDE disk")
@@ -163,7 +175,12 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		cpu.Close()
 		return nil, err
 	}
-	regions := []hypervisor.RAMRegion{{Address: 0, Offset: 0, Size: 0xa0000}, {Address: 0xc0000, Offset: 0xc0000, Size: uint64(m.Memory) - 0xc0000}, {Address: ramfb.Address, Offset: uint64(m.Memory), Size: ramfb.Size}}
+	lowMemory := min(uint64(m.Memory), uint64(pciMemoryBase))
+	regions := []hypervisor.RAMRegion{{Address: 0, Offset: 0, Size: 0xa0000}, {Address: 0xc0000, Offset: 0xc0000, Size: lowMemory - 0xc0000}}
+	if uint64(m.Memory) > lowMemory {
+		regions = append(regions, hypervisor.RAMRegion{Address: highRAMBase, Offset: lowMemory, Size: uint64(m.Memory) - lowMemory})
+	}
+	regions = append(regions, hypervisor.RAMRegion{Address: ramfb.Address, Offset: uint64(m.Memory), Size: ramfb.Size})
 	total := uint64(m.Memory) + ramfb.Size
 	if len(m.Channels) == 1 {
 		regions = append(regions, hypervisor.RAMRegion{Address: channelAddress, Offset: total, Size: channelSize})

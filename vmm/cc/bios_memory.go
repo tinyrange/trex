@@ -12,7 +12,7 @@ import (
 func (p *pc) extendedMemory(r *x86state.Registers, s x86state.SystemRegisters) bool {
 	if uint16(r.Rax) == 0xe801 {
 		low := uint16((min(len(p.ram), 16<<20) - (1 << 20)) >> 10)
-		high := uint16(max(len(p.ram)-(16<<20), 0) >> 16)
+		high := uint16(max(min(len(p.ram), pciMemoryBase)-(16<<20), 0) >> 16)
 		setLow(&r.Rax, low)
 		setLow(&r.Rbx, high)
 		setLow(&r.Rcx, low)
@@ -21,7 +21,7 @@ func (p *pc) extendedMemory(r *x86state.Registers, s x86state.SystemRegisters) b
 	}
 	switch uint32(r.Rax) {
 	case 0xe820:
-		regions := [...]struct {
+		regions := []struct {
 			base, size uint64
 			kind       uint32
 		}{
@@ -29,7 +29,13 @@ func (p *pc) extendedMemory(r *x86state.Registers, s x86state.SystemRegisters) b
 			// The VGA aperture is device address space, not firmware-owned
 			// memory. Claiming it here conflicts with NT 3.51 video resources.
 			{0xc0000, 0x40000, 2},
-			{0x100000, uint64(len(p.ram)) - 0x100000, 1},
+			{0x100000, min(uint64(len(p.ram)), uint64(pciMemoryBase)) - 0x100000, 1},
+		}
+		if len(p.ram) > pciMemoryBase {
+			regions = append(regions, struct {
+				base, size uint64
+				kind       uint32
+			}{highRAMBase, uint64(len(p.ram)) - pciMemoryBase, 1})
 		}
 		index := uint32(r.Rbx)
 		if uint32(r.Rdx) != 0x534d4150 || uint32(r.Rcx) < 20 || index >= uint32(len(regions)) {

@@ -64,7 +64,10 @@ func binaryScalarCodecNamed(name string) (binaryScalarCodec, bool) {
 
 func Builtins() starlark.StringDict {
 	attrs := starlark.StringDict{
-		"android_boot":         starlark.NewBuiltin("android_boot", androidboot.Builtin),
+		"android_boot":                 starlark.NewBuiltin("android_boot", androidboot.Builtin),
+		"software_update_catalog":      starlark.NewBuiltin("software_update_catalog", softwareUpdateCatalogBuiltin),
+		"software_update_distribution": starlark.NewBuiltin("software_update_distribution", softwareUpdateDistributionBuiltin),
+
 		"annotate":             starlark.NewBuiltin("annotate", binaryAnnotateBuiltin),
 		"appledouble":          starlark.NewBuiltin("appledouble", appleDoubleBuiltin),
 		"appledouble_metadata": starlark.NewBuiltin("appledouble_metadata", appleDoubleMetadataBuiltin),

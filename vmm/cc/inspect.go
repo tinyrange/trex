@@ -61,17 +61,22 @@ func (i inspection) readPhysical(_ *starlark.Thread, _ *starlark.Builtin, args s
 	}
 	var result starlark.Value
 	err := i.driver.call(i.ctx, func() error {
-		memory := i.driver.pc.ram
-		base := uint64(0)
-		if address >= ramfb.Address {
-			memory = i.driver.pc.framebuffer
-			base = ramfb.Address
+		p := i.driver.pc
+		var memory []byte
+		if address >= ramfb.Address && address-ramfb.Address < uint64(len(p.framebuffer)) {
+			offset := address - ramfb.Address
+			if uint64(size) > uint64(len(p.framebuffer))-offset {
+				return fmt.Errorf("physical range exceeds framebuffer")
+			}
+			memory = p.framebuffer[offset : offset+uint64(size)]
+		} else {
+			var err error
+			memory, err = p.memory(address, uint64(size))
+			if err != nil {
+				return err
+			}
 		}
-		offset := address - base
-		if offset > uint64(len(memory)) || uint64(size) > uint64(len(memory))-offset {
-			return fmt.Errorf("physical range is not RAM")
-		}
-		result = starlark.Bytes(string(memory[offset : offset+uint64(size)]))
+		result = starlark.Bytes(string(memory))
 		return nil
 	})
 	return result, err
@@ -170,7 +175,7 @@ func (p *pc) inspectState() (starlark.Value, error) {
 	}
 	return starvalue.Starlark(map[string]any{
 		"virtio_input": map[string]any{"status": int(p.input.status), "reports": int64(p.input.reports), "queue_ready": p.input.queues[0].ready, "used": int(p.input.queues[0].written), "descriptor": int64(p.input.queues[0].desc), "available": int64(p.input.queues[0].avail), "pending": len(p.input.pending)},
-		"ata_failures": failures, "ata_last_command": int(p.ide.lastCommand), "ata_dma_pending": p.ide.dmaPending, "ata_irq_pending": p.ide.pending,
+		"ata_failures": failures, "ata_sleeping": p.ide.sleeping, "ata_last_command": int(p.ide.lastCommand), "ata_dma_pending": p.ide.dmaPending, "ata_irq_pending": p.ide.pending,
 		"pci_address": int64(p.pciAddress), "pci_ide": pciIDE,
 		"network": network, "hpet": timer, "smc": smcState, "usb": usbState,
 		"pc": int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),

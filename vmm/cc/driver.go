@@ -59,6 +59,7 @@ func newDriver(ctx context.Context, p *pc, paused bool) *driver {
 	if paused {
 		d.state.Name = "paused"
 	}
+	p.asyncDMAReads = true
 	go d.loop()
 	return d
 }
@@ -99,7 +100,13 @@ func (d *driver) loop() {
 	}
 	defer close(d.done)
 	defer close(d.events)
-	defer func() { d.mu.Lock(); d.closeErr = d.pc.cpu.Close(); d.mu.Unlock() }()
+	defer func() {
+		// Join storage before releasing CPU memory or closing its wake target.
+		readErr := d.pc.completeIDEDMARead(true)
+		d.mu.Lock()
+		d.closeErr = errors.Join(readErr, d.pc.cpu.Close())
+		d.mu.Unlock()
+	}()
 	d.emit("started", nil)
 	for {
 		state, _ := d.Status(d.ctx)
@@ -187,6 +194,9 @@ func (d *driver) call(ctx context.Context, fn func() error) error {
 }
 func (d *driver) Pause(ctx context.Context) error {
 	return d.call(ctx, func() error {
+		if err := d.pc.completeIDEDMARead(true); err != nil {
+			return err
+		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		if d.result != nil {
@@ -221,7 +231,13 @@ func (d *driver) Resume(ctx context.Context) error {
 	})
 }
 func (d *driver) Stop(ctx context.Context) error {
-	return d.call(ctx, func() error { d.finish("stopped", "", true); return nil })
+	return d.call(ctx, func() error {
+		if err := d.pc.completeIDEDMARead(true); err != nil {
+			return err
+		}
+		d.finish("stopped", "", true)
+		return nil
+	})
 }
 func (d *driver) Reset(context.Context) error {
 	return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "cc reset is not implemented"}

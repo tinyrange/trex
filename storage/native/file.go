@@ -38,6 +38,7 @@ type blockDeviceExtenter = blockpkg.Extenter
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
 		"http_file":   starlark.NewBuiltin("http_file", httpFileBuiltin),
+		"http_get":    starlark.NewBuiltin("http_get", httpGetBuiltin),
 		"mirror_file": starlark.NewBuiltin("mirror_file", mirrorFileBuiltin),
 		"open":        starlark.NewBuiltin("open", openBuiltin),
 		"stdout":      starlark.NewBuiltin("stdout", stdoutBuiltin),

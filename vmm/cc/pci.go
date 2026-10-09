@@ -155,6 +155,13 @@ func (p *pc) pciIO(ex hypervisor.X86Exit) error {
 }
 
 func (p *pc) ideIO(ex hypervisor.X86Exit) error {
+	// No second storage operation or task-file/reset mutation may race the
+	// read worker. Reading status does not wait for disk completion.
+	if ex.Write {
+		if err := p.completeIDEDMARead(true); err != nil {
+			return err
+		}
+	}
 	if p.pciIDE != nil && !p.pciIDE.primaryEnabled() {
 		if !ex.Write {
 			for i := range ex.Data {

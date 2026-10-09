@@ -22,17 +22,17 @@ func init() {
 }
 func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
-	var maximum int64
-	if err := starlark.UnpackArgs("pbzx", args, kwargs, "file", &value, "maximum_bytes?", &maximum); err != nil {
+	var maximum, replayBytes int64
+	if err := starlark.UnpackArgs("pbzx", args, kwargs, "file", &value, "maximum_bytes?", &maximum, "replay_cache_bytes?", &replayBytes); err != nil {
 		return nil, err
 	}
 	r, ok := value.(storage.Reader)
 	if !ok {
 		return nil, fmt.Errorf("pbzx: expected file")
 	}
-	f, err := Open(r, maximum)
+	f, err := OpenWithReplayCache(r, maximum, replayBytes)
 	if err != nil {
 		return nil, err
 	}
-	return starfile.NewReader("payload.cpio", f), nil
+	return &fileValue{ReaderValue: starfile.NewReader("payload.cpio", f), file: f}, nil
 }

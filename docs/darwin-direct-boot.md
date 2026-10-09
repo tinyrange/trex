@@ -174,14 +174,20 @@ Mach-O, EFI and disk fixtures, not distributed Apple payloads.
   selection is limited to 128 results. No prelinked-kext symbol table is implied.
 * `symbolize(address)`: nearest preceding kernel symbol and unsigned offset,
   or None if no predecessor exists. It is not a function-extent or kext resolver.
-* `read_virtual(address, size)`: read-only, nonwrapping 0..65536-byte access
-  through the current original guest page tables, including cross-page reads.
-* `disassemble(address, size=256, mode=64)`: read-only Intel-syntax instruction
+* `read_virtual(address, size, page_table=0)`: read-only, nonwrapping
+  0..65536-byte access, including cross-page reads. Zero uses current CR3;
+  a nonzero value selects an explicitly caller-observed page-table root
+  (raw CR3, including PCID bits). It changes only the inspector's register
+  copy, never guest CR3 or memory. Unmapped roots fail; none is guessed.
+  This permits kernel observations when a KPTI guest stops on an isolated
+  userspace root. Obtain and validate the kernel root while it is mapped,
+  using that kernel generation's original pmap layout.
+* `disassemble(address, size=256, mode=64, page_table=0)`: read-only Intel-syntax instruction
   rows; size is 0..4096, mode is 16/32/64. Invalid or partial final instructions
   produce a terminal error row while preserving the decoded prefix.
 * `breakpoint(address)`: native hardware execution breakpoint, with no guest
   instruction modifications. Address0 disables it.
-* `state()`: existing bounded device/CPU state plus Darwin handoff metadata,
+* `state()`: existing bounded device/CPU state (including `ata_sleeping`) plus Darwin handoff metadata,
   full PCI IDE configuration and the last32 configuration transfers. Darwin
   transfers retain at most six readable frame-pointer links from transaction
   time; they are observations, not a guaranteed unwinder.

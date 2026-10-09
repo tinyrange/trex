@@ -1,9 +1,17 @@
 # Intel macOS installer layers
 
+For catalog-based full-installer discovery and package URLs, see
+[macOS software update](macos-software-update.md). Discovery is separate from
+the image-construction and boot support described here.
+
 The native readers cover the Apple installer media for Lion (10.7), Mountain
 Lion (10.8), Yosemite (10.10), El Capitan (10.11) and Sierra (10.12). No host
 mount, conversion or extraction program is needed. Each stage borrows portable
 `storage.Reader` / Starlark `file` views; decoded host intermediates are not used.
+
+For the validated 10.13.6 original-payload image, unattended desktop and
+Calculator smoke, see [High Sierra](macos-high-sierra.md). That proof does not
+establish firmware/postinstall equivalence or APFS support.
 
 ## Layer order
 

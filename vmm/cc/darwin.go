@@ -47,7 +47,7 @@ func (p *pc) installDarwin(boot *vmm.DarwinBoot) error {
 	dtAddr := top + 8192
 	runtimeAddr := top + 0x10000
 	runtimeEnd := runtimeAddr + 0x2000
-	ramEnd := uint64(len(p.ram))
+	ramEnd := min(uint64(len(p.ram)), uint64(pciMemoryBase))
 	// The original bootstrap maps the low 1GiB and addresses metadata with
 	// 32-bit pointers. Check the complete arena before touching guest RAM.
 	loadedEnd := runtimeEnd
@@ -135,6 +135,9 @@ func (p *pc) installDarwin(boot *vmm.DarwinBoot) error {
 		{Type: 5, Physical: stub, Virtual: stub | 0xffffff8000000000, Pages: 1, Attributes: 0x8000000000000008},
 	}
 	ranges = append(ranges, darwin.MemoryRange{Type: 7, Physical: loadedEnd, Pages: (ramEnd - loadedEnd) / 4096, Attributes: 8})
+	if uint64(len(p.ram)) > ramEnd {
+		ranges = append(ranges, darwin.MemoryRange{Type: 7, Physical: highRAMBase, Pages: (uint64(len(p.ram)) - ramEnd) / 4096, Attributes: 8})
+	}
 	mmap, err := darwin.MemoryMap(ranges)
 	if err != nil {
 		return err
