@@ -18,7 +18,7 @@ import (
 // Exercise the real backend mapping and Darwin firmware handoff, not merely
 // the validation limit. mmap reserves 3GiB; this guest touches only a few pages.
 func TestDarwinThreeGiBRAM(t *testing.T) {
-	requireKVM(t)
+	requireDarwinKVM(t)
 	kernel := make([]byte, 4096)
 	if _, err := darwinKernel(0x200000).ReadAt(kernel, 0); err != nil {
 		t.Fatal(err)

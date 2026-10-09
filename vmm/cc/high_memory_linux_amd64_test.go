@@ -21,7 +21,7 @@ import (
 // writes, native virtual reads, and both firmware maps without allocating
 // eight GiB of resident host memory just to test address arithmetic.
 func TestDarwinEightGiBHighMemory(t *testing.T) {
-	requireKVM(t)
+	requireDarwinKVM(t)
 	kernel := make([]byte, 4096)
 	if _, err := darwinKernel(0x200000).ReadAt(kernel, 0); err != nil {
 		t.Fatal(err)
@@ -129,5 +129,37 @@ func TestDarwinEightGiBHighMemory(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// KVM availability alone does not imply the Intel-style cache enumeration
+// required by the Darwin CPU profile (for example on some AMD CI hosts).
+// Inspect raw host capabilities, not configureDarwinCPU's result: unexpected
+// profile/setup failures on a supported accelerator must still fail the test.
+func requireDarwinKVM(t *testing.T) {
+	t.Helper()
+	requireKVM(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	host, err := hypervisor.NewX86(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	entries, err := host.SupportedCPUID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	longMode, cache := false, false
+	for _, entry := range entries {
+		if entry.Function == 0x80000001 && entry.Edx&(1<<29) != 0 {
+			longMode = true
+		}
+		if entry.Function == 4 && entry.Eax&31 != 0 {
+			cache = true
+		}
+	}
+	if !longMode || !cache {
+		t.Skip("accelerator lacks Darwin long mode or deterministic cache enumeration")
 	}
 }
