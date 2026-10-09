@@ -3,6 +3,7 @@ package cc
 import (
 	"fmt"
 	"j5.nz/cc/hypervisor"
+	"j5.nz/cc/hypervisor/x86state"
 )
 
 // Penryn is an XNU-supported family that does not require newer topology or
@@ -12,7 +13,7 @@ func configureDarwinCPU(cpu hypervisor.X86) error {
 	if err != nil {
 		return err
 	}
-	filtered := entries[:0]
+	filtered := make([]x86state.CPUIDEntry, 0, len(entries)+6)
 	longMode, cache := false, false
 	for _, e := range entries {
 		if e.Function > 4 && (e.Function < 0x80000000 || e.Function > 0x80000008) {
@@ -20,7 +21,7 @@ func configureDarwinCPU(cpu hypervisor.X86) error {
 		}
 		switch e.Function {
 		case 0:
-			e.Eax = 4
+			e.Eax = 0xa
 			e.Ebx, e.Edx, e.Ecx = 0x756e6547, 0x49656e69, 0x6c65746e
 		case 1:
 			e.Eax = 0x10676
@@ -52,6 +53,15 @@ func configureDarwinCPU(cpu hypervisor.X86) error {
 	}
 	if !longMode || !cache {
 		return fmt.Errorf("cc Darwin requires accelerator long mode and deterministic cache enumeration")
+	}
+	// XNU4570 queries the architectural PMU leaf even on this Penryn profile.
+	// An out-of-range basic CPUID query may return the highest basic leaf,
+	// so omitting 0xa with max=4 can turn cache geometry into fake counters.
+	// This machine supplies no virtual PMU. Enumerate through 0xa and return
+	// explicit zero leaves for MONITOR/thermal/structured features and PMU,
+	// rather than advertising unsupported counters or patching guest code.
+	for function := uint32(5); function <= 0xa; function++ {
+		filtered = append(filtered, x86state.CPUIDEntry{Function: function})
 	}
 	return cpu.SetCPUID(filtered)
 }

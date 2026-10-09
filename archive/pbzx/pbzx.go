@@ -13,6 +13,7 @@ import (
 	"io"
 	"math"
 	"sort"
+	"sync/atomic"
 )
 
 const MaxChunk = 64 << 20
@@ -25,14 +26,28 @@ type Chunk struct {
 	reader                      storage.Reader
 }
 type File struct {
-	source storage.Reader
-	size   int64
-	Chunks []Chunk
-	cache  *bytecache.Cache
+	source                                       storage.Reader
+	size                                         int64
+	Chunks                                       []Chunk
+	cache                                        *bytecache.Cache
+	replay                                       *bytecache.Cache
+	xzChunks, xzBytes, replayBlocks, replayBytes atomic.Uint64
 }
 
 func (f *File) Size() int64 { return f.size }
 func Open(source storage.Reader, maximum int64) (*File, error) {
+	return OpenWithReplayCache(source, maximum, 0)
+}
+
+// OpenWithReplayCache optionally retains verified chunks in a fast-compressed
+// in-memory LRU in addition to the 64 MiB decoded cache. It never decodes ahead
+// or persists intermediates. replayBytes bounds retained encoded bytes, not
+// temporary decoder/output buffers or concurrent callers' borrowed results.
+// Zero preserves Open's original retention policy.
+func OpenWithReplayCache(source storage.Reader, maximum, replayBytes int64) (*File, error) {
+	if replayBytes < 0 {
+		return nil, fmt.Errorf("pbzx: negative replay cache budget")
+	}
 	if source == nil || source.Size() < 12 || maximum < 0 {
 		return nil, fmt.Errorf("pbzx: invalid source/maximum")
 	}
@@ -48,6 +63,9 @@ func Open(source storage.Reader, maximum int64) (*File, error) {
 		return nil, fmt.Errorf("pbzx: invalid header/chunk bound")
 	}
 	f := &File{source: source, cache: bytecache.New(MaxChunk)}
+	if replayBytes > 0 {
+		f.replay = bytecache.New(replayBytes)
+	}
 	off := int64(12)
 	for off < source.Size() {
 		if len(f.Chunks) >= MaxChunks || source.Size()-off < 16 {
@@ -113,20 +131,14 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 			if _, err := io.ReadFull(io.NewSectionReader(c.reader, skip, n), p[:n]); err != nil {
 				return done, err
 			}
+		} else if f.replay != nil {
+			read, err := f.readReplay(p[:n], i, c, skip)
+			if err != nil {
+				return done + read, fmt.Errorf("pbzx: chunk %d: %w", i, err)
+			}
 		} else {
 			data, err := f.cache.Get(bytecache.Key{Index: i}, func() ([]byte, error) {
-				// Keep only the borrowed stored extent in Chunk. Retaining one
-				// xz.File per chunk also retains each decoder's LZMA dictionary
-				// after EOF, growing memory with the entire decoded payload.
-				decoded, err := xz.Open(c.reader, MaxChunk)
-				if err != nil {
-					return nil, err
-				}
-				b := make([]byte, c.Size)
-				if _, err := io.ReadFull(io.NewSectionReader(decoded, 0, c.Size), b); err != nil {
-					return nil, err
-				}
-				return b, nil
+				return f.decodeChunk(c)
 			})
 			if err != nil {
 				return done, fmt.Errorf("pbzx: chunk %d: %w", i, err)

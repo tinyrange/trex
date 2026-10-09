@@ -17,7 +17,7 @@ The graphics output protocol exposes a 1280×720 BGRX framebuffer with a
 hardware device path. Guest page tables translate firmware-call arguments;
 runtime address mapping updates the firmware tables and their checksums.
 Usable low RAM remains available for Windows startup stubs; VGA and firmware
-ranges are reserved. Both BIOS and UEFI machines accept 16 MiB–2 GiB RAM.
+ranges are reserved. BIOS and direct-Darwin x86_64 machines accept 16 MiB–8 GiB RAM; i386 accepts up to 3 GiB and native UEFI retains its 2 GiB ceiling. Low RAM ends at the PCI MMIO window (0xc0000000). Additional RAM is mapped above 4 GiB, with compact host backing. BIOS E820 and the Darwin EFI map describe both ranges; E801 reports only low RAM. Native memory inspection and DMA reject the PCI hole rather than aliasing it to RAM.
 The `efi` inspection field contains the last 32 firmware calls and statuses.
 Unsupported firmware services stop execution with their name and arguments.
 
@@ -114,7 +114,7 @@ PCI inspection includes the configuration-address latch, controller header,
 and bitmaps of configuration dwords read and written.
 It also exposes integer registers, CR2/CR4 and the IDT base. `read_physical(address,
 size)` returns an owned snapshot of at most 64 KiB of RAM, including the display
-aperture. `breakpoint(address)` installs a debugger-owned execution breakpoint;
+aperture. `breakpoint(address)` replaces the single debugger-owned execution breakpoint;
 zero disables it. A hit pauses execution and `resume()` skips that occurrence.
 Reading a screenshot or state serializes with execution. Closing the VM
 releases KVM and RAM and is idempotent; stopping preserves inspection until

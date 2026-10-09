@@ -106,6 +106,7 @@ var nativeStarlarkTypes = map[string][]string{
 	"byte_view":                {"bytes(offset=0, size=remaining)", "compare(other, signed=False, exact=False)", "find(needle, start=0, end=size)", "find_all(needle, start=0, end=size, limit=1M)", "find_indices(needles, start=0, end=size)", "size", "slice(offset=0, size=remaining)"},
 	"tcp_bridge":               {"close()", "port"},
 	"byte_channel":             {"close()", "name", "read(size, maximum=8MiB)", "read_available(maximum=64KiB)", "read_some(maximum=64KiB, timeout=30)", "write(value)", "write_available(value)"},
+	"clock.read_profiler":      {"file(source, label)", "reset()", "snapshot(limit=100)"},
 	"clock.profiler":           {"counter(name, amount=1)", "measure(name, function, *args, **kwargs)", "report(minimum_coverage=0.95)", "snapshot()", "span(name)"},
 	"clock.span":               {"end() -> elapsed seconds"},
 	"directory":                {"fat_short_path(name)", "files", "find(path)", "get_security(name)", "mkdir(name)", "remove(name)", "set_attributes(name, readonly=False, hidden=False, system=False, archive=False)", "set_security(name, descriptor)", "write(name, value)"},
@@ -147,7 +148,10 @@ var nativeStarlarkTypes = map[string][]string{
 }
 
 var nativeStarlarkSignatures = map[string]string{
-	"archive.crx":               "archive.crx(file) -> record(id, version, files, entries)",
+	"archive.crx":                         "archive.crx(file) -> record(id, version, files, entries)",
+	"binary.software_update_catalog":      "binary.software_update_catalog(source) -> list",
+	"binary.software_update_distribution": "binary.software_update_distribution(source) -> dict",
+
 	"emulator.shell.filesystem": "emulator.shell.filesystem(maximum=64MiB) -> unix_filesystem",
 	"emulator.shell.run":        "emulator.shell.run(files, source, dir='/', env={}, args=[], commands={}, executable=None, stdin=b'', name='shell', max_steps=100000, maximum_output=8MiB, timeout=120) -> shell_result",
 	"emulator.shell.date":       "emulator.shell.date(epoch) -> shell_command",
@@ -170,6 +174,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"help":                              "help(value=None) -> None",
 	"json.decode":                       "json.decode(value, maximum=64MiB) -> value",
 	"hex":                               "hex(value, width=0) -> string",
+	"http_get":                          "http_get(url, maximum=64MiB, timeout=60) -> file",
 	"http_file":                         "http_file(urls, size=None, name='HTTP range file', chunk_bytes=4MiB, cache_bytes=256MiB) -> file; omitted size uses HEAD discovery",
 	"mirror_file":                       "mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file",
 	"open":                              "open(name) -> file",
@@ -230,7 +235,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"filesystem.xfs":                    "filesystem.xfs(file, maximum_entries=1M) -> record",
 	"archive.udif":                      "archive.udif(file) -> record",
 	"archive.xar":                       "archive.xar(file, maximum_entries=100000) -> record",
-	"archive.pbzx":                      "archive.pbzx(file, maximum_bytes=<unlimited>) -> file",
+	"archive.pbzx":                      "archive.pbzx(file, maximum_bytes=<unlimited>, replay_cache_bytes=0) -> file",
 	"archive.lzfse":                     "archive.lzfse(file, maximum_bytes=<unlimited>) -> file",
 	"archive.im4p":                      "archive.im4p(file) -> record",
 	"archive.bom":                       "archive.bom(file, maximum_entries=1M) -> list[record]",
@@ -239,7 +244,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"archive.gzip_members":              "archive.gzip_members(file, maximum_bytes=512MiB, maximum_members=1024) -> list[file]",
 	"filesystem.ext4":                   "filesystem.ext4(file, maximum_entries=100000, maximum_depth=32) -> record",
 	"filesystem.ext4_build":             "filesystem.ext4_build(entries, size, label='', uuid='') -> file",
-	"binary.macho":                      "binary.macho(file, architecture=\"x86_64\") -> record",
+	"binary.macho":                      "binary.macho(file, architecture=\"x86_64\", cpu_subtype=None) -> record",
 	"binary.plist":                      "binary.plist(source) -> value",
 	"binary.plist_encode":               "binary.plist_encode(value) -> file",
 	"binary.appledouble_metadata":       "binary.appledouble_metadata(file) -> dict(finder_info, resource, xattrs, other)",
@@ -256,6 +261,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"archive.xz":                        "archive.xz(file, max_dictionary=64MiB) -> file",
 	"clock.monotonic":                   "clock.monotonic() -> elapsed seconds",
 	"clock.profiler":                    "clock.profiler() -> clock.profiler",
+	"clock.read_profiler":               "clock.read_profiler(max_files=16384, max_events=1024, min_seconds=0.01) -> clock.read_profiler",
 	"renvo.go":                          "renvo.go(source, input, target, arena_size=32MiB) -> compiledModule",
 	"renvo.cc":                          "renvo.cc(source, input, target, flags=[], arena_size=32MiB) -> compiledModule; input is a virtual source path or list of paths",
 	"renvo.make":                        "renvo.make(source, target, input='Makefile', targets=[], output='', arena_size=32MiB) -> compiledModule; rebuilds Renvo recipes in memory; output selects the binary by virtual path relative to the Makefile",

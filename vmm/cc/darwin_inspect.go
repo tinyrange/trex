@@ -2,7 +2,6 @@ package cc
 
 import (
 	"fmt"
-	"github.com/tinyrange/trex/emulator/cpu"
 	"github.com/tinyrange/trex/script/value"
 	"go.starlark.net/starlark"
 	"sort"
@@ -82,7 +81,8 @@ func (i inspection) symbolize(_ *starlark.Thread, _ *starlark.Builtin, args star
 func (i inspection) readVirtual(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var address uint64
 	var size int
-	if err := starlark.UnpackArgs("cc.read_virtual", args, kwargs, "address", &address, "size", &size); err != nil {
+	var pageTable uint64
+	if err := starlark.UnpackArgs("cc.read_virtual", args, kwargs, "address", &address, "size", &size, "page_table?", &pageTable); err != nil {
 		return nil, err
 	}
 	if size < 0 || size > 65536 || uint64(size) > ^uint64(0)-address {
@@ -90,12 +90,8 @@ func (i inspection) readVirtual(_ *starlark.Thread, _ *starlark.Builtin, args st
 	}
 	var result starlark.Value
 	err := i.driver.call(i.ctx, func() error {
-		s, err := i.driver.pc.cpu.SystemRegisters()
+		b, err := i.driver.pc.readVirtualBytes(address, size, pageTable)
 		if err != nil {
-			return err
-		}
-		b := make([]byte, size)
-		if err = (efiMemory{p: i.driver.pc, system: &s}).ReadMemory(address, b, cpu.Read); err != nil {
 			return err
 		}
 		result = starlark.Bytes(string(b))

@@ -10,7 +10,8 @@ import (
 func machoBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var input starlark.Value
 	architecture := "x86_64"
-	if err := starlark.UnpackArgs("macho", args, kwargs, "file", &input, "architecture?", &architecture); err != nil {
+	var subtype starlark.Value = starlark.None
+	if err := starlark.UnpackArgs("macho", args, kwargs, "file", &input, "architecture?", &architecture, "cpu_subtype?", &subtype); err != nil {
 		return nil, err
 	}
 	file, ok := input.(starfile.File)
@@ -20,7 +21,17 @@ func machoBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 	if architecture != "x86_64" {
 		return nil, fmt.Errorf("macho: only x86_64 inspection supported")
 	}
-	image, err := macho.Open(file, macho.AMD64)
+	var image *macho.Image
+	var err error
+	if subtype == starlark.None {
+		image, err = macho.Open(file, macho.AMD64)
+	} else {
+		var value uint32
+		if err := starlark.AsInt(subtype, &value); err != nil {
+			return nil, fmt.Errorf("macho: cpu_subtype: %w", err)
+		}
+		image, err = macho.OpenSubtype(file, macho.AMD64, value)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -43,5 +54,5 @@ func machoBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 		}
 		return starfile.NewReader("macho virtual bytes", r), nil
 	})
-	return starfile.NewRecord(starlark.StringDict{"architecture": starlark.String(architecture), "type": starlark.MakeUint(uint(image.Type)), "file": starfile.NewReader("macho selected image", image.Source), "segments": starlark.NewList(segments), "symbols": starlark.NewList(symbols), "at": at}), nil
+	return starfile.NewRecord(starlark.StringDict{"architecture": starlark.String(architecture), "cpu_subtype": starlark.MakeUint(uint(image.Subtype)), "type": starlark.MakeUint(uint(image.Type)), "file": starfile.NewReader("macho selected image", image.Source), "segments": starlark.NewList(segments), "symbols": starlark.NewList(symbols), "at": at}), nil
 }

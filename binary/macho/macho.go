@@ -28,10 +28,10 @@ type Symbol struct {
 	Description   uint16
 }
 type Image struct {
-	CPU, Type uint32
-	Source    storage.Reader
-	Segments  []Segment
-	Symbols   []Symbol
+	CPU, Subtype, Type uint32
+	Source             storage.Reader
+	Segments           []Segment
+	Symbols            []Symbol
 }
 type view struct {
 	storage.Reader
@@ -75,6 +75,17 @@ func span(r storage.Reader, off, size uint64) (storage.Reader, error) {
 // image of that CPU. It accepts little-endian 64-bit images and fat32/fat64
 // big-endian containers. Load commands and symbol allocations are bounded.
 func Open(r storage.Reader, cpu uint32) (*Image, error) {
+	return open(r, cpu, nil)
+}
+
+// OpenSubtype selects an exact CPU subtype, including capability bits. Unlike
+// Open, it can disambiguate universal files containing both x86_64 and x86_64h.
+// Both the universal directory and selected thin header must match.
+func OpenSubtype(r storage.Reader, cpu, subtype uint32) (*Image, error) {
+	return open(r, cpu, &subtype)
+}
+
+func open(r storage.Reader, cpu uint32, subtype *uint32) (*Image, error) {
 	if r == nil || r.Size() < 32 {
 		return nil, fmt.Errorf("macho: truncated header")
 	}
@@ -112,7 +123,7 @@ func Open(r storage.Reader, cpu uint32) (*Image, error) {
 			if err != nil {
 				return nil, err
 			}
-			if binary.BigEndian.Uint32(a) == cpu {
+			if binary.BigEndian.Uint32(a) == cpu && (subtype == nil || binary.BigEndian.Uint32(a[4:]) == *subtype) {
 				if selected != nil {
 					return nil, fmt.Errorf("macho: duplicate architecture")
 				}
@@ -129,7 +140,7 @@ func Open(r storage.Reader, cpu uint32) (*Image, error) {
 		}
 	}
 	u32, u64 := binary.LittleEndian.Uint32, binary.LittleEndian.Uint64
-	if u32(h) != 0xfeedfacf || u32(h[4:]) != cpu {
+	if u32(h) != 0xfeedfacf || u32(h[4:]) != cpu || (subtype != nil && u32(h[8:]) != *subtype) {
 		return nil, fmt.Errorf("macho: expected selected little-endian 64-bit CPU")
 	}
 	count, size := u32(h[16:]), u32(h[20:])
@@ -140,7 +151,7 @@ func Open(r storage.Reader, cpu uint32) (*Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	image := &Image{CPU: cpu, Type: u32(h[12:]), Source: r}
+	image := &Image{CPU: cpu, Subtype: u32(h[8:]), Type: u32(h[12:]), Source: r}
 	var symtab []byte
 	for i := uint32(0); i < count; i++ {
 		if len(commands) < 8 {

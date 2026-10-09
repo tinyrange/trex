@@ -195,10 +195,11 @@ func predeclared() starlark.StringDict {
 		"clock": namespace{
 			name: "clock",
 			attrs: starlark.StringDict{
-				"monotonic": starlark.NewBuiltin("monotonic", clockMonotonicBuiltin),
-				"profiler":  starlark.NewBuiltin("profiler", clockProfilerBuiltin),
-				"unix":      starlark.NewBuiltin("unix", clockUnixBuiltin),
-				"utc":       starlark.NewBuiltin("utc", clockUTCBuiltin),
+				"monotonic":     starlark.NewBuiltin("monotonic", clockMonotonicBuiltin),
+				"profiler":      starlark.NewBuiltin("profiler", clockProfilerBuiltin),
+				"read_profiler": starlark.NewBuiltin("read_profiler", clockReadProfilerBuiltin),
+				"unix":          starlark.NewBuiltin("unix", clockUnixBuiltin),
+				"utc":           starlark.NewBuiltin("utc", clockUTCBuiltin),
 			},
 		},
 		"filesystem": namespace{
@@ -305,6 +306,7 @@ func predeclared() starlark.StringDict {
 		"hex":          starlark.NewBuiltin("hex", hexBuiltin),
 		"help":         starlark.NewBuiltin("help", helpBuiltin),
 		"http_file":    nativeIO["http_file"],
+		"http_get":     nativeIO["http_get"],
 		"mirror_file":  nativeIO["mirror_file"],
 		"open":         nativeIO["open"],
 		"repl":         starlark.NewBuiltin("repl", replBuiltin),

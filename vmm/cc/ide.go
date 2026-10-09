@@ -34,6 +34,7 @@ type ide struct {
 	lastCommand, lastFeature byte
 	failures                 []ideFailure
 	dmaError                 string
+	sleeping                 bool
 }
 
 func newIDE(disk vmm.Disk, g vmm.CHSGeometry, irq func(uint32, bool) error) *ide {
@@ -49,6 +50,7 @@ func (d *ide) reset() {
 	d.identify = false
 	d.dmaPending = false
 	d.dmaMode = 0xff
+	d.sleeping = false
 }
 func (d *ide) signal(level bool) error {
 	d.pending = level
@@ -103,6 +105,11 @@ func (d *ide) readSector() error {
 	return d.signal(true)
 }
 func (d *ide) command(command byte) error {
+	// SLEEP exits only through reset, not by accepting the next command.
+	// Status reads may acknowledge its completion interrupt in the meantime.
+	if d.sleeping {
+		return nil
+	}
 	d.commands++
 	feature := d.task[1]
 	d.lastCommand, d.lastFeature = command, feature
@@ -228,11 +235,16 @@ func (d *ide) command(command byte) error {
 		} else if feature != 2 && feature != 0x82 {
 			return d.fail(4)
 		}
-	case command == 0xe7:
+	case command == 0xe6 || command == 0xe7:
 		if flusher, ok := d.disk.Device.(block.Flusher); ok && d.disk.Device.Capabilities().Flush {
 			if err := flusher.Flush(); err != nil {
+				d.dmaError = fmt.Sprintf("ATA cache flush: %v", err)
 				return d.fail(4)
 			}
+		}
+		if command == 0xe6 {
+			d.remaining = 0
+			d.sleeping = true
 		}
 	default:
 		return d.fail(4)

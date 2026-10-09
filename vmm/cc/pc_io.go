@@ -40,6 +40,9 @@ func (p *pc) runWithHandler(ctx context.Context, handle func(hypervisor.X86Exit)
 		if err := ctx.Err(); err != nil {
 			return hypervisor.X86Exit{}, err
 		}
+		if err := p.completeIDEDMARead(false); err != nil {
+			return hypervisor.X86Exit{}, err
+		}
 		now := p.now()
 		if p.uhci != nil {
 			if err := p.uhci.poll(now); err != nil {

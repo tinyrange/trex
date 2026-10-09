@@ -299,6 +299,49 @@ Returns bounded raw registry state below selected roots in one hive.
 
 Returns sorted added, changed, and removed values from keyed snapshots.
 
+## `macos/softwareupdate.star`
+
+Discover macOS full installers from explicit Apple software-update catalogs.
+
+Discovery reads metadata only; cache_packages acquires complete original sources.
+Does not emulate softwareupdate's
+machine eligibility rules, execute Distribution scripts, or infer Intel support.
+
+### `cache_packages`
+
+Acquire every original package before parsing or guest execution.
+
+    Returns URL -> complete local file, using the native persistent mirror
+    cache by default. No decompression or installer execution occurs here.
+    Sizes, duplicate URLs and the aggregate budget are checked before fetching.
+    A failed acquisition returns no partial mapping; completed source objects
+    remain reusable and interrupted downloads remain resumable in the cache.
+
+    Size is verified; catalog Digest is an opaque cache-identity component,
+    not a claim of signature or cryptographic verification. Alternate backends
+    may supply fetch(package, cache), returning a complete random-access file
+    with no later network dependency. Cache configuration belongs to that
+    backend; paths never enter the returned file interface.
+
+### `installers`
+
+Fetch a catalog and one Distribution per installer, returning manifests.
+
+    catalog_url is explicit. languages is an ordered list of exact Distribution
+    keys; absence is an error, not a silent omission. fetch(url, maximum) can
+    supply an alternative byte transport or offline fixture. Results preserve
+    product IDs, versions/builds, package dictionaries (including sizes, URLs
+    and digests), all original product metadata, and parsed Distribution data.
+    No payload is downloaded, no version is deduplicated, and no host/model
+    eligibility filter is applied. Missing version/build metadata is an error.
+
+### `products`
+
+Return installer product dictionaries from a plain/gzip catalog file.
+
+    Results are ordered by product ID. Each has id and the complete original
+    metadata dictionary; ordinary updates are excluded. No network requests.
+
 ## `predeclared.star`
 
 Declares optional embedded extensions to predeclared Go namespaces.
@@ -2038,6 +2081,12 @@ Formats an integer as signed, 0x-prefixed hexadecimal text with optional digit p
 
 Creates a lazy random-access file over HTTP byte ranges with a bounded in-memory chunk cache. urls supplies alternative source locations; omitted size uses HEAD discovery. This does not extract or convert the remote content.
 
+### `http_get`
+
+`http_get(url, maximum=64MiB, timeout=60) -> file`
+
+Performs one sequential HTTP(S) GET into an in-memory file, with normal redirect handling and HTTP gzip decoding. No HEAD/range requests, retries, disk cache or host intermediate files. Requires status200 and bounds response bytes after HTTP decompression to maximum (1..128MiB); timeout is 1..3600 seconds and lifecycle cancellation is honored. This is for bounded metadata; use http_file for large lazy payloads. It does not validate package signatures or digests.
+
 ### `mirror_file`
 
 `mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file`
@@ -2304,9 +2353,9 @@ Decodes a UNIX pack (1f1e) Huffman stream, checking its symbol tree, end marker,
 
 ### `archive.pbzx`
 
-`archive.pbzx(file, maximum_bytes=<unlimited>) -> file`
+`archive.pbzx(file, maximum_bytes=<unlimited>, replay_cache_bytes=0) -> file`
 
-Opens chunked Apple installer payloads as a lazy read-only concatenated file. Validates decoded/stored chunk lengths, XZ indexes and final short-chunk framing; stored chunks are borrowed. Uses a 64 MiB decoded cache and 64 MiB per-chunk bound. Omitted maximum_bytes has no total decoded ceiling; explicit positive limits are enforced. Read complete contents to force XZ checksums. Parse the resulting CPIO separately.
+Opens chunked Apple installer payloads as a lazy read-only concatenated file. Validates decoded/stored chunk lengths, XZ indexes and final short-chunk framing; stored chunks are borrowed. Uses a 64 MiB decoded cache and 64 MiB per-chunk bound. Optional nonnegative replay_cache_bytes adds a byte-bounded volatile indexed S2 cache of verified decoded chunks. Replay and decoded retention use independent 64 KiB blocks, avoiding whole-chunk work on small reads; first XZ verification still covers the complete original chunk. No eager reads or host intermediates. The returned file.stats dictionary separates cumulative successful xz_chunks/xz_bytes from replay_blocks/replay_bytes and includes decoded_cache/replay_cache counters; snapshots under concurrent reads are observational, not transactional. The budget charges exact retained encoded allocations; transient decode buffers are additional. Zero disables it. Omitted maximum_bytes has no total decoded ceiling; explicit positive limits are enforced. Read complete contents to force XZ checksums. Parse the resulting CPIO separately.
 
 ### `archive.rar`
 
@@ -2556,9 +2605,9 @@ Compiles a fixed-size binary layout from a format string and optional field name
 
 ### `binary.macho`
 
-`binary.macho(file, architecture="x86_64") -> record`
+`binary.macho(file, architecture="x86_64", cpu_subtype=None) -> record`
 
-Inspects a bounded little-endian Mach-O64 x86_64 image, optionally selected from a big-endian fat32/fat64 universal container. Exposes the selected borrowed file, segments (name, address, size, file_offset, file_size, flags), and original symbols (name, address, type, section, description). at(address, size) returns borrowed file-backed virtual bytes; zero-fill, unmapped, ambiguous and overflowing ranges fail. Header, command, string and symbol counts and aggregate symbol-name allocations are bounded. Does not relocate, link or execute the image.
+Inspects a bounded little-endian Mach-O64 x86_64 image, optionally selected from a big-endian fat32/fat64 universal container. cpu_subtype optionally selects an exact uint32 subtype (including capability bits) and validates the thin header; omitted selection rejects ambiguous CPU matches. Exposes the selected cpu_subtype, borrowed file, segments (name, address, size, file_offset, file_size, flags), and original symbols (name, address, type, section, description). at(address, size) returns borrowed file-backed virtual bytes; zero-fill, unmapped, ambiguous and overflowing ranges fail. Header, command, string and symbol counts and aggregate symbol-name allocations are bounded. Does not relocate, link or execute the image.
 
 ### `binary.plist`
 
@@ -2686,6 +2735,18 @@ Reads a 8-bit unsigned integer from source at the byte offset, using single-byte
 
 Returns bytes with up to count non-overlapping occurrences of old replaced by new; count=-1 replaces all. old must be nonempty and maximum bounds the result.
 
+### `binary.software_update_catalog`
+
+`binary.software_update_catalog(source) -> list`
+
+Reads plain or gzip Apple software-update catalogs and returns installer products as id/metadata dictionaries in ID order. Selects OSInstall or SharedSupport InstallAssistant identifiers, preserving original package URLs, int64 sizes, digests, dates and Distribution locations. Does not fetch URLs or filter host compatibility. XML is decoded per product, bounded to 128MiB stored/expanded input, 8MiB per product, 4M XML tokens and depth128; each product retains plist value limits. Binary catalogs use the existing stricter plist limits. Rejects duplicate product/catalog keys, malformed XML/plists and corrupt gzip.
+
+### `binary.software_update_distribution`
+
+`binary.software_update_distribution(source) -> dict`
+
+Reads bounded installer-gui-script XML (8MiB, 4M tokens, depth128). Returns title, raw_title, version, build, auxinfo, options, scripts and localizations. Prefers macOSProductVersion/macOSProductBuildVersion to VERSION/BUILD. Resolves observed double-quoted localization title assignments; unsupported localization grammar remains in raw_title/localizations. Scripts are retained as text, never executed, and external entities are not followed. This is metadata, not an eligibility decision.
+
 ### `binary.strings`
 
 `binary.strings(value, encoding='ascii', minimum=4, maximum=64MiB) -> list[string]`
@@ -2786,7 +2847,7 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 `cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456) -> vmm_backend`
 
-Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 2 GiB. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 2 GiB with uefi=True. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
 ### `channel.expose_tcp`
 
@@ -2823,6 +2884,12 @@ Returns seconds from the runtime's monotonic clock. Subtract readings to time wo
 `clock.profiler() -> clock.profiler`
 
 Creates a profiler for named spans, counters and measured calls. Its snapshots and reports summarize work explicitly recorded through this profiler.
+
+### `clock.read_profiler`
+
+`clock.read_profiler(max_files=16384, max_events=1024, min_seconds=0.01) -> clock.read_profiler`
+
+Measures completed reads from labeled file views with bounded per-file aggregates and slowest-call samples. Uses the runtime monotonic clock without executing callbacks on I/O threads.
 
 ### `clock.unix`
 
@@ -4462,6 +4529,12 @@ Methods and attributes: `bytes(offset=0, size=remaining)`, `compare(other, signe
 An explicit instrumentation collector. span/end time a region, measure wraps a call and counter adds a named quantity. snapshot exposes current measurements and report applies the requested coverage criterion.
 
 Methods and attributes: `counter(name, amount=1)`, `measure(name, function, *args, **kwargs)`, `report(minimum_coverage=0.95)`, `snapshot()`, `span(name)`.
+
+### `clock.read_profiler` value
+
+Wraps borrowed sources with file(source, label). snapshot returns detached dictionaries of per-label latency, bytes, errors and bounded slowest reads; reset starts a new phase and excludes earlier in-flight calls. Reads are not serialized and source bytes/errors are preserved. Nested labels measure inclusive latency and must not be summed as exclusive work.
+
+Methods and attributes: `file(source, label)`, `reset()`, `snapshot(limit=100)`.
 
 ### `clock.span` value
 

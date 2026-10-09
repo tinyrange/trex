@@ -49,6 +49,8 @@ type pc struct {
 	rtcNext       time.Time
 	rtcIRQ        bool
 	ide           *ide
+	asyncDMAReads bool
+	dmaRead       *ideDMARead
 	vga           *vga
 	inputTrace    []string
 	keyboard      *keyboard
@@ -176,10 +178,27 @@ func (p *pc) initializeCMOS() {
 }
 
 func (p *pc) memory(addr, size uint64) ([]byte, error) {
-	if addr > uint64(len(p.ram)) || size > uint64(len(p.ram))-addr {
-		return nil, fmt.Errorf("guest memory out of range: %#x+%#x", addr, size)
+	offset, err := ramOffset(uint64(len(p.ram)), addr, size)
+	if err != nil {
+		return nil, err
 	}
-	return p.ram[addr : addr+size], nil
+	return p.ram[offset : offset+size], nil
+}
+
+// ramOffset translates a guest physical range into compact RAM backing. Never
+// let firmware, inspection, or DMA treat the PCI hole as ordinary memory.
+func ramOffset(total, addr, size uint64) (uint64, error) {
+	low := min(total, uint64(pciMemoryBase))
+	if addr <= low && size <= low-addr {
+		return addr, nil
+	}
+	if total > low && addr >= highRAMBase {
+		offset := addr - highRAMBase
+		if offset <= total-low && size <= total-low-offset {
+			return low + offset, nil
+		}
+	}
+	return 0, fmt.Errorf("guest memory out of range: %#x+%#x", addr, size)
 }
 
 func (p *pc) inputMemory(addr, size uint64) ([]byte, error) {
