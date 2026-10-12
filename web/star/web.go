@@ -22,11 +22,12 @@ import (
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
-		"browse":   starlark.NewBuiltin("browse", webBrowseBuiltin),
-		"file":     starlark.NewBuiltin("file", webFileBuiltin),
-		"redirect": starlark.NewBuiltin("redirect", webRedirectBuiltin),
-		"response": starlark.NewBuiltin("response", webResponseBuiltin),
-		"zip":      starlark.NewBuiltin("zip", webZIPBuiltin),
+		"browse":      starlark.NewBuiltin("browse", webBrowseBuiltin),
+		"application": starlark.NewBuiltin("application", applicationBuiltin),
+		"file":        starlark.NewBuiltin("file", webFileBuiltin),
+		"redirect":    starlark.NewBuiltin("redirect", webRedirectBuiltin),
+		"response":    starlark.NewBuiltin("response", webResponseBuiltin),
+		"zip":         starlark.NewBuiltin("zip", webZIPBuiltin),
 	}
 }
 
@@ -130,13 +131,13 @@ type Application struct {
 	// RequestLogger is optional and must be set before serving requests.
 	RequestLogger *slog.Logger
 	requestID     atomic.Uint64
-	mu            sync.Mutex
+	mu            *sync.Mutex
 	thread        *starlark.Thread
 	handler       starlark.Callable
 }
 
 func NewApplication(thread *starlark.Thread, handler starlark.Callable) *Application {
-	return &Application{thread: thread, handler: handler}
+	return NewApplicationWithMutex(thread, handler, &sync.Mutex{})
 }
 
 func (a *Application) ServeHTTP(w http.ResponseWriter, request *http.Request) {

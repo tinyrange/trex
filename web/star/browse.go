@@ -20,7 +20,8 @@ import (
 func webBrowseBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var root *autostar.Value
 	var request starlark.Value
-	if err := starlark.UnpackArgs("web.browse", args, kwargs, "root", &root, "request", &request); err != nil {
+	var routePath string
+	if err := starlark.UnpackArgs("web.browse", args, kwargs, "root", &root, "request", &request, "path?", &routePath); err != nil {
 		return nil, err
 	}
 	a, ok := request.(starlark.HasAttrs)
@@ -30,6 +31,9 @@ func webBrowseBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlar
 	get := func(name string) starlark.Value { v, _ := a.Attr(name); return v }
 	method, _ := starlark.AsString(get("method"))
 	name, _ := starlark.AsString(get("path"))
+	if routePath != "" {
+		name = routePath
+	}
 	if method != "GET" && method != "HEAD" {
 		r := browseError(http.StatusMethodNotAllowed, "use GET or HEAD")
 		r.headers["Allow"] = "GET, HEAD"

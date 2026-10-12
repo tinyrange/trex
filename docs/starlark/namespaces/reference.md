@@ -3654,13 +3654,19 @@ Checks whether a backend can implement a machine specification and its required 
 
 `vmm.workspace(vms, create=None)`
 
-Groups a name-to-VM dictionary for the browser frontend. The optional zero-argument create callback returns (name, vm); calls are serialized and successful creations appear as new tabs. Switching tabs leaves every VM running. Guest construction and provisioning remain recipe-owned.
+Groups a name-to-VM dictionary for the browser frontend; it may start empty. add(name, vm) registers a display and returns a never-reused ID; remove(id) unregisters without closing the VM. The optional zero-argument create callback returns (name, vm); calls are serialized and successful creations appear as new tabs. Switching tabs leaves every VM running. Guest construction and provisioning remain recipe-owned.
+
+### `web.application`
+
+`web.application(handler, consoles=None, public=[], origin='') -> application`
+
+Composes a scripted request handler with optional dynamically registered VM consoles and native session authentication. Public GET/HEAD asset paths are explicit; other requests require a token, and mutations require same-origin checks. The HTTP listener permits loopback or an exact IP assigned to the local Tailscale tunnel; wildcard and LAN binds are rejected. An explicit HTTPS origin supports a trusted reverse proxy without trusting forwarded headers.
 
 ### `web.browse`
 
-`web.browse(root, request) -> response`
+`web.browse(root, request, path='') -> response`
 
-Resolves a recursive path against an auto view. json=1 returns entry metadata and paginated children; raw responses use the existing file range handling. Returns structured HTTP errors for missing, malformed and bounded-out inputs.
+Resolves a recursive path against an auto view. Optional path mounts a tree under a script-owned route prefix. json=1 returns entry metadata and paginated children; raw responses use the existing file range handling. Returns structured HTTP errors for missing, malformed and bounded-out inputs.
 
 ### `web.file`
 

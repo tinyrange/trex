@@ -1,5 +1,51 @@
-import {test} from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import vm from 'node:vm';
+const clientSource = await readFile(new URL('./client.js', import.meta.url), 'utf8');
+const {RFB, keySym} = await import('data:text/javascript;base64,' + Buffer.from(clientSource).toString('base64'));
+const appSource = (await readFile(new URL('./app.js', import.meta.url), 'utf8')).replace(/^import .*\n/, '');
+test('viewer switches consoles, releases held input and ignores stale socket events', async () => {
+  const elements = new Map();
+  const element = () => ({style: {}, children: [], addEventListener() {}, setAttribute() {}, replaceChildren(...items) {this.children = items;}, getContext() {return {clearRect() {}, putImageData() {}};}, focus() {}, getBoundingClientRect() {return {left: 10, top: 20, width: 100, height: 100};}});
+  for (const id of ['screen', 'status', 'connect', 'cad', 'tabs', 'create', 'vm-name']) elements.set('#' + id, element());
+  const listeners = {}, sockets = [], storage = new Map();
+  class Socket {
+    static OPEN = 1; static CLOSING = 2;
+    constructor(url) {this.url = url; this.readyState = 1; this.sent = []; sockets.push(this);}
+    send(b) {this.sent.push([...b]);}
+    close() {this.readyState = 3;}
+    feed(b) {this.onmessage({data: Uint8Array.from(b).buffer});}
+  }
+  const context = {RFB, keySym, Uint8Array, Uint8ClampedArray, ImageData: class {}, WebSocket: Socket,
+    document: {querySelector: id => elements.get(id), createElement: element, addEventListener() {}},
+    window: {addEventListener: (name, fn) => {listeners[name] = fn;}},
+    location: {hash: '#test-token', pathname: '/', protocol: 'http:', host: 'localhost'},
+    sessionStorage: {getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v)}, history: {replaceState() {}},
+    setTimeout, clearTimeout,
+    fetch: async () => ({ok: true, json: async () => ({vms: [{id: '1', name: 'First'}, {id: '2', name: 'Second'}], canCreate: false})})};
+  vm.runInNewContext(appSource, context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sockets.length, 1); assert.match(sockets[0].url, /vm=1/);
+  function handshake(ws) {
+    ws.feed(Buffer.from('RFB 003.008\n')); ws.feed([1, 1]); ws.feed([0, 0, 0, 0]);
+    const init = Buffer.alloc(24); init.writeUInt16BE(2); init.writeUInt16BE(2, 2); ws.feed(init);
+  }
+  handshake(sockets[0]);
+  assert.equal(elements.get('#status').textContent, 'Connected');
+  elements.get('#screen').onkeydown({code: 'ControlLeft', preventDefault() {}});
+  listeners.blur(); assert.deepEqual(sockets[0].sent.at(-2), [4, 0, 0, 0, 0, 0, 255, 227]);
+  elements.get('#tabs').children[1].onclick();
+  assert.equal(sockets[0].readyState, 3); assert.equal(sockets.length, 2);
+  sockets[0].onclose(); sockets[0].feed([99]);
+  assert.equal(elements.get('#status').textContent, 'Connecting…');
+  handshake(sockets[1]);
+  const mode = Buffer.alloc(16); mode.writeUInt16BE(1, 2); mode.writeUInt16BE(1, 4); mode.writeInt32BE(-257, 12); sockets[1].feed(mode);
+  elements.get('#screen').onmousemove({clientX: 999, clientY: -99});
+  assert.deepEqual(sockets[1].sent.at(-1), [5, 0, 0, 1, 0, 0]);
+  elements.get('#connect').onclick(); assert.equal(sockets[1].readyState, 3);
+  assert.equal(elements.get('#cad').disabled, true);
+});
 
 test('tabs release input, ignore stale sockets, and select successfully created VMs', async () => {
   const nodes = new Map();
@@ -39,7 +85,7 @@ test('tabs release input, ignore stale sockets, and select successfully created 
   };
   for(const [key,value] of Object.entries(globals)){previous.set(key,globalThis[key]);globalThis[key]=value;}
   try {
-    await import('./app.js');
+    vm.runInNewContext(appSource, {...globals, RFB, keySym, Uint8Array, Uint8ClampedArray, setTimeout, clearTimeout});
     await new Promise(resolve=>setImmediate(resolve));
     const first=sockets[0];first.ready();
     nodes.get('#screen').onkeydown({code:'KeyA',preventDefault(){}});
