@@ -209,6 +209,7 @@ func predeclared() starlark.StringDict {
 				"efs":                  starlark.NewBuiltin("efs", filesystemefs.Builtin),
 				"ext4":                 starlark.NewBuiltin("ext4", filesystemext4.Builtin),
 				"ext4_build":           starlark.NewBuiltin("ext4_build", filesystemext4.BuildBuiltin),
+				"ffs_build":            starlark.NewBuiltin("ffs_build", filesystemufs.BuildBuiltin),
 				"hfs":                  starlark.NewBuiltin("hfs", filesystemhfs.Builtin),
 				"hfs_build":            starlark.NewBuiltin("hfs_build", filesystemhfs.BuildBuiltin),
 				"ufs":                  starlark.NewBuiltin("ufs", filesystemufs.Builtin),
