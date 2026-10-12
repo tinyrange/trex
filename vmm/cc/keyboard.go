@@ -120,6 +120,10 @@ func (k *keyboard) io(ex hypervisor.X86Exit) error {
 				k.command |= 0x20
 			case 0xa8:
 				k.command &^= 0x20
+			case 0xdd:
+				k.output &^= 2
+			case 0xdf:
+				k.output |= 2
 			case 0xd0:
 				if err := k.enqueue(false, k.output); err != nil {
 					return err
@@ -300,14 +304,30 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 			return &vmm.Error{Code: vmm.ErrorInvalid, Message: "unknown keyboard key " + key}
 		}
 	}
+	remaining := 0
+	releaseKeys := func() error {
+		for remaining > 0 {
+			if err := d.pc.keyEvent(input.Keys[remaining-1], false); err != nil {
+				return err
+			}
+			remaining--
+		}
+		return nil
+	}
 	if err := d.call(ctx, func() error {
 		for _, key := range input.Keys {
 			if err := d.pc.keyEvent(key, true); err != nil {
 				return err
 			}
+			remaining++
 		}
 		return nil
 	}); err != nil {
+		// Cancellation can win the reply race after a press was accepted.
+		// Read and update the accepted-prefix count only on the device loop.
+		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = d.call(cleanup, releaseKeys)
 		return err
 	}
 	timer := time.NewTimer(50 * time.Millisecond)
@@ -318,16 +338,7 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 	}
 	// Both attempts execute on the serialized device loop. Track progress
 	// there so cancellation racing a completed release cannot duplicate it.
-	remaining := len(input.Keys)
-	releaseKeys := func() error {
-		for remaining > 0 {
-			if err := d.pc.keyEvent(input.Keys[remaining-1], false); err != nil {
-				return err
-			}
-			remaining--
-		}
-		return nil
-	}
+
 	// Cold guest reads may keep the device loop busy for more than a second.
 	// Preserve the live caller's deadline; only cancellation starts cleanup.
 	err := ctx.Err()

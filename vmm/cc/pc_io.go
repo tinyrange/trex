@@ -25,6 +25,7 @@ func (p *pc) runDevices(ctx context.Context) (hypervisor.X86Exit, error) {
 			}
 			return false, nil
 		case hypervisor.X86ExitMMIO:
+			ex.Address = p.cpuAddress(ex.Address)
 			if ex.Address >= 0xa0000 && ex.Address+uint64(ex.Size) <= 0xc0000 {
 				return true, p.vga.mmio(ex, p.cpu)
 			}
@@ -158,7 +159,10 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 		}
 	}
 	if ex.Port == 0x60 || ex.Port == 0x64 {
-		return p.keyboard.io(ex)
+		if err := p.keyboard.io(ex); err != nil {
+			return err
+		}
+		return p.updateA20()
 	}
 	if ex.Port >= 0x3b0 && ex.Port <= 0x3df {
 		return p.vga.io(ex)
@@ -232,12 +236,27 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 			}
 			p.observeRTC(false, value)
 		case 0x61:
+			if ex.Write {
+				p.ports[ex.Port] = (p.ports[ex.Port] & 0x20) | (data[0] & 0x0f)
+				break
+			}
+			// AT refresh clock: PIT channel 1 divides the input by 18.
+			// HIMEM waits for bit 4 to change twice before using the 8042.
+			// Reading the port must not advance the refresh clock itself.
+			elapsed := max(p.now().Sub(p.started), 0)
+			ticks := uint64(elapsed/time.Second)*1193182 + uint64(elapsed%time.Second)*1193182/1000000000
 			value = p.ports[ex.Port] ^ 0x20
 			p.ports[ex.Port] = value
+			value |= byte((ticks/18)&1) << 4
 		case 0x80, 0x92:
 			value = p.ports[ex.Port]
 			if ex.Write {
 				p.ports[ex.Port] = data[0]
+				if ex.Port == 0x92 {
+					if err := p.updateA20(); err != nil {
+						return err
+					}
+				}
 			}
 		default:
 			// Unpopulated ISA ports float high; writes have no receiver.

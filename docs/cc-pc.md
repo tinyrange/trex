@@ -105,6 +105,53 @@ TinyRangeX supplies the NT 3.1 image recipes, guest drivers and integration
 smokes in [tinyrangex](https://github.com/tinyrange/tinyrangex). Those are
 consumer-level validation of this backend, not image-building features of trex.
 
+## DOS and Win16 firmware
+
+Legacy POST enables IRQ1 and installs a firmware keyboard handler. Translated
+set-1 key events feed the standard BDA ring buffer. INT16 supports blocking
+reads, non-consuming status queries, shift-state queries and buffered key
+insertion. Blocking reads sleep in guest ROM with interrupts enabled; they do
+not terminate the VM or block the host input loop. Protected-mode guest drivers
+can replace IRQ1 and continue using the i8042 directly. The firmware translation
+is a US-layout subset, not a complete international/enhanced keyboard BIOS.
+
+Text mode starts with readable 8×16 ASCII cells padded from Go's BSD-licensed
+basicfont (derived from public-domain X11 misc-fixed). Guest font uploads remain
+authoritative; the screenshot renderer does not replace uploaded glyphs. Full
+CP437 coverage is not supplied. CGA mode 06h uses 640×200 monochrome pixels in
+the two alternating 8 KiB banks at B8000. BIOS EGA palette-table services and
+six-bit EGA color decoding are implemented, including the 64-entry DAC colors.
+VGA BIOS DAC services 1010/1012/1015/1017 program or read single entries and
+RGB blocks through paged guest buffers. Screenshot DAC expansion matches the
+QEMU comparison surface; the Windows 95 smoke checks exact UI color samples,
+not only glyph silhouettes.
+
+System-control port 61h exposes clock-driven AT refresh transitions on bit 4.
+Its writable low bits are independent of refresh status. On Linux/amd64, the
+8042 output-port and fast-A20 controls drive actual native RAM aliases with
+physical address bit 20 cleared while disabled. Enabling the gate restores the
+original high-memory backing without copying or overwriting it. VGA holes stay
+unmapped and their MMIO aliases are decoded by the PC layer. BIOS INT15 A20
+control/status services use the same gate. Unowned software-interrupt vectors use inert `IRET` entries, not host services
+or null targets. CPU exceptions and implemented BIOS vectors retain their
+explicit traps. No optional software-provider signature is supplied.
+
+Consumer smokes build DOS 6.22 and Windows 2.03 from original media. They check
+shell commands or exact Notepad title/document glyphs, real key chords, and
+files saved by the guest through a native FAT disk snapshot. The separate DOS
+HIMEM variant verifies a resident XMS driver and nonzero free extended memory;
+the stock DOS recipe's configuration remains unchanged. Windows 95 RTM also
+passes the exact original Notepad title/document glyphs and keyboard edit/save
+proof from a fresh image. Its first-run mouse-detection warning is recorded
+and explicitly acknowledged; pointer input is not part of that proof.
+
+BIOS stack frames, CHS/EDD buffers and firmware output packets use guest
+linear addresses. Firmware walks the current guest page tables for paged
+virtual-8086 calls, including noncontiguous physical pages. Physical disk DMA
+is kept separate. The disk-call inspection tail reports linear and translated
+buffer addresses, CR0/CR3 and returned status; a successful disk status must
+not conceal data written to the wrong RAM backing.
+
 ## Inspection and limitations
 
 `vm.extension("cc.v1").state()` returns a serialized observation containing
@@ -112,15 +159,25 @@ PC, CR0/CR3, last BIOS service, ATA task registers and command count, VGA
 access count, PIC/PIT state, and bounded keyboard/CMOS transaction tails.
 PCI inspection includes the configuration-address latch, controller header,
 and bitmaps of configuration dwords read and written.
-It also exposes integer registers, CR2/CR4 and the IDT base. `read_physical(address,
+It also exposes integer registers, CR2/CR4, the IDT base, CS/DS/ES/SS selectors
+and bases, `a20_enabled`, VGA register/palette snapshots, and the last 16
+`bios_calls` with arguments, caller addresses and returned AX/flags.
+`bios_counts` records per-vector totals and `bios_disk_calls` retains the last
+eight disk calls independently of keyboard polling. `read_physical(address,
 size)` returns an owned snapshot of at most 64 KiB of RAM, including the display
 aperture. `breakpoint(address)` replaces the single debugger-owned execution breakpoint;
-zero disables it. A hit pauses execution and `resume()` skips that occurrence.
+zero disables it. `breakpoint(address, skip=N)` skips only the first N hits.
+A hit pauses execution and `resume()` skips that occurrence. `step(count=1,
+stop_below=0)` performs bounded native debug observations on a paused VM
+(up to 4096 observations and five seconds), replacing the execution breakpoint.
+Its structured result retains the trace on a guest fault rather than treating
+the fault as success; `reason` distinguishes a limit, address bound, timeout
+and guest failure. Devices use the same bus routing as ordinary execution.
 Reading a screenshot or state serializes with execution. Closing the VM
 releases KVM and RAM and is idempotent; stopping preserves inspection until
 close. Events support `debug.select` and the portable automation helpers.
 
-This platform supports one IDE disk, BIOS modes 03h/12h, UEFI GOP, PNG capture,
+This platform supports one IDE disk, BIOS modes 03h/06h/10h/12h, UEFI GOP, PNG capture,
 keyboard transitions, chords and relative PS/2 pointer input. Text injection,
 interactive host windows, reset, guest snapshots and debugger
 channels are not advertised capabilities. ARM64 UEFI continuation remains

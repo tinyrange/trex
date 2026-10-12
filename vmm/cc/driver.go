@@ -42,6 +42,7 @@ type driver struct {
 	state          vmm.State
 	result         *vmm.Result
 	closeErr       error
+	breakpointSkip int
 	breakpointHit  bool // owned by the native CPU loop
 }
 
@@ -142,6 +143,13 @@ func (d *driver) loop() {
 			switch ex.Reason {
 			case hypervisor.X86ExitDebug:
 				d.breakpointHit = true
+				if d.breakpointSkip > 0 {
+					d.breakpointSkip--
+					err = d.skipBreakpoint()
+					if err == nil {
+						continue
+					}
+				}
 				d.mu.Lock()
 				d.state = vmm.State{Name: "paused"}
 				d.mu.Unlock()
@@ -151,13 +159,7 @@ func (d *driver) loop() {
 			case hypervisor.X86ExitIO:
 				err = d.pc.handleIO(ex)
 			case hypervisor.X86ExitMMIO:
-				if d.pc.hpet != nil && ex.Address >= hpetAddress && ex.Address < hpetAddress+0x400 {
-					err = d.pc.hpet.mmio(ex, d.pc.cpu, d.pc.now())
-				} else if ex.Address >= inputAddress && ex.Address < inputAddress+0x1000 {
-					err = d.pc.input.mmio(ex, d.pc.cpu)
-				} else {
-					err = d.pc.vga.mmio(ex, d.pc.cpu)
-				}
+				err = d.pc.handleMMIO(ex)
 			case hypervisor.X86ExitShutdown:
 				d.finish("guest_failure", "x86 triple fault", false)
 				continue
@@ -207,18 +209,24 @@ func (d *driver) Pause(ctx context.Context) error {
 		return nil
 	})
 }
+func (d *driver) skipBreakpoint() error {
+	if d.breakpointHit {
+		r, err := d.pc.cpu.Registers()
+		if err != nil {
+			return err
+		}
+		r.Rflags |= 1 << 16 // RF suppresses the current execution breakpoint once
+		if err := d.pc.cpu.SetRegisters(r); err != nil {
+			return err
+		}
+		d.breakpointHit = false
+	}
+	return nil
+}
 func (d *driver) Resume(ctx context.Context) error {
 	return d.call(ctx, func() error {
-		if d.breakpointHit {
-			r, err := d.pc.cpu.Registers()
-			if err != nil {
-				return err
-			}
-			r.Rflags |= 1 << 16 // RF suppresses the current execution breakpoint once
-			if err := d.pc.cpu.SetRegisters(r); err != nil {
-				return err
-			}
-			d.breakpointHit = false
+		if err := d.skipBreakpoint(); err != nil {
+			return err
 		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
