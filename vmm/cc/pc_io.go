@@ -26,8 +26,8 @@ func (p *pc) runDevices(ctx context.Context) (hypervisor.X86Exit, error) {
 			return false, nil
 		case hypervisor.X86ExitMMIO:
 			ex.Address = p.cpuAddress(ex.Address)
-			if ex.Address >= 0xa0000 && ex.Address+uint64(ex.Size) <= 0xc0000 {
-				return true, p.vga.mmio(ex, p.cpu)
+			if ex.Address >= 0xa0000 && ex.Address <= 0xc0000 && uint64(ex.Size) <= 0xc0000-ex.Address {
+				return true, p.handleMMIO(ex)
 			}
 			return false, nil
 		default:
