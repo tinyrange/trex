@@ -2849,6 +2849,18 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 2 GiB with uefi=True. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
+### `cc.boot_bsd`
+
+`cc.boot_bsd(os, kernel, marker, root=None, memory_mb=1024, timeout=60, console=None, overlay_limit=64MiB) -> result`
+
+Directly boots an original amd64 OpenBSD, FreeBSD or NetBSD kernel in Linux/amd64 KVM with optional borrowed NVMe root backing. Stops at an explicit serial marker, timeout or failure and closes the VM. Returns success, serial, error and a read-only post-boot root snapshot (None without a root). The snapshot is available on failure too; FreeBSD timeout errors include bounded architectural observations. Output is capped at 1 MiB, kernel at 256 MiB, memory at 64..8192 MiB and timeout at 600 seconds. Console is at most 64 ordered (wait, send) string tuples; root writes use a bounded in-memory overlay, never alter the source. This is a bounded serial boot primitive, not a persistent desktop or managed-agent session.
+
+### `cc.kernel_symbol`
+
+`cc.kernel_symbol(kernel, address) -> symbol or None`
+
+Read-only nearest original executable-section ELF symbol lookup for a stopped kernel address. Returns name, address, size and offset, or None when no preceding symbol exists. A nonzero offset is a nearest-symbol observation, not an exact call-site assertion. Input is bounded to 256 MiB and symbol/string sections to 32 MiB. Does not relocate, execute or patch bytes.
+
 ### `channel.expose_tcp`
 
 `channel.expose_tcp(channel, port=0) -> tcp_bridge`
@@ -3179,6 +3191,12 @@ Builds a FAT16 volume from a directory, preserving supported attributes and requ
 
 Builds a FAT32 volume from a directory and requested layout options. It produces a volume file for composition into a disk rather than writing or formatting a host device.
 
+### `filesystem.ffs_build`
+
+`filesystem.ffs_build(entries, size=0, extra=0, layout='raw', timestamp=1700000000) -> file`
+
+Builds a sparse FFS1 root from Unix entry dictionaries, preserving ownership, special permissions, symlinks, hardlinks and BSD device numbers. Payload readers are borrowed. Raw layout is for FreeBSD/NetBSD; openbsd adds an MBR and disklabel. Size is filesystem capacity excluding the OpenBSD prefix; zero estimates capacity. Capacity and total file payload are bounded to 32 GiB. No host extraction, mounting or mkfs.
+
 ### `filesystem.gpt`
 
 `filesystem.gpt(file) -> parsed GPT; filesystem.gpt(size, disk_guid=...) -> builder`
@@ -3264,7 +3282,7 @@ Reads Files-11 ODS-2 version1 home blocks, index headers and versioned directory
 
 `filesystem.openbsd_label(file, label_offset=512) -> record`
 
-Reads a version-1 OpenBSD disklabel at label_offset, an explicit byte offset in the complete disk. The default 512 is the common standalone amd64 label location; for an MBR image pass the OpenBSD partition offset plus 512. Validates both magic values, XOR checksum, partition count, 48-bit sector addresses, declared disk/partition bounds and FFS geometry. Sector size is declared by the label, including 4096-byte sectors. Returns sector_size, total_sectors, bound_start, bound_end, uid, type_name, pack_name and partitions. Partitions preserve index, a-z/A-Z name, absolute start_sector, sectors, type, block_size, fragment_size, cylinders_per_group and borrowed read-only data. Empty slots have data=None; overlapping raw c remains present. Requires the complete declared disk; does not guess offsets, mount, repair, construct images or accept other disklabel versions.
+Reads a version-1 OpenBSD or legacy version-0 BSD disklabel at label_offset, an explicit byte offset in the complete disk. The default 512 is the common standalone amd64 label location; for an MBR image pass the OpenBSD partition offset plus 512. Validates both magic values, XOR checksum, partition count, 48-bit sector addresses, declared disk/partition bounds and FFS geometry. Legacy labels use 32-bit sector addresses and explicit fragment geometry rather than the OpenBSD packed fields. Sector size is declared by the label, including 4096-byte sectors. Returns sector_size, total_sectors, bound_start, bound_end, uid, type_name, pack_name and partitions. Partitions preserve index, a-z/A-Z name, absolute start_sector, sectors, type, block_size, fragment_size, cylinders_per_group and borrowed read-only data. Empty slots have data=None; overlapping raw c remains present. Requires the complete declared disk; does not guess offsets, mount, repair, construct images or accept other disklabel versions.
 
 ### `filesystem.raw_cd`
 
@@ -3288,7 +3306,7 @@ Parses a UDF filesystem into directory and file views. Symbolic links expose dec
 
 `filesystem.ufs(file, maximum_entries=1M, maximum_blocks=1M) -> record`
 
-Reads historical and 4.4BSD UFS1, including OpenBSD FFS1, with a superblock at byte8192 and either byte order. The declared inode format selects old 16-bit ownership/16-bit directory name lengths or modern 32-bit ownership/typed directories and inline symlinks. Checks fragment/cylinder-group geometry, inode and data ranges, 512-byte directory records, dot entries, directory type/inode agreement, duplicate names and directory cycles. Returns entries, paths, find(path), block_size, fragment_size, groups and inode_format. Entries preserve inode identity, mode, link count, ownership, timestamps, flags, device number and borrowed data views. Reads 12 direct blocks and single/double/triple indirect pointers; zero pointers remain sparse zeroes. maximum_blocks bounds mapping work; maximum_entries bounds reachable paths. Hard-linked files share data, symlinks are not followed and device nodes are metadata only. UFS2, unknown inode formats, extended attributes, journal replay and filesystem construction remain unsupported. Nested archives require separate decoders.
+Reads historical and 4.4BSD UFS1, UFS2 and NetBSD UFS2EA in either byte order, checking superblocks at byte8192 or byte65536. UFS2 uses 256-byte inodes and 64-bit pointers; UFS1 uses 128-byte inodes and 32-bit pointers. The declared inode format selects old 16-bit ownership/16-bit directory name lengths or modern 32-bit ownership/typed directories and inline symlinks. Checks fragment/cylinder-group geometry, inode and data ranges, 512-byte directory records, dot entries, directory type/inode agreement, duplicate names and directory cycles. Returns entries, paths, find(path), block_size, fragment_size, groups and inode_format. Entries preserve inode identity, mode, link count, ownership, timestamps, flags, device number and borrowed data views. Reads 12 direct blocks and single/double/triple indirect pointers; zero pointers remain sparse zeroes. maximum_blocks bounds mapping work; maximum_entries bounds reachable paths. Hard-linked files share data, symlinks are not followed and device nodes are metadata only. Unknown inode formats, extended-attribute enumeration and journal replay remain unsupported. filesystem.ffs_build separately constructs FFS1 roots. Nested archives require separate decoders.
 
 ### `filesystem.ultrix_label`
 

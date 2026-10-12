@@ -1,4 +1,4 @@
-// Package openbsd reads version-1 OpenBSD disklabels. Layout and checksum
+// Package openbsd reads version-1 OpenBSD and legacy version-0 BSD disklabels. Layout and checksum
 // facts follow OpenBSD sys/sys/disklabel.h and sys/kern/subr_disk.c.
 // Partition addresses are absolute disk sectors, not relative to the label.
 package openbsd
@@ -83,7 +83,8 @@ func readLabel(source storage.Reader, labelOffset int64) (*Label, error) {
 	if order.Uint32(h[132:]) != magic {
 		return nil, fmt.Errorf("openbsd label: bad second magic")
 	}
-	if version := order.Uint16(h[114:]); version != 1 {
+	version := order.Uint16(h[114:])
+	if version != 0 && version != 1 {
 		return nil, fmt.Errorf("openbsd label: unsupported version %d", version)
 	}
 	count := int(order.Uint16(h[138:]))
@@ -119,7 +120,12 @@ func readLabel(source storage.Reader, labelOffset int64) (*Label, error) {
 		PackName:   strings.TrimRight(string(h[24:40]), "\x00"),
 		Partitions: make([]Partition, count),
 	}
-	copy(l.UID[:], h[64:72])
+	if version == 0 {
+		l.Sectors = uint64(order.Uint32(h[60:]))
+		l.BoundStart, l.BoundEnd = 0, l.Sectors
+	} else {
+		copy(l.UID[:], h[64:72])
+	}
 	if l.Sectors == 0 || l.Sectors > math.MaxInt64/uint64(sectorSize) || l.BoundStart > l.BoundEnd || l.BoundEnd > l.Sectors {
 		return nil, fmt.Errorf("openbsd label: invalid disk geometry")
 	}
@@ -137,10 +143,17 @@ func readLabel(source storage.Reader, labelOffset int64) (*Label, error) {
 			Start:   uint64(order.Uint32(b[4:])) | uint64(order.Uint16(b[8:]))<<32,
 			Type:    b[12], CylindersPerGroup: order.Uint16(b[14:]),
 		}
+		if version == 0 {
+			p.Sectors, p.Start = uint64(order.Uint32(b)), uint64(order.Uint32(b[4:]))
+			if p.Type == 7 {
+				p.FragmentSize = order.Uint32(b[8:])
+				p.BlockSize = p.FragmentSize * uint32(b[13])
+			}
+		}
 		if p.Sectors != 0 && (p.Start > l.Sectors || p.Sectors > l.Sectors-p.Start) {
 			return nil, fmt.Errorf("openbsd label: partition %s outside disk", p.Name)
 		}
-		if p.Type == 7 && b[13] != 0 {
+		if version == 1 && p.Type == 7 && b[13] != 0 {
 			blockShift, fragShift := uint(b[13]>>3)+12, uint(b[13]&7)
 			if blockShift > 16 || fragShift == 0 || fragShift > 4 {
 				return nil, fmt.Errorf("openbsd label: invalid FFS geometry in %s", p.Name)
