@@ -39,7 +39,11 @@ portable block interface; snapshot attachments use bounded memory overlays.
 `cc.backend(overlay_limit=...)` sets the dirty-memory bound in bytes; the
 default is 256 MiB. Larger Windows images can require a larger limit during
 first logon. The limit reserves no memory until the guest writes.
-The VGA aperture is unmapped RAM and generates MMIO exits. Guest RAM, disk
+The VGA aperture is unmapped RAM and generates MMIO exits. Win9x alias probes
+may read past installed low RAM: the conventional gap below the PCI aperture
+returns zero on reads and ignores writes, matching the QEMU control. Real RAM
+and device apertures are not converted to this unassigned bus range; wrapping
+MMIO accesses are rejected. Guest RAM, disk
 and firmware are never transferred through temporary host files.
 The E820 memory map omits the VGA device aperture while reserving ROM and
 firmware memory. Advertising VGA as firmware-owned memory conflicts with
