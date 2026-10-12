@@ -128,3 +128,39 @@ func TestChordCancellationWhileReleaseIsQueued(t *testing.T) {
 		t.Fatalf("press/release scan codes: %+v", keyboard.queue)
 	}
 }
+
+func TestChordCancellationDuringAcceptedPressReleasesPrefix(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := true
+	k := newKeyboard(func(line uint32, level bool) error {
+		if line == 1 && level && first {
+			first = false
+			cancel()
+		}
+		return nil
+	})
+	d := &driver{pc: &pc{cpu: inputTestCPU{}, keyboard: k}, requests: make(chan request, 16), done: make(chan struct{})}
+	result := make(chan error, 1)
+	go func() { result <- d.Input(ctx, vmm.Input{Kind: "keys", Keys: []string{"alt", "f"}}) }()
+	for count := 0; count < 2; count++ {
+		select {
+		case request := <-d.requests:
+			request.execute()
+		case <-time.After(5 * time.Second):
+			t.Fatal("accepted press lost cancellation cleanup")
+		}
+	}
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	want := []byte{0x38, 0x21, 0xa1, 0xb8}
+	if len(k.queue) != len(want) {
+		t.Fatal("accepted prefix not released", k.queue)
+	}
+	for i, v := range want {
+		if k.queue[i].value != v {
+			t.Fatal("release order", k.queue)
+		}
+	}
+}

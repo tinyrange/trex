@@ -45,7 +45,7 @@ func (p *pc) extendedMemory(r *x86state.Registers, s x86state.SystemRegisters) b
 		if uint32(r.Rcx) >= 24 {
 			size = 24
 		}
-		buffer, err := p.memory(s.Es.Base+uint64(uint16(r.Rdi)), size)
+		buffer, err := p.biosReadContext(s.Es.Base+uint64(uint16(r.Rdi)), size, s)
 		if err != nil {
 			return false
 		}
@@ -55,6 +55,9 @@ func (p *pc) extendedMemory(r *x86state.Registers, s x86state.SystemRegisters) b
 		binary.LittleEndian.PutUint32(buffer[16:], region.kind)
 		if size == 24 {
 			binary.LittleEndian.PutUint32(buffer[20:], 1) // Enabled range.
+		}
+		if err := p.biosCopy(s.Es.Base+uint64(uint16(r.Rdi)), buffer, true, s); err != nil {
+			return false
 		}
 		r.Rax = 0x534d4150
 		r.Rcx = size

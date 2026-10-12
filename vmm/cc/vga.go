@@ -5,6 +5,8 @@ import (
 	"image"
 	"image/color"
 
+	"golang.org/x/image/font/basicfont"
+
 	"j5.nz/cc/hypervisor"
 )
 
@@ -12,6 +14,7 @@ import (
 // No SVGA identity is advertised. Register writes determine both memory
 // operations and the displayed surface.
 type vga struct {
+	cgaMono            bool
 	planes             [4][65536]byte
 	latch              [4]byte
 	seq                [8]byte
@@ -42,34 +45,76 @@ func newVGA(text []byte) *vga {
 	v.crtc[0x13] = 40
 	for i := 0; i < 16; i++ {
 		v.attr[i] = byte(i)
+		if i >= 8 {
+			v.attr[i] += 48
+		}
+		if i == 6 {
+			v.attr[i] = 20
+		}
+	}
+	for i := 0; i < 64; i++ {
 		for c := 0; c < 3; c++ {
 			level := byte(0)
 			if i&(1<<uint(2-c)) != 0 {
 				level = 42
 			}
-			if i&8 != 0 {
+			if i&(1<<uint(5-c)) != 0 {
 				level += 21
 			}
 			v.dac[i][c] = level
 		}
 	}
+	v.loadFirmwareFont()
 	return v
 }
 
+// Face7x13 is BSD-licensed Go code derived from the public-domain X11
+// misc-fixed font. Pad its ASCII glyphs to 8x16 VGA cells. Guest font
+// uploads still write plane 2 normally; screenshots never substitute glyphs.
+func (v *vga) loadFirmwareFont() {
+	face := basicfont.Face7x13
+	for ch := 32; ch < 127; ch++ {
+		for y := 0; y < 13; y++ {
+			var row byte
+			for x := 0; x < face.Width; x++ {
+				_, _, _, a := face.Mask.At(x, (ch-32)*13+y).RGBA()
+				if a != 0 {
+					row |= 0x40 >> x
+				}
+			}
+			v.planes[2][ch*32+y+1] = row
+		}
+	}
+}
+
 func (v *vga) setMode(mode byte) error {
-	if mode&0x7f != 3 && mode&0x7f != 0x12 {
+	if mode&0x7f != 3 && mode&0x7f != 6 && mode&0x7f != 0x10 && mode&0x7f != 0x12 {
 		return fmt.Errorf("unsupported VGA BIOS mode %#x", mode)
 	}
+	v.cgaMono = mode&0x7f == 6
 	if mode&0x80 == 0 {
+		if v.cgaMono {
+			clear(v.text[:16384])
+		}
 		for i := range v.planes {
 			clear(v.planes[i][:])
 		}
 	}
-	if mode&0x7f == 0x12 {
+	if v.cgaMono {
+		v.seq = [8]byte{3, 0, 1, 0, 6}
+		v.gc = [16]byte{0, 0, 0, 0, 0, 0, 0x0d, 0, 255}
+		return nil
+	}
+	if mode&0x7f == 0x10 || mode&0x7f == 0x12 {
 		v.misc = 0xe3
 		v.seq = [8]byte{3, 1, 15, 0, 6}
 		v.gc = [16]byte{0, 0, 0, 0, 0, 0, 5, 15, 255}
 		v.crtc = [32]byte{0x5f, 0x4f, 0x50, 0x82, 0x54, 0x80, 0x0b, 0x3e, 0, 0x40, 0, 0, 0, 0, 0, 0, 0xea, 0x8c, 0xdf, 0x28, 0, 0xe7, 4, 0xe3, 0xff}
+		if mode&0x7f == 0x10 {
+			// Same 80-byte planar scanline, with 350 visible EGA rows.
+			v.crtc[0x12] = 0x5d
+			v.crtc[7] = (v.crtc[7] &^ 0x42) | 2
+		}
 		v.attr[0x10] = 1
 		v.attr[0x12] = 15
 	} else {
@@ -81,6 +126,9 @@ func (v *vga) setMode(mode byte) error {
 		v.crtc[9] = 15
 		v.crtc[0x13] = 40
 		v.attr[0x10] = 0
+		if mode&0x80 == 0 {
+			v.loadFirmwareFont()
+		}
 	}
 	return nil
 }
@@ -194,6 +242,9 @@ func (v *vga) offset(address uint64) (uint32, bool) {
 	return uint32(address - base), true
 }
 func (v *vga) read(address uint64) byte {
+	if v.cgaMono && address >= 0xb8000 && address < 0xbc000 {
+		return v.text[address-0xb8000]
+	}
 	v.accesses++
 	off, ok := v.offset(address)
 	if !ok {
@@ -227,6 +278,10 @@ func (v *vga) read(address uint64) byte {
 	return result
 }
 func (v *vga) write(address uint64, value byte) {
+	if v.cgaMono && address >= 0xb8000 && address < 0xbc000 {
+		v.text[address-0xb8000] = value
+		return
+	}
 	v.accesses++
 	off, ok := v.offset(address)
 	if !ok {
@@ -311,7 +366,33 @@ func (v *vga) mmio(ex hypervisor.X86Exit, cpu hypervisor.X86) error {
 	return nil
 }
 
+// Expand the emulated six-bit DAC output to the eight-bit screenshot surface.
+// The low DAC bit also supplies the two low output bits, matching the QEMU
+// comparison surface; proportional scaling changes even the default colors.
+func dacComponent(value byte) byte {
+	value &= 63
+	level := value * 4
+	if value&1 != 0 {
+		level += 3
+	}
+	return level
+}
+
 func (v *vga) screenshot() (*image.RGBA, error) {
+	if v.cgaMono {
+		img := image.NewRGBA(image.Rect(0, 0, 640, 200))
+		for y := 0; y < 200; y++ {
+			for x := 0; x < 640; x++ {
+				off := (y&1)*8192 + (y/2)*80 + x/8
+				level := byte(0)
+				if v.text[off]&(0x80>>uint(x&7)) != 0 {
+					level = 255
+				}
+				img.SetRGBA(x, y, color.RGBA{R: level, G: level, B: level, A: 255})
+			}
+		}
+		return img, nil
+	}
 	width := (int(v.crtc[1]) + 1) * 8
 	height := int(v.crtc[0x12]) | int(v.crtc[7]&2)<<7 | int(v.crtc[7]&0x40)<<3
 	height++
@@ -348,7 +429,7 @@ func (v *vga) screenshot() (*image.RGBA, error) {
 			index |= (v.attr[0x14] & 12) << 4
 			index &= v.mask
 			c := v.dac[index]
-			img.SetRGBA(x, y, color.RGBA{R: byte(uint16(c[0]) * 255 / 63), G: byte(uint16(c[1]) * 255 / 63), B: byte(uint16(c[2]) * 255 / 63), A: 255})
+			img.SetRGBA(x, y, color.RGBA{R: dacComponent(c[0]), G: dacComponent(c[1]), B: dacComponent(c[2]), A: 255})
 		}
 	}
 	return img, nil

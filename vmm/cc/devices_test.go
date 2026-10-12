@@ -193,7 +193,7 @@ func TestVGAPlanesLatchesAndCapture(t *testing.T) {
 		t.Fatal(img.Bounds())
 	}
 	c := img.RGBAAt(0, 0)
-	if c.R != 170 || c.G != 0 || c.B != 0 {
+	if c.R != 168 || c.G != 0 || c.B != 0 {
 		t.Fatalf("palette conversion: %v", c)
 	}
 }

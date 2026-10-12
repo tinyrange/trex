@@ -24,6 +24,7 @@ func (d *driver) Extension(ctx context.Context, name string) (starlark.Value, er
 	i := inspection{driver: d, ctx: ctx}
 	return starvalue.NewRecord(starlark.StringDict{
 		"breakpoint":    starlark.NewBuiltin("cc.breakpoint", i.breakpoint),
+		"step":          starlark.NewBuiltin("cc.step", i.step),
 		"read_physical": starlark.NewBuiltin("cc.read_physical", i.readPhysical),
 		"disk":          starlark.NewBuiltin("cc.disk", i.disk),
 		"state":         starlark.NewBuiltin("cc.state", i.state),
@@ -37,7 +38,8 @@ func (d *driver) Extension(ctx context.Context, name string) (starlark.Value, er
 
 func (i inspection) breakpoint(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var address uint64
-	if err := starlark.UnpackArgs("cc.breakpoint", args, kwargs, "address", &address); err != nil {
+	skip := 0
+	if err := starlark.UnpackArgs("cc.breakpoint", args, kwargs, "address", &address, "skip?", &skip); err != nil {
 		return nil, err
 	}
 	err := i.driver.call(i.ctx, func() error {
@@ -45,7 +47,14 @@ func (i inspection) breakpoint(_ *starlark.Thread, _ *starlark.Builtin, args sta
 		if !ok {
 			return fmt.Errorf("execution breakpoints unavailable")
 		}
-		return debug.SetBreakpoint(address)
+		if skip < 0 {
+			return fmt.Errorf("breakpoint skip must be nonnegative")
+		}
+		if err := debug.SetBreakpoint(address); err != nil {
+			return err
+		}
+		i.driver.breakpointSkip = skip
+		return nil
 	})
 	return starlark.None, err
 }
@@ -173,7 +182,14 @@ func (p *pc) inspectState() (starlark.Value, error) {
 	for i, failure := range p.ide.failures {
 		failures[i] = map[string]any{"command": int(failure.command), "feature": int(failure.feature), "error": int(failure.code), "reason": failure.reason, "task": fmt.Sprintf("%x", failure.task)}
 	}
+	biosCounts := map[string]any{}
+	for vector, count := range p.biosCounts {
+		if count != 0 {
+			biosCounts[fmt.Sprintf("%02x", vector)] = int64(count)
+		}
+	}
 	return starvalue.Starlark(map[string]any{
+		"bios_counts":  biosCounts,
 		"virtio_input": map[string]any{"status": int(p.input.status), "reports": int64(p.input.reports), "queue_ready": p.input.queues[0].ready, "used": int(p.input.queues[0].written), "descriptor": int64(p.input.queues[0].desc), "available": int64(p.input.queues[0].avail), "pending": len(p.input.pending)},
 		"ata_failures": failures, "ata_sleeping": p.ide.sleeping, "ata_last_command": int(p.ide.lastCommand), "ata_dma_pending": p.ide.dmaPending, "ata_irq_pending": p.ide.pending,
 		"pci_address": int64(p.pciAddress), "pci_ide": pciIDE,
@@ -181,9 +197,18 @@ func (p *pc) inspectState() (starlark.Value, error) {
 		"pc": int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
 		"cr2": int64(s.Cr2), "cr4": int64(s.Cr4), "efer": int64(s.Efer), "gs_base": int64(s.Gs.Base),
 		"registers": registers, "idt_base": int64(s.Idt.Base),
+		"segments": map[string]any{
+			"cs": map[string]any{"base": int64(s.Cs.Base), "selector": int(s.Cs.Selector)},
+			"ss": map[string]any{"base": int64(s.Ss.Base), "selector": int(s.Ss.Selector)},
+			"ds": map[string]any{"base": int64(s.Ds.Base), "selector": int(s.Ds.Selector)},
+			"es": map[string]any{"base": int64(s.Es.Base), "selector": int(s.Es.Selector)},
+		},
 		"console": string(p.console), "darwin": p.darwin,
+		"bios_disk_calls": p.biosDiskCalls,
+		"bios_calls":      p.biosCalls, "a20_enabled": !p.a20Disabled,
 		"efi": p.efiTrace, "last_bios": p.lastService, "ata_commands": int64(p.ide.commands),
 		"ata_task": fmt.Sprintf("%x", p.ide.task), "vga_accesses": int64(p.vga.accesses),
+		"vga":               map[string]any{"attribute": fmt.Sprintf("%x", p.vga.attr[:]), "dac": fmt.Sprintf("%x", p.vga.dac[:64]), "sequencer": fmt.Sprintf("%x", p.vga.seq[:]), "graphics": fmt.Sprintf("%x", p.vga.gc[:])},
 		"keyboard_commands": keyboard, "rtc": p.rtcTrace, "interrupts": interrupts,
 	})
 }

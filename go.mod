@@ -12,6 +12,7 @@ require (
 	github.com/ulikunitz/xz v0.5.15
 	go.starlark.net v0.0.0-20260630144053-529d8e869a14
 	golang.org/x/arch v0.29.0
+	golang.org/x/image v0.27.0
 	golang.org/x/sys v0.46.0
 	golang.org/x/text v0.39.0
 	j5.nz/cc v0.0.0
