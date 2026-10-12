@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +28,9 @@ type Server struct {
 	Token     string
 	busy      sync.Map // VM ID -> *atomic.Bool
 	creating  atomic.Bool
+	// publicOrigin is an explicitly configured external HTTPS origin; forwarded
+	// headers are never trusted. Empty means direct same-origin requests.
+	publicOrigin string
 }
 
 type singleWorkspace struct{ display vmm.DisplaySource }
@@ -92,12 +94,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid session token", 403)
 		return
 	}
-	origin, err := url.Parse(r.Header.Get("Origin"))
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if !(r.URL.Path == "/api/vms" && r.Method == "GET" && r.Header.Get("Origin") == "") && (err != nil || origin.Scheme != scheme || !strings.EqualFold(origin.Host, r.Host) || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" || origin.User != nil) {
+	if !s.ValidOrigin(r, r.URL.Path == "/api/vms" && r.Method == "GET") {
 		http.Error(w, "origin mismatch", 403)
 		return
 	}
