@@ -10,14 +10,22 @@ import (
 func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	maximum := 1000000
-	if err := starlark.UnpackArgs("xfs", args, kwargs, "file", &value, "maximum_entries?", &maximum); err != nil {
+	var realtimeValue starlark.Value = starlark.None
+	if err := starlark.UnpackArgs("xfs", args, kwargs, "file", &value, "maximum_entries?", &maximum, "realtime_file?", &realtimeValue); err != nil {
 		return nil, err
 	}
 	file, ok := value.(starfile.File)
 	if !ok {
 		return nil, fmt.Errorf("xfs: expected file")
 	}
-	volume, err := Open(file, maximum)
+	var realtime starfile.File
+	if realtimeValue != starlark.None {
+		realtime, ok = realtimeValue.(starfile.File)
+		if !ok {
+			return nil, fmt.Errorf("xfs: expected realtime file")
+		}
+	}
+	volume, err := OpenRealtime(file, realtime, maximum)
 	if err != nil {
 		return nil, err
 	}

@@ -20,11 +20,13 @@ type Item struct {
 	Kind, Owner, Group, Path, Source string
 	Mode                             uint32
 	Attributes                       []string
+	RawAttributes                    []string
 }
 
 // words preserves whitespace within attribute parentheses and quoted strings.
 // Backslashes quote the following character. Unbalanced input is rejected.
-func words(line string) ([]string, error) {
+func words(line string) ([]string, error) { return wordsMode(line, false) }
+func wordsMode(line string, raw bool) ([]string, error) {
 	var result []string
 	var current strings.Builder
 	depth := 0
@@ -35,12 +37,18 @@ func words(line string) ([]string, error) {
 			if i+1 == len(line) {
 				return nil, fmt.Errorf("dangling escape")
 			}
+			if raw && depth > 0 {
+				current.WriteByte(c)
+			}
 			i++
 			current.WriteByte(line[i])
 			continue
 		}
 		if quote != 0 {
 			if c == quote {
+				if raw && depth > 0 {
+					current.WriteByte(c)
+				}
 				quote = 0
 			} else {
 				current.WriteByte(c)
@@ -49,6 +57,9 @@ func words(line string) ([]string, error) {
 		}
 		if c == '\'' || c == '"' {
 			quote = c
+			if raw && depth > 0 {
+				current.WriteByte(c)
+			}
 			continue
 		}
 		if c == '(' {
@@ -118,7 +129,11 @@ func ReadIDB(file starfile.File, maximum int) ([]Item, error) {
 		if len(items) >= maximum {
 			return nil, fmt.Errorf("irix idb: entry limit exceeded")
 		}
-		items = append(items, Item{Kind: tokens[0], Mode: uint32(mode), Owner: tokens[2], Group: tokens[3], Path: tokens[4], Source: tokens[5], Attributes: tokens[6:]})
+		rawTokens, err := wordsMode(text, true)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, Item{RawAttributes: rawTokens[6:], Kind: tokens[0], Mode: uint32(mode), Owner: tokens[2], Group: tokens[3], Path: tokens[4], Source: tokens[5], Attributes: tokens[6:]})
 	}
 	if err := scan.Err(); err != nil {
 		return nil, err
@@ -476,7 +491,7 @@ func IDBBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 		values[i] = starfile.NewRecord(starlark.StringDict{
 			"kind": starlark.String(item.Kind), "path": starlark.String(item.Path), "source": starlark.String(item.Source),
 			"mode": starlark.MakeUint(uint(item.Mode)), "owner": starlark.String(item.Owner), "group": starlark.String(item.Group),
-			"attributes": starlark.NewList(attributes),
+			"attributes": starlark.NewList(attributes), "raw_attributes": pdStrings(item.RawAttributes),
 		})
 	}
 	return starfile.NewRecord(starlark.StringDict{"items": starlark.NewList(values)}), nil

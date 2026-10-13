@@ -2297,6 +2297,18 @@ Parses an IRIX installation database into ordered items, preserving duplicates a
 
 Opens an IRIX inst software image with its IDB index and explicit image name, such as 4Dwm.sw. Returns files in physical record order, retaining duplicate paths, source names, IDB attributes, modes, owners and groups. Reads unwrap indexed .Z payloads and validate decoded sizes and BSD checksums. Supports headerless tape images and indexes without offsets, matching repeated names by IDB occurrence order; explicit offsets take precedence. Checks all tape padding is zero and block-aligned. Does not select subsystems or execute installation actions.
 
+### `archive.irix_plan`
+
+`archive.irix_plan(descriptors, selected, machine={}, installed={}, versions={}, indexes={}, images={}, existing={}, previous={}) -> record`
+
+Plans explicitly selected subsystem patterns (or declared defaults when selected is empty), choosing the newest supplied version unless versions pins an exact subsystem. Reports unsatisfied prerequisite alternatives, explicit machine facts, ambiguous destinations, missing payloads and unexecuted preop/postop/exitop hooks. indexes uses product@version keys; images uses product.image@version keys. installed maps subsystem names to versions. existing is the caller's complete current regular-file map, and previous maps paths to prior BSD checksums for config(update/suggest/noupdate) decisions. Returns ordered selections, declarative borrowed-file/node/link operations, removed subsystem names, hooks and issues. resolved only means no known planning issue: payload checksums are validated when read, and this is not installation or boot proof. Unknown policy remains an explicit issue; scripts are never executed.
+
+### `archive.irix_product`
+
+`archive.irix_product(file, maximum_entries=1M) -> record`
+
+Reads IRIX pd001 product descriptors into products, images and subsystems with versions, flags, build-selection expressions, replacement ranges and grouped prerequisites. Preserves alternate descriptions and extended attributes. Checks field bounds, entry limits and zero block padding; it neither executes expressions nor installs software.
+
 ### `archive.irix_tape`
 
 `archive.irix_tape(file) -> record`
@@ -2596,6 +2608,12 @@ Encodes a 64-bit signed integer as 8 bytes in little-endian order. Returns new b
 `binary.i8(value) -> bytes`
 
 Encodes a 8-bit signed integer as 1 bytes in single-byte order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
+
+### `binary.irix_executable`
+
+`binary.irix_executable(file) -> record`
+
+Inspects MIPS ELF32/ELF64 and ECOFF32 files natively, returning byte order, o32/n32/n64 ABI and ISA flags, entry/GP, borrowed sections and segments, symbols, relocations, dynamic tags and needed libraries. MIPS64 relocations preserve all three operation types and the special-symbol byte; MIPS option/ABI-flag records expose compiler metadata and the GP value. ECOFF symbolic tables retain local/external names and storage classes. Tables, counts, names, ranges and references are bounded and checked. It does not apply relocations, load executable code, interpret all debug records or emulate IRIX syscalls.
 
 ### `binary.layout`
 
@@ -3322,9 +3340,9 @@ Parses a VHDX container and exposes its logical disk contents. This unwraps the 
 
 ### `filesystem.xfs`
 
-`filesystem.xfs(file, maximum_entries=1M) -> record`
+`filesystem.xfs(file, maximum_entries=1M, realtime_file=None) -> record`
 
-Reads a legacy version-4 XFS directory tree using borrowed file extents, without mounting or replaying the journal. Returns entries and paths; find(path) returns an entry or None. Entries expose data, entry_type, inode, mode, uid, gid, modified and size. Supports local forks and inode-resident extent lists, sparse and unwritten data, and version-1/version-2 directories (including version-1 directory btrees). Symlinks are not followed. Version-5 metadata, extent btrees, realtime data and file-type directory extensions are currently rejected explicitly.
+Reads version-4 and checksum-protected version-5 XFS directory trees using borrowed local, extent-list and multi-level bmap-btree views. Checks levels, key ranges, sibling links, cycles and extent counts; sparse and unwritten data reads as zeros. Version-5 superblocks, v3 inodes, BMA3 trees and directory blocks validate CRC32C, metadata UUID, owner and physical address. Supports directory formats 1/2/3 and file-type extensions. realtime_file explicitly supplies the separate realtime device. Returns entries, paths and find(path); symlinks are never followed. Does not mount, replay logs, repair or build filesystems, decode attribute forks, or accept unsupported incompatible features such as bigtime and large-extent-count layouts.
 
 ### `firmware.acpi_compatible_id`
 

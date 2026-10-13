@@ -167,6 +167,8 @@ func predeclared() starlark.StringDict {
 				"bzip2":            starlark.NewBuiltin("bzip2", bzip2.Builtin),
 				"compress":         starlark.NewBuiltin("compress", compressed.Builtin),
 				"pack":             starlark.NewBuiltin("pack", compressed.Builtin),
+				"irix_plan":        starlark.NewBuiltin("irix_plan", irix.PlanBuiltin),
+				"irix_product":     starlark.NewBuiltin("irix_product", irix.ProductBuiltin),
 				"irix_image":       starlark.NewBuiltin("irix_image", irix.ImageBuiltin),
 				"irix_idb":         starlark.NewBuiltin("irix_idb", irix.IDBBuiltin),
 				"irix_tape":        starlark.NewBuiltin("irix_tape", irix.TapeBuiltin),

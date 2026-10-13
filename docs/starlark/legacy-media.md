@@ -140,9 +140,10 @@ incomplete multivolume inputs are explicit errors, not raw-file fallbacks.
 
 Newer IRIX standalone `mr` files can contain XFS rather than EFS. Use
 `filesystem.xfs` on that member; it returns directory metadata and borrowed
-payload views, never follows symlinks, and does not replay the log. Legacy
-version-4 local and extent forks are supported. Extent btrees, version-5
-metadata and realtime-device data are explicit gaps. The layout follows the
+payload views, never follows symlinks, and does not replay the log. Local forks, extent lists and multi-level bmap btrees are supported. Version-5
+metadata validates CRC32C and identity fields, and an explicit `realtime_file`
+can supply realtime-device data. Unsupported newer incompatible features,
+attribute-fork interpretation and journal recovery remain separate gaps. The layout follows the
 [XFS format documentation](https://www.kernel.org/pub/linux/utils/fs/xfs/docs/xfs_filesystem_structure.pdf).
 
 Older miniroots can use version-1 directories on a version-4 XFS volume.
