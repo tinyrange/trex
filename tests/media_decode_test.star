@@ -401,6 +401,53 @@ def test_bff():
     equal(auto(file).find("file").file.read(), "ABBA")
     raises(archive.bff, [file], {"maximum_decoded_bytes": 3})
 
+
+def _pd_text(value):
+    return binary.concat([binary.u16be(len(value)), value])
+
+def _irix_product_fixture():
+    return binary.concat([
+        b"pd001V650P00\x00", binary.u16be(1988), binary.u16be(1),
+        binary.u16be(1987), binary.u16be(3), _pd_text("main"), _pd_text("Main"), binary.u16be(0),
+        binary.u16be(1), binary.u16be(0), _pd_text("sw"), _pd_text("Software"),
+        binary.u16be(2), binary.u16be(7), binary.u32be(2), binary.u32be(0), binary.u32be(0),
+        binary.u16be(1), binary.u16be(2), _pd_text("bin"), _pd_text("Binaries"), _pd_text("source.bin"),
+        binary.u32be(0), binary.u16be(0), binary.u16be(0),
+    ])
+
+def test_irix_product_plan():
+    descriptor = _irix_product_fixture()
+    product = archive.irix_product(descriptor).products[0]
+    equal(product.name, "main")
+    equal(product.images[0].version, 2)
+    equal(product.images[0].subsystems[0].expression, "source.bin")
+    image = binary.concat([b"im001V630P00\x00\x00\x01aA"])
+    index = binary.concat([b"f 0755 root sys a source/a main.sw.bin size(1) sum(65) off(13) cmpsize(0) links(b)\n"])
+    plan = archive.irix_plan([descriptor], ["main.sw.bin"],
+                             indexes = {"main@2": index}, images = {"main.sw@2": image})
+    true(plan.resolved)
+    equal(plan.selected[0].version, 2)
+    equal([(op.kind, op.path) for op in plan.operations], [("file", "/a"), ("hardlink", "/b")])
+    equal(plan.operations[0].data.read(), "A")
+    equal(plan.operations[1].target, "/a")
+    unresolved = archive.irix_plan([descriptor], ["main.sw.bin"])
+    equal(unresolved.resolved, False)
+    equal(unresolved.issues[0].kind, "missing_idb")
+    raises(archive.irix_product, [descriptor.slice(0, descriptor.size - 1)])
+
+def test_irix_executable():
+    image = binary.concat([
+        b"\x7fELF\x02\x02\x01", b"\x00" * 9,
+        binary.u16be(2), binary.u16be(8), binary.u32be(1), binary.u64be(0x100000000),
+        binary.u64be(0), binary.u64be(0), binary.u32be(0x20000000),
+        binary.u16be(64), binary.u16be(56), binary.u16be(0), binary.u16be(64), binary.u16be(0), binary.u16be(0),
+    ])
+    decoded = binary.irix_executable(image)
+    equal((decoded.format, getattr(decoded, "class"), decoded.abi, decoded.isa), ("elf", 64, "n64", "mips3"))
+    equal(decoded.entry, 0x100000000)
+    equal(decoded.sections, [])
+    raises(binary.irix_executable, [image.slice(0, 63)])
+
 TEST_SUITE = suite("media_decode", [
     case("high_sierra", test_high_sierra),
     case("bff", test_bff),
@@ -421,6 +468,8 @@ TEST_SUITE = suite("media_decode", [
     case("bzip2_layer", test_bzip2_layer),
     case("aws_record_boundaries", test_aws_record_boundaries),
     case("irix_indexed_image", test_irix_indexed_image),
+    case("irix_product_plan", test_irix_product_plan),
+    case("irix_executable", test_irix_executable),
     case("pack_layer", test_pack_layer),
     case("irix_standalone_tape", test_irix_standalone_tape),
 ])
