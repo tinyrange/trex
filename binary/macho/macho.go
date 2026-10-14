@@ -11,6 +11,7 @@ import (
 )
 
 const AMD64 uint32 = 0x01000007
+const ARM64 uint32 = 0x0100000c
 const maxCommands = 1 << 20
 const maxSymbols = 1 << 20
 const maxStrings = 64 << 20
@@ -27,11 +28,29 @@ type Symbol struct {
 	Type, Section byte
 	Description   uint16
 }
+
+// Import identifies a symbol stub or indirect pointer, without resolving it.
+type Import struct {
+	Name, Kind    string
+	Address, Size uint64
+}
+
+// FilesetEntry identifies a Mach-O header embedded in a kernel collection.
+// Offsets remain relative to Source; an entry is not a standalone file.
+type FilesetEntry struct {
+	Name            string
+	Address, Offset uint64
+}
 type Image struct {
 	CPU, Subtype, Type uint32
-	Source             storage.Reader
-	Segments           []Segment
-	Symbols            []Symbol
+	// Entry is the initial PC from an LC_UNIXTHREAD command, or zero if absent.
+	Entry          uint64
+	Source         storage.Reader
+	Segments       []Segment
+	Symbols        []Symbol
+	Exports        []Export
+	Imports        []Import
+	FilesetEntries []FilesetEntry
 }
 type view struct {
 	storage.Reader
@@ -139,6 +158,14 @@ func open(r storage.Reader, cpu uint32, subtype *uint32) (*Image, error) {
 			return nil, err
 		}
 	}
+	return openThin(r, cpu, subtype, 0, false)
+}
+
+func openThin(r storage.Reader, cpu uint32, subtype *uint32, headerOffset uint64, boundFileset bool) (*Image, error) {
+	h, err := read(r, headerOffset, 32)
+	if err != nil {
+		return nil, err
+	}
 	u32, u64 := binary.LittleEndian.Uint32, binary.LittleEndian.Uint64
 	if u32(h) != 0xfeedfacf || u32(h[4:]) != cpu || (subtype != nil && u32(h[8:]) != *subtype) {
 		return nil, fmt.Errorf("macho: expected selected little-endian 64-bit CPU")
@@ -147,12 +174,16 @@ func open(r storage.Reader, cpu uint32, subtype *uint32) (*Image, error) {
 	if count > 4096 || size > maxCommands || uint64(count)*8 > uint64(size) {
 		return nil, fmt.Errorf("macho: invalid load command bounds")
 	}
-	commands, err := read(r, 32, uint64(size))
+	commands, err := read(r, headerOffset+32, uint64(size))
 	if err != nil {
 		return nil, err
 	}
 	image := &Image{CPU: cpu, Subtype: u32(h[8:]), Type: u32(h[12:]), Source: r}
-	var symtab []byte
+	var symtab, dysymtab []byte
+	var indirectSections []indirectSection
+	var exportOffset, exportSize uint32
+	seenThread := false
+	entryNames := map[string]bool{}
 	for i := uint32(0); i < count; i++ {
 		if len(commands) < 8 {
 			return nil, fmt.Errorf("macho: truncated command")
@@ -164,6 +195,23 @@ func open(r storage.Reader, cpu uint32, subtype *uint32) (*Image, error) {
 		c := commands[:length]
 		commands = commands[length:]
 		switch kind {
+		case 5: // LC_UNIXTHREAD: flavor/count followed by architecture state.
+			if seenThread || length < 16 {
+				return nil, fmt.Errorf("macho: invalid or duplicate thread command")
+			}
+			seenThread = true
+			flavor, words := u32(c[8:]), u32(c[12:])
+			if uint64(words)*4 != uint64(length)-16 {
+				return nil, fmt.Errorf("macho: invalid thread state length")
+			}
+			switch {
+			case cpu == ARM64 && flavor == 6 && words == 68:
+				image.Entry = u64(c[16+256:])
+			case cpu == AMD64 && flavor == 4 && words == 42:
+				image.Entry = u64(c[16+128:])
+			default:
+				return nil, fmt.Errorf("macho: unsupported thread state flavor %d", flavor)
+			}
 		case 0x19:
 			if length < 72 || uint64(u32(c[64:]))*80+72 != uint64(length) {
 				return nil, fmt.Errorf("macho: invalid segment command")
@@ -178,11 +226,68 @@ func open(r storage.Reader, cpu uint32, subtype *uint32) (*Image, error) {
 				return nil, err
 			}
 			image.Segments = append(image.Segments, s)
+			for off := 72; off < len(c); off += 80 {
+				section := c[off : off+80]
+				kind := u32(section[64:]) & 255
+				if kind == 6 || kind == 7 || kind == 8 || kind == 16 {
+					stride := uint64(8)
+					if kind == 8 {
+						stride = uint64(u32(section[72:]))
+					}
+					address, size := u64(section[32:]), u64(section[40:])
+					if stride == 0 || size%stride != 0 || address < s.Address || address-s.Address > s.Size || size > s.Size-(address-s.Address) {
+						return nil, fmt.Errorf("macho: invalid indirect symbol section")
+					}
+					indirectSections = append(indirectSections, indirectSection{address, size, stride, u32(section[68:]), kind == 8})
+				}
+			}
 		case 2:
 			if length != 24 || symtab != nil {
 				return nil, fmt.Errorf("macho: invalid symbol command")
 			}
 			symtab = c
+		case 0xb: // LC_DYSYMTAB
+			if length != 80 || dysymtab != nil {
+				return nil, fmt.Errorf("macho: invalid dynamic symbol command")
+			}
+			dysymtab = c
+		case 0x22, 0x80000022: // LC_DYLD_INFO[_ONLY]
+			if length != 48 {
+				return nil, fmt.Errorf("macho: invalid dyld info command")
+			}
+			if u32(c[44:]) != 0 {
+				if exportSize != 0 {
+					return nil, fmt.Errorf("macho: duplicate export trie")
+				}
+				exportOffset, exportSize = u32(c[40:]), u32(c[44:])
+			}
+		case 0x80000033: // LC_DYLD_EXPORTS_TRIE
+			if length != 16 || exportSize != 0 {
+				return nil, fmt.Errorf("macho: invalid or duplicate export trie command")
+			}
+			exportOffset, exportSize = u32(c[8:]), u32(c[12:])
+		case 0x80000035: // LC_FILESET_ENTRY
+			if length < 40 || image.Type != 12 || u32(c[28:]) != 0 {
+				return nil, fmt.Errorf("macho: invalid fileset entry command")
+			}
+			nameOffset := u32(c[24:])
+			if nameOffset < 32 || nameOffset >= length {
+				return nil, fmt.Errorf("macho: fileset name outside command")
+			}
+			end := bytes.IndexByte(c[nameOffset:], 0)
+			if end <= 0 {
+				return nil, fmt.Errorf("macho: empty or unterminated fileset name")
+			}
+			name := string(c[nameOffset : nameOffset+uint32(end)])
+			if entryNames[name] {
+				return nil, fmt.Errorf("macho: duplicate fileset name")
+			}
+			entryNames[name] = true
+			offset := u64(c[16:])
+			if _, err := span(r, offset, 32); err != nil {
+				return nil, err
+			}
+			image.FilesetEntries = append(image.FilesetEntries, FilesetEntry{name, u64(c[8:]), offset})
 		}
 	}
 	if len(commands) != 0 {
@@ -228,7 +333,51 @@ func open(r storage.Reader, cpu uint32, subtype *uint32) (*Image, error) {
 			image.Symbols = append(image.Symbols, Symbol{name, u64(s[8:]), s[4], s[5], binary.LittleEndian.Uint16(s[6:])})
 		}
 	}
+	if exportSize != 0 {
+		if exportSize > maxStrings {
+			return nil, fmt.Errorf("macho: excessive export trie")
+		}
+		data, err := read(r, uint64(exportOffset), uint64(exportSize))
+		if err != nil {
+			return nil, err
+		}
+		var base uint64
+		found := false
+		for _, s := range image.Segments {
+			if s.Offset == 0 && s.FileSize > 0 {
+				if found {
+					return nil, fmt.Errorf("macho: ambiguous export image base")
+				}
+				base = s.Address
+				found = true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("macho: missing export image base")
+		}
+		image.Exports, err = readExports(data, base)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if dysymtab != nil {
+		image.Imports, err = readImports(r, dysymtab, indirectSections, image.Symbols, boundFileset)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return image, nil
+}
+
+// Fileset opens an embedded Mach-O header while retaining the collection's
+// shared segment and link-edit offsets. Entries are never extracted or rebased.
+func (i *Image) Fileset(name string) (*Image, error) {
+	for _, entry := range i.FilesetEntries {
+		if entry.Name == name {
+			return openThin(i.Source, i.CPU, nil, entry.Offset, true)
+		}
+	}
+	return nil, fmt.Errorf("macho: fileset entry %q absent", name)
 }
 
 // At returns a borrowed view of file-backed virtual bytes. It does not fabricate

@@ -73,6 +73,8 @@ type Channel struct {
 type Machine struct {
 	Boot                 *LinuxBoot
 	DarwinBoot           *DarwinBoot
+	ARM64Boot            *ARM64Boot
+	ARM64Platform        *ARM64Platform
 	Architecture         string
 	Memory               int64
 	CPUs                 int

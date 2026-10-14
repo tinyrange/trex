@@ -20,6 +20,10 @@ const pciMemoryBase = 0xc0000000
 const highRAMBase = 1 << 32
 
 type Backend struct {
+	// PrivateAppleISA opts into native HVF ISA level 3 and Apple PAC services.
+	PrivateAppleISA bool
+	// RunTimeout bounds a caller-constructed ARM64 firmware run. Zero uses 30 seconds.
+	RunTimeout               time.Duration
 	ACPI, PCIIDE, HPET, UEFI bool
 	// PIOOnly disables the PCI IDE disk's DMA capability.
 	PIOOnly bool
@@ -29,16 +33,36 @@ type Backend struct {
 	OverlayLimit int64
 }
 
-func Available() bool { return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" }
+func Available() bool {
+	return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" || runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
+}
 func Capabilities() []string {
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		return arm64Capabilities()
+	}
 	return []string{"boot.darwin", "disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
 }
 func (*Backend) ID() string             { return "cc.v1" }
 func (*Backend) Capabilities() []string { return Capabilities() }
 func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
+	if m.Architecture == "arm64" {
+		return b.validateARM64(m)
+	}
 	var issues []vmm.ValidationIssue
 	add := func(field, message string) {
 		issues = append(issues, vmm.ValidationIssue{Code: "cc.unsupported", Field: field, Message: message, Backend: b.ID()})
+	}
+	if b.PrivateAppleISA {
+		add("private_apple_isa", "private Apple ISA requires the native ARM64 backend")
+	}
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		add("backend", "PC execution requires Linux/amd64 KVM")
+	}
+	if m.ARM64Platform != nil {
+		add("platform", "ARM64 platforms require ARM64 execution")
+	}
+	if m.ARM64Boot != nil {
+		add("boot", "ARM64 firmware requires arm64 architecture")
 	}
 	if b.IDEModel != "" && b.IDEModel != "synthetic" && b.IDEModel != "ich7-pata" {
 		add("ide_model", "IDE model must be synthetic or ich7-pata")
@@ -149,6 +173,23 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) {
 	if issues := b.Validate(m); len(issues) != 0 {
 		return nil, &vmm.Error{Code: vmm.ErrorInvalid, Message: "invalid cc machine", Detail: issues[0].Field + ": " + issues[0].Message}
+	}
+	if m.Architecture == "arm64" {
+		m.Disks = append([]vmm.Disk(nil), m.Disks...)
+		for i, disk := range m.Disks {
+			if disk.Snapshot {
+				limit := b.OverlayLimit
+				if limit == 0 {
+					limit = 256 << 20
+				}
+				overlay, err := blockstar.NewOverlayDevice(disk.Device, limit, blockstar.DefaultOverlayChunk)
+				if err != nil {
+					return nil, err
+				}
+				m.Disks[i].Device = overlay
+			}
+		}
+		return b.startARM64(ctx, m)
 	}
 	disk := m.Disks[0]
 	if disk.Snapshot {

@@ -97,6 +97,9 @@ private SDK is needed. No original Microsoft media or installed image is bundled
 | `nbd_boot_smoke.star` | Generated BIOS sector proving direct NBD boot; requires QEMU/KVM |
 | `code_watch.star`, `pe_calls.star` | Reusable bounded observation helpers, not commands |
 
+ARM64 board composition is exposed through the [generic platform API](../docs/arm64-platforms.md).
+Product-specific boot and restore recipes belong to the containing recipe repository.
+
 See [debugging](../docs/starlark/debugging.md) for channels, symbols, events,
 timeouts, and cleanup. These tools do not extract media for use by host parsers
 or debuggers. Consult each command's usage before running it; some explicitly

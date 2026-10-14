@@ -10,6 +10,27 @@ import (
 	"go.starlark.net/starlarkstruct"
 )
 
+func TestARM64BootOptionalRegisterComposition(t *testing.T) {
+	thread, _, _ := newStarlarkRuntime("-")
+	resources, _ := lifecycle.ForThread(thread)
+	defer resources.Close()
+	globals, err := starlark.ExecFile(thread, "arm64.star", `
+def firmware(system = None):
+    return vmm.arm64_boot(image, address=0x70000000, memory_base=0x70000000, registers=None, system=system)
+default = firmware()
+configured = firmware({0xc100: 0x30000180})
+`, starlark.StringDict{
+		"vmm":   &starlarkstruct.Module{Name: "vmm", Members: Builtins()},
+		"image": &starfile.Bytes{Name: "firmware", Data: make([]byte, 4)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(globals["default"].(*arm64BootValue).boot.System) != 0 || globals["configured"].(*arm64BootValue).boot.System[0xc100] != 0x30000180 {
+		t.Fatal("optional system registers lost during composition")
+	}
+}
+
 func TestLinuxBootValidationBeforeLaunch(t *testing.T) {
 	kernel := &starfile.Bytes{Name: "kernel", Data: []byte("kernel")}
 	for _, tc := range []struct {

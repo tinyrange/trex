@@ -11,7 +11,9 @@ import (
 // Property names are NUL-terminated in 32 bytes; values are padded to 4 bytes.
 type Node struct {
 	Properties map[string][]byte
-	Children   []Node
+	// PropertyFlags preserves the high template bit in restore device trees.
+	PropertyFlags map[string]uint32
+	Children      []Node
 }
 
 func (n Node) Encode() ([]byte, error) {
@@ -33,6 +35,10 @@ func (n Node) Encode() ([]byte, error) {
 		sort.Strings(keys)
 		for _, k := range keys {
 			v := n.Properties[k]
+			flags := n.PropertyFlags[k]
+			if flags&^uint32(0x80000000) != 0 {
+				return fmt.Errorf("darwin: invalid device tree property flags")
+			}
 			if len(k) == 0 || len(k) > 31 || strings.ContainsRune(k, 0) || len(v) > 1<<20 {
 				return fmt.Errorf("darwin: invalid device tree property")
 			}
@@ -42,7 +48,7 @@ func (n Node) Encode() ([]byte, error) {
 			var name [32]byte
 			copy(name[:], k)
 			out = append(out, name[:]...)
-			out = binary.LittleEndian.AppendUint32(out, uint32(len(v)))
+			out = binary.LittleEndian.AppendUint32(out, uint32(len(v))|flags)
 			out = append(out, v...)
 			for len(out)%4 != 0 {
 				out = append(out, 0)

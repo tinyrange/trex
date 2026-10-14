@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/tinyrange/trex/archive/adcr"
+	"github.com/tinyrange/trex/archive/aea"
+	"github.com/tinyrange/trex/archive/applearchive"
 	ararchive "github.com/tinyrange/trex/archive/ar"
 	"github.com/tinyrange/trex/archive/arsenic"
 	"github.com/tinyrange/trex/archive/aws"
@@ -37,6 +39,7 @@ import (
 	"github.com/tinyrange/trex/archive/lha"
 	"github.com/tinyrange/trex/archive/lzfse"
 	"github.com/tinyrange/trex/archive/macresource"
+	"github.com/tinyrange/trex/archive/pbze"
 	"github.com/tinyrange/trex/archive/pbzx"
 	"github.com/tinyrange/trex/archive/rar"
 	"github.com/tinyrange/trex/archive/rms"
@@ -63,6 +66,7 @@ import (
 	emulatorapi "github.com/tinyrange/trex/emulator"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	"github.com/tinyrange/trex/filesystem/androidlp"
+	filesystemapfs "github.com/tinyrange/trex/filesystem/apfs"
 	filesystemapm "github.com/tinyrange/trex/filesystem/apm"
 	filesystemckd "github.com/tinyrange/trex/filesystem/ckd"
 	filesystemefs "github.com/tinyrange/trex/filesystem/efs"
@@ -74,6 +78,7 @@ import (
 	filesystemiso9660 "github.com/tinyrange/trex/filesystem/iso9660"
 	filesystemmbr "github.com/tinyrange/trex/filesystem/mbr"
 	filesystemmds "github.com/tinyrange/trex/filesystem/mds"
+	filesystemmtree "github.com/tinyrange/trex/filesystem/mtree"
 	filesystemnative "github.com/tinyrange/trex/filesystem/native"
 	filesystemntfs "github.com/tinyrange/trex/filesystem/ntfs"
 	filesystemods2 "github.com/tinyrange/trex/filesystem/ods2"
@@ -158,6 +163,11 @@ func predeclared() starlark.StringDict {
 				"gzip_members":     starlark.NewBuiltin("gzip_members", gzip.MembersBuiltin),
 				"pbzx":             starlark.NewBuiltin("pbzx", pbzx.Builtin),
 				"im4p":             starlark.NewBuiltin("im4p", im4p.Builtin),
+				"apple_archive":    starlark.NewBuiltin("apple_archive", applearchive.Builtin),
+				"pbze":             starlark.NewBuiltin("pbze", pbze.Builtin),
+				"img4":             starlark.NewBuiltin("img4", im4p.WrapBuiltin),
+				"aea_metadata":     starlark.NewBuiltin("aea_metadata", aea.MetadataBuiltin),
+				"aea":              starlark.NewBuiltin("aea", aea.Builtin),
 				"bom":              starlark.NewBuiltin("bom", bom.Builtin),
 				"lzfse":            starlark.NewBuiltin("lzfse", lzfse.Builtin),
 				"xar":              starlark.NewBuiltin("xar", xar.Builtin),
@@ -213,6 +223,9 @@ func predeclared() starlark.StringDict {
 				"ext4_build":           starlark.NewBuiltin("ext4_build", filesystemext4.BuildBuiltin),
 				"ffs_build":            starlark.NewBuiltin("ffs_build", filesystemufs.BuildBuiltin),
 				"hfs":                  starlark.NewBuiltin("hfs", filesystemhfs.Builtin),
+				"apfs":                 starlark.NewBuiltin("apfs", filesystemapfs.Builtin),
+				"apfs_sealed_tree":     starlark.NewBuiltin("apfs_sealed_tree", filesystemapfs.SealedTreeBuiltin),
+				"mtree":                starlark.NewBuiltin("mtree", filesystemmtree.Builtin),
 				"hfs_build":            starlark.NewBuiltin("hfs_build", filesystemhfs.BuildBuiltin),
 				"ufs":                  starlark.NewBuiltin("ufs", filesystemufs.Builtin),
 				"ods2":                 starlark.NewBuiltin("ods2", filesystemods2.Builtin),

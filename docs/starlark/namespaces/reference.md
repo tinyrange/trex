@@ -2123,6 +2123,24 @@ Writes a binary value to the named host output file, subject to max_bytes. This 
 
 Decodes Aladdin ADCR01 and ADCR03 resources to in-memory files. Both validate the header, 24-bit decoded size, copy ranges and complete compressed-byte consumption. Version1 validates its additional stored-length framing and decodes control words with a 4096-entry phrase table and rolling insertion counter. Its optional dictionary supplies the first 18 bytes as an initial seed phrase; unobserved framing flags are rejected. Version3 validates recursively encoded Huffman tables and uses the last 65535 dictionary bytes as preceding history. Missing referenced history is always an error, never zero-filled. maximum_decoded_bytes bounds output and stored payload bytes. These wrappers have no checksum; verify decoded structures or independent hashes. The decoder never locates or executes loader code or selects an installation variant. Other ADCR versions remain unsupported.
 
+### `archive.aea`
+
+`archive.aea(file, key=None, maximum_bytes=4GiB) -> record`
+
+Opens a symmetric profile-1 AEA1 archive natively. key is 32 raw bytes; None selects the explicit hex encryption_key metadata field. Returns a lazy plaintext file, encrypted_size, segment_size, segments_per_cluster, compression, checksum and verify(). Authenticates root/cluster/segment HMACs and optional padding; verifies plaintext SHA256 or Murmur checksums. Supports stored, LZFSE, LZVN and zlib segments with bounded allocations and a one-segment cache. maximum_bytes bounds declared decoded size. verify() reads the entire archive. Rejects other profiles/strengths and unavailable keys; never fetches keys, launches tools or writes intermediate files.
+
+### `archive.aea_metadata`
+
+`archive.aea_metadata(file) -> record`
+
+Reads bounded AEA1 header metadata without decrypting or authenticating it. Returns profile, scrypt_strength, borrowed auth_data and values (key to binary bytes). Rejects malformed or duplicate records. Metadata may contain encryption keys; inspect names before printing values. Never contacts a key service.
+
+### `archive.apple_archive`
+
+`archive.apple_archive(file, maximum_entries=100000) -> entries`
+
+Reads bounded AA01 Apple Archive records. Returns path, kind, borrowed data and fields keyed by the original three-letter names. Supports unsigned integer, path, timestamp and blob fields; timestamps contain seconds and nanoseconds. Rejects unknown encodings and malformed extents. Does not unpack to a host directory or infer archive authentication.
+
 ### `archive.ar`
 
 `archive.ar(file, maximum_entries=1M, maximum_metadata=64MiB) -> ar`
@@ -2253,7 +2271,13 @@ Reads qualified IBM i optical descriptors, catalogs and stored sections. Support
 
 `archive.im4p(file) -> record`
 
-Parses an ASN.1 IM4P firmware envelope with bounded DER depth/node counts. Returns payload_type, description, borrowed payload, extras (original optional DER records) and expected_size (LZFSE metadata when present, otherwise zero). Does not decrypt, decompress, authenticate signatures or infer a filesystem; pass payload explicitly to archive.lzfse or the appropriate format reader.
+Parses an ASN.1 IM4P firmware envelope with bounded DER depth/node counts, including canonical high-tag-number private properties. Returns payload_type, description, borrowed payload, extras (original optional DER records) and expected_size (LZFSE metadata when present, otherwise zero). Does not decrypt, decompress, authenticate signatures or infer a filesystem; pass payload explicitly to archive.lzfse or the appropriate format reader.
+
+### `archive.img4`
+
+`archive.img4(payload, manifest=None) -> file`
+
+Constructs an IMG4 DER wrapper around a validated complete IM4P file and optional IM4M manifest. Borrows source records without changing payload or metadata; the manifest uses explicit context tag zero. Does not create a ticket, sign or authenticate the image. Omitting the manifest does not bypass firmware authentication.
 
 ### `archive.installer`
 
@@ -2362,6 +2386,12 @@ Lists File instructions from the NSIS 2 ANSI non-solid stored/NSIS-DEFLATE metad
 `archive.pack(file, maximum_bytes=2GiB) -> file`
 
 Decodes a UNIX pack (1f1e) Huffman stream, checking its symbol tree, end marker, padding and declared output size. Enforces maximum_bytes and returns a file; useful for compressed IRIX manual pages nested inside inst images.
+
+### `archive.pbze`
+
+`archive.pbze(file, maximum_bytes=<unlimited>) -> file`
+
+Opens a bounded Apple pbze chunk stream as a lazy read-only file using native LZFSE decoding. Validates chunk framing and decoded lengths; maximum_bytes bounds total decoded size. Uses a 64 MiB decoded cache and a 64 MiB per-chunk bound. No host decoder or intermediate files are used.
 
 ### `archive.pbzx`
 
@@ -2477,6 +2507,12 @@ Reads Android boot and vendor_boot v3/v4 headers, exposing bounded section files
 
 Wraps a file with caller-supplied attributes while retaining its bytes. Use this to attach construction metadata without rebuilding the file's contents.
 
+### `binary.apple_device_tree`
+
+`binary.apple_device_tree(file) -> record`
+
+Decodes an Apple flattened device tree into recursive properties, property_flags and children records. Preserves template flag bits without resolving bindings. Bounds input to 1 MiB, depth to 32 and nodes to 4096; rejects malformed names, duplicate properties, truncation and trailing bytes.
+
 ### `binary.appledouble`
 
 `binary.appledouble(file) -> dict[int,file]`
@@ -2489,11 +2525,23 @@ Parses AppleDouble version 2 headers and returns an integer-entry-ID dictionary 
 
 Decodes FinderInfo, resource forks and macOS ATTR named attributes as separate borrowed views. Absolute ATTR offsets, 64 KiB header/table bound, names, duplicate attributes and overlapping data extents are checked. Unknown entry IDs are retained in other. Does not apply metadata or follow links.
 
+### `binary.arm64_disassemble`
+
+`binary.arm64_disassemble(source, offset=0, address=0, count=32) -> list`
+
+Decodes 1 through 4096 ARM64 instructions from a portable file or byte view. Returns records with address, bytes, instruction and target for PC-relative operands. Unknown instructions retain their original bytes and report unknown. Offset and caller-supplied address are independent; no host disassembler is used.
+
 ### `binary.base64`
 
 `binary.base64(value, url=False, padding=True, maximum=512MiB)`
 
 Encodes binary input as a Base64 string. url selects the URL-safe alphabet, padding controls trailing equals signs, and maximum bounds encoded output.
+
+### `binary.berkeley_db`
+
+`binary.berkeley_db(file, maximum_entries=1000000) -> record`
+
+Reads BSD Berkeley DB version-3 B-trees with inline keys and values in either byte order. Returns page_size, little_endian and entries with borrowed key/value file views, preserving on-disk comparator order. Validates root traversal, page bounds, overlapping records, cycles and leaf sibling links. Rejects overflow records, recno databases and newer formats explicitly; does not execute or infer a database-specific comparator.
 
 ### `binary.bits`
 
@@ -2530,6 +2578,12 @@ Decodes a hex, Base64 or unpadded URL-safe Base64 string into bytes. This is the
 `binary.encode(value, encoding='utf8', nul=False) -> bytes`
 
 Encodes a string into bytes using the selected character encoding, including explicit IBM037/cp037. Unrepresentable characters fail. nul appends an encoding-appropriate terminator; binary.text performs the reverse conversion.
+
+### `binary.encode_apple_device_tree`
+
+`binary.encode_apple_device_tree(tree) -> file`
+
+Encodes an Apple flattened device tree from recursive records or dictionaries with properties (string-to-bytes), optional property_flags, and children lists. Uses the same bounded layout and validation as binary.apple_device_tree, preserves explicit flags, and creates a portable in-memory file. Template expressions require caller policy before kernel handoff.
 
 ### `binary.extents`
 
@@ -2625,7 +2679,7 @@ Compiles a fixed-size binary layout from a format string and optional field name
 
 `binary.macho(file, architecture="x86_64", cpu_subtype=None) -> record`
 
-Inspects a bounded little-endian Mach-O64 x86_64 image, optionally selected from a big-endian fat32/fat64 universal container. cpu_subtype optionally selects an exact uint32 subtype (including capability bits) and validates the thin header; omitted selection rejects ambiguous CPU matches. Exposes the selected cpu_subtype, borrowed file, segments (name, address, size, file_offset, file_size, flags), and original symbols (name, address, type, section, description). at(address, size) returns borrowed file-backed virtual bytes; zero-fill, unmapped, ambiguous and overflowing ranges fail. Header, command, string and symbol counts and aggregate symbol-name allocations are bounded. Does not relocate, link or execute the image.
+Inspects a bounded little-endian Mach-O64 image (architecture x86_64 or arm64), optionally selected from a big-endian fat32/fat64 universal container. cpu_subtype optionally selects an exact uint32 subtype (including arm64e capability bits) and validates the thin header; omitted selection rejects ambiguous CPU matches. Exposes the selected cpu_subtype, initial thread entry PC (zero when absent), borrowed file, segments (name, address, size, file_offset, file_size, flags), original symbols (name, address, type, section, description), dyld exports (name, address, flags, resolver, reexport_ordinal, import_name), indirect imports (name, kind stub/pointer, address, size), and fileset_entries (name, address, file_offset) for MH_FILESET kernel collections. fileset(name) opens an embedded Mach-O through the same reader, preserving collection-relative segment and linkedit offsets. Bound filesets with stripped symbol tables may contain zero indirect-symbol placeholders; these expose no named imports. Fileset offsets refer to the containing image; entries are not independent extracted binaries. at(address, size) returns borrowed file-backed virtual bytes; zero-fill, unmapped, ambiguous and overflowing ranges fail. Header, command, string, symbol and export-trie traversal bounds and aggregate name/prefix allocations are enforced. Export trie support includes ordinary, absolute, weak, thread-local, reexport and stub/resolver terminals; it does not resolve reexport dependencies. Does not relocate, link or execute the image.
 
 ### `binary.plist`
 
@@ -2869,9 +2923,9 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 ### `cc.backend`
 
-`cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456) -> vmm_backend`
+`cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
 
-Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 2 GiB with uefi=True. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 2 GiB with uefi=True. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
 ### `cc.boot_bsd`
 
@@ -3095,6 +3149,12 @@ Creates an in-process machine for the input's supported architecture, using nati
 
 Wraps explicit mutable plugin state and its installation callback for emulator use. Keep checkpointed callback state here rather than hiding it in closures.
 
+### `emulator.processor`
+
+`emulator.processor(architecture='arm64', memory=64MiB) -> processor`
+
+Creates a portable in-process ARM64 or AMD64 instruction context independently of executable formats and OS APIs. map(address,size,data=None,access=rw) copies bounded bytes/files into owned sparse memory; read/write, get_register/set_register and plugin expose explicit experiment state. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps and PC for breakpoint, halt, budget or fault. ARM64 uses the existing baseline ARMv8-A processor without optional PAuth. No code is implicitly loaded or executed. close() releases the context.
+
 ### `emulator.uefi`
 
 `emulator.uefi(image, memory=256MiB, memory_base=0x40000000, image_base=0, stack_size=1MiB, time_unix=0, image_path='\\EFI\\Boot\\BootAA64.efi', registers={}, observe=None, device_path=b'', event_kinds=None)`
@@ -3112,6 +3172,18 @@ Creates a bounded 32-bit x86 execution context from a PE image or raw code. Expo
 `filesystem.android_super(file, slot=0, devices={}) -> record`
 
 Reads raw Android super-partition metadata versions 10.0–10.2 with geometry/header/table SHA256 validation and backup fallback. Exposes groups, physical devices and logical partition files composed from linear/zero extents. slot chooses a metadata slot; devices supplies additional physical files by name. Views borrow their inputs; sparse wrappers and EROFS traversal are separate formats.
+
+### `filesystem.apfs`
+
+`filesystem.apfs(file) -> record`
+
+Inspects a raw APFS container natively. Returns the selected container superblock byte view, block_size, blocks, transaction, allocation() and volumes with name, canonical UUID string, ID, role, flags, tree metadata, snapshot_count, snapshot_tree, snapshot_tree_type and browse(raw=False), plus the selected volume superblock byte view. snapshots() validates snapshot metadata and name records; snapshot(name) opens that immutable filesystem through its physical superblock and historical object-map versions, exposing the same read APIs. browse reconstructs entries, paths and exact find(path) from ordinary unencrypted filesystem trees; each entry exposes entry_type, ID/private_id, mode/uid/gid, target, size, data, raw_data, compression_type, xattrs and xattr_streams (nonresident attribute stream IDs). allocation() validates the selected checkpoint maps, space manager, chunk bitmaps and free counts, returning bounded free_ranges and metadata summaries; it does not allocate or modify blocks. Supports sparse files, regular hardlinks, embedded/streamed xattrs and shared decmpfs types 3/4/9. raw=True retains compression metadata and physical streams with data=None for compressed files. Checks object checksums, object-map versions, tree and extent bounds. Symlinks remain entries. Sealed volumes support headerless hashed metadata trees and separate file-extent trees. seal_info() returns integrity version/flags/hash type, advertised root hash and original root node. verify_seal(expected=None) validates all metadata node hashes, optionally against external trusted root bytes; it counts file-data hash records but does not read or verify file contents. records() copies bounded (key,value) metadata byte tuples in APFS traversal order. object(id) returns the selected virtual object mapping and borrowed bytes. canonical_records(time_ns, hashes) normalizes inode/directory/stream metadata, omits physical extents and merges APFS file-info hash tuples. seal_image(records, expected, snapshot_name='', snapshot_time_ns=0, companions=[]) constructs an immutable standalone single-checkpoint container with these records, a mandatory matching external SHA-256 root, preserved file data, updated maps and allocation accounting; it requires an unencrypted snapshot-free volume and a single-block internal-pool bitmap. A nonempty snapshot_name and explicit positive snapshot_time_ns additionally construct a named boot snapshot, its physical superblock, object-map snapshot index and extended metadata, while moving the extent-reference tree into the snapshot and starting an empty live extent-reference tree. companions accepts up to 16 dictionaries with name, role, created_ns, optional directories and optional entries. Entry dictionaries supply path, entry_type (directory/file/symlink), mode, optional uid/gid, file data and symlink target. Native construction copies plaintext into new blocks, builds bounded mutable virtual filesystem trees, physical extent references and data-stream refcounts, creates missing directory parents and synthetic root entries, expands the container volume slots, and assigns deterministic UUIDs. Data shares an existing system volume group; ungrouped sources remain ungrouped. Bounds include 128 directories, 1024 explicit entries, 8 MiB per file and 32 MiB aggregate data, with a single bounded extent-reference leaf. Existing source IDs, compression and xattrs are not copied. Native directory, mapping, allocation and seal checks run before returning. The result includes snapshot_name, snapshot_transaction and deterministic snapshot_uuid. It retires historical checkpoints and is not a live-disk journal operation. File-content hash verification remains the caller’s responsibility. Encrypted and fusion volumes and ephemeral filesystem trees are unsupported; no mounting, repair or execution is performed.
+
+### `filesystem.apfs_sealed_tree`
+
+`filesystem.apfs_sealed_tree(records, block_size=4096, hash_type=1) -> record`
+
+Constructs a packed headerless APFS filesystem metadata B-tree in memory from (key,value) byte tuples already in APFS traversal order. Returns file, root_hash, nodes and records. Supports power-of-two node sizes 4096 through 65536 and SHA256, SHA512/256, SHA384 or SHA512. Reproduces sequential node splitting, relative node identifiers, conservative index preflight, freed separator bytes and child hashes for the observed PCC generation. Bounds records and tree storage; does not install the tree into a container, create integrity metadata or snapshots, supply file extents, or claim authentication without a trusted matching root seal.
 
 ### `filesystem.apm`
 
@@ -3237,7 +3309,7 @@ Decodes standard and extended HD-Copy images in memory with strict RLE validatio
 
 `filesystem.hfs(file, maximum_entries=1M, raw_forks=False) -> record`
 
-Reads classic HFS, HFS+/HFSX and embedded HFS+ volumes without mounting. Returns raw volume name, entries, paths and exact find(path). Entries expose distinct data/resource forks, xattrs, reversible escaped paths, Finder/catalog metadata, Unix modes/uid/gid and link targets. Hardlink inode aliases share decoded inode contents while raw_data/raw_resource retain physical alias forks. Symlinks are not followed. Inline and fork-backed attributes have independent extent-overflow support. decmpfs types 3/4 (inline/resource zlib with stored-block escape) decode lazily with exact lengths; other compression types fail unless raw_forks=True explicitly requests physical forensic forks. compression_type identifies decoded files. Does not mount, repair or execute filesystem contents.
+Reads classic HFS, HFS+/HFSX and embedded HFS+ volumes without mounting. Returns raw volume name, entries, paths and exact find(path). Entries expose distinct data/resource forks, xattrs, reversible escaped paths, Finder/catalog metadata, Unix modes/uid/gid and link targets. Hardlink inode aliases share decoded inode contents while raw_data/raw_resource retain physical alias forks. Symlinks are not followed. Inline and fork-backed attributes have independent extent-overflow support. Shared decmpfs types 3/4 (inline/resource zlib with stored-block escape) and 9 (stored inline) decode lazily with exact logical lengths and checksums; resource zlib allocations may have unused trailing bytes. Other compression types fail unless raw_forks=True explicitly requests physical forensic forks. compression_type identifies decoded files. Does not mount, repair or execute filesystem contents.
 
 ### `filesystem.hfs_build`
 
@@ -3268,6 +3340,12 @@ With a file, parses the MBR and partitions; with a disk size, creates a builder 
 `filesystem.mds(file, images={}) -> mds`
 
 Reads Alcohol MDS v1 descriptor metadata, including sessions, track geometry, pregaps, TOC and companion filenames. Optional images maps declared names (including *.mdf) to portable files. Bound tracks expose raw sectors, logical data or audio, and interleaved P-W subchannels without conversion or copying. auto resolves MDF companions from its source tree. The sessions attribute contains tracks and their byte views.
+
+### `filesystem.mtree`
+
+`filesystem.mtree(file, maximum_entries=100000) -> list[record]`
+
+Reads a bounded BSD mtree metadata manifest natively, including /set and /unset defaults, directory descent and parent navigation, full ./ paths, line continuations, comments and octal or common escaped characters. Returns path/attributes records with metadata values preserved as strings, including Apple extensions. Bounds input, logical lines, records, expanded attributes and paths; rejects duplicates, malformed escapes and parent traversal. Does not read the described files, follow links or mutate a filesystem.
 
 ### `filesystem.ntfs`
 
@@ -3626,6 +3704,18 @@ Percent-encodes text for use as one URL path segment. It is not query-string enc
 
 Decodes percent escapes in URL path text. Malformed escape sequences produce an error.
 
+### `vmm.arm64_boot`
+
+`vmm.arm64_boot(image, address, memory_base, entry=None, registers=None, system=None) -> vmm_arm64_boot`
+
+Creates a board-independent ARM64 handoff with explicit physical RAM base, image address, entry point and optional X0-X30/system registers. It contains no devices, firmware commands, NVRAM or board selection. Generic validation checks load ranges and instruction alignment; native backends separately enforce host-page constraints. Compose hardware with vmm.arm64_platform and pass it independently to vmm.machine. Native cc currently provides one CPU and headless execution; stopped cc.v1 exposes bounded read_physical and read_virtual until VM close.
+
+### `vmm.arm64_platform`
+
+`vmm.arm64_platform(create, gic_distributor=0, gic_redistributor=0) -> vmm_arm64_platform`
+
+Composes ARM64 hardware independently of CPU/load state. create(ctx) runs once per VM and returns a dictionary with devices (ordered MMIO/native device values) and optional hvc(immediate,function)->bool. Each factory must create fresh mutable state. Earlier devices win overlapping address ranges; unknown MMIO and unhandled HVC remain unsupported exits. Optional GIC distributor/redistributor addresses are explicit and must be distinct 64 KiB-aligned values. Factory and MMIO/HVC callbacks run serially on one VM-owned Starlark thread, canceled when the VM stops. Runtime operations reject calls from any other Starlark thread. The runtime supplies bounded guest-memory access, permission-enforcing DMA, memory protection, registers, counter/epoch, IRQs, disk resources, events and native protocol construction. Native device instances cannot be shared across VMs; unused or failed-factory native devices are closed. No host paths, sockets or processes are exposed.
+
 ### `vmm.backends`
 
 `vmm.backends()`
@@ -3638,11 +3728,23 @@ Lists the VMM backends registered in this runtime and their advertised capabilit
 
 Describes a named VM byte channel of the requested kind. required determines whether lack of backend support is a validation failure.
 
+### `vmm.darwin_arm64_boot`
+
+`vmm.darwin_arm64_boot(kernel, device_tree, memory, memory_base, virtual_base, command_line='-v', entropy=None, payloads=None, nvram=None) -> vmm_arm64_boot`
+
+Constructs a board-independent unslid ARM64 executable/fileset handoff in memory from a decoded Mach-O kernel and flattened Apple device tree. Loads bounded nonoverlapping segments, zeroes BSS, appends ARM64 revision-2 bootargs, chosen DRAM ranges, a random-seed and device-tree memory-map ranges, and enters the original thread PC with X0 pointing to bootargs. Physical and virtual bases are required explicit arguments; RAM bases and size must be 32 MiB aligned. The machine memory must equal the encoded memory value. payloads maps memory-map names to immutable files loaded separately at 16 KiB aligned addresses and reserved through topOfKernelData. TrustCache is placed below the kernel inside its protected range; RAMDisk can contain an original APFS image. nvram optionally maps string variable names to string values in a fresh volatile CHRP bank; the bytes seed the chosen proxy and are returned as boot.nvram for explicit recipe-owned device backing. Unqualified names and the 7C436110-AB2A-4BBB-A880-FE41995C9F82: prefix select common; the 40A0DDD2-77F8-4392-B4A3-1E7304206516: prefix selects system and is needed for system variables such as boot-args. None preserves a supplied proxy with matching bank geometry or creates an empty bank. XNU performs its own fileset rebasing/signing. entropy=None generates 256 fresh cryptographic bytes for modern XNU; an explicit entropy value must be 64 bytes (earlier XNU) or 256 bytes with nonzero data. Returned read_only_address/read_only_size describe the immutable kernel prefix for optional platform protection configuration. No hardware platform is selected. Does not personalize IMG4 or imply a successful kernel boot. Public HVF rejects Apple PAC initialization; the native cc private_apple_isa option selects ISA level 3 with a separately entitled executable.
+
 ### `vmm.darwin_boot`
 
 `vmm.darwin_boot(kernel, command_line='', smc_osk=b'') -> vmm_darwin_boot`
 
 Creates an unslid amd64 XNU v2 direct handoff from an immutable original kernelcache or Mach-O executable. Supports amd64 fat slices and Apple comp/lzss caches with checksum validation. Native cc requires Linux/amd64 KVM, x86_64 and no UEFI image execution; QEMU rejects this intent. No guest bootloader is executed or kernel instructions patched. RAM disks are not supported. Optional smc_osk must be empty or exactly 64 bytes; it is explicit caller-supplied SMC material, never bundled or logged. Native cc exposes SMC APP0001/IRQ6 and omits OSK0/OSK1 when no material is supplied. Verified scope is Lion HFS-root boot to launchd and a visible single-user shell, not keyboard input, a desktop or a complete installation.
+
+### `vmm.darwin_nvram`
+
+`vmm.darwin_nvram(values) -> bytes`
+
+Encodes string variable names/values into one volatile 8 KiB CHRP NVRAM bank. Unqualified names select Apple common; explicit Apple common/system GUID prefixes select their corresponding partitions. Returns immutable bytes for a caller-owned backing layout. This is format construction only and never accesses host firmware.
 
 ### `vmm.disk`
 
@@ -3664,9 +3766,15 @@ Creates portable direct Linux boot intent from borrowed immutable kernel and opt
 
 ### `vmm.machine`
 
-`vmm.machine(architecture, memory, cpus=1, disks=[], networks=[], display=vmm.display('none'), channels=[], start_paused=False, required_capabilities=[], boot=None)`
+`vmm.machine(architecture, memory, cpus=1, disks=[], networks=[], display=vmm.display('none'), channels=[], start_paused=False, required_capabilities=[], boot=None, platform=None)`
 
 Creates a portable machine specification from architecture, memory, CPUs, storage, networking and channels. It does not start a VM.
+
+### `vmm.mmio`
+
+`vmm.mmio(address, size, read=None, write=None, widths=[1,2,4,8]) -> vmm_arm64_device`
+
+Creates a guest MMIO region with explicit address/size, optional read(offset,size)->uint and write(offset,size,value)->None callbacks, and access widths (default 1,2,4,8). Reads/writes must be aligned to their width and fit entirely inside the region; read results must fit the requested width. Add the value to an ARM64 platform factory result. Mutable callback state should be created inside that factory. A missing callback fails explicitly. This primitive does not allocate RAM or select hardware.
 
 ### `vmm.network`
 
@@ -4788,6 +4896,18 @@ A live virtual machine. Input helpers send guest keys, text or pointer events; s
 
 Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `record(width=1440, height=900, fps=30, maximum=64MiB, duration=600, lossless=False)`, `reset(timeout=30)`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
 
+### `vmm_arm64_boot` value
+
+Portable raw ARM64 handoff containing an immutable firmware image, physical load/entry addresses, RAM base. Optional Darwin handoff metadata exposes encoded NVRAM and an immutable kernel-prefix range; hardware platform selection is separate. CPU register configuration belongs to the handoff; native execution belongs to the selected backend.
+
+Methods and attributes: `address`, `entry`, `image`, `memory_base`, `nvram`, `read_only_address`, `read_only_size`.
+
+### `vmm_arm64_runtime` value
+
+VM-owned guest resource access for an ARM64 platform factory. Exposes memory_base, memory_size, disks, epoch_microseconds, read_memory(address,size), write_memory(address,data), protect_memory(address,size,read=True,write=False,execute=True), counter(), irq(id,level), read_register(id), write_register(id,value), emit(kind,payload=None), and device(kind,options). Native device options and lifecycle are documented in docs/arm64-platforms.md. Runtime operations are revoked when the VM stops; no host paths or native handles are exposed.
+
+Methods and attributes: `counter`, `device`, `disks`, `emit`, `epoch_microseconds`, `irq`, `memory_base`, `memory_size`, `protect_memory`, `read_memory`, `read_register`, `write_memory`, `write_register`.
+
 ### `vmm_backend` value
 
 A backend configuration and its advertised capabilities. id identifies the implementation; machine, accelerator and block_transport describe backend choices used during validation and startup.
@@ -4822,7 +4942,7 @@ Methods and attributes: `command_line`, `initramfs`, `kernel`.
 
 A portable VM specification, not a live VM. It records architecture, resources, disks, networks, channels, display and required capabilities for backend validation and vmm.start.
 
-Methods and attributes: `architecture`, `boot`, `channels`, `cpus`, `disks`, `display`, `memory`, `networks`, `required_capabilities`, `start_paused`.
+Methods and attributes: `architecture`, `boot`, `channels`, `cpus`, `disks`, `display`, `memory`, `networks`, `platform`, `required_capabilities`, `start_paused`.
 
 ### `vmm_network` value
 

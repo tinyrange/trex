@@ -55,3 +55,27 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 	}
 	return starfile.NewRecord(starlark.StringDict{"payload_type": starlark.String(f.Type), "description": starlark.String(f.Description), "payload": starfile.NewReader("payload", f.Payload), "extras": starlark.NewList(extras), "expected_size": starlark.MakeInt64(f.ExpectedSize)}), nil
 }
+
+func WrapBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var payload starlark.Value
+	var manifest starlark.Value = starlark.None
+	if err := starlark.UnpackArgs("img4", args, kwargs, "payload", &payload, "manifest?", &manifest); err != nil {
+		return nil, err
+	}
+	p, ok := payload.(storage.Reader)
+	if !ok {
+		return nil, fmt.Errorf("img4: expected IM4P file")
+	}
+	var m storage.Reader
+	if manifest != starlark.None {
+		m, ok = manifest.(storage.Reader)
+		if !ok {
+			return nil, fmt.Errorf("img4: expected IM4M file")
+		}
+	}
+	r, err := Wrap(p, m)
+	if err != nil {
+		return nil, err
+	}
+	return starfile.NewReader("image.img4", r), nil
+}

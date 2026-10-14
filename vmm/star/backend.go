@@ -118,6 +118,12 @@ func validateVMM(machine VMMMachine, backend VMMBackend) []VMMValidationIssue {
 	if machine.DarwinBoot != nil {
 		require("boot.darwin", "boot", "direct Darwin boot", true)
 	}
+	if machine.ARM64Platform != nil {
+		require("platform.arm64", "platform", "ARM64 platform", true)
+	}
+	if machine.ARM64Boot != nil {
+		require("boot.arm64", "boot", "AArch64 firmware boot", true)
+	}
 	if machine.StartPaused {
 		require("lifecycle.pause", "start_paused", "paused startup", true)
 	}
@@ -131,7 +137,9 @@ func validateVMM(machine VMMMachine, backend VMMBackend) []VMMValidationIssue {
 			require("disk.geometry.chs", field+".chs", "legacy CHS geometry", disk.Required)
 		}
 		if disk.Bus != "" && disk.Bus != "auto" {
-			require("disk.bus."+disk.Bus, field+".bus", "disk bus", disk.Required)
+			if machine.ARM64Platform == nil {
+				require("disk.bus."+disk.Bus, field+".bus", "disk bus", disk.Required)
+			}
 		}
 	}
 	for index, network := range machine.Networks {
@@ -141,7 +149,11 @@ func validateVMM(machine VMMMachine, backend VMMBackend) []VMMValidationIssue {
 		require("display."+machine.Display.Mode, "display", "display mode", machine.Display.Required)
 	}
 	for index, channel := range machine.Channels {
-		require("channel."+channel.Kind, fmt.Sprintf("channels[%d]", index), "channel attachment", channel.Required)
+		if machine.ARM64Platform == nil {
+			require("channel."+channel.Kind, fmt.Sprintf("channels[%d]", index), "channel attachment", channel.Required)
+		} else {
+			require("channel", fmt.Sprintf("channels[%d]", index), "byte channel", channel.Required)
+		}
 	}
 	for _, issue := range backend.Validate(machine) {
 		if issue.Backend == "" {
@@ -172,8 +184,25 @@ func validateVMMCore(machine VMMMachine) []VMMValidationIssue {
 	if machine.CPUs <= 0 {
 		add("machine.cpus", "cpus", "CPU count must be positive")
 	}
-	if machine.Boot != nil && machine.DarwinBoot != nil {
-		add("machine.boot", "boot", "Linux and Darwin boot requests are mutually exclusive")
+	bootCount := 0
+	for _, present := range []bool{machine.Boot != nil, machine.DarwinBoot != nil, machine.ARM64Boot != nil} {
+		if present {
+			bootCount++
+		}
+	}
+	if bootCount > 1 {
+		add("machine.boot", "boot", "boot requests are mutually exclusive")
+	}
+	if machine.ARM64Platform != nil && (machine.Architecture != "arm64" || machine.ARM64Boot == nil) {
+		add("machine.platform", "platform", "ARM64 platform requires ARM64 boot")
+	}
+	if machine.ARM64Boot != nil {
+		if machine.Architecture != "arm64" {
+			add("machine.boot", "architecture", "arm64_boot requires arm64 architecture")
+		}
+		if err := machine.ARM64Boot.Validate(machine.Memory); err != nil {
+			add("machine.boot", "boot", err.Error())
+		}
 	}
 	if machine.DarwinBoot != nil {
 		if err := machine.DarwinBoot.Validate(); err != nil {

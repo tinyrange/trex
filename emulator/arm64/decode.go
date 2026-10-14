@@ -27,6 +27,7 @@ const (
 	opVectorEqual
 	opClearExclusive
 	opExclusive
+	opAtomicReadModifyWrite
 	opMultiplyLong
 	opMultiplyHigh
 	opPointerAuthHint
@@ -130,6 +131,8 @@ func classifyInstruction(i uint32) instructionClass {
 		return opClearExclusive
 	case i&0x3fa00000 == 0x08000000 && i>>10&31 == 31: // single-register exclusive load/store
 		return opExclusive
+	case i&0x3f20fc00 == 0x38200000 || i&0x3f20fc00 == 0x38203000: // LSE LDADD/LDSET, all sizes and ordering variants
+		return opAtomicReadModifyWrite
 	case i&0xff600000 == 0x9b200000: // SMADDL/UMADDL/SMSUBL/UMSUBL (and MUL aliases)
 		return opMultiplyLong
 	case i&0xffe0fc00 == 0x9b407c00 || i&0xffe0fc00 == 0x9bc07c00: // SMULH/UMULH
