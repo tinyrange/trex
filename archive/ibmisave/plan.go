@@ -138,10 +138,17 @@ func (v *libraryObjects) Entries() ([]auto.Entry, error) {
 func rawObjectView(obj Object) auto.View {
 	return auto.ViewFunc(func() ([]auto.Entry, error) {
 		sections := make([]auto.Entry, len(obj.Sections))
+		logical := make([]auto.Entry, len(obj.Sections))
 		for i, s := range obj.Sections {
+			reader, err := s.LogicalReader()
+			if err != nil {
+				return nil, err
+			}
+			logical[i] = auto.Entry{Name: fmt.Sprintf("%d.bin", i+1), Kind: "file", Reader: reader, Attributes: map[string]any{"logical_size": s.LogicalSize, "stored_size": s.Data.Size(), "missing_bytes": int64(s.LogicalSize) - s.Data.Size(), "missing_bytes_policy": "error, never zero-fill", "saved_ccsid": "unknown"}}
 			sections[i] = auto.Entry{Name: fmt.Sprintf("%d.bin", i+1), Kind: "file", Reader: s.Data, Attributes: map[string]any{"logical_size": s.LogicalSize, "stored_size": s.Data.Size(), "address": fmt.Sprintf("%016x", s.Address)}}
 		}
 		entries := []auto.Entry{{Name: "descriptor.bin", Kind: "file", Reader: obj.Header}, {Name: "stored.bin", Kind: "file", Reader: obj.Data}, {Name: "sections", Kind: "directory", View: auto.ViewFunc(func() ([]auto.Entry, error) { return sections, nil })}}
+		entries = append(entries, auto.Entry{Name: "logical-sections", Kind: "directory", View: auto.ViewFunc(func() ([]auto.Entry, error) { return logical, nil })})
 		if obj.Trailer.Size() > 0 {
 			entries = append(entries, auto.Entry{Name: "trailer.bin", Kind: "file", Reader: obj.Trailer})
 		}

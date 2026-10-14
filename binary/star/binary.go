@@ -84,6 +84,7 @@ func Builtins() starlark.StringDict {
 		"hex":                  starlark.NewBuiltin("hex", binaryHexBuiltin),
 		"layout":               starlark.NewBuiltin("layout", binaryLayoutBuiltin),
 		"macho":                starlark.NewBuiltin("macho", machoBuiltin),
+		"ppc_instructions":     starlark.NewBuiltin("ppc_instructions", powerPCInstructionsBuiltin),
 		"plist":                starlark.NewBuiltin("plist", plistBuiltin),
 		"plist_encode":         starlark.NewBuiltin("plist_encode", plistEncodeBuiltin),
 		"replace":              starlark.NewBuiltin("replace", binaryReplaceBuiltin),
@@ -381,18 +382,20 @@ func binaryStringsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark
 	if file, ok := value.(File); ok && file.Size() > int64(maximum) {
 		return nil, fmt.Errorf("strings: input size %d exceeds limit %d", file.Size(), maximum)
 	}
-	data, err := bytesForBinaryValue(value)
+	data, err := starfile.BytesForValue(value, int64(maximum))
 	if err != nil {
 		return nil, fmt.Errorf("strings: %w", err)
 	}
 	var found []string
 	switch strings.ToLower(encoding) {
+	case "ibm037", "cp037":
+		found = scanIBM037Strings(data, minimum)
 	case "ascii":
 		found = scanASCIIStrings(data, minimum)
 	case "utf16le", "utf-16le":
 		found = windowsapi.ScanUTF16Strings(data, minimum)
 	default:
-		return nil, fmt.Errorf("strings: encoding must be ascii or utf16le")
+		return nil, fmt.Errorf("strings: encoding must be ascii, utf16le or ibm037")
 	}
 	values := make([]starlark.Value, len(found))
 	for index, value := range found {

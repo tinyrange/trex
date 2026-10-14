@@ -2245,9 +2245,9 @@ Reads concatenated classic Amiga and EHF HUNK_UNIT object libraries, preserving 
 
 ### `archive.ibmi_save`
 
-`archive.ibmi_save(file, maximum_entries=100000) -> record`
+`archive.ibmi_save(file, maximum_entries=100000, profile="catalog") -> record`
 
-Reads IBM i 7.5 optical save streams: save groups, EBCDIC object names, descriptor types, raw headers and stored sections. Preserves logical sizes, opaque addresses and uninterpreted object trailers without inventing restored contents. Validates page framing and section bounds; standalone 528-byte SAVF transport and other release layouts are not supported. Auto browsing exposes named object directories and downloadable stored bytes; this is structural decoding, not object restoration.
+Reads qualified IBM i optical descriptors, catalogs and stored sections. Supported release/target pairs are 4705/4705, 4705/3905, 4600/4600 and older 3400/3400 font descriptors. The default catalog profile requires a save catalog; profile=boot750 permits only the qualified QGENESIST or QINTAPE catalog-free starts. Auto additionally expands codec-02 LD_TRS into lazy logical-prefix views while retaining unknown LD_LZ1 tails and physical/logical provenance. Logical section views fail on unstored bytes, never zero-fill. Explicit IBM037 text rendering is not detected saved CCSID. Standalone 528-byte SAVF, unqualified generations and full object restoration remain unsupported.
 
 ### `archive.im4p`
 
@@ -2529,7 +2529,7 @@ Decodes a hex, Base64 or unpadded URL-safe Base64 string into bytes. This is the
 
 `binary.encode(value, encoding='utf8', nul=False) -> bytes`
 
-Encodes a string into bytes using the selected character encoding. nul appends an encoding-appropriate terminator; binary.text performs the reverse conversion.
+Encodes a string into bytes using the selected character encoding, including explicit IBM037/cp037. Unrepresentable characters fail. nul appends an encoding-appropriate terminator; binary.text performs the reverse conversion.
 
 ### `binary.extents`
 
@@ -2638,6 +2638,12 @@ Decodes bounded XML 1.0 or bplist00 property lists into dict/list, bytes, string
 `binary.plist_encode(value) -> file`
 
 Encodes supported plist values as deterministic XML1.0 in an in-memory file. Preserves plist_date values from decoding. Enforces aggregate conversion/output byte, node and depth limits, including dictionary keys. Rejects None, non-finite floats, non-string keys, invalid XML characters and integers outside int64.
+
+### `binary.ppc_instructions`
+
+`binary.ppc_instructions(source, offset=0, size=256, address=0, byte_order="big", maximum=4096) -> list[record]`
+
+Inspects a four-byte-aligned POWER instruction range without execution. Accepts source, offset=0, size=256, address=0, byte_order=big and maximum=4096. Reads at most 64KiB, returns offset/address/length/word/opcode/GNU text/typed operands, resolved 64-bit branch target and explicit decode errors. Absolute branch labels are sign-extended for target; upstream GNU display uses 32-bit label spelling. Prefixed instructions consume eight bytes; unknown words consume four and are not proof of executable code. Maximum is at most 16384; source bounds, alignment, address overflow and instruction budget fail explicitly.
 
 ### `binary.read_f32be`
 
@@ -2769,13 +2775,13 @@ Reads bounded installer-gui-script XML (8MiB, 4M tokens, depth128). Returns titl
 
 `binary.strings(value, encoding='ascii', minimum=4, maximum=64MiB) -> list[string]`
 
-Scans binary input for printable ASCII or UTF-16LE strings of at least minimum characters. Returns string values, not offsets or a decoded version of the entire file.
+Scans bounded binary input for printable ASCII, UTF-16LE or explicitly rendered IBM037 strings of at least minimum characters. IBM037 is a selected rendering, not saved-CCSID detection. Returns strings, not offsets or a decoded file.
 
 ### `binary.text`
 
 `binary.text(value, encoding='utf8', nul=False, maximum=16MiB) -> string`
 
-Decodes binary input into a string using the selected character encoding. nul requests terminator-aware decoding; maximum bounds input size.
+Decodes bounded binary input using the selected character encoding, including explicit IBM037/cp037 (not CCSID detection). nul requests terminator-aware decoding; maximum bounds input size.
 
 ### `binary.u16be`
 

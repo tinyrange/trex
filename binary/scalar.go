@@ -5,6 +5,7 @@ import (
 	bytespkg "bytes"
 	encodingbinary "encoding/binary"
 	"fmt"
+	"golang.org/x/text/encoding/charmap"
 	"math"
 	"strings"
 	"unicode/utf16"
@@ -146,6 +147,13 @@ func DecodeText(data []byte, encoding string, nul bool) (string, error) {
 			}
 		}
 		return string(data), nil
+	case "ibm037", "cp037":
+		if nul {
+			if end := bytespkg.IndexByte(data, 0); end >= 0 {
+				data = data[:end]
+			}
+		}
+		return charmap.CodePage037.NewDecoder().String(string(data))
 	case "windows1252", "cp1252":
 		if nul {
 			if end := bytespkg.IndexByte(data, 0); end >= 0 {
@@ -206,6 +214,12 @@ func EncodeText(value, encoding string, nul bool) ([]byte, error) {
 			}
 			data = append(data, byte(character))
 		}
+	case "ibm037", "cp037":
+		encoded, err := charmap.CodePage037.NewEncoder().Bytes([]byte(value))
+		if err != nil {
+			return nil, err
+		}
+		data = encoded
 	case "windows1252", "cp1252":
 		data = make([]byte, 0, len(value))
 		for _, character := range value {

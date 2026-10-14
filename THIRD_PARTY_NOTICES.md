@@ -43,3 +43,8 @@ checkout were changed for trex. The SCS repository owner confirmed ownership
 and authorized licensing this incorporation under Apache-2.0. A copy of the
 licence is retained in `scs/LICENSE`; dependency notices retain their own terms.
 See [the integration guide](docs/scs.md) for scope and limitations.
+
+The native IBM i TERSE prefix-chain LRU decoder was informed by the Open
+Mainframe Project tersedecompress algorithm (Apache-2.0). Its source identity
+and native adaptation scope are recorded in the format-reference notice; the
+full Apache licence is retained in LICENSE.

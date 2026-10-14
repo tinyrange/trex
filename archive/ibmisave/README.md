@@ -2,7 +2,7 @@
 
 `archive.ibmi_save(file)` reads the descriptor layout inspected on IBM i 7.5
 optical distribution media. `auto` exposes `saveN/object-name/` directories with
-`descriptor.bin`, `stored.bin`, `sections/N.bin`, and an optional `trailer.bin`.
+`descriptor.bin`, `stored.bin`, `sections/N.bin`, `logical-sections/N.bin`, and an optional `trailer.bin`.
 Duplicate names have occurrence subdirectories. Unknown EBCDIC identifier bytes
 are percent-escaped; the original name bytes remain available in metadata.
 
@@ -15,7 +15,7 @@ declared sections; it is preserved as an uninterpreted trailer. Descriptor
 declared logical blocks need not equal the sum of section logical lengths.
 
 This is structural decoding, not IBM i object restoration. Standalone SAVF
-528-byte transport records, other descriptor release layouts, MI object
+528-byte transport records, unqualified descriptor release layouts, MI object
 internals and companion-volume reconstruction are not implemented. There is no
 claim of payload checksum validation. Native bounds checks cover descriptors,
 section extents, padding, and entry budgets.
@@ -36,8 +36,8 @@ their source path, save group and descriptor offset. Original paths are unchange
 Listing a proposal reads no member contents. Library contents are validated
 lazily, and malformed or unsupported streams fail explicitly. Variants are kept
 separate, not overlaid or chosen according to the browser's locale. The plan
-does not include QSYS product streams: those contain LD_TRS records not yet
-handled by this descriptor parser. It is not a complete distribution reconstruction.
+does not merge QSYS product streams into user-library variants. Those streams
+are browsable separately through the native LD_TRS transport view. It is not a complete distribution reconstruction.
 
 ## Structured object inspection (partial)
 
@@ -87,11 +87,21 @@ receiver layouts match saved internal storage.
 ## Implementation provenance
 
 The parser is independently implemented from observed binary layout facts and
-the public semantic references above. No IBM implementation source, proprietary
-payloads, or third-party parser implementation is included. Tests construct
+the public semantic references above. No IBM implementation source or proprietary
+payload is included. The native TERSE dictionary implementation was informed
+by the Open Mainframe Project reference algorithm; its Apache-2.0 provenance
+is recorded in `docs/third-party-format-references.md`. Tests construct
 synthetic records in Go; they do not require or redistribute installation media.
 Character conversion uses the BSD-3-Clause `golang.org/x/text` dependency;
 its notice is retained in the repository's dependency licence notices.
 This is a provenance statement, not a formal clean-room certification or a
 determination of a user's rights to particular input media. The reader grants
 no rights to redistribute the content it reads.
+
+## Compressed transport and qualified generations
+
+See [TRANSPORT.md](TRANSPORT.md) for codec-02 LD_TRS, retained opaque LD_LZ1
+tails, release/target qualification, the restricted catalog-free boot750
+profile, saved-address composition and explicit absent-byte errors. Catalog
+profiles 024a and 044a share the independently inspected 112-byte prefix and
+counted 151-byte record table; generation bytes and opaque fields are retained.

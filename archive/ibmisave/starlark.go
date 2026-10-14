@@ -10,10 +10,11 @@ import (
 func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var file starfile.File
 	maximum := 100000
-	if err := starlark.UnpackArgs("ibmi_save", args, kwargs, "file", &file, "maximum_entries?", &maximum); err != nil {
+	profile := "catalog"
+	if err := starlark.UnpackArgs("ibmi_save", args, kwargs, "file", &file, "maximum_entries?", &maximum, "profile?", &profile); err != nil {
 		return nil, err
 	}
-	a, err := Open(file, maximum)
+	a, err := OpenProfile(file, maximum, profile)
 	if err != nil {
 		return nil, err
 	}
@@ -29,5 +30,5 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 	for i, p := range a.Padding {
 		padding[i] = p
 	}
-	return starfile.NewRecord(starlark.StringDict{"objects": starlark.NewList(objects), "groups": starlark.MakeInt(a.Groups), "padding": starlark.NewList(padding)}), nil
+	return starfile.NewRecord(starlark.StringDict{"profile": starlark.String(a.Profile), "catalog_present": starlark.Bool(a.CatalogPresent), "objects": starlark.NewList(objects), "groups": starlark.MakeInt(a.Groups), "padding": starlark.NewList(padding)}), nil
 }

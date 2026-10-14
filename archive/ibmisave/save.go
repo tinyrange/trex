@@ -31,9 +31,11 @@ type Object struct {
 	Sections                     []Section
 }
 type Archive struct {
-	Objects []Object
-	Padding []starfile.File
-	Groups  int
+	Profile        string
+	CatalogPresent bool
+	Objects        []Object
+	Padding        []starfile.File
+	Groups         int
 }
 
 // Names use the invariant EBCDIC identifier alphabet. Unrecognized bytes are
@@ -77,14 +79,25 @@ func identifier(raw []byte) string {
 // or materializing their bodies. This is the 4096-byte optical descriptor form,
 // not the 528-byte checksummed transport used by standalone SAVF files.
 func Open(file starfile.File, maximum int) (*Archive, error) {
+	return OpenProfile(file, maximum, "catalog")
+}
+
+// OpenProfile selects catalog framing explicitly. boot750 is restricted to the
+// independently inspected QGENESIST/QINTAPE initial descriptors and generation.
+// It is not an arbitrary bypass for malformed or missing catalogs.
+func OpenProfile(file starfile.File, maximum int, profile string) (*Archive, error) {
 	if maximum < 1 || file.Size() < pageSize || file.Size()%pageSize != 0 {
 		return nil, fmt.Errorf("ibmi_save: invalid optical stream size or limit")
 	}
-	a := &Archive{}
+	if profile != "catalog" && profile != "boot750" {
+		return nil, fmt.Errorf("ibmi_save: unknown profile %q", profile)
+	}
+	a := &Archive{Profile: profile}
 	be := binary.BigEndian
 	view := func(off, n int64) starfile.File { return &starfile.Slice{Base: file, Offset: off, Length: n} }
 	var h [pageSize]byte
 	needCatalog := true
+	afterPadding := false
 	sections := 0
 	for off := int64(0); off < file.Size(); {
 		if _, err := starfile.ReadFullAt(file, h[:], off); err != nil {
@@ -98,26 +111,42 @@ func Open(file starfile.File, maximum int) (*Archive, error) {
 				return nil, fmt.Errorf("ibmi_save: invalid padding at %d", off)
 			}
 			a.Padding = append(a.Padding, view(off, pageSize))
+			afterPadding = true
 			off += pageSize
-			needCatalog = true
 			continue
 		}
 		if be.Uint32(h[:]) != 0xffffffff || !bytes.Equal(h[0x96:0xae], descriptor) {
 			return nil, fmt.Errorf("ibmi_save: invalid descriptor at %d", off)
 		}
-		if needCatalog {
-			if !bytes.HasPrefix(h[4:34], catalogName) || be.Uint16(h[34:]) != 0x19db {
-				return nil, fmt.Errorf("ibmi_save: expected save-group catalog at %d", off)
+		isCatalog := bytes.HasPrefix(h[4:34], catalogName) && be.Uint16(h[34:]) == 0x19db
+		if needCatalog && !isCatalog {
+			if profile != "boot750" || len(a.Objects) != 0 || off != 0 || be.Uint16(h[0x52:]) != 0x4705 || be.Uint16(h[0x54:]) != 0x4705 || !((identifier(h[4:34]) == "QGENESIST" && be.Uint16(h[34:]) == 0x19c1) || (identifier(h[4:34]) == "QINTAPE" && be.Uint16(h[34:]) == 0x0201)) {
+				return nil, fmt.Errorf("ibmi_save: expected qualified save-group start at %d", off)
 			}
 			a.Groups++
 			needCatalog = false
 		}
+		if isCatalog {
+			a.CatalogPresent = true
+		}
+		if isCatalog && (needCatalog || afterPadding) {
+			a.Groups++
+			needCatalog = false
+		}
+		afterPadding = false
 		if len(a.Objects) >= maximum {
 			return nil, fmt.Errorf("ibmi_save: object limit")
 		}
-		// Only the independently inspected release layout is selected here.
-		if be.Uint16(h[0x52:]) != 0x4705 || be.Uint16(h[0x54:]) != 0x4705 {
-			return nil, fmt.Errorf("ibmi_save: unsupported descriptor release at %d", off)
+		// Release/target pairs select independently inspected table origins.
+		release, target := be.Uint16(h[0x52:]), be.Uint16(h[0x54:])
+		minimumTable := int64(0x280)
+		switch {
+		case release == 0x4705 && (target == 0x4705 || target == 0x3905):
+		case release == 0x4600 && target == 0x4600:
+		case release == 0x3400 && target == 0x3400:
+			minimumTable = 0x1e0
+		default:
+			return nil, fmt.Errorf("ibmi_save: unsupported descriptor release %04x/%04x at %d", release, target, off)
 		}
 		blocks := int64(be.Uint32(h[0xcc:]))
 		length := blocks * 512
@@ -126,7 +155,7 @@ func Open(file starfile.File, maximum int) (*Archive, error) {
 		}
 		count := int64(be.Uint32(h[0x64:]))
 		table := int64(be.Uint64(h[0x108:])&0xffffff) - pageSize
-		if count < 1 || count > int64(maximum-sections) || table < 0x280 || table > pageSize || count*16 > pageSize-table {
+		if count < 1 || count > int64(maximum-sections) || table < minimumTable || table > pageSize || count*16 > pageSize-table {
 			return nil, fmt.Errorf("ibmi_save: invalid section table at %d", off)
 		}
 		obj := Object{Name: identifier(h[4:34]), RawName: bytes.Clone(h[4:34]), Group: a.Groups, Offset: off, Type: be.Uint16(h[34:]), Release: be.Uint16(h[0x52:]), TargetRelease: be.Uint16(h[0x54:]), DeclaredDataBlocks: be.Uint32(h[0xd4:]), Header: view(off, pageSize), Data: view(off+pageSize, length-pageSize)}
