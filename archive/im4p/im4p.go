@@ -9,6 +9,8 @@ import (
 )
 
 type Node struct {
+	// Tag is the first identifier octet, including class and constructed bits.
+	// Raw preserves the complete identifier for high-tag-number metadata.
 	Tag      byte
 	Data     storage.Reader
 	Raw      storage.Reader
@@ -22,31 +24,62 @@ type Image struct {
 }
 
 func header(r storage.Reader, off, end int64) (byte, int64, int64, error) {
-	var b [10]byte
+	var b [8]byte
 	if off < 0 || off > end-2 {
 		return 0, 0, 0, fmt.Errorf("im4p: truncated DER header")
 	}
-	if _, err := r.ReadAt(b[:2], off); err != nil {
+	if _, err := r.ReadAt(b[:1], off); err != nil {
 		return 0, 0, 0, err
 	}
-	if b[0]&31 == 31 {
-		return 0, 0, 0, fmt.Errorf("im4p: high DER tags unsupported")
+	tag := b[0]
+	h := int64(1)
+	if tag&31 == 31 {
+		var number uint64
+		for {
+			if h >= end-off {
+				return 0, 0, 0, fmt.Errorf("im4p: truncated DER identifier")
+			}
+			if _, err := r.ReadAt(b[:1], off+h); err != nil {
+				return 0, 0, 0, err
+			}
+			v := b[0]
+			if h == 1 && v&127 == 0 {
+				return 0, 0, 0, fmt.Errorf("im4p: noncanonical DER identifier")
+			}
+			if number > (^uint64(0)-uint64(v&127))/128 {
+				return 0, 0, 0, fmt.Errorf("im4p: DER identifier overflow")
+			}
+			number = number*128 + uint64(v&127)
+			h++
+			if v&128 == 0 {
+				break
+			}
+		}
+		if number < 31 {
+			return 0, 0, 0, fmt.Errorf("im4p: noncanonical DER identifier")
+		}
 	}
-	n := int64(b[1])
-	h := int64(2)
-	if b[1]&128 != 0 {
-		width := int64(b[1] & 127)
-		if width == 0 || width > 8 || width > end-off-2 {
+	if h >= end-off {
+		return 0, 0, 0, fmt.Errorf("im4p: truncated DER length")
+	}
+	if _, err := r.ReadAt(b[:1], off+h); err != nil {
+		return 0, 0, 0, err
+	}
+	n := int64(b[0])
+	h++
+	if b[0]&128 != 0 {
+		width := int64(b[0] & 127)
+		if width == 0 || width > 8 || width > end-off-h {
 			return 0, 0, 0, fmt.Errorf("im4p: invalid DER length")
 		}
-		if _, err := r.ReadAt(b[2:2+width], off+2); err != nil {
+		if _, err := r.ReadAt(b[:width], off+h); err != nil {
 			return 0, 0, 0, err
 		}
-		if b[2] == 0 {
+		if b[0] == 0 {
 			return 0, 0, 0, fmt.Errorf("im4p: noncanonical DER length")
 		}
 		n = 0
-		for _, v := range b[2 : 2+width] {
+		for _, v := range b[:width] {
 			if n > (1<<63-1-int64(v))/256 {
 				return 0, 0, 0, fmt.Errorf("im4p: length overflow")
 			}
@@ -60,7 +93,7 @@ func header(r storage.Reader, off, end int64) (byte, int64, int64, error) {
 	if n > end-off-h {
 		return 0, 0, 0, fmt.Errorf("im4p: DER extent outside source")
 	}
-	return b[0], h, n, nil
+	return tag, h, n, nil
 }
 func node(r storage.Reader, off, end int64, depth int, count *int) (Node, int64, error) {
 	*count++

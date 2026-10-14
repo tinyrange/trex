@@ -46,6 +46,14 @@ func Starlark(value any) (starlark.Value, error) {
 		return starlark.MakeInt(value), nil
 	case int64:
 		return starlark.MakeInt64(value), nil
+	case uint64:
+		return starlark.MakeUint64(value), nil
+	case uint32:
+		return starlark.MakeUint(uint(value)), nil
+	case uint16:
+		return starlark.MakeUint(uint(value)), nil
+	case uint8:
+		return starlark.MakeUint(uint(value)), nil
 	case []any:
 		items := make([]starlark.Value, len(value))
 		for index, item := range value {

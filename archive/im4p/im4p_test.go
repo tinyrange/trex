@@ -45,3 +45,49 @@ func TestRejectDERBoundsAndNesting(t *testing.T) {
 		t.Fatal("unbounded nesting")
 	}
 }
+
+func TestPrivateHighTagMetadata(t *testing.T) {
+	// PAYP metadata uses a constructed private tag whose number is the
+	// four-character property name (here kcbf), enclosing a DER sequence.
+	property := []byte{0xff, 0x86, 0xdb, 0x8d, 0xc4, 0x66, 0x0e,
+		0x30, 0x0c, 0x16, 4, 'k', 'c', 'b', 'f', 2, 4, 2, 0x2b, 0, 0}
+	b := fixture()
+	b[1] += byte(len(property))
+	b = append(b, property...)
+	f, err := Open(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := f.Extras[1]
+	if extra.Tag != 0xff || len(extra.Children) != 1 || len(extra.Children[0].Children) != 2 {
+		t.Fatalf("metadata not parsed: %+v", extra)
+	}
+	raw, err := io.ReadAll(io.NewSectionReader(extra.Raw, 0, extra.Raw.Size()))
+	if err != nil || !bytes.Equal(raw, property) {
+		t.Fatalf("metadata changed: %x %v", raw, err)
+	}
+	id, err := auto.Identify(bytes.NewReader(b), auto.Options{})
+	if err != nil || id.Format != "im4p" {
+		t.Fatalf("auto %v %v", id, err)
+	}
+}
+
+func TestRejectMalformedHighTags(t *testing.T) {
+	for _, metadata := range [][]byte{
+		{0xff, 0x80, 0x1f, 0}, // leading zero
+		{0xff, 0x1e, 0},       // low number in long form
+		{0xff, 0x81},          // unfinished identifier
+		{0xff, 0x1f},          // missing length
+		{0xff, 0x1f, 0x80},    // indefinite length
+		{0xff, 0x1f, 0x81, 0}, // noncanonical length
+		{0xff, 0x1f, 2, 0},    // extent outside parent
+		{0xff, 0x82, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0, 0}, // overflow
+	} {
+		b := fixture()
+		b[1] += byte(len(metadata))
+		b = append(b, metadata...)
+		if _, err := Open(bytes.NewReader(b)); err == nil {
+			t.Fatalf("accepted malformed identifier: %x", metadata)
+		}
+	}
+}

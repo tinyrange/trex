@@ -5,6 +5,8 @@ Opening a layer is explicit: retain its container and select a member for the
 next probe. Unknown signatures are evidence, not a claim of decoded contents.
 """
 
+
+
 def describe(file):
     return {"size": file.size, "header": file.hex(0, min(32, file.size))}
 
@@ -57,6 +59,25 @@ def verify_entries(container):
                        "sha256": hex(digest(file)),
                        "header": binary.hex(file.bytes(0, min(16, file.size)))})
     return result
+
+def apple_apfs(file, key = None, cache_input = True):
+    """Open raw APFS or its AEA1/IM4P wrapper for explicit volume browsing.
+
+    cache_input snapshots only the selected input in memory, avoiding repeated
+    ZIP decompression during random access. AEA metadata keys are never printed
+    or fetched. Compression and filesystem contents remain native file views.
+    """
+    if cache_input:
+        file = binary.view(file.bytes())
+    header = file.bytes(0, min(40, file.size))
+    if header[:4] == b"AEA1":
+        file = archive.aea(file, key = key).file
+    elif header[32:36] != b"NXSB":
+        envelope = archive.im4p(file)
+        if envelope.payload_type != "rdsk":
+            fail("IM4P payload is not a restore ramdisk", envelope.payload_type)
+        file = envelope.payload
+    return filesystem.apfs(file)
 
 def verify_hfs_forks(volume):
     """Read both HFS forks, including resource-only files; do not decode payloads."""

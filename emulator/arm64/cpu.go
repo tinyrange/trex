@@ -761,6 +761,40 @@ func (c *CPU) step(m, physical cpu.Memory) (cpu.Effect, error) {
 		c.q[rd] = value
 	case opClearExclusive: // CLREX
 		c.exclusiveValid = false
+	case opAtomicReadModifyWrite: // LDADD/LDSET, including store-only aliases
+		// Step completes one instruction before another can execute. Ordering
+		// variants have the same behavior in this single-processor memory model.
+		size := 1 << (i >> 30)
+		address, source := c.r(rn, true), c.r(rm, false)
+		if address&uint64(size-1) != 0 {
+			return effect, fmt.Errorf("arm64: unaligned atomic access %#x", address)
+		}
+		if err := m.CheckMemory(address, int(size), cpu.Write); err != nil {
+			return effect, err
+		}
+		var data [8]byte
+		if err := m.ReadMemory(address, data[:size], cpu.Read); err != nil {
+			return effect, err
+		}
+		var old uint64
+		for j := 0; j < size; j++ {
+			old |= uint64(data[j]) << (8 * j)
+		}
+		value := old + source
+		if i>>12&15 == 3 {
+			value = old | source
+		}
+		for j := 0; j < size; j++ {
+			data[j] = byte(value >> (8 * j))
+		}
+		if err := m.WriteMemory(address, data[:size]); err != nil {
+			return effect, err
+		}
+		registerWidth := uint32(32)
+		if size == 8 {
+			registerWidth = 64
+		}
+		c.w(rd, old, registerWidth, false)
 	case opExclusive: // single-register exclusive load/store
 		size := 1 << uint(i>>30)
 		address := c.r(rn, true)

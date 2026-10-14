@@ -14,6 +14,7 @@ import (
 
 	binaryapi "github.com/tinyrange/trex/binary"
 	"github.com/tinyrange/trex/binary/androidboot"
+	"github.com/tinyrange/trex/binary/berkeleydb"
 	irixbinary "github.com/tinyrange/trex/binary/irix"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	starfile "github.com/tinyrange/trex/storage/star"
@@ -66,7 +67,11 @@ func binaryScalarCodecNamed(name string) (binaryScalarCodec, bool) {
 func Builtins() starlark.StringDict {
 	attrs := starlark.StringDict{
 		"irix_executable":              starlark.NewBuiltin("irix_executable", irixbinary.Builtin),
+		"apple_device_tree":            starlark.NewBuiltin("apple_device_tree", appleDeviceTreeBuiltin),
+		"encode_apple_device_tree":     starlark.NewBuiltin("encode_apple_device_tree", encodeAppleDeviceTreeBuiltin),
+		"arm64_disassemble":            starlark.NewBuiltin("arm64_disassemble", arm64DisassembleBuiltin),
 		"android_boot":                 starlark.NewBuiltin("android_boot", androidboot.Builtin),
+		"berkeley_db":                  starlark.NewBuiltin("berkeley_db", berkeleydb.Builtin),
 		"software_update_catalog":      starlark.NewBuiltin("software_update_catalog", softwareUpdateCatalogBuiltin),
 		"software_update_distribution": starlark.NewBuiltin("software_update_distribution", softwareUpdateDistributionBuiltin),
 
