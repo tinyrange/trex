@@ -2,6 +2,7 @@ package udf
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"github.com/tinyrange/trex/storage"
 	starfile "github.com/tinyrange/trex/storage/star"
@@ -48,15 +49,16 @@ func UDFBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 }
 
 type udfImage struct {
-	file          starfile.File
-	logicalBlock  int64
-	anchorSector  int64
-	vdsOffset     int64
-	vdsSize       int64
-	partitions    map[uint16]udfPartition
-	partitionMaps map[uint16]uint16
-	root          udfFileEntry
-	rootPath      string
+	file            starfile.File
+	logicalBlock    int64
+	anchorSector    int64
+	vdsOffset       int64
+	vdsSize         int64
+	partitions      map[uint16]udfPartition
+	partitionMaps   map[uint16]uint16
+	root            udfFileEntry
+	rootPath        string
+	bootDescriptors []BootDescriptor
 }
 
 type udfPartition struct {
@@ -86,6 +88,7 @@ type udfVirtualEntry struct {
 	name   string
 	offset int64
 	size   int64
+	data   []byte
 }
 
 func newUDFImage(file starfile.File) (*udfImage, error) {
@@ -120,6 +123,10 @@ func newUDFImage(file starfile.File) (*udfImage, error) {
 	root.name = "/"
 	root.path = "/"
 	img.root = root
+	img.bootDescriptors, err = ReadBootDescriptors(file)
+	if err != nil {
+		return nil, err
+	}
 	return img, nil
 }
 
@@ -537,15 +544,28 @@ func (i *udfImage) extentOffset(extent udfExtent) (int64, error) {
 }
 
 func (i *udfImage) virtualEntries() []udfVirtualEntry {
-	return []udfVirtualEntry{
+	entries := []udfVirtualEntry{
 		{name: "/$metadata/anchor.bin", offset: i.anchorSector * udfBlockSize, size: udfBlockSize},
 		{name: "/$metadata/volume_descriptor_sequence.bin", offset: i.vdsOffset, size: i.vdsSize},
 	}
+	for index, d := range i.bootDescriptors {
+		prefix := fmt.Sprintf("/$metadata/boot%d", index)
+		metadata, _ := json.MarshalIndent(d, "", "  ")
+		entries = append(entries, udfVirtualEntry{name: prefix + ".json", size: int64(len(metadata)), data: metadata},
+			udfVirtualEntry{name: prefix + ".descriptor.bin", offset: d.DescriptorOffset, size: udfBlockSize})
+		if d.ExtentBytes != 0 {
+			entries = append(entries, udfVirtualEntry{name: prefix + ".extent.bin", offset: d.ExtentOffset, size: int64(d.ExtentBytes)})
+		}
+	}
+	return entries
 }
 
 func (i *udfImage) virtualFile(name string) starfile.File {
 	for _, entry := range i.virtualEntries() {
 		if strings.EqualFold(entry.name, name) {
+			if entry.data != nil {
+				return &starfile.Bytes{Name: entry.name, Data: entry.data}
+			}
 			return &udfRegionFile{image: i, name: entry.name, offset: entry.offset, size: entry.size}
 		}
 	}

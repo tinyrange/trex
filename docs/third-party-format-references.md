@@ -288,3 +288,23 @@ incorporated. The Apache License 2.0 is retained in this repository's LICENSE.
 Upstream apk-tools format/version behavior was inspected as a reference only.
 No GPL implementation is copied, translated or linked; unsupported version
 range constraints are explicitly rejected by the basic pinned policy.
+
+## IBM i optical TERSE and XCOFF
+
+Native inspection of original media established LD_TRS outer framing, the
+02000080 inner header, record boundaries and byte-aligned zero end-code tails.
+The prefix-chain LRU dictionary behavior was informed by the Open Mainframe
+Project `tersedecompress` NonSpack algorithm at commit
+`12f5f9f34821defeef696c3232d97b7733dc79a6`. It is implemented natively in Go with
+bounded arrays, strict declared-output/trailer checks and synthetic fixtures;
+no external decompressor or host extraction command is used. Upstream is
+Apache-2.0; its full license is retained by the repository LICENSE. The project
+and reference source are at
+https://github.com/openmainframeproject/tersedecompress/tree/12f5f9f34821defeef696c3232d97b7733dc79a6.
+
+XCOFF64 fields and auxiliary tags were checked against the primary format
+declarations in Go's `src/internal/xcoff/xcoff.go` and LLVM's
+`llvm/include/llvm/Object/XCOFFObjectFile.h`, alongside native original-media
+inspection. No third-party XCOFF parser code is incorporated or invoked.
+The native APIs preserve raw names, unknown auxiliary records and non-restored
+BSS; saved addresses are never automatically equated with execution addresses.

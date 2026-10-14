@@ -117,9 +117,27 @@ Slicing a byte view with step one remains a view. Explicit `bytes()` calls
 materialize the selected range. Views support bounded search and comparison.
 
 `binary.encode(text, encoding="utf8", nul=False)` supports ASCII, UTF-8,
-UTF-16LE, and UTF-16BE. `binary.text(value, encoding="utf8", nul=False)`
+UTF-16LE, UTF-16BE, and explicit IBM037 (`ibm037` or `cp037`). IBM037 is a chosen rendering, not detected saved CCSID. `binary.text(value, encoding="utf8", nul=False)`
 performs the reverse conversion with validation. Hex and Base64 conversion use
 `binary.hex`, `binary.base64`, and `binary.decode` with explicit output limits.
 
 Use `binary.concat` and `binary.extents` for lazy composition. Do not join large
 files by converting them to bytes or by extracting intermediate host files.
+
+
+## POWER instruction inspection
+
+`binary.ppc_instructions(source, offset=0, size=256, address=0,
+byte_order="big", maximum=4096)` returns bounded decoded records using the pinned
+portable Go POWER decoder, without executing code or invoking a host disassembler.
+`address` is the address of the first selected byte, not a base to which `offset`
+is added. File/bytes/string/byte-view sources and both byte orders are supported.
+
+Ranges are four-byte aligned and limited to 64KiB. Records contain source offset,
+64-bit address, raw first word, length, opcode, GNU text, typed operands and a
+resolved branch target where present. Absolute branch targets are sign-extended
+for 64-bit execution; GNU display text retains upstream 32-bit absolute label
+spelling. Prefixed instructions consume eight bytes. Unknown words and truncated
+prefixes carry an explicit error and advance by four bytes. Successful decoding
+alone does not establish that bytes are executable code. This API does not infer
+load addresses, recover control flow, apply relocation or emulate POWER state.

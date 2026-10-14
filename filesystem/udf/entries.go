@@ -13,7 +13,7 @@ func Entries(file starfile.File) ([]filesystemapi.ArchiveEntry, error) {
 	}
 	entries := []filesystemapi.ArchiveEntry{{Name: "/$metadata", Directory: true}}
 	for _, entry := range image.virtualEntries() {
-		entries = append(entries, filesystemapi.ArchiveEntry{Name: entry.name, Size: entry.size, File: &udfRegionFile{image: image, name: entry.name, offset: entry.offset, size: entry.size}})
+		entries = append(entries, filesystemapi.ArchiveEntry{Name: entry.name, Size: entry.size, File: image.virtualFile(entry.name)})
 	}
 	var walk func(udfFileEntry) error
 	walk = func(dir udfFileEntry) error {

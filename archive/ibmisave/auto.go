@@ -10,10 +10,14 @@ import (
 
 func init() {
 	auto.Register("ibmi_save", 30, func(p []byte, r storage.Reader, o auto.Options) (auto.View, error) {
-		if len(p) <= pageSize || !bytes.Equal(p[:4], []byte{255, 255, 255, 255}) || !bytes.Equal(p[0x96:0xae], descriptor) || !bytes.HasPrefix(p[4:34], catalogName) {
+		if len(p) <= pageSize || !bytes.Equal(p[:4], []byte{255, 255, 255, 255}) || !bytes.Equal(p[0x96:0xae], descriptor) {
 			return nil, auto.ErrNoMatch
 		}
-		a, err := Open(adapter.File(r), o.MaxEntries)
+		profile := "catalog"
+		if !bytes.HasPrefix(p[4:34], catalogName) {
+			profile = "boot750"
+		}
+		a, err := OpenProfile(adapter.File(r), o.MaxEntries, profile)
 		if err != nil {
 			return nil, err
 		}
@@ -45,6 +49,6 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
-		return &auto.DescribedView{View: tree, Format: "ibmi_save", Attributes: map[string]any{"save_groups": a.Groups, "objects": len(a.Objects), "restored": false}}, nil
+		return &auto.DescribedView{View: tree, Format: "ibmi_save", Attributes: map[string]any{"profile": a.Profile, "catalog_present": a.CatalogPresent, "save_groups": a.Groups, "objects": len(a.Objects), "restored": false}}, nil
 	})
 }

@@ -248,6 +248,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"filesystem.ext4":                   "filesystem.ext4(file, maximum_entries=100000, maximum_depth=32) -> record",
 	"filesystem.ffs_build":              "filesystem.ffs_build(entries, size=0, extra=0, layout='raw', timestamp=1700000000) -> file",
 	"filesystem.ext4_build":             "filesystem.ext4_build(entries, size, label='', uuid='') -> file",
+	"binary.ppc_instructions":           "binary.ppc_instructions(source, offset=0, size=256, address=0, byte_order=\"big\", maximum=4096) -> list[record]",
 	"binary.macho":                      "binary.macho(file, architecture=\"x86_64\", cpu_subtype=None) -> record",
 	"binary.plist":                      "binary.plist(source) -> value",
 	"binary.plist_encode":               "binary.plist_encode(value) -> file",
