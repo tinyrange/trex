@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"strings"
@@ -50,21 +51,26 @@ func Match(pattern, name string) (bool, error) {
 	return visit(0, 0), nil
 }
 func (w *Workspace) Glob(pattern string) ([]string, error) {
-	if _, err := Match(pattern, ""); err != nil {
-		return nil, err
-	}
+	return w.GlobContext(context.Background(), pattern)
+}
+
+// GlobContext is the complete-result compatibility operation with cancellation.
+// Retain GlobPage for bounded output and independent traversal-work limits.
+func (w *Workspace) GlobContext(ctx context.Context, pattern string) ([]string, error) {
+	view := w.View()
 	out := []string{}
-	paths, err := w.PathsWithError()
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range paths {
-		ok, _ := Match(pattern, p)
-		if ok {
-			out = append(out, p)
+	after := ""
+	for {
+		page, err := view.GlobPage(ctx, pattern, after, QueryLimits{Limit: 10000, MaxVisited: int(^uint(0) >> 1)})
+		if err != nil {
+			return nil, err
 		}
+		out = append(out, page.Paths...)
+		if page.Next == "" {
+			return out, nil
+		}
+		after = page.Next
 	}
-	return out, nil
 }
 
 // Fork durably snapshots current state and shares its immutable root. A clean

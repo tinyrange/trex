@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/tinyrange/trex/scs/repo"
@@ -51,31 +52,39 @@ func (v *Value) search(a starlark.Tuple, k []starlark.Tuple) (starlark.Value, er
 	matches := []starlark.Value{}
 	searched, output, skipped := 0, 0, 0
 	truncated := false
-	paths, err := v.w.PathsWithError()
-	if err != nil {
-		return nil, err
+	view := v.w.View()
+	selectedPaths := map[string]bool{}
+	if len(globs) == 0 {
+		globs = []string{"**"}
 	}
+	for _, g := range globs {
+		paths, err := view.GlobContext(v.ctx, g)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range paths {
+			selectedPaths[p] = true
+		}
+	}
+	paths := make([]string, 0, len(selectedPaths))
+	for p := range selectedPaths {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
 outer:
 	for _, p := range paths {
 		if err := v.ctx.Err(); err != nil {
 			return nil, err
 		}
-		e, err := v.w.Stat(p)
+		e, err := view.Stat(p)
 		if err != nil {
 			return nil, err
 		}
 		if e.Kind != "file" {
 			continue
 		}
-		selected := len(globs) == 0
-		for _, g := range globs {
-			ok, _ := repo.Match(g, p)
-			selected = selected || ok
-		}
-		if !selected {
-			continue
-		}
-		data, err := v.w.ReadFile(p)
+
+		data, err := view.ReadFile(p)
 		if err != nil {
 			return nil, err
 		}

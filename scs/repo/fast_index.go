@@ -36,23 +36,27 @@ type fastRun struct {
 	NativePages, GitPages []fastPageRef
 }
 type fastManifest struct {
-	Version  int
-	Runs     []fastRunRef
-	Refs     map[string]ID
-	Catalogs map[string]ID
-	GitStats GitStats
-	Stats    StorageStats
+	Version     int
+	Runs        []fastRunRef
+	IndexedRefs bool
+	RefIndex    ID
+	Refs        map[string]ID
+	Catalogs    map[string]ID
+	GitStats    GitStats
+	Stats       StorageStats
 }
 type fastState struct {
-	manifest        fastManifest
-	runs            map[int64]*fastRun
-	pages           map[int64][]byte
-	dec             *zstd.Decoder
-	dirty           map[objectKey]location
-	dirtyGit        map[GitOID]objectKey
-	pendingRefs     map[string]ID
-	pendingCatalogs map[string]ID
-	sealed          int64
+	manifest           fastManifest
+	runs               map[int64]*fastRun
+	pages              map[int64][]byte
+	dec                *zstd.Decoder
+	dirty              map[objectKey]location
+	dirtyGit           map[GitOID]objectKey
+	pendingIndexedRefs bool
+	pendingRefIndex    ID
+	pendingRefs        map[string]ID
+	pendingCatalogs    map[string]ID
+	sealed             int64
 }
 
 func newFast(m fastManifest) *fastState {
@@ -507,6 +511,18 @@ func (r *Repository) sealFast() error {
 	}
 	m := f.manifest
 	m.Refs = r.refs
+	if r.indexedRefs || f.pendingIndexedRefs {
+		m.Version = 2
+		m.IndexedRefs = true
+		m.Refs = nil
+		m.RefIndex = ""
+		if r.refIndex != nil {
+			m.RefIndex = r.refIndex.id
+		}
+		if f.pendingIndexedRefs {
+			m.RefIndex = f.pendingRefIndex
+		}
+	}
 	if f.pendingRefs != nil {
 		m.Refs = f.pendingRefs
 	}
@@ -531,6 +547,8 @@ func (r *Repository) sealFast() error {
 	clear(f.dirty)
 	clear(f.dirtyGit)
 	f.pendingRefs = nil
+	f.pendingIndexedRefs = false
+	f.pendingRefIndex = ""
 	f.pendingCatalogs = nil
 	return nil
 }
@@ -612,7 +630,7 @@ func (r *Repository) loadFastIndex(fileSize int64) (bool, int64, error) {
 		if e = json.Unmarshal(data, &m); e != nil {
 			return false, 0, e
 		}
-		if m.Version != 1 || m.Refs == nil || len(m.Runs) == 0 || len(m.Runs) > 1024 || m.Stats.ContentObjects < 0 {
+		if (m.Version != 1 && m.Version != 2) || (m.Version == 1 && (m.Refs == nil || m.IndexedRefs)) || (m.Version == 2 && (!m.IndexedRefs || m.Refs != nil)) || len(m.Runs) == 0 || len(m.Runs) > 1024 || m.Stats.ContentObjects < 0 {
 			return false, 0, errors.New("invalid persistent manifest")
 		}
 		for _, rr := range m.Runs {
@@ -622,7 +640,9 @@ func (r *Repository) loadFastIndex(fileSize int64) (bool, int64, error) {
 		}
 		r.fast = newFast(m)
 		r.fast.sealed = footer + fastFooterSize
-		r.refs = m.Refs
+		if e := r.installCatalog(catalog{Refs: m.Refs, Indexed: m.IndexedRefs, Index: m.RefIndex}); e != nil {
+			return false, 0, e
+		}
 		r.gitCatalogs = m.Catalogs
 		r.gitStats = m.GitStats
 		r.gitObjects = map[GitOID]gitLocation{}

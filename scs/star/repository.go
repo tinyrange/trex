@@ -98,7 +98,7 @@ func (*RepositoryValue) Freeze()               {}
 func (*RepositoryValue) Truth() starlark.Bool  { return starlark.True }
 func (*RepositoryValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: repository") }
 func (*RepositoryValue) AttrNames() []string {
-	return []string{"checkout", "checkout_git", "checkpoint", "clone", "close", "empty", "file", "git_refs", "refs"}
+	return []string{"blame", "git_blame", "git_is_ancestor", "git_merge_bases", "checkout_revision", "revision", "promote", "drop", "enable_indexed_refs", "is_ancestor", "merge_bases", "path_history", "operation_stats", "clear_derived_indexes", "checkout", "checkout_git", "checkpoint", "clone", "close", "empty", "file", "git_refs", "refs"}
 }
 func (v *RepositoryValue) Attr(name string) (starlark.Value, error) {
 	for _, n := range v.AttrNames() {
@@ -116,6 +116,8 @@ func (v *RepositoryValue) Attr(name string) (starlark.Value, error) {
 func (v *RepositoryValue) call(_ *starlark.Thread, name string, a starlark.Tuple, k []starlark.Tuple) (starlark.Value, error) {
 	unpack := func(pairs ...any) error { return starlark.UnpackArgs("repository."+name, a, k, pairs...) }
 	switch name {
+	case "blame", "git_blame", "git_is_ancestor", "git_merge_bases", "checkout_revision", "revision", "promote", "drop", "enable_indexed_refs", "is_ancestor", "merge_bases", "path_history", "operation_stats", "clear_derived_indexes":
+		return v.query(name, a, k)
 	case "empty":
 		if err := unpack(); err != nil {
 			return nil, err
@@ -143,9 +145,10 @@ func (v *RepositoryValue) call(_ *starlark.Thread, name string, a starlark.Tuple
 		return NewWorkspace(v.ctx, w), nil
 	case "clone":
 		var url string
+		var selected starlark.Value
 		catalog := "git"
 		packLimit, nativeLimit := int64(256<<20), int64(512<<30)
-		if err := unpack("url", &url, "catalog?", &catalog, "max_pack_bytes?", &packLimit, "max_native_bytes?", &nativeLimit); err != nil {
+		if err := unpack("url", &url, "catalog?", &catalog, "max_pack_bytes?", &packLimit, "max_native_bytes?", &nativeLimit, "refs?", &selected); err != nil {
 			return nil, err
 		}
 		if packLimit < 32 || nativeLimit < 1 {
@@ -158,7 +161,11 @@ func (v *RepositoryValue) call(_ *starlark.Thread, name string, a starlark.Tuple
 		if err != nil {
 			return nil, err
 		}
-		report, err := gitstore.Clone(v.ctx, v.r, url, gitstore.Options{Name: catalog, MaxPackBytes: packLimit, MaxNativeBytes: nativeLimit, Transport: backend})
+		refs, err := stringsArg(selected)
+		if err != nil {
+			return nil, err
+		}
+		report, err := gitstore.Clone(v.ctx, v.r, url, gitstore.Options{Name: catalog, Refs: refs, MaxPackBytes: packLimit, MaxNativeBytes: nativeLimit, Transport: backend})
 		if err != nil {
 			return nil, err
 		}

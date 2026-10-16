@@ -48,6 +48,10 @@ type tree struct {
 type snapshot struct {
 	Tree         ID     `json:"tree"`
 	SourceCommit string `json:"source_commit,omitempty"`
+	Parents      []ID   `json:"parents,omitempty"`
+	Author       string `json:"author,omitempty"`
+	Message      string `json:"message,omitempty"`
+	Task         string `json:"task,omitempty"`
 }
 type state struct {
 	loadErr  error
@@ -122,6 +126,9 @@ func (r *Repository) Fork(id ID) (*Workspace, error) {
 func (r *Repository) load(id ID) (*Workspace, error) {
 	var sn snapshot
 	if err := r.getJSON(id, snapshotKind, &sn); err != nil {
+		return nil, err
+	}
+	if _, err := r.validateRevision(id, sn); err != nil {
 		return nil, err
 	}
 	if !r.earlier(sn.Tree, id) {
@@ -604,7 +611,7 @@ func (w *Workspace) save() (ID, error) {
 	if err != nil {
 		return "", err
 	}
-	return w.r.putJSON(snapshotKind, snapshot{root, w.s.source})
+	return w.r.putJSON(snapshotKind, snapshot{Tree: root, SourceCommit: w.s.source})
 }
 
 // snapshotLocked requires both the workspace and repository locks. Memoization
@@ -667,18 +674,9 @@ func (w *Workspace) Publish(name string) (ID, error) {
 	if err != nil {
 		return "", err
 	}
-	refs := map[string]ID{}
-	for n, id := range w.r.refs {
-		refs[n] = id
-	}
-	refs[name] = id
-	if _, err = w.r.putJSON(refsKind, catalog{refs}); err != nil {
+	if err = w.r.promoteLocked(name, current, id); err != nil {
 		return "", err
 	}
-	if err = w.r.sync(); err != nil {
-		return "", err
-	}
-	w.r.refs = refs
 	w.s.name = name
 	w.s.base = id
 	return id, nil
