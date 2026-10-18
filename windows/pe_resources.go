@@ -277,18 +277,20 @@ func peInfoBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 		return nil, err
 	}
 	defer image.Close()
-	var entryPoint, imageBase, imageSize, sectionAlignment uint64
+	var entryPoint, imageBase, imageSize, sectionAlignment, subsystem uint64
 	switch header := image.OptionalHeader.(type) {
 	case *pe.OptionalHeader32:
 		entryPoint = uint64(header.AddressOfEntryPoint)
 		imageBase = uint64(header.ImageBase)
 		imageSize = uint64(header.SizeOfImage)
 		sectionAlignment = uint64(header.SectionAlignment)
+		subsystem = uint64(header.Subsystem)
 	case *pe.OptionalHeader64:
 		entryPoint = uint64(header.AddressOfEntryPoint)
 		imageBase = header.ImageBase
 		imageSize = uint64(header.SizeOfImage)
 		sectionAlignment = uint64(header.SectionAlignment)
+		subsystem = uint64(header.Subsystem)
 	default:
 		return nil, fmt.Errorf("pe_info: unsupported optional header %T", image.OptionalHeader)
 	}
@@ -306,6 +308,7 @@ func peInfoBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 		{"image_base", imageBase},
 		{"image_size", imageSize},
 		{"section_alignment", sectionAlignment},
+		{"subsystem", subsystem},
 	}
 	for _, field := range fields {
 		if err := dict.SetKey(starlark.String(field.name), starlark.MakeUint64(field.value)); err != nil {

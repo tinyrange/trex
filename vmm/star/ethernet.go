@@ -11,6 +11,10 @@ import (
 
 type switchValue struct{ switcher *ethernet.Switch }
 
+// NewSwitchValue wraps an explicitly supplied private Ethernet domain for an
+// embedding application's machine recipe. It does not attach a host network.
+func NewSwitchValue(s *ethernet.Switch) starlark.Value { return &switchValue{switcher: s} }
+
 func (*switchValue) String() string        { return "<vmm.switch>" }
 func (*switchValue) Type() string          { return "vmm_switch" }
 func (*switchValue) Freeze()               {}

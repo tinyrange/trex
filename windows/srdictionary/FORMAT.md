@@ -21,11 +21,14 @@ Relevant native functions and RVAs:
 - `Writer::StringSize`, 0x22f88: string length includes the UTF-16 terminator.
 
 `EncodeStrings` and `DecodeStrings` cover string-valued wire primitives.
-`Encode` and `Decode` additionally support nested dictionaries (type 21) and
+`Encode` and `Decode` additionally support booleans (type 1), nested dictionaries (type 21) and
 arrays of dictionaries (type 42). A map payload is a uint32 byte length followed
 by a complete SRD1 dictionary. A map-array entry inserts a uint32 count between
 its type and key length, then stores a uint32 size and complete SRD1 value for
-each child. Unsupported types are rejected.
+each child. Boolean payloads are a single byte (0 or 1) immediately after the
+key, without a length word. A captured Windows 11 build 26300 PrimaryTile
+dictionary independently verifies the boolean wire layout in the regression
+test. Invalid boolean values and extents are rejected. Unsupported types are rejected.
 The wire-layout test is independently specified from this layout; it is not
 a captured native-producer fixture or proof of guest interoperability.
 

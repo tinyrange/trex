@@ -14,7 +14,7 @@ func BuildBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 	var value starlark.Value
 	var options BuildOptions
 	uuid := ""
-	if err := starlark.UnpackArgs("ext4_build", args, kwargs, "entries", &value, "size", &options.Size, "label?", &options.Label, "uuid?", &uuid); err != nil {
+	if err := starlark.UnpackArgs("ext4_build", args, kwargs, "entries", &value, "size", &options.Size, "label?", &options.Label, "uuid?", &uuid, "inode_count?", &options.InodeCount); err != nil {
 		return nil, err
 	}
 	if uuid != "" {

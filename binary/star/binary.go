@@ -15,7 +15,9 @@ import (
 	binaryapi "github.com/tinyrange/trex/binary"
 	"github.com/tinyrange/trex/binary/androidboot"
 	"github.com/tinyrange/trex/binary/berkeleydb"
+	"github.com/tinyrange/trex/binary/elfmeta"
 	irixbinary "github.com/tinyrange/trex/binary/irix"
+	"github.com/tinyrange/trex/binary/perf"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	starfile "github.com/tinyrange/trex/storage/star"
 	windowsapi "github.com/tinyrange/trex/windows"
@@ -89,6 +91,8 @@ func Builtins() starlark.StringDict {
 		"hex":                  starlark.NewBuiltin("hex", binaryHexBuiltin),
 		"layout":               starlark.NewBuiltin("layout", binaryLayoutBuiltin),
 		"macho":                starlark.NewBuiltin("macho", machoBuiltin),
+		"perf":                 starlark.NewBuiltin("perf", perf.Builtin),
+		"elf_symbols":          starlark.NewBuiltin("elf_symbols", elfmeta.Builtin),
 		"ppc_instructions":     starlark.NewBuiltin("ppc_instructions", powerPCInstructionsBuiltin),
 		"plist":                starlark.NewBuiltin("plist", plistBuiltin),
 		"plist_encode":         starlark.NewBuiltin("plist_encode", plistEncodeBuiltin),
@@ -97,6 +101,7 @@ func Builtins() starlark.StringDict {
 		"text":                 starlark.NewBuiltin("text", binaryTextBuiltin),
 		"view":                 starlark.NewBuiltin("view", binaryViewBuiltin),
 		"xml":                  starlark.NewBuiltin("xml", binaryXMLBuiltin),
+		"zlib":                 starlark.NewBuiltin("zlib", binaryZlibBuiltin),
 	}
 	for _, codec := range binaryScalarCodecs {
 		codec := codec

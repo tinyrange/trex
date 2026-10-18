@@ -25,6 +25,8 @@ type Backend struct {
 	// RunTimeout bounds a caller-constructed ARM64 firmware run. Zero uses 30 seconds.
 	RunTimeout               time.Duration
 	ACPI, PCIIDE, HPET, UEFI bool
+	// USB enables the UHCI keyboard and absolute pointer.
+	USB bool
 	// PIOOnly disables the PCI IDE disk's DMA capability.
 	PIOOnly bool
 	// IDEModel selects synthetic (default) or the native ich7-pata profile.
@@ -40,7 +42,7 @@ func Capabilities() []string {
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 		return arm64Capabilities()
 	}
-	return []string{"boot.darwin", "disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
+	return []string{"boot.darwin", "disk", "disk.bus.ide", "disk.bus.nvme", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
 }
 func (*Backend) ID() string             { return "cc.v1" }
 func (*Backend) Capabilities() []string { return Capabilities() }
@@ -84,6 +86,9 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 			add("boot", err.Error())
 		}
 	}
+	if b.USB && m.Architecture != "x86_64" {
+		add("usb", "cc USB input requires x86_64")
+	}
 	if b.UEFI && m.Architecture != "x86_64" {
 		add("architecture", "cc UEFI requires x86_64")
 	}
@@ -96,21 +101,24 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if m.Architecture != "i386" && m.Architecture != "x86_64" {
 		add("architecture", "cc PC supports i386 and x86_64")
 	}
-	if m.CPUs != 1 {
-		add("cpus", "cc PC requires one CPU")
+	if m.CPUs < 1 || m.CPUs > 4 {
+		add("cpus", "cc PC supports one to four CPUs")
+	}
+	if m.CPUs > 1 && (!b.UEFI || m.Architecture != "x86_64" || m.DarwinBoot != nil) {
+		add("cpus", "multiple CPUs require the x86_64 UEFI PC profile")
 	}
 	maxMemory := int64(pciMemoryBase)
 	if m.Architecture == "x86_64" {
 		maxMemory = 8 << 30
-	}
-	if b.UEFI {
-		maxMemory = 2 << 30 // Keep the native UEFI execution profile unchanged.
+		if b.UEFI {
+			maxMemory = 16 << 30
+		}
 	}
 	if m.Memory < 16<<20 || m.Memory > maxMemory || m.Memory%4096 != 0 {
 		add("memory", fmt.Sprintf("memory must be page-aligned and between 16 MiB and %d GiB", maxMemory>>30))
 	}
 	if len(m.Disks) != 1 {
-		add("disks", "cc PC requires one primary IDE disk")
+		add("disks", "cc PC requires one IDE or NVMe disk")
 	}
 	for i, d := range m.Disks {
 		field := fmt.Sprintf("disks[%d]", i)
@@ -118,8 +126,11 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 			add(field, "disk device is required")
 			continue
 		}
-		if d.Bus != "" && d.Bus != "auto" && d.Bus != "ide" || d.Unit != 0 || d.Media != "" && d.Media != "disk" {
-			add(field, "disk must be primary IDE master with disk media")
+		if d.Bus != "" && d.Bus != "auto" && d.Bus != "ide" && d.Bus != "nvme" || d.Unit != 0 || d.Media != "" && d.Media != "disk" {
+			add(field, "disk must use IDE or NVMe, unit zero and disk media")
+		}
+		if d.Bus == "nvme" && (!b.UEFI || m.Architecture != "x86_64" || b.PCIIDE || b.PIOOnly || b.IDEModel != "" && b.IDEModel != "synthetic" || d.CHS != nil) {
+			add(field, "NVMe requires x86_64 UEFI without IDE options or CHS geometry")
 		}
 		g := d.Device.Geometry()
 		if g.LogicalBlockSize != 512 || g.Size < 512 || g.Size%512 != 0 {
@@ -136,14 +147,14 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		}
 	}
 	if len(m.Networks) > 1 {
-		add("networks", "cc PC supports one ISA NE2000")
+		add("networks", "cc PC supports one Ethernet controller")
 	}
-	if len(m.Networks) != 0 && (b.ACPI || b.PCIIDE || m.Architecture == "x86_64") {
+	if len(m.Networks) != 0 && m.Architecture != "x86_64" && (b.ACPI || b.PCIIDE) {
 		add("networks", "ACPI SCI and ISA NE2000 currently require the same IRQ9")
 	}
 	for _, network := range m.Networks {
 		if network.Kind != "ethernet" || network.Switch == nil || network.MAC == [6]byte{} || network.MAC[0]&1 != 0 {
-			add("networks", "NE2000 requires an Ethernet switch and a unicast MAC")
+			add("networks", "Ethernet requires a switch and a unicast MAC")
 		}
 	}
 	if len(m.Channels) > 1 {
@@ -203,14 +214,19 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		}
 		disk.Device = overlay
 	}
-	cpu, err := hypervisor.NewX86(ctx)
+	cpus, err := hypervisor.NewX86WithCPUs(ctx, m.CPUs)
 	if err != nil {
 		return nil, err
 	}
+	cpu := cpus[0]
 	if m.DarwinBoot != nil {
 		err = configureDarwinCPU(cpu)
 	} else {
-		err = configureCPUArchitecture(cpu, m.Architecture == "x86_64")
+		for id, core := range cpus {
+			if err = configureCPUTopology(core, m.Architecture == "x86_64", id, len(cpus)); err != nil {
+				break
+			}
+		}
 	}
 	if err != nil {
 		cpu.Close()
@@ -237,8 +253,11 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		cpu.Close()
 		return nil, err
 	}
+	platform.cpus = cpus
 	platform.framebuffer = ram[m.Memory : uint64(m.Memory)+ramfb.Size]
-	if b.PCIIDE || b.UEFI {
+	if disk.Bus == "nvme" {
+		platform.nvme = newPCINVMe(platform)
+	} else if b.PCIIDE || b.UEFI {
 		platform.pciIDE = newPCIIDE()
 		if b.IDEModel == "ich7-pata" {
 			platform.pciIDE = newICH7PATA()
@@ -269,7 +288,23 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	if m.DarwinBoot != nil {
 		platform.smc = newSMC(m.DarwinBoot.SMCOSK)
 		platform.pciDisplay = newPCIDisplay()
+	}
+	if b.USB || m.DarwinBoot != nil {
 		platform.uhci = newUHCI(platform.inputMemory, cpu.SetIRQ)
+	}
+	if len(m.Networks) == 1 {
+		network := m.Networks[0]
+		port := network.Switch.Connect()
+		defer func() {
+			if err != nil {
+				_ = port.Close()
+			}
+		}()
+		if m.Architecture == "x86_64" {
+			platform.pciNIC = newE1000(port, network.MAC, platform.inputMemory, func(level bool) error { return cpu.SetIRQ(18, level) })
+		} else {
+			platform.nic = newNE2000(port, network.MAC, func(level bool) error { return cpu.SetIRQ(9, level) })
+		}
 	}
 	if b.ACPI || b.PCIIDE || b.HPET || b.UEFI || m.Architecture == "x86_64" {
 		if err = platform.installACPI(); err != nil {
@@ -283,10 +318,6 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		copy(platform.channelMemory, []byte("TRCH\x01\x00\x00\x00"))
 	}
 	binary.LittleEndian.PutUint32(platform.framebuffer, ramfb.Magic)
-	if len(m.Networks) == 1 {
-		network := m.Networks[0]
-		platform.nic = newNE2000(network.Switch.Connect(), network.MAC, func(level bool) error { return cpu.SetIRQ(9, level) })
-	}
 	if b.UEFI {
 		if err = platform.installUEFI(); err != nil {
 			cpu.Close()

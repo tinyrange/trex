@@ -2051,7 +2051,7 @@ Hashes a file, string or bytes value and returns raw digest bytes, not hexadecim
 
 `directory() -> directory`
 
-A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
+A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
 `get_security(name)` returns the existing path's self-relative Windows security descriptor as immutable bytes, or `None` when no descriptor is assigned. Missing paths are errors. It does not synthesize inherited permissions or modify the tree.
 
@@ -2467,9 +2467,9 @@ Reads a complete single-volume VMS BACKUP block stream, validating header CRC-16
 
 ### `archive.wim`
 
-`archive.wim(file) -> wim`
+`archive.wim(file, references=[], cache_bytes=384MiB) -> wim`
 
-Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image.
+Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image. Nonnegative cache_bytes bounds retained decoded chunks shared with reference archives; zero disables retention. Large multi-chunk reads use bounded parallel decoding and join all workers before returning. Entry and file metadata expose tagged_items as ordered tag/data records, retaining unknown extensions. apply preserves Windows tag-2 extended attributes (names, flags and value bytes) for supporting filesystem builders; it does not synthesize trust verdicts or apply unknown tags.
 
 ### `archive.xar`
 
@@ -2572,6 +2572,12 @@ Creates a sequential byte reader at the selected offset. Scalar reads and bytes(
 `binary.decode(value, encoding, maximum=512MiB) -> bytes`
 
 Decodes a hex, Base64 or unpadded URL-safe Base64 string into bytes. This is the inverse of binary.hex/base64, not a character-set decoder; use binary.text for text.
+
+### `binary.elf_symbols`
+
+`binary.elf_symbols(file, maximum_symbols=1000000, maximum_string_bytes=16MiB)`
+
+Reads bounded ELF64 static/dynamic symbols and load segments from a portable file, in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), and segments (address, offset, file_size, memory_size, flags). Addresses are ELF values, not runtime-relocated addresses; callers supply mapping/load bias. Zero-sized/undefined symbols are preserved, not assigned inferred extents. Rejects extended numbering, duplicate symbol-table kinds, compressed symbol/string metadata, malformed extents/names and resource-limit violations. Does not read host symbols or load code.
 
 ### `binary.encode`
 
@@ -2680,6 +2686,12 @@ Compiles a fixed-size binary layout from a format string and optional field name
 `binary.macho(file, architecture="x86_64", cpu_subtype=None) -> record`
 
 Inspects a bounded little-endian Mach-O64 image (architecture x86_64 or arm64), optionally selected from a big-endian fat32/fat64 universal container. cpu_subtype optionally selects an exact uint32 subtype (including arm64e capability bits) and validates the thin header; omitted selection rejects ambiguous CPU matches. Exposes the selected cpu_subtype, initial thread entry PC (zero when absent), borrowed file, segments (name, address, size, file_offset, file_size, flags), original symbols (name, address, type, section, description), dyld exports (name, address, flags, resolver, reexport_ordinal, import_name), indirect imports (name, kind stub/pointer, address, size), and fileset_entries (name, address, file_offset) for MH_FILESET kernel collections. fileset(name) opens an embedded Mach-O through the same reader, preserving collection-relative segment and linkedit offsets. Bound filesets with stripped symbol tables may contain zero indirect-symbol placeholders; these expose no named imports. Fileset offsets refer to the containing image; entries are not independent extracted binaries. at(address, size) returns borrowed file-backed virtual bytes; zero-fill, unmapped, ambiguous and overflowing ranges fail. Header, command, string, symbol and export-trie traversal bounds and aggregate name/prefix allocations are enforced. Export trie support includes ordinary, absolute, weak, thread-local, reexport and stub/resolver terminals; it does not resolve reexport dependencies. Does not relocate, link or execute the image.
+
+### `binary.perf`
+
+`binary.perf(file, maximum_records=1000000, maximum_samples=1000000, maximum_string_bytes=1MiB) -> record`
+
+Reads finalized little-endian Linux PERFILE2 perf.data directly from a file. Returns attributes, samples, mappings, comms, lost, total_lost, unknown_records (record type to count), records and little_endian. Samples expose ip, pid, tid, time, address, id, stream_id, cpu, period, identifier and a present bit mask; absent fields are None. Each record retains its file offset and raw misc bits, so streams can be ordered and CPU modes distinguished. MMAP/MMAP2 records expose address, length, page_offset, filename and available inode/build-ID/protection metadata. Mapping, COMM and loss records include a sample_id trailer record. Attributes retain sample_type, read_format, flags, IDs, sample_id_all, use_clock_id and clock_id (None unless explicitly selected). Times retain the recorded clock domain; no symbols, paths or clock conversion are inferred. Rejects pipe/unfinalized input, unsupported sample layouts, heterogeneous attribute layouts, compression and AUX streams. All limits must be positive. Records and samples are each capped at 10 million; maximum_string_bytes bounds aggregate decoded names and is capped at 64 MiB. Limits and malformed records fail explicitly rather than returning a truncated profile.
 
 ### `binary.plist`
 
@@ -2891,6 +2903,12 @@ Creates a bounded random-access byte view, optionally over a source slice. It su
 
 Parses XML into namespace-aware immutable document and node values. Size, depth and node-count limits bound parsing; with_root/with_children/with_text create edited values for serialization.
 
+### `binary.zlib`
+
+`binary.zlib(source, maximum=16MiB)`
+
+Decodes one complete RFC 1950 zlib stream from bytes or a file. Returns bytes; verifies the checksum and rejects truncation, trailing data and output beyond maximum (0..512MiB). No host extraction or intermediate files.
+
 ### `block.cache`
 
 `block.cache(base, max_bytes=32MiB, chunk_size=64KiB)`
@@ -2925,7 +2943,7 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 `cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
 
-Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 2 GiB with uefi=True. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. Native UEFI PCs accept cpus=1..4 as one package without SMT; other PC profiles remain single-CPU. All-core pause/stop/capture barriers precede inspection and teardown. cc.v1.cpus() returns per-core register summaries; state/read_virtual use CPU0, and breakpoint/step require one CPU. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 16 GiB with uefi=True. usb=True on x86_64 enables a UHCI keyboard and absolute pointer with wheel; PS/2 keyboard fallback remains until USB enumeration. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
 ### `cc.boot_bsd`
 
@@ -3129,7 +3147,7 @@ Connects a GDB remote-protocol session over an existing byte channel. The return
 
 `debug.select(values, timeout=-1)`
 
-Waits until one of the supplied selectable values is ready, returning that value, or None on timeout. Read the event from the returned source separately; selection itself does not consume the event.
+Waits until one of the supplied selectable values is ready, returning that value, or None on timeout. Read the event from the returned source separately; selection itself does not consume the event. For byte channels, readiness includes data, stream closure, or a spurious change notification (such as checkpoint restoration): retry the read to distinguish them. A closed debugger/event session still reports EOF.
 
 ### `emulator.linux`
 
@@ -3259,9 +3277,9 @@ Reads a clean ext2/3/4 image without mounting. Returns flat entry records with U
 
 ### `filesystem.ext4_build`
 
-`filesystem.ext4_build(entries, size, label='', uuid='') -> file`
+`filesystem.ext4_build(entries, size, label='', uuid='', inode_count=0) -> file`
 
-Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. Preserves ownership, permissions, links and devices. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes.
+Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. inode_count optionally sets minimum total inode capacity, including reserved inodes, rounded up to block-group geometry; zero sizes from input entries. Larger values reserve free inodes for later guest writes, subject to the metadata and disk-size bounds. Preserves ownership, permissions, links and devices. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes.
 
 ### `filesystem.fat`
 
@@ -3357,6 +3375,11 @@ Read-only mounts resolve extension attributes through the base record's
 `$ATTRIBUTE_LIST`, matching record sequences, stream names and starting VCNs.
 An extension backlink alone does not make its data current. Conflicting
 referenced extents remain errors; unreferenced stale records are not merged.
+
+Read-only `volume.metadata(path)` returns `path`, `directory`, `record_number`,
+`sequence`, `security_id` and `security_descriptor`. Use the record number with
+`filesystem.ntfs_record` to inspect the corresponding base FILE record. Metadata
+reads do not flush guest writes or make a paused live volume coherent.
 
 ### `filesystem.ntfs_record`
 
@@ -3953,6 +3976,12 @@ Reads a PKCS#7 catalog and returns its member digest byte strings. Extracting me
 
 Parses one DER X.509 certificate and returns its DER bytes, subject, issuer, SHA-1 fingerprint and a subject/issuer-equality flag named self_signed. That flag is not cryptographic signature verification.
 
+### `windows.cli_inspect`
+
+`windows.cli_inspect(value, method='') -> record`
+
+Reads CLI metadata and selected managed method bodies without executing them. Accepts a portable file or bytes, at most 32 MiB. Returns entry_point (raw COR header entry field), rows (token, columns in ECMA-335 table order), strings (user-string token to text), and methods (token, name, instructions). String/blob columns are decoded; coded references and table indexes become tokens, except null remains zero; list-end sentinels are preserved as token-shaped indexes. Other columns retain their integer value, including GUID heap indexes. method is a case-sensitive method-name substring; empty selects all IL bodies. Each instruction has offset relative to IL code, numeric opcode, raw operand bytes and token (zero for non-token operands). Bounds tables/heaps/bodies, limits rows to 100000, decoded row heaps to 64 MiB and instructions to 1000000, and rejects unknown opcodes. Does not verify IL stack/control flow, resolve external assemblies, decode signatures or exception clauses, evaluate feature gates, or claim observed runtime effects.
+
 ### `windows.clone_file_entries`
 
 `windows.clone_file_entries(entries) -> dict`
@@ -4148,9 +4177,9 @@ Malformed segment counts and truncated segments are rejected.
 
 ### `windows.hive_from_patches`
 
-`windows.hive_from_patches(name, patches, keys=None, format=None) -> file`
+`windows.hive_from_patches(name, patches, keys=None, format=None, source=None, source_drive="", target_drive="", exclude_keys=None, exclude_values=None) -> file`
 
-Builds an NT registry hive from declarative value patches and optional key records. format controls the supported on-disk generation; security and key metadata remain caller-supplied policy.
+Builds an NT registry hive from declarative value patches and optional key records. With source, imports its raw value types/data, empty keys, security, class and flags natively before applying keys and patches; the source format is inherited unless format overrides it. Optional source_drive/target_drive (both ASCII drive letters with colons) relocate upper/lower drive spellings in key/value names and raw UTF-16 REG_SZ/REG_EXPAND_SZ/REG_MULTI_SZ data only. exclude_keys removes case-insensitive normalized subtrees from the relocated source; exclude_values contains exact key/name dictionaries. Additions are applied after exclusions and are never relocated or filtered. Source options require source. Without source, format controls the generation and metadata is caller-supplied.
 
 ### `windows.hive_keys`
 
@@ -4474,6 +4503,12 @@ nodes/entries during input conversion, 65534 UTF-16 key bytes, 1 MiB per
 string/nested-map payload, and 64 MiB per complete dictionary. Strings are
 terminated UTF-16LE; embedded NULs, invalid Unicode and cycles are rejected.
 
+### `windows.state_repository_dictionary_read`
+
+`windows.state_repository_dictionary_read(source) -> dict`
+
+Decodes a file or bytes containing a complete SRD1 dictionary into ordered Starlark dictionaries, booleans, strings and lists of dictionaries. Uses the strict native decoder; rejects unknown types, duplicate keys, truncated extents and excessive depth. Input is limited to 64 MiB before allocation. Property identifiers are preserved, not interpreted.
+
 ### `windows.state_repository_hash`
 
 `windows.state_repository_hash(values) -> string`
@@ -4718,9 +4753,9 @@ Methods and attributes: `index_entries(table, index, maximum=100000)`, `info`, `
 
 ### `directory` value
 
-A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
+A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
-Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_security(name)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_security(name, descriptor)`, `write(name, value)`.
+Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_security(name)`, `list_dir(path)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_security(name, descriptor)`, `write(name, value)`.
 
 ### `emulator.execution` value
 

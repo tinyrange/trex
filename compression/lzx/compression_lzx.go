@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sync"
 )
 
 const (
@@ -72,9 +73,22 @@ func DecompressWIMChunk(data []byte, windowBits int, outSize int) ([]byte, error
 	if len(data) == outSize {
 		return append([]byte(nil), data...), nil
 	}
-	dec, err := newLZXDecoder(windowBits)
-	if err != nil {
-		return nil, err
+	var dec *lzxDecoder
+	if windowBits == 15 {
+		dec = wimDecoderPool.Get().(*lzxDecoder)
+		// WIM chunks have independent histories, including after a failed
+		// decode. No input or output buffer is retained by the pooled state.
+		clear(dec.mainLens)
+		clear(dec.lengthLens)
+		dec.r0, dec.r1, dec.r2 = 1, 1, 1
+		dec.aligned = false
+		defer wimDecoderPool.Put(dec)
+	} else {
+		var err error
+		dec, err = newLZXDecoder(windowBits)
+		if err != nil {
+			return nil, err
+		}
 	}
 	dec.intelStarted = true
 	dec.intelSize = 12000000
@@ -88,6 +102,13 @@ func DecompressWIMChunk(data []byte, windowBits int, outSize int) ([]byte, error
 	dec.undoE8(out, 0)
 	return out[:outSize], nil
 }
+
+// The common 32-KiB WIM window needs several decoding tables per chunk.
+// Reuse only that bounded state, never decompressed payloads or error state.
+var wimDecoderPool = sync.Pool{New: func() any {
+	d, _ := newLZXDecoder(15)
+	return d
+}}
 
 func newLZXDecoder(windowBits int) (*lzxDecoder, error) {
 	if windowBits < 15 || windowBits > 21 {
@@ -329,9 +350,13 @@ func (d *lzxDecoder) readLengths(br *lzxBitReader, lens []byte, first, last int)
 
 func (d *lzxDecoder) decodeCompressedBlock(br *lzxBitReader, out *[]byte, end int) error {
 	for len(*out) < end {
-		sym, err := d.mainTree.decode(br)
-		if err != nil {
-			return fmt.Errorf("main symbol at output %d: %w", len(*out), err)
+		sym, fast := d.mainTree.decodeFast(br)
+		if !fast {
+			var err error
+			sym, err = d.mainTree.decode(br)
+			if err != nil {
+				return fmt.Errorf("main symbol at output %d: %w", len(*out), err)
+			}
 		}
 		if sym < lzxNumChars {
 			d.putByte(out, byte(sym))
@@ -605,10 +630,22 @@ func (h *lzxHuffman) reset(lengths []byte) error {
 	return nil
 }
 
-func (h *lzxHuffman) decode(br *lzxBitReader) (int, error) {
-	if h.empty {
-		return 0, fmt.Errorf("lzx: empty huffman tree")
+// decodeFast is small enough to inline in the symbol loop. Refills, long
+// codes, and malformed/truncated input retain the checked decoding path.
+func (h *lzxHuffman) decodeFast(br *lzxBitReader) (int, bool) {
+	if br.nbits < 16 {
+		return 0, false
 	}
+	entry := h.table[br.bits>>(64-lzxHuffmanTableBits)]
+	n := uint(entry & 31)
+	if n == 0 {
+		return 0, false
+	}
+	br.dropBits(n)
+	return int(entry >> 5), true
+}
+
+func (h *lzxHuffman) decode(br *lzxBitReader) (int, error) {
 	// At EOF the reservoir is zero-padded, but a code is accepted only when
 	// all of its bits are present. Raw reads return unused prefetched words.
 	if br.nbits < 16 {
@@ -618,6 +655,13 @@ func (h *lzxHuffman) decode(br *lzxBitReader) (int, error) {
 	if n := uint(entry & 31); n != 0 && n <= br.nbits {
 		br.dropBits(n)
 		return int(entry >> 5), nil
+	}
+	return h.decodeLong(br)
+}
+
+func (h *lzxHuffman) decodeLong(br *lzxBitReader) (int, error) {
+	if h.empty {
+		return 0, fmt.Errorf("lzx: empty huffman tree")
 	}
 	peek := uint32(br.bits >> 48)
 	available := min(br.nbits, 16)

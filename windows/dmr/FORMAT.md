@@ -262,6 +262,29 @@ Consumer verifiers `7148` and `78dc` bound payloads to 65536 UTF-16 code units.
 The Go reader additionally requires exact declared extents, correct ALTF
 payload length, reserved zeros, valid UTF-16, and zero alignment padding.
 
+## Sparse external-content paths
+
+For the matched OneCore producer above, sparse packages retain the installed
+identity directory in DEPG but use the external executable directory in ALTP
+and the corresponding PKMP entry. `AddPackageToListForCommit` (`111144`)
+retrieves the external location and passes it through the ARI initializer.
+`ARI::Package::Initialize` (`3678c`, call at `36e87`) supplies that path to
+`SetMutablePath` (`c4de0`) when no installed mutable link takes precedence.
+The latter stores the path at object offset `60` and trims a trailing separator.
+`RetrieveDependenciesAndAddSections` (`9f668`, overload `9f7a4`) preserves
+object offset `50` as the dependency's installed path, selects offset `60` for
+loader search, and passes it to `Add_PackageMutablePath` (`9f918`). A single
+root therefore uses `external-path;` in ALTP and `external-path` in PKMP.
+The raw sparse/Win32 StateRepository flags are not copied into ARI flags.
+
+The recipe applies this established mapping to dependency-free sparse main
+packages with a verified per-user external-location record. Literal resource
+properties do not require a PRI; file references must exist beneath the signed
+identity directory. A fresh 26300.9457 image with Edge152.0.4191.66 verified
+WinRT display-name/effective-path resolution and browser launch without the
+previous failed AppX repair. This does not establish PWA host registration or
+arbitrary sparse package extension support.
+
 ## Mutable paths
 
 `PackageMutablePaths::Serialize` (`8bfc0`) writes `PKMP`, u32 section size,

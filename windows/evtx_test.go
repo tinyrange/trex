@@ -69,3 +69,32 @@ func TestEVTXSID(t *testing.T) {
 		t.Fatalf("SID = %q", got)
 	}
 }
+
+// Four-byte BOOLs occur inside boot-performance EventData template instances.
+// A rejected nested value must not silently turn the entire payload into bytes.
+func TestEVTXNestedBooleanPayload(t *testing.T) {
+	for _, value := range []uint32{0, 1} {
+		data := make([]byte, 30)
+		data[0], data[1] = 0x0c, 1
+		binary.LittleEndian.PutUint32(data[10:], 2)
+		binary.LittleEndian.PutUint16(data[14:], 4)
+		data[16] = 0x0d
+		binary.LittleEndian.PutUint16(data[18:], 4)
+		data[20] = 0x08
+		binary.LittleEndian.PutUint32(data[22:], value)
+		binary.LittleEndian.PutUint32(data[26:], 12345)
+		got, err := decodeEVTXValue(data, 0, len(data), 0x21, 0)
+		values, ok := got.([]evtxValue)
+		if err != nil || !ok || len(values) != 2 {
+			t.Fatalf("nested payload: %T %v", got, err)
+		}
+		if values[0].value != (value == 1) || values[1].value != uint64(12345) {
+			t.Fatalf("decoded: %#v", values)
+		}
+	}
+	for _, data := range [][]byte{{}, {1, 0}, {0, 1, 0, 0}} {
+		if _, err := decodeEVTXValue(data, 0, len(data), 0x0d, 0); err == nil {
+			t.Fatalf("accepted malformed BOOL %x", data)
+		}
+	}
+}

@@ -93,6 +93,20 @@ func (p *pc) pciIO(ex hypervisor.X86Exit) error {
 				}
 				value = p.uhci.config[offset]
 			}
+			if port >= 0xcfc && port <= 0xcff && p.nvme != nil && p.pciAddress&0xffffff00 == 0x80000800 {
+				offset := int(p.pciAddress&0xfc) + port - 0xcfc
+				if ex.Write {
+					p.nvme.write(offset, data[j])
+				}
+				value = p.nvme.config[offset]
+			}
+			if port >= 0xcfc && port <= 0xcff && p.pciNIC != nil && p.pciAddress&0xffffff00 == 0x80002000 {
+				offset := int(p.pciAddress&0xfc) + port - 0xcfc
+				if ex.Write {
+					p.pciNIC.writeConfig(offset, data[j])
+				}
+				value = p.pciNIC.config[offset]
+			}
 			if !ex.Write {
 				data[j] = value
 			}
@@ -137,6 +151,11 @@ func (p *pc) pciIO(ex hypervisor.X86Exit) error {
 			p.pciIDE.trace = p.pciIDE.trace[:31]
 		}
 		p.pciIDE.trace = append(p.pciIDE.trace, row)
+	}
+	if p.nvme != nil {
+		if err := p.nvme.syncInterrupt(); err != nil {
+			return err
+		}
 	}
 	if p.ide != nil && p.pciIDE != nil && oldConfig != p.pciIDE.config {
 		old := *p.pciIDE

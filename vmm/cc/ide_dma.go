@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"j5.nz/cc/hypervisor"
 )
@@ -118,7 +119,14 @@ func (p *pc) tryIDEDMA() error {
 			if !ok || ata.disk.ReadOnly {
 				return fail("disk is not writable")
 			}
+			var began time.Time
+			if p.performance != nil {
+				began = time.Now()
+			}
 			n, err = writer.WriteAt(buffer, offset)
+			if p.performance != nil {
+				p.performance.Write.add(time.Since(began), n)
+			}
 		} else {
 			n, err = ata.disk.Device.ReadAt(buffer, offset)
 		}

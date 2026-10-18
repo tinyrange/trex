@@ -98,6 +98,9 @@ func (p *pc) ideDataPort() uint16 {
 
 // Translate native PCI BARs into the shared ATA task-file implementation.
 func (p *pc) routeIDE(ex hypervisor.X86Exit) (bool, error) {
+	if p.nvme != nil {
+		return false, nil
+	}
 	cmd, ctrl := uint16(0x1f0), uint16(0x3f6)
 	if d := p.pciIDE; d != nil {
 		cmd, ctrl = d.commandBase(0), d.controlPort(0)

@@ -16,8 +16,9 @@ func TestMemoryLimits(t *testing.T) {
 		{"x64-high-RAM", "x86_64", 8 << 30, false, false},
 		{"x64-bound", "x86_64", (8 << 30) + 4096, false, true},
 		{"unaligned", "x86_64", (3 << 30) - 1, false, true},
-		{"UEFI-ceiling", "x86_64", 2 << 30, true, false},
-		{"UEFI-unchanged", "x86_64", (2 << 30) + 4096, true, true},
+		{"UEFI-8GiB", "x86_64", 8 << 30, true, false},
+		{"UEFI-ceiling", "x86_64", 16 << 30, true, false},
+		{"UEFI-bound", "x86_64", (16 << 30) + 4096, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rejected := false

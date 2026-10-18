@@ -18,6 +18,8 @@ const biosPort = 0xf1
 // Interrupt entries execute small real-mode ROM routines; native execution
 // retains all mode switches and executes the original boot sector and loader.
 type pc struct {
+	nvme            *pciNVMe
+	performance     *pcPerformance
 	biosDiskCalls   []any
 	biosCalls       []any
 	biosCounts      [256]uint64
@@ -34,10 +36,12 @@ type pc struct {
 	hpet            *hpet
 	smc             *smc
 	nic             *ne2000
+	pciNIC          *e1000
 	framebuffer     []byte
 	input           *virtioInput
 	channelMemory   []byte
 	channelName     string
+	cpus            []hypervisor.X86 // CPU0 owns the machine; cpu selects the serialized exit owner.
 	cpu             hypervisor.X86
 	ram             []byte
 	disk            vmm.Disk

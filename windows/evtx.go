@@ -216,10 +216,21 @@ func decodeEVTXValue(chunk []byte, offset, length int, typ byte, depth int) (any
 		}
 		return math.Float64frombits(binary.LittleEndian.Uint64(raw)), nil
 	case 0x0d:
-		if length != 1 || raw[0] > 1 {
-			return nil, fmt.Errorf("invalid Bool value")
+		// Event-log Boolean substitutions use a four-byte BOOL. Retain the
+		// one-byte representation accepted by earlier callers as well.
+		var value uint32
+		switch length {
+		case 1:
+			value = uint32(raw[0])
+		case 4:
+			value = binary.LittleEndian.Uint32(raw)
+		default:
+			return nil, fmt.Errorf("invalid Bool length %d", length)
 		}
-		return raw[0] != 0, nil
+		if value > 1 {
+			return nil, fmt.Errorf("invalid Bool value %d", value)
+		}
+		return value != 0, nil
 	case 0x0f:
 		if length != 16 {
 			return nil, fmt.Errorf("GUID has length %d", length)

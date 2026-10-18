@@ -1,19 +1,23 @@
 package cc
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type ideDMARegion struct{ address, size uint64 }
 
 // The worker owns only a bounded host buffer and the storage read. All guest
 // memory, task-file, bus-master, and IRQ changes belong to the CPU loop.
 type ideDMARead struct {
-	ready   chan struct{} // storage result published, before the CPU wake
-	done    chan struct{} // worker and CPU wake have both finished
-	regions []ideDMARegion
-	data    []byte
-	offset  int64
-	n       int
-	err     error
+	started, finished time.Time
+	ready             chan struct{} // storage result published, before the CPU wake
+	done              chan struct{} // worker and CPU wake have both finished
+	regions           []ideDMARegion
+	data              []byte
+	offset            int64
+	n                 int
+	err               error
 }
 
 func (p *pc) startIDEDMARead(regions []ideDMARegion, offset int64, size int) {
@@ -24,7 +28,9 @@ func (p *pc) startIDEDMARead(regions []ideDMARegion, offset int64, size int) {
 	disk, cpu := p.ide.disk.Device, p.cpu
 	go func() {
 		defer close(transfer.done)
+		transfer.started = time.Now()
 		transfer.n, transfer.err = disk.ReadAt(transfer.data, offset)
+		transfer.finished = time.Now()
 		// Publish readiness BEFORE waking the CPU. Otherwise the awakened
 		// loop can see an unfinished transfer and reenter native execution,
 		// delaying an already completed read until the next timer/slice.
@@ -54,6 +60,10 @@ func (p *pc) completeIDEDMARead(wait bool) error {
 	// late Cancel from racing CPU close after this transfer is retired.
 	<-transfer.done
 	p.dmaRead = nil
+	if stats := p.performance; stats != nil {
+		stats.Read.add(transfer.finished.Sub(transfer.started), transfer.n)
+		stats.ReadDelivery.add(time.Since(transfer.finished), 0)
+	}
 	ata, bm := p.ide, p.pciIDE
 	if transfer.err != nil || transfer.n != len(transfer.data) {
 		ata.dmaError = fmt.Sprintf("block transfer at %#x: %d/%d bytes: %v",

@@ -2,6 +2,7 @@
 package native
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,7 +14,8 @@ import (
 // TCPBridge owns a channel and one loopback TCP connection. It accepts exactly
 // one client: reconnecting an RPC stream could replay or misattribute effects.
 // Close interrupts both directions and joins all bridge workers. The supplied
-// channel must unblock Read and Write when closed and must not be used elsewhere.
+// channel must either unblock Read and Write when closed or expose cooperative
+// read and write-capacity notifications. It must not be used elsewhere.
 type TCPBridge struct {
 	listener net.Listener
 	channel  channel.ByteChannel
@@ -22,6 +24,7 @@ type TCPBridge struct {
 	client   net.Conn
 	closed   bool
 	once     sync.Once
+	stopped  chan struct{}
 	done     chan struct{}
 }
 
@@ -35,13 +38,14 @@ func ExposeTCP(stream channel.ByteChannel, port int) (*TCPBridge, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := &TCPBridge{listener: listener, channel: stream, port: listener.Addr().(*net.TCPAddr).Port, done: make(chan struct{})}
+	b := &TCPBridge{listener: listener, channel: stream, port: listener.Addr().(*net.TCPAddr).Port, stopped: make(chan struct{}), done: make(chan struct{})}
 	go b.serve()
 	return b, nil
 }
 func (b *TCPBridge) Port() int { return b.port }
 func (b *TCPBridge) stop() {
 	b.once.Do(func() {
+		close(b.stopped)
 		b.mu.Lock()
 		b.closed = true
 		client := b.client
@@ -52,6 +56,88 @@ func (b *TCPBridge) stop() {
 		}
 		b.channel.Close()
 	})
+}
+
+// bridgeStream waits only at the native transport boundary. The underlying
+// cooperative channel keeps its nonblocking operations and bounded queues.
+type bridgeStream struct{ bridge *TCPBridge }
+
+func (s bridgeStream) wait(changed <-chan struct{}) error {
+	select {
+	case <-s.bridge.stopped:
+		return io.ErrClosedPipe
+	case <-changed:
+		return nil
+	}
+}
+
+func (s bridgeStream) Read(p []byte) (int, error) {
+	for {
+		select {
+		case <-s.bridge.stopped:
+			return 0, io.ErrClosedPipe
+		default:
+		}
+		var ready <-chan struct{}
+		if notifier, ok := s.bridge.channel.(channel.ReadNotifier); ok {
+			ready = notifier.ReadReady()
+		}
+		n, err := s.bridge.channel.Read(p)
+		if !errors.Is(err, channel.ErrWouldBlock) || ready == nil {
+			return n, err
+		}
+		if n > 0 {
+			return n, nil
+		}
+		if err := s.wait(ready); err != nil {
+			return 0, err
+		}
+	}
+}
+
+func (s bridgeStream) Write(p []byte) (int, error) {
+	written := 0
+	for len(p) != 0 {
+		select {
+		case <-s.bridge.stopped:
+			return written, io.ErrClosedPipe
+		default:
+		}
+		part := p
+		var changed <-chan struct{}
+		if notifier, ok := s.bridge.channel.(channel.WriteCapacityNotifier); ok {
+			capacity, notification, err := notifier.WriteCapacity()
+			if err != nil && !errors.Is(err, channel.ErrWriteCapacityUnsupported) {
+				return written, err
+			}
+			if err == nil {
+				changed = notification
+				if capacity == 0 {
+					if err := s.wait(changed); err != nil {
+						return written, err
+					}
+					continue
+				}
+				part = p[:min(len(p), capacity)]
+			}
+		}
+		n, err := s.bridge.channel.Write(part)
+		written += n
+		p = p[n:]
+		if errors.Is(err, channel.ErrWouldBlock) && changed != nil {
+			if err := s.wait(changed); err != nil {
+				return written, err
+			}
+			continue
+		}
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
 }
 func (b *TCPBridge) Close() error { b.stop(); <-b.done; return nil }
 func (b *TCPBridge) serve() {
@@ -76,8 +162,9 @@ func (b *TCPBridge) serve() {
 		io.CopyBuffer(struct{ io.Writer }{dst}, struct{ io.Reader }{src}, make([]byte, 4096))
 		finished <- struct{}{}
 	}
-	go copyStream(client, b.channel)
-	go copyStream(b.channel, client)
+	stream := bridgeStream{bridge: b}
+	go copyStream(client, stream)
+	go copyStream(stream, client)
 	<-finished
 	b.stop()
 	<-finished

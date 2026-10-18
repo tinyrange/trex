@@ -282,10 +282,24 @@ func hiveFromPatchesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starla
 	var patches *starlark.List
 	keysValue := starlark.Value(starlark.None)
 	formatValue := starlark.Value(starlark.None)
-	if err := starlark.UnpackArgs("hive_from_patches", args, kwargs, "name", &name, "patches", &patches, "keys?", &keysValue, "format?", &formatValue); err != nil {
+	sourceValue := starlark.Value(starlark.None)
+	excludeKeys := starlark.Value(starlark.None)
+	excludeValues := starlark.Value(starlark.None)
+	var sourceDrive, targetDrive string
+	if err := starlark.UnpackArgs("hive_from_patches", args, kwargs, "name", &name, "patches", &patches, "keys?", &keysValue, "format?", &formatValue, "source?", &sourceValue, "source_drive?", &sourceDrive, "target_drive?", &targetDrive, "exclude_keys?", &excludeKeys, "exclude_values?", &excludeValues); err != nil {
 		return nil, err
 	}
 	root := newRegistryTree(name)
+	if sourceValue != starlark.None {
+		if err := importRegistryHive(root, sourceValue, sourceDrive, targetDrive, excludeKeys, excludeValues); err != nil {
+			return nil, err
+		}
+		if formatValue == starlark.None {
+			formatValue = sourceValue
+		}
+	} else if sourceDrive != "" || targetDrive != "" || excludeKeys != starlark.None || excludeValues != starlark.None {
+		return nil, fmt.Errorf("hive_from_patches: source options require source")
+	}
 	if keysValue != starlark.None {
 		keys, ok := keysValue.(*starlark.List)
 		if !ok {
@@ -898,6 +912,7 @@ func hiveLogBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 type mutableHive struct {
 	data             []byte
 	legacyCellPrefix bool
+	freeCells        *hiveFreeIndex
 }
 
 func (h *mutableHive) cellBodyOffset() int {
@@ -1966,43 +1981,30 @@ func (h *mutableHive) allocateCell(body []byte) (uint32, error) {
 		}
 	}
 	h.data = append(h.data, newHbin...)
+	if h.freeCells != nil {
+		bin := hiveBaseBlockSize + oldSize
+		h.freeCells.bins = append(h.freeCells.bins, bin)
+		if remaining := hbinSize - 0x20 - used; remaining >= h.minimumFreeCellSize() {
+			h.freeCells.add(bin, bin+0x20+used, remaining)
+		}
+	}
 	binary.LittleEndian.PutUint32(h.data[0x28:0x2c], uint32(oldSize+hbinSize))
 	h.updateBaseChecksum()
 	return uint32(oldSize + 0x20), nil
 }
 
 func (h *mutableHive) allocateExistingCell(body []byte, needed int) (uint32, bool) {
-	hiveSize := int(binary.LittleEndian.Uint32(h.data[0x28:0x2c]))
-	for binRel := 0; binRel+0x20 <= hiveSize; {
-		binOff := hiveBaseBlockSize + binRel
-		if binOff+0x20 > len(h.data) || string(h.data[binOff:binOff+4]) != "hbin" {
-			return 0, false
-		}
-		binSize := int(binary.LittleEndian.Uint32(h.data[binOff+8 : binOff+12]))
-		if binSize <= 0 || binOff+binSize > len(h.data) {
-			return 0, false
-		}
-		for cellOff := binOff + 0x20; cellOff+4 <= binOff+binSize; {
-			rawSize := int32(binary.LittleEndian.Uint32(h.data[cellOff : cellOff+4]))
-			if rawSize == 0 {
-				break
-			}
-			cellSize := int(rawSize)
-			if cellSize < 0 {
-				cellSize = -cellSize
-			}
-			if cellSize < 8 || cellOff+cellSize > binOff+binSize {
-				break
-			}
-			if rawSize > 0 && cellSize >= needed {
-				h.writeAllocatedCell(binOff, cellOff, cellSize, body, needed)
-				return uint32(cellOff - hiveBaseBlockSize), true
-			}
-			cellOff += cellSize
-		}
-		binRel += binSize
+	if h.freeCells == nil {
+		h.indexFreeCells()
 	}
-	return 0, false
+	n := h.freeCells.firstFit(needed)
+	if n == nil {
+		return 0, false
+	}
+	binOff, cellOff, size := n.bin, n.offset, n.size
+	h.freeCells.root = removeHiveFree(h.freeCells.root, cellOff)
+	h.writeAllocatedCell(binOff, cellOff, size, body, needed)
+	return uint32(cellOff - hiveBaseBlockSize), true
 }
 
 func (h *mutableHive) writeAllocatedCell(binOff, cellOff, cellSize int, body []byte, needed int) {
@@ -2023,6 +2025,9 @@ func (h *mutableHive) writeAllocatedCell(binOff, cellOff, cellSize int, body []b
 	}
 	if remaining := cellSize - used; remaining >= h.minimumFreeCellSize() {
 		restOff := cellOff + used
+		if h.freeCells != nil {
+			h.freeCells.add(binOff, restOff, remaining)
+		}
 		binary.LittleEndian.PutUint32(h.data[restOff:restOff+4], uint32(remaining))
 		clear(h.data[restOff+4 : cellOff+cellSize])
 		if h.legacyCellPrefix {
@@ -2078,6 +2083,12 @@ func (h *mutableHive) freeCell(cell uint32) error {
 		return fmt.Errorf("patch_hive: cell 0x%x is not allocated", cell)
 	}
 	binary.LittleEndian.PutUint32(h.data[offset:offset+4], uint32(-rawSize))
+	if h.freeCells != nil {
+		i := sort.Search(len(h.freeCells.bins), func(i int) bool { return h.freeCells.bins[i] > offset }) - 1
+		if i >= 0 {
+			h.freeCells.add(h.freeCells.bins[i], offset, int(-rawSize))
+		}
+	}
 	return nil
 }
 
