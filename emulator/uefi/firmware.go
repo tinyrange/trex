@@ -49,7 +49,9 @@ func NewFirmware(image storage.Reader, opts FirmwareOptions) (*Firmware, error) 
 	if o.ImagePath == "" {
 		o.ImagePath = "\\EFI\\Boot\\BootX64.efi"
 	}
-	if opts.Memory == nil || opts.Gate == nil || opts.Clock == nil || o.Memory < 16<<20 || o.Memory > 2<<30 || o.Memory%page != 0 || o.MemoryBase%page != 0 || o.MemoryBase > ^uint64(0)-o.Memory || o.StackSize%page != 0 || o.StackSize > o.Memory {
+	// External firmware owns no RAM allocation. Permit a sparse physical span
+	// (including PCI holes); the supplied memory validates every access.
+	if opts.Memory == nil || opts.Gate == nil || opts.Clock == nil || o.Memory < 16<<20 || o.Memory > 64<<30 || o.Memory%page != 0 || o.MemoryBase%page != 0 || o.MemoryBase > ^uint64(0)-o.Memory || o.StackSize%page != 0 || o.StackSize > o.Memory {
 		return nil, fmt.Errorf("uefi: invalid external firmware memory or callbacks")
 	}
 	if image.Size() < 0 || uint64(image.Size()) > o.Memory {

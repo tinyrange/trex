@@ -6,14 +6,15 @@ import (
 )
 
 const (
+	boolType               = 1
 	mapType                = 21
 	mapArrayType           = 42
 	maximumDepth           = 32
 	maximumDictionaryBytes = 64 << 20
 )
 
-// Dictionary preserves entry order. Values are strings, Dictionary values,
-// or []Dictionary values. These are the types emitted for XML properties;
+// Dictionary preserves entry order. Values are bools, strings, Dictionary values,
+// or []Dictionary values. These are used by tile and XML properties;
 // other SRD1 types must not be silently coerced into this representation.
 type Dictionary []Entry
 type Entry struct {
@@ -21,7 +22,7 @@ type Entry struct {
 	Value any
 }
 
-// Encode encodes the string/map/map-array subset used by manifest properties.
+// Encode encodes the boolean/string/map/map-array subset used by tile and manifest properties.
 // In addition to native per-value/count limits, it bounds nesting to 32 levels
 // and a complete dictionary to 64 MiB to limit construction memory use.
 func Encode(d Dictionary) ([]byte, error) { return encode(d, 0) }
@@ -47,6 +48,11 @@ func encode(d Dictionary, depth int) ([]byte, error) {
 		var kind uint32
 		count := -1
 		switch v := e.Value.(type) {
+		case bool:
+			kind, payload = boolType, []byte{0}
+			if v {
+				payload[0] = 1
+			}
 		case string:
 			kind = stringType
 			payload, err = terminatedUTF16(v, maxValueBytes)
@@ -79,6 +85,9 @@ func encode(d Dictionary, depth int) ([]byte, error) {
 			return nil, fmt.Errorf("dictionary value exceeds byte limit")
 		}
 		size := 14 + len(key) + len(payload)
+		if kind == boolType {
+			size -= 4 // Native scalar booleans have no payload-length word.
+		}
 		if len(out) > maximumDictionaryBytes-size {
 			return nil, fmt.Errorf("dictionary exceeds byte limit")
 		}
@@ -96,7 +105,7 @@ func encode(d Dictionary, depth int) ([]byte, error) {
 		off += 2
 		copy(pair[off:], key)
 		off += len(key)
-		if count < 0 {
+		if count < 0 && kind != boolType {
 			binary.LittleEndian.PutUint32(pair[off:], uint32(len(payload)))
 			off += 4
 		}
@@ -122,11 +131,11 @@ func decode(data []byte, depth int) (Dictionary, error) {
 	seen := make(map[string]bool, count)
 	rest := data[12:]
 	for range count {
-		if len(rest) < 14 {
+		if len(rest) < 13 {
 			return nil, fmt.Errorf("truncated dictionary entry")
 		}
 		size := uint64(binary.LittleEndian.Uint32(rest))
-		if size < 14 || size > uint64(len(rest)) {
+		if size < 13 || size > uint64(len(rest)) {
 			return nil, fmt.Errorf("invalid dictionary entry extent")
 		}
 		pair := rest[:int(size)]
@@ -134,13 +143,16 @@ func decode(data []byte, depth int) (Dictionary, error) {
 		kind := binary.LittleEndian.Uint32(pair[4:])
 		off, arrayCount := 8, -1
 		if kind == mapArrayType {
+			if len(pair) < 14 {
+				return nil, fmt.Errorf("truncated dictionary array header")
+			}
 			n := binary.LittleEndian.Uint32(pair[8:])
 			if n > maxPairs {
 				return nil, fmt.Errorf("dictionary array exceeds entry limit")
 			}
 			arrayCount = int(n)
 			off += 4
-		} else if kind != stringType && kind != mapType {
+		} else if kind != stringType && kind != mapType && kind != boolType {
 			return nil, fmt.Errorf("unsupported dictionary type %d", kind)
 		}
 		keySize := int(binary.LittleEndian.Uint16(pair[off:]))
@@ -183,6 +195,11 @@ func decode(data []byte, depth int) (Dictionary, error) {
 				return nil, fmt.Errorf("trailing map array bytes")
 			}
 			value = maps
+		} else if kind == boolType {
+			if len(pair)-off != 1 || pair[off] > 1 {
+				return nil, fmt.Errorf("invalid dictionary boolean")
+			}
+			value = pair[off] != 0
 		} else {
 			if len(pair)-off < 4 {
 				return nil, fmt.Errorf("truncated dictionary value length")

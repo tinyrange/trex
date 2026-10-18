@@ -44,7 +44,8 @@ const (
 func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	referenceValue := starlark.Value(starlark.None)
-	if err := starlark.UnpackArgs("wim", args, kwargs, "file", &value, "references?", &referenceValue); err != nil {
+	cacheBytes := int64(bytecache.DefaultBytes)
+	if err := starlark.UnpackArgs("wim", args, kwargs, "file", &value, "references?", &referenceValue, "cache_bytes?", &cacheBytes); err != nil {
 		return nil, err
 	}
 	file, ok := value.(starfile.File)
@@ -68,7 +69,7 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 			references = append(references, reference)
 		}
 	}
-	return OpenWithReferences(file, references)
+	return OpenWithReferencesCache(file, references, cacheBytes)
 }
 
 type Archive struct {
@@ -125,23 +126,30 @@ type wimLookupEntry struct {
 	hash     [20]byte
 }
 
+type wimTaggedItem struct {
+	tag  uint32
+	data []byte
+}
+
 type entry struct {
-	namedStreams   map[string]starfile.File
-	name           string
-	path           string
-	shortName      string
-	size           int64
-	attrs          uint32
-	securityID     uint32
-	creationTime   uint64
-	lastAccessTime uint64
-	lastWriteTime  uint64
-	reparseTag     uint32
-	hardLink       uint64
-	streamCount    uint16
-	hash           [20]byte
-	isDir          bool
-	subdirOff      uint64
+	taggedItems        []wimTaggedItem
+	extendedAttributes []virtualfs.ExtendedAttribute
+	namedStreams       map[string]starfile.File
+	name               string
+	path               string
+	shortName          string
+	size               int64
+	attrs              uint32
+	securityID         uint32
+	creationTime       uint64
+	lastAccessTime     uint64
+	lastWriteTime      uint64
+	reparseTag         uint32
+	hardLink           uint64
+	streamCount        uint16
+	hash               [20]byte
+	isDir              bool
+	subdirOff          uint64
 }
 
 // EntryInfo describes one image path without exposing WIM metadata internals.
@@ -834,6 +842,7 @@ func (w *Archive) entryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 		"sha1":             starlark.Bytes(entry.hash[:]),
 		"short_name":       starlark.String(entry.shortName),
 		"stream_count":     starlark.MakeUint(uint(entry.streamCount)),
+		"tagged_items":     wimTaggedItemsValue(entry.taggedItems),
 	}), nil
 }
 
@@ -851,7 +860,11 @@ func parseWIMResource(data []byte) wimResource {
 }
 
 func (w *Archive) readImages() error {
-	metadata := make([]wimResource, 0, min(w.imageCount, len(w.lookup)))
+	type imageMetadata struct {
+		resource wimResource
+		data     []byte
+	}
+	metadata := make([]imageMetadata, 0, min(w.imageCount, len(w.lookup)))
 	for _, entry := range w.lookup {
 		if entry.resource.flags&wimResourceMetadata == 0 || entry.resource.originalSize == 0 {
 			continue
@@ -862,7 +875,7 @@ func (w *Archive) readImages() error {
 				continue
 			}
 			if len(data) >= 120 && plausibleWIMMetadata(data) {
-				metadata = append(metadata, entry.resource)
+				metadata = append(metadata, imageMetadata{entry.resource, data})
 				if len(metadata) >= w.imageCount {
 					break
 				}
@@ -870,13 +883,17 @@ func (w *Archive) readImages() error {
 		}
 	}
 	if len(metadata) == 0 && w.boot.originalSize > 0 {
-		metadata = append(metadata, w.boot)
-	}
-	for idx, resource := range metadata {
-		data, err := w.readResource(resource)
+		data, err := w.readResource(w.boot)
 		if err != nil {
 			return err
 		}
+		metadata = append(metadata, imageMetadata{w.boot, data})
+	}
+	// Retain the bytes validated above: rereading all metadata in a second
+	// pass can evict and decompress the same resources again. These bytes
+	// are retained by the image objects in either case.
+	for idx, item := range metadata {
+		resource, data := item.resource, item.data
 		root, err := parseWIMRoot(data, idx+1)
 		if err != nil {
 			return err
@@ -999,6 +1016,32 @@ func parseWIMEntry(data []byte, off int, base string) (entry, error) {
 		isDir:          binary.LittleEndian.Uint64(data[off+16:off+24]) != 0 || binary.LittleEndian.Uint32(data[off+8:off+12])&0x10 != 0,
 	}
 	copy(entry.hash[:], data[off+64:off+84])
+	// Modern WIM names include terminators not counted in their lengths.
+	// Tagged items follow both names, aligned relative to the dentry.
+	extra := wimMetadataEntryBaseLen + nameLen + shortLen
+	if nameLen != 0 {
+		extra += 2
+	}
+	if shortLen != 0 {
+		extra += 2
+	}
+	extra = align8(extra)
+	if extra < length {
+		items, err := parseWIMTaggedItems(data[off+extra : off+length])
+		if err != nil {
+			return entry, err
+		}
+		entry.taggedItems = items
+		for _, item := range items {
+			if item.tag == 2 {
+				eas, err := parseWIMEAs(item.data)
+				if err != nil {
+					return entry, err
+				}
+				entry.extendedAttributes = append(entry.extendedAttributes, eas...)
+			}
+		}
+	}
 	return entry, nil
 }
 
@@ -1106,14 +1149,15 @@ func (w *Archive) applyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 
 func (image *image) virtualMetadata(entry entry, preserveHardLinks bool) virtualfs.Metadata {
 	metadata := virtualfs.Metadata{
-		NamedStreams:      entry.namedStreams,
-		FileAttributes:    entry.attrs,
-		HasFileAttributes: true,
-		CreationTime:      entry.creationTime,
-		LastAccessTime:    entry.lastAccessTime,
-		LastWriteTime:     entry.lastWriteTime,
-		HardLink:          entry.hardLink,
-		ShortName:         entry.shortName,
+		NamedStreams:       entry.namedStreams,
+		ExtendedAttributes: entry.extendedAttributes,
+		FileAttributes:     entry.attrs,
+		HasFileAttributes:  true,
+		CreationTime:       entry.creationTime,
+		LastAccessTime:     entry.lastAccessTime,
+		LastWriteTime:      entry.lastWriteTime,
+		HardLink:           entry.hardLink,
+		ShortName:          entry.shortName,
 	}
 	if !preserveHardLinks {
 		metadata.HardLink = 0
@@ -1312,16 +1356,53 @@ func (w *Archive) readResource(resource wimResource) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0, min(resource.originalSize, 64<<10))
-	for _, chunk := range chunks {
-		data, err := w.readChunk(resource, chunk)
+	// Bounds and the chunk table have been validated before allocation. Each
+	// independent WIM chunk owns a disjoint output span; retain only a bounded
+	// number of decoder buffers while filling the final metadata allocation.
+	out := make([]byte, resource.originalSize)
+	workers := 1
+	if len(chunks) >= 16 && resource.originalSize >= 1<<20 {
+		workers = 4
+	}
+	var group sync.WaitGroup
+	errs := make([]error, workers)
+	decode := func(worker int) {
+		offset := 0
+		for index, chunk := range chunks {
+			start := offset
+			offset += chunk.outputSize
+			if offset < start || offset > len(out) {
+				errs[worker] = fmt.Errorf("wim: decoded resource exceeds original size")
+				return
+			}
+			if index%workers != worker {
+				continue
+			}
+			data, err := w.readChunk(resource, chunk)
+			if err != nil {
+				errs[worker] = err
+				return
+			}
+			if len(data) != chunk.outputSize {
+				errs[worker] = fmt.Errorf("wim: decoded chunk size differs from expected size")
+				return
+			}
+			copy(out[start:offset], data)
+		}
+		if offset != len(out) {
+			errs[worker] = fmt.Errorf("wim: decoded resource size differs from original size")
+		}
+	}
+	for worker := 1; worker < workers; worker++ {
+		group.Add(1)
+		go func() { defer group.Done(); decode(worker) }()
+	}
+	decode(0)
+	group.Wait()
+	for _, err := range errs {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, data...)
-	}
-	if int64(len(out)) != resource.originalSize {
-		return nil, fmt.Errorf("wim: decoded resource size differs from original size")
 	}
 	return out, nil
 }
@@ -1655,6 +1736,7 @@ func (f *File) Attr(name string) (starlark.Value, error) {
 			"sha1":             starlark.Bytes(f.entry.hash[:]),
 			"short_name":       starlark.String(f.entry.shortName),
 			"stream_count":     starlark.MakeUint(uint(f.entry.streamCount)),
+			"tagged_items":     wimTaggedItemsValue(f.entry.taggedItems),
 		}), nil
 	case "resource":
 		if f.location == nil {
@@ -1843,12 +1925,59 @@ func (f *ResourceFile) ReadAt(p []byte, off int64) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("wim resource %q: %w", f.name, err)
 	}
-	n := 0
 	absoluteOffset := f.offset + off
 	chunkSize := f.archive.chunkSize
 	if f.resource.flags&wimResourceSolid != 0 {
 		chunkSize = f.resource.chunkSize
 	}
+	// Decode only requested chunks, with bounded parallelism for large reads.
+	// The disjoint output spans also cover unaligned solid-resource subfiles.
+	// Join every worker before returning, including on error: callers may reuse
+	// the destination immediately after ReadAt returns.
+	if len(p) >= 128<<10 && chunkSize > 0 && len(p)/chunkSize >= 4 {
+		const workers = 4
+		var group sync.WaitGroup
+		var counts [workers]int
+		var errs [workers]error
+		var starts [workers + 1]int
+		first := absoluteOffset / int64(chunkSize)
+		last := (absoluteOffset + int64(len(p)) - 1) / int64(chunkSize)
+		for worker := 1; worker < workers; worker++ {
+			starts[worker] = int((first+(last-first+1)*int64(worker)/workers)*int64(chunkSize) - absoluteOffset)
+		}
+		starts[workers] = len(p)
+		read := func(worker int) {
+			start, end := starts[worker], starts[worker+1]
+			counts[worker], errs[worker] = f.readChunksAt(p[start:end], absoluteOffset+int64(start), chunks, chunkSize)
+		}
+		for worker := 1; worker < workers; worker++ {
+			group.Add(1)
+			go func() { defer group.Done(); read(worker) }()
+		}
+		read(0)
+		group.Wait()
+		n := 0
+		for worker := 0; worker < workers; worker++ {
+			n += counts[worker]
+			if errs[worker] != nil {
+				return n, errs[worker]
+			}
+		}
+		if n < requested {
+			return n, io.EOF
+		}
+		return n, nil
+	}
+	n, err := f.readChunksAt(p, absoluteOffset, chunks, chunkSize)
+	if err == nil && n < requested {
+		err = io.EOF
+	}
+	return n, err
+}
+
+func (f *ResourceFile) readChunksAt(p []byte, absoluteOffset int64, chunks []wimChunk, chunkSize int) (int, error) {
+	requested := len(p)
+	n := 0
 	for len(p) > 0 {
 		index := int(absoluteOffset / int64(chunkSize))
 		if index < 0 || index >= len(chunks) {
@@ -1861,7 +1990,6 @@ func (f *ResourceFile) ReadAt(p []byte, off int64) (int, error) {
 		chunkOffset := int(absoluteOffset % int64(chunkSize))
 		copied := copy(p, chunk[chunkOffset:])
 		n += copied
-		off += int64(copied)
 		absoluteOffset += int64(copied)
 		p = p[copied:]
 	}

@@ -30,6 +30,10 @@ type BuildOptions struct {
 	Size  int64
 	UUID  [16]byte
 	Label string
+	// InodeCount is a minimum total inode capacity, including reserved inodes.
+	// Zero preserves automatic sizing from the input entries. The actual count
+	// is rounded up to the block-group geometry and may also grow to fit input.
+	InodeCount int64
 }
 type fragment struct {
 	offset int64
@@ -68,6 +72,9 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 	if len(options.Label) > 16 || strings.ContainsRune(options.Label, 0) {
 		return nil, fmt.Errorf("ext4: invalid volume label")
 	}
+	if options.InodeCount < 0 || options.InodeCount > math.MaxUint32 {
+		return nil, fmt.Errorf("ext4: inode_count must be 0..4294967295")
+	}
 	entries, err := unixfs.Normalize(input)
 	if err != nil {
 		return nil, err
@@ -75,11 +82,15 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 	total := uint32(options.Size / int64(blockSize))
 	ng := (uint64(total) + uint64(blocksPerGroup) - 1) / uint64(blocksPerGroup)
 	// Bound retained metadata independently of sparse disk capacity.
-	ipg := uint32((uint64(len(entries)) + 10 + ng - 1) / ng)
-	ipg = max(128, (ipg+31)&^31)
-	if ipg > 32768 || ng*(uint64(ipg)*256+8192) > 256<<20 {
+	inodeCount := max(uint64(len(entries))+10, uint64(options.InodeCount))
+	if inodeCount > math.MaxUint32 {
+		return nil, fmt.Errorf("ext4: inode capacity exceeded")
+	}
+	inodesPerGroup := max(uint64(128), ((inodeCount+ng-1)/ng+31)&^uint64(31))
+	if inodesPerGroup > 32768 || ng*inodesPerGroup > math.MaxUint32 || ng*(inodesPerGroup*256+8192) > 256<<20 {
 		return nil, fmt.Errorf("ext4: metadata capacity exceeded")
 	}
+	ipg := uint32(inodesPerGroup)
 	b := &imageBuilder{ipg: ipg, gdtBlocks: uint32((ng*32 + 4095) / 4096)}
 	tableBlocks := ipg * 256 / blockSize
 	metadata := 1 + b.gdtBlocks + 2 + tableBlocks

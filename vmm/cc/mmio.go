@@ -12,6 +12,12 @@ func (p *pc) handleMMIO(ex hypervisor.X86Exit) error {
 		return fmt.Errorf("invalid MMIO range address=%#x size=%d", ex.Address, ex.Size)
 	}
 	ex.Address = p.cpuAddress(ex.Address)
+	if p.pciNIC != nil && p.pciNIC.contains(ex.Address, ex.Size) {
+		return p.pciNIC.mmio(ex, p.cpu)
+	}
+	if p.nvme != nil && p.nvme.contains(ex.Address, ex.Size) {
+		return p.nvme.mmio(ex, p.cpu)
+	}
 	if p.hpet != nil && ex.Address >= hpetAddress && ex.Address < hpetAddress+0x400 {
 		return p.hpet.mmio(ex, p.cpu, p.now())
 	}

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"time"
 
+	channelpkg "github.com/tinyrange/trex/channel"
 	starvalue "github.com/tinyrange/trex/script/value"
 	"go.starlark.net/starlark"
 )
@@ -36,6 +37,7 @@ func SelectBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 	}
 	cases := make([]reflect.SelectCase, 0, values.Len()+1)
 	indexes := make([]int, 0, values.Len())
+	readNotifications := make([]bool, 0, values.Len())
 	for index := 0; index < values.Len(); index++ {
 		selectable, ok := values.Index(index).(debugSelectable)
 		if !ok {
@@ -47,6 +49,11 @@ func SelectBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 		}
 		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ready)})
 		indexes = append(indexes, index)
+		// Byte-channel readiness is a change notification: closing it means
+		// retry the read, not EOF. Only the read can distinguish data, a
+		// spurious wakeup (e.g. checkpoint restore), and terminal closure.
+		_, notification := values.Index(index).(channelpkg.ReadNotifier)
+		readNotifications = append(readNotifications, notification)
 	}
 	var timer *time.Timer
 	var timeoutChannel <-chan time.Time
@@ -60,7 +67,7 @@ func SelectBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 	if chosen == len(cases)-1 {
 		return starlark.None, nil
 	}
-	if !open {
+	if !open && !readNotifications[chosen] {
 		return nil, io.EOF
 	}
 	return values.Index(indexes[chosen]), nil

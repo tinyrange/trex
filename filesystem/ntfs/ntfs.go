@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -143,6 +144,10 @@ func NTFSBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, k
 }
 
 type ntfsNode struct {
+	eaInfo, eaData     []byte
+	eaLCN              int64
+	childLookup        map[string]*ntfsNode // temporary append-only import index
+	indexedChildren    int
 	streams            []ntfsNamedStream
 	id                 uint64
 	name               string
@@ -402,6 +407,9 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 		}
 	}
 	for _, node := range b.nodes {
+		if len(node.eaData) > 192 {
+			node.eaLCN = b.allocate(fsinternal.CeilDiv(int64(len(node.eaData)), ntfsCluster))
+		}
 		for index := range node.streams {
 			stream := &node.streams[index]
 			stream.lcn = b.allocate(fsinternal.CeilDiv(stream.file.Size(), ntfsCluster))
@@ -451,6 +459,9 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 		}
 	}
 	for _, node := range b.nodes {
+		if node.eaLCN > 0 {
+			extents = append(extents, filesystemapi.ExtentSpec{Start: node.eaLCN * ntfsCluster, Size: int64(len(node.eaData)), Data: node.eaData})
+		}
 		for _, stream := range node.streams {
 			if stream.file.Size() > 0 {
 				extents = append(extents, filesystemapi.ExtentSpec{Start: stream.lcn * ntfsCluster, Size: stream.file.Size(), File: stream.file})
@@ -714,6 +725,11 @@ func (b *ntfsBuild) importDirectory(dir *filesystemapi.Directory) error {
 		}
 	}
 	for _, node := range b.nodes {
+		var eaErr error
+		node.eaInfo, node.eaData, eaErr = ntfsEncodeEAs(node.metadata.ExtendedAttributes)
+		if eaErr != nil {
+			return fmt.Errorf("%s: %w", node.fullPath, eaErr)
+		}
 		streamNames := make(map[string]bool)
 		for name, file := range node.metadata.NamedStreams {
 			if name == "" || strings.ContainsAny(name, "\\/:\x00") || len(utf16.Encode([]rune(name))) > 255 || file == nil || file.Size() < 0 {
@@ -727,6 +743,9 @@ func (b *ntfsBuild) importDirectory(dir *filesystemapi.Directory) error {
 			node.streams = append(node.streams, ntfsNamedStream{name: name, file: file})
 		}
 		sort.Slice(node.streams, func(i, j int) bool { return node.streams[i].name < node.streams[j].name })
+		// No more child lookups after import; do not retain this construction cache.
+		node.childLookup = nil
+		node.indexedChildren = 0
 		for _, link := range node.children {
 			link.sortKey = ntfsNameSortKey(link.name, b.upCase)
 		}
@@ -759,13 +778,41 @@ func (b *ntfsBuild) ensureDir(byPath map[string]*ntfsNode, name string) *ntfsNod
 	return node
 }
 
+// ntfsChildByName is used during append-only directory import. Index each link
+// once instead of rescanning wide WinSxS/System32 directories for every insertion.
+// Preserve the previous EqualFold and first-link-wins semantics; on-disk NTFS
+// collation still uses the selected volume upcase table, independently.
 func ntfsChildByName(parent *ntfsNode, name string) *ntfsNode {
-	for _, link := range parent.children {
-		if strings.EqualFold(link.name, name) {
-			return link.node
-		}
+	if parent.childLookup == nil {
+		parent.childLookup = make(map[string]*ntfsNode)
 	}
-	return nil
+	for parent.indexedChildren < len(parent.children) {
+		link := parent.children[parent.indexedChildren]
+		key := ntfsImportFold(link.name)
+		if parent.childLookup[key] == nil {
+			parent.childLookup[key] = link.node
+		}
+		parent.indexedChildren++
+	}
+	return parent.childLookup[ntfsImportFold(name)]
+}
+
+func ntfsImportFold(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' {
+			return r - ('a' - 'A')
+		}
+		if r < 128 {
+			return r
+		}
+		smallest := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < smallest {
+				smallest = next
+			}
+		}
+		return smallest
+	}, name)
 }
 
 func (b *ntfsBuild) assignFileNames() error {
@@ -774,6 +821,7 @@ func (b *ntfsBuild) assignFileNames() error {
 			continue
 		}
 		used := make(map[string]*ntfsNode, len(parent.children))
+		aliases := make(map[string]*ntfsAliasCursor)
 		for _, link := range parent.children {
 			key := strings.ToUpper(link.name)
 			if owner := used[key]; owner != nil {
@@ -797,9 +845,18 @@ func (b *ntfsBuild) assignFileNames() error {
 				child.names = append(child.names, link.names...)
 				continue
 			}
+			// A separate DOS/Win32 pair belongs to the original name only.
+			// Windows paired-name updates search the file's DOS attributes;
+			// a second pair can select an alias from a different directory.
+			// Additional long-name hard links have no paired short name.
+			if len(child.names) != 0 {
+				link.names = []ntfsName{newNTFSName(link.name, 0, parent)}
+				child.names = append(child.names, link.names...)
+				continue
+			}
 			alias := upper
 			if owner := used[alias]; alias == "" || owner != nil && owner != child {
-				alias = ntfsDOSAlias(link.name, child, used)
+				alias = ntfsDOSAlias(link.name, child, used, aliases)
 			}
 			used[alias] = child
 			link.names = []ntfsName{
@@ -810,11 +867,11 @@ func (b *ntfsBuild) assignFileNames() error {
 		}
 	}
 	for _, node := range b.nodes {
-		for _, name := range node.names {
-			if name.namespace != 2 {
-				node.linkCount++
-			}
+		// Each FILE_NAME has a directory entry, including a DOS alias.
+		if len(node.names) > 0xffff {
+			return fmt.Errorf("ntfs: too many file names for %q", node.fullPath)
 		}
+		node.linkCount = uint16(len(node.names))
 	}
 	return nil
 }
@@ -840,6 +897,12 @@ func (b *ntfsBuild) createAttributeExtensions() error {
 			return err
 		}
 		node.attributeList = append(node.attributeList, ntfsAttributeListEntry(ntfsAttrData, node.dataAttributeID, node.id)...)
+		next := node.dataAttributeID + 1
+		for _, stream := range node.streams {
+			node.attributeList = append(node.attributeList, ntfsNamedAttributeListEntry(ntfsAttrData, stream.name, next, node.id)...)
+			next++
+		}
+		ntfsAppendEAList(node, next)
 	}
 	return nil
 }
@@ -922,27 +985,36 @@ func (b *ntfsBuild) appendDirectoryIndexAttributeList(node *ntfsNode) {
 	if len(node.index.blocks) > 0 {
 		node.attributeList = append(node.attributeList, ntfsNamedAttributeListEntry(ntfsAttrIndexAllocation, "$I30", id+1, node.id)...)
 		node.attributeList = append(node.attributeList, ntfsNamedAttributeListEntry(ntfsAttrBitmap, "$I30", id+2, node.id)...)
+		id += 2
 	}
+	next := id + 1
+	for _, stream := range node.streams {
+		node.attributeList = append(node.attributeList, ntfsNamedAttributeListEntry(ntfsAttrData, stream.name, next, node.id)...)
+		next++
+	}
+	ntfsAppendEAList(node, next)
 }
 
+// Reserve full-width run offsets: allocation happens after record splitting.
+// A one-byte placeholder LCN can underestimate the final aligned attribute.
 func ntfsNodeRecordSize(node *ntfsNode, names []ntfsName, attributeList bool) int {
 	used := align8(0x30 + (int(ntfsRecordSize)/int(ntfsSectorSize)+1)*2)
 	used += len(ntfsResidentAttr(ntfsAttrStandardInformation, "", ntfsStandardInformation(node, true)))
 	if attributeList {
-		used += len(ntfsNonResidentAttr(ntfsAttrAttributeList, "", 1, 1))
+		used += len(ntfsNonResidentAttr(ntfsAttrAttributeList, "", 1<<56, 1))
 	}
 	for _, name := range names {
 		used += len(ntfsResidentAttr(ntfsAttrFileName, "", ntfsFileNameAttribute(node, name)))
 	}
 	if node.size > 0 {
-		used += len(ntfsNonResidentAttr(ntfsAttrData, "", 1, node.size))
+		used += len(ntfsNonResidentAttr(ntfsAttrData, "", 1<<56, node.size))
 	} else {
 		used += len(ntfsResidentAttr(ntfsAttrData, "", nil))
 	}
 	for _, stream := range node.streams {
-		used += len(ntfsStreamAttr(stream, 1))
+		used += len(ntfsStreamAttr(stream, 1<<56))
 	}
-	return align8(used + 4)
+	return align8(used + ntfsEARecordSize(node) + 4)
 }
 
 func ntfsExtensionRecordHeaderSize() int {
@@ -1074,7 +1146,7 @@ func ntfsIndexRootLimit(node *ntfsNode, allocated bool, bitmapBytes int, modern 
 		used += len(ntfsNonResidentAttr(ntfsAttrIndexAllocation, "$I30", 1<<24, ntfsIndexSize))
 		used += len(ntfsResidentAttr(ntfsAttrBitmap, "$I30", make([]byte, bitmapBytes)))
 	}
-	available := int(ntfsRecordSize) - used - 4
+	available := int(ntfsRecordSize) - used - ntfsEARecordSize(node) - 4
 	valueOffset := align8(24 + len(utf16Bytes("$I30")))
 	limit := available&^7 - valueOffset
 	if limit < 0 {
@@ -1575,6 +1647,7 @@ func (b *ntfsBuild) mftRecord(node *ntfsNode) ([]byte, error) {
 	for _, stream := range node.streams {
 		attrs = append(attrs, ntfsStreamAttr(stream, stream.lcn))
 	}
+	attrs = append(attrs, ntfsEAAttrs(node, node.eaLCN)...)
 	offset := attrOff
 	nextAttributeID := uint16(0)
 	nextExtendedID := node.dataAttributeID
@@ -1857,6 +1930,11 @@ func ntfsFileNameAttribute(node *ntfsNode, name ntfsName) []byte {
 	binary.LittleEndian.PutUint64(data[40:48], uint64(alloc))
 	binary.LittleEndian.PutUint64(data[48:56], uint64(node.size))
 	binary.LittleEndian.PutUint32(data[56:60], ntfsFileFlags(node))
+	if node.metadata.ReparseTag != 0 {
+		binary.LittleEndian.PutUint32(data[60:64], node.metadata.ReparseTag)
+	} else if len(node.eaInfo) == 8 {
+		binary.LittleEndian.PutUint32(data[60:64], uint32(binary.LittleEndian.Uint16(node.eaInfo)))
+	}
 	data[64] = byte(len(nameBytes) / 2)
 	data[65] = name.namespace
 	copy(data[66:], nameBytes)
@@ -2611,6 +2689,9 @@ func (b *ntfsBuild) volumeBitmap() []byte {
 		for _, stream := range node.streams {
 			mark(stream.lcn, fsinternal.CeilDiv(stream.file.Size(), ntfsCluster))
 		}
+		if node.eaLCN > 0 {
+			mark(node.eaLCN, fsinternal.CeilDiv(int64(len(node.eaData)), ntfsCluster))
+		}
 		if node.attributeListLCN > 0 && len(node.attributeList) > 0 {
 			mark(node.attributeListLCN, fsinternal.CeilDiv(int64(len(node.attributeList)), ntfsCluster))
 		}
@@ -2737,7 +2818,16 @@ func ntfsDOSName(name string) (string, bool) {
 	return upper, true
 }
 
-func ntfsDOSAlias(name string, node *ntfsNode, used map[string]*ntfsNode) string {
+// Each prefix/extension group produces the same candidate sequence. Remember
+// occupied prefixes rather than retrying ~1 for every WinSxS sibling. Owners
+// retain their earliest alias so hard links preserve first-match semantics.
+// The directory's used map is append-only for the lifetime of these cursors.
+type ntfsAliasCursor struct {
+	serial int
+	owned  map[*ntfsNode]string
+}
+
+func ntfsDOSAlias(name string, node *ntfsNode, used map[string]*ntfsNode, groups map[string]*ntfsAliasCursor) string {
 	base, extension := name, ""
 	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
 		base, extension = name[:dot], name[dot+1:]
@@ -2750,8 +2840,17 @@ func ntfsDOSAlias(name string, node *ntfsNode, used map[string]*ntfsNode) string
 	if len(extension) > 3 {
 		extension = extension[:3]
 	}
-	for serial := 1; ; serial++ {
-		suffix := fmt.Sprintf("~%d", serial)
+	group := base[:min(len(base), 6)] + "." + extension
+	cursor := groups[group]
+	if cursor == nil {
+		cursor = &ntfsAliasCursor{serial: 1, owned: make(map[*ntfsNode]string)}
+		groups[group] = cursor
+	}
+	if alias := cursor.owned[node]; alias != "" {
+		return alias
+	}
+	for serial := cursor.serial; ; serial++ {
+		suffix := "~" + strconv.Itoa(serial)
 		prefixLength := 8 - len(suffix)
 		if prefixLength < 1 {
 			prefixLength = 1
@@ -2764,7 +2863,15 @@ func ntfsDOSAlias(name string, node *ntfsNode, used map[string]*ntfsNode) string
 		if extension != "" {
 			alias += "." + extension
 		}
-		if owner := used[alias]; owner == nil || owner == node {
+		owner := used[alias]
+		if owner == nil {
+			owner = node
+		}
+		if cursor.owned[owner] == "" {
+			cursor.owned[owner] = alias
+		}
+		cursor.serial = serial + 1
+		if owner == node {
 			return alias
 		}
 	}

@@ -25,18 +25,20 @@ func DirectoryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 }
 
 type Directory struct {
-	dirs           map[string]struct{}
-	files          map[string]FileRecord
-	attributes     map[string]Attributes
-	metadata       map[string]Metadata
-	hardLinkRefs   map[uint64]uint64
-	nextHardLink   uint64
-	nextWriteOrder uint64
-	revision       uint64
-	fatShortIndex  map[string]string
-	fatShortErr    error
-	fatShortRev    uint64
-	fatShortValid  bool
+	dirs             map[string]struct{}
+	files            map[string]FileRecord
+	attributes       map[string]Attributes
+	metadata         map[string]Metadata
+	hardLinkRefs     map[uint64]uint64
+	nextHardLink     uint64
+	nextWriteOrder   uint64
+	revision         uint64
+	children         map[string][]string
+	childrenRevision uint64
+	fatShortIndex    map[string]string
+	fatShortErr      error
+	fatShortRev      uint64
+	fatShortValid    bool
 }
 
 // Attributes contains portable DOS-style file attributes.
@@ -49,7 +51,15 @@ type Attributes struct {
 
 // Metadata contains optional Windows filesystem metadata used by image
 // builders that can represent it.
+// ExtendedAttribute is an uninterpreted Windows EA, not a trust verdict.
+type ExtendedAttribute struct {
+	Name  string
+	Flags byte
+	Value []byte
+}
+
 type Metadata struct {
+	ExtendedAttributes []ExtendedAttribute
 	NamedStreams       map[string]starfile.File
 	FileAttributes     uint32
 	HasFileAttributes  bool
@@ -110,6 +120,10 @@ func (d *Directory) Snapshot() Snapshot {
 	metadata := make(map[string]Metadata, len(d.metadata))
 	for name, value := range d.metadata {
 		value.SecurityDescriptor = append([]byte(nil), value.SecurityDescriptor...)
+		value.ExtendedAttributes = append([]ExtendedAttribute(nil), value.ExtendedAttributes...)
+		for i := range value.ExtendedAttributes {
+			value.ExtendedAttributes[i].Value = append([]byte(nil), value.ExtendedAttributes[i].Value...)
+		}
 		if value.NamedStreams != nil {
 			streams := make(map[string]starfile.File, len(value.NamedStreams))
 			for key, file := range value.NamedStreams {
@@ -140,6 +154,8 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("hardlink", d.hardlinkBuiltin), nil
 	case "find":
 		return starlark.NewBuiltin("find", d.findBuiltin), nil
+	case "list_dir":
+		return starlark.NewBuiltin("list_dir", d.listDirBuiltin), nil
 	case "remove":
 		return starlark.NewBuiltin("remove", d.removeBuiltin), nil
 	case "set_attributes":
@@ -156,7 +172,7 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (d *Directory) AttrNames() []string {
-	return []string{"fat_short_path", "files", "find", "get_security", "hardlink", "mkdir", "remove", "set_attributes", "set_security", "write"}
+	return []string{"fat_short_path", "files", "find", "get_security", "hardlink", "list_dir", "mkdir", "remove", "set_attributes", "set_security", "write"}
 }
 
 func (d *Directory) hardlinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -201,6 +217,38 @@ func (d *Directory) HardLink(source, destination string) error {
 	destinationMetadata.HardLink = metadata.HardLink
 	d.SetMetadata(destination, destinationMetadata)
 	return nil
+}
+
+// listDirBuiltin enumerates only immediate children, without allocating and
+// sorting the entire tree's file list per call. Missing paths return an empty list.
+func (d *Directory) listDirBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs("list_dir", args, kwargs, "path", &name); err != nil {
+		return nil, err
+	}
+	if d.children == nil || d.childrenRevision != d.revision {
+		children := make(map[string][]string)
+		for candidate := range d.dirs {
+			if candidate != "/" {
+				children[path.Dir(candidate)] = append(children[path.Dir(candidate)], candidate)
+			}
+		}
+		for candidate := range d.files {
+			if _, isDir := d.dirs[candidate]; !isDir {
+				children[path.Dir(candidate)] = append(children[path.Dir(candidate)], candidate)
+			}
+		}
+		for _, names := range children {
+			sort.Strings(names)
+		}
+		d.children, d.childrenRevision = children, d.revision
+	}
+	names := d.children[storage.CleanPath(name)]
+	result := make([]starlark.Value, len(names))
+	for i, child := range names {
+		result[i] = starlark.String(child)
+	}
+	return starlark.NewList(result), nil
 }
 
 func (d *Directory) findBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

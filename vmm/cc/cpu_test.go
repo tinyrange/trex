@@ -80,3 +80,96 @@ func TestLongModeDoesNotInventInstructionFeatures(t *testing.T) {
 		}
 	}
 }
+
+func TestFourCoreCPUIDTopology(t *testing.T) {
+	for id := 0; id < 4; id++ {
+		c := &cpuidTestCPU{input: []x86state.CPUIDEntry{
+			{Function: 0, Eax: 32}, {Function: 1, Ebx: 0xffffffff, Edx: 0xffffffff},
+			{Function: 4, Eax: 0xffffffff, Ebx: 63, Ecx: 63},
+			{Function: 0xb, Index: 0, Ebx: 128, Edx: 99},
+			{Function: 0x80000001, Edx: 1 << 29},
+		}}
+		if err := configureCPUTopology(c, true, id, 4); err != nil {
+			t.Fatal(err)
+		}
+		seen := map[uint32]int{}
+		for _, e := range c.output {
+			seen[e.Function]++
+			switch e.Function {
+			case 0:
+				if e.Eax != 0xb {
+					t.Fatal("topology leaf inaccessible")
+				}
+			case 1:
+				if e.Ebx>>24 != uint32(id) || e.Ebx>>16&255 != 4 || e.Edx&(1<<28) == 0 {
+					t.Fatalf("wrong package/APIC identity: %+v", e)
+				}
+			case 4:
+				if e.Eax>>26 != 3 || e.Eax>>14&0xfff != 0 {
+					t.Fatal("host cache sharing topology leaked")
+				}
+			case 0xb:
+				if e.Edx != uint32(id) || e.Flags != 1 {
+					t.Fatal("wrong extended topology ID")
+				}
+				if e.Index == 0 && (e.Eax != 0 || e.Ebx != 1 || e.Ecx != 0x100) {
+					t.Fatal("unexpected SMT")
+				}
+				if e.Index == 1 && (e.Eax != 2 || e.Ebx != 4 || e.Ecx != 0x201) {
+					t.Fatal("not one four-core package")
+				}
+				if e.Index == 2 && e.Ebx != 0 {
+					t.Fatal("missing terminator")
+				}
+			}
+		}
+		if seen[1] != 1 || seen[4] != 1 || seen[0xb] != 3 {
+			t.Fatal("missing/duplicate topology leaves", seen)
+		}
+	}
+}
+
+type fallbackTestCPU struct {
+	cpuidTestCPU
+	values map[uint32]uint64
+}
+
+func (c *fallbackTestCPU) SetReadOnlyFallbackMSRs(values map[uint32]uint64) error {
+	c.values = values
+	return nil
+}
+func TestAMDPortableSMPFeatureControl(t *testing.T) {
+	c := &fallbackTestCPU{cpuidTestCPU: cpuidTestCPU{input: []x86state.CPUIDEntry{
+		{Function: 0, Eax: 0x10, Ebx: 0x68747541, Edx: 0x69746e65, Ecx: 0x444d4163},
+		{Function: 1, Ecx: 0xffffffff, Edx: 0xffffffff},
+		{Function: 0x80000001, Edx: 1 << 29},
+	}}}
+	if err := configureCPUTopology(c, true, 0, 4); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.values) != 1 || c.values[0x3a] != 1 {
+		t.Fatalf("unsafe FEATURE_CONTROL policy: %v", c.values)
+	}
+	topology := false
+	for _, e := range c.output {
+		if e.Function == 0 && e.Eax != 0xb {
+			t.Fatal("lost topology leaf range")
+		}
+		if e.Function == 1 && e.Ecx&(1<<5) != 0 {
+			t.Fatal("VMX exposed with disabled FEATURE_CONTROL")
+		}
+		if e.Function == 0xb && e.Index == 1 && e.Ebx == 4 {
+			topology = true
+		}
+	}
+	if !topology {
+		t.Fatal("lost SMP topology")
+	}
+	unsupported := &cpuidTestCPU{input: c.input}
+	if err := configureCPUTopology(unsupported, true, 0, 4); err == nil {
+		t.Fatal("silently accepted missing accelerator MSR support")
+	}
+	if err := configureCPUTopology(unsupported, true, 1, 4); err != nil {
+		t.Fatal("AP must reuse machine-owner policy:", err)
+	}
+}

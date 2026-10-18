@@ -2,6 +2,7 @@ package cc
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"j5.nz/cc/hypervisor"
 	"time"
@@ -41,65 +42,11 @@ func (p *pc) runWithHandler(ctx context.Context, handle func(hypervisor.X86Exit)
 		if err := ctx.Err(); err != nil {
 			return hypervisor.X86Exit{}, err
 		}
-		if err := p.completeIDEDMARead(false); err != nil {
+		deadline, deliver, commit, err := p.pollDevices()
+		if err != nil {
 			return hypervisor.X86Exit{}, err
 		}
 		now := p.now()
-		if p.uhci != nil {
-			if err := p.uhci.poll(now); err != nil {
-				return hypervisor.X86Exit{}, err
-			}
-		}
-		if p.acpi != nil {
-			if err := p.acpi.poll(now); err != nil {
-				return hypervisor.X86Exit{}, err
-			}
-		}
-		if p.nic != nil {
-			if err := p.nic.poll(); err != nil {
-				return hypervisor.X86Exit{}, err
-			}
-		}
-		if p.hpet != nil {
-			if err := p.hpet.poll(now); err != nil {
-				return hypervisor.X86Exit{}, err
-			}
-		}
-		var deadline time.Time
-		var deliver func() error
-		var commit func()
-		rate := p.cmos[0xa] & 15
-		if p.cmos[0xb]&0x40 == 0 || rate < 3 || (p.hpet != nil && p.hpet.config&2 != 0) {
-			p.rtcNext = time.Time{}
-		} else {
-			period := time.Second * time.Duration(uint64(1)<<(rate-1)) / 32768
-			if p.rtcNext.IsZero() {
-				p.rtcNext = now.Add(period)
-			}
-			if !now.Before(p.rtcNext) {
-				p.rtcNext = now.Add(period)
-				p.cmos[0xc] |= 0xc0
-				if !p.rtcIRQ {
-					if err := p.cpu.SetIRQ(8, true); err != nil {
-						return hypervisor.X86Exit{}, err
-					}
-					p.rtcIRQ = true
-				}
-			}
-			if !p.rtcIRQ {
-				deadline = p.rtcNext
-				deliver = func() error { return p.cpu.SetIRQ(8, true) }
-				commit = func() { p.rtcIRQ = true; p.cmos[0xc] |= 0xc0; p.rtcNext = p.now().Add(period) }
-			}
-		}
-		if p.hpet != nil {
-			i, next := p.hpet.deadline()
-			if i >= 0 && (deadline.IsZero() || next.Before(deadline)) {
-				deadline = next
-				deliver = p.hpet.delivery(i)
-				commit = func() { p.hpet.expire(i, p.now()) }
-			}
-		}
 		if deadline.IsZero() {
 			return p.cpu.RunUntil(ctx, handle)
 		}
@@ -125,6 +72,9 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 	if ex.Port >= 0x3f8 && ex.Port <= 0x3ff {
 		return p.serialIO(ex)
 	}
+	if p.efi != nil && ex.Port == efiExceptionPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
+		return p.efiException()
+	}
 	if p.efi != nil && ex.Port == efiPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		return p.efiCall()
 	}
@@ -148,6 +98,12 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 	}
 	if p.smc != nil && ex.Port >= smcBase && ex.Port < smcBase+32 {
 		return p.smc.io(ex)
+	}
+	if p.pciNIC != nil && p.pciNIC.config[4]&1 != 0 {
+		base := uint16(binary.LittleEndian.Uint32(p.pciNIC.config[0x14:]) &^ 7)
+		if ex.Port == base || ex.Port == base+4 {
+			return p.pciNIC.io(ex)
+		}
 	}
 	if p.nic != nil && ex.Port >= 0x300 && ex.Port <= 0x31f {
 		return p.nic.io(ex)
@@ -276,4 +232,74 @@ func (p *pc) observeRTC(write bool, value byte) {
 			p.rtcTrace = p.rtcTrace[1:]
 		}
 	}
+}
+
+// pollDevices is called only by the platform owner, never a CPU worker.
+func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
+	if err := p.completeIDEDMARead(false); err != nil {
+		return time.Time{}, nil, nil, err
+	}
+	now := p.now()
+	if p.uhci != nil {
+		if err := p.uhci.poll(now); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	if p.acpi != nil {
+		if err := p.acpi.poll(now); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	if p.pciNIC != nil {
+		if err := p.pciNIC.poll(); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	if p.nic != nil {
+		if err := p.nic.poll(); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	if p.hpet != nil {
+		if err := p.hpet.poll(now); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	var deadline time.Time
+	var deliver func() error
+	var commit func()
+	rate := p.cmos[0xa] & 15
+	if p.cmos[0xb]&0x40 == 0 || rate < 3 || (p.hpet != nil && p.hpet.config&2 != 0) {
+		p.rtcNext = time.Time{}
+	} else {
+		period := time.Second * time.Duration(uint64(1)<<(rate-1)) / 32768
+		if p.rtcNext.IsZero() {
+			p.rtcNext = now.Add(period)
+		}
+		if !now.Before(p.rtcNext) {
+			p.rtcNext = now.Add(period)
+			p.cmos[0xc] |= 0xc0
+			if !p.rtcIRQ {
+				if err := p.cpu.SetIRQ(8, true); err != nil {
+					return time.Time{}, nil, nil, err
+				}
+				p.rtcIRQ = true
+			}
+		}
+		if !p.rtcIRQ {
+			deadline = p.rtcNext
+			deliver = func() error { return p.cpu.SetIRQ(8, true) }
+			commit = func() { p.rtcIRQ = true; p.cmos[0xc] |= 0xc0; p.rtcNext = p.now().Add(period) }
+		}
+	}
+	if p.hpet != nil {
+		i, next := p.hpet.deadline()
+		if i >= 0 && (deadline.IsZero() || next.Before(deadline)) {
+			deadline = next
+			deliver = p.hpet.delivery(i)
+			commit = func() { p.hpet.expire(i, p.now()) }
+		}
+	}
+
+	return deadline, deliver, commit, nil
 }

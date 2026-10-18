@@ -47,10 +47,22 @@ func New(name string, channel ByteChannel) *Value {
 
 func (c *Value) String() string { return fmt.Sprintf("<byte_channel %q>", c.name) }
 func (c *Value) DebugReady() <-chan struct{} {
+	return c.ReadReady()
+}
+
+// ReadReady preserves cooperative readiness when a Value wraps a byte stream.
+func (c *Value) ReadReady() <-chan struct{} {
 	if notifier, ok := c.channel.(channelReadNotifier); ok {
 		return notifier.ReadReady()
 	}
 	return nil
+}
+
+func (c *Value) WriteCapacity() (int, <-chan struct{}, error) {
+	if notifier, ok := c.channel.(channelpkg.WriteCapacityNotifier); ok {
+		return notifier.WriteCapacity()
+	}
+	return 0, nil, channelpkg.ErrWriteCapacityUnsupported
 }
 func (c *Value) Type() string         { return "byte_channel" }
 func (c *Value) Freeze()              {}

@@ -21,6 +21,7 @@ type usbHID struct {
 	stalled                                bool
 	report                                 []byte
 	pending                                [][]byte
+	pointerMotionTail                      bool
 	controls, reports                      uint64
 	trace                                  []any
 }
@@ -144,6 +145,7 @@ func (d *usbHID) setup(data []byte) bool {
 			}
 			d.configuration = byte(value)
 			d.pending = nil
+			d.pointerMotionTail = false
 			if value != 0 {
 				d.pending = append(d.pending, append([]byte(nil), d.report...))
 			}
@@ -212,7 +214,11 @@ func (d *usbHID) transaction(pid byte, endpoint byte, data []byte) (int, int) {
 			return 0, 2
 		}
 		n := copy(data, d.pending[0])
+		d.pending[0] = nil
 		d.pending = d.pending[1:]
+		if len(d.pending) == 0 {
+			d.pointerMotionTail = false
+		}
 		d.reports++
 		return n, 0
 	}
@@ -246,11 +252,25 @@ func (d *usbHID) enqueue(report []byte) error {
 	if d.configuration == 0 {
 		return fmt.Errorf("USB HID device is not configured")
 	}
-	if len(d.pending) >= 1024 {
+	// Absolute motion may supersede only earlier motion, never the report
+	// containing a button transition or a relative wheel delta. Keep the
+	// transition's original coordinates (including the start of a drag).
+	motion := d.pointer && report[0] == d.report[0] && report[5] == 0
+	coalesce := motion && d.pointerMotionTail && len(d.pending) != 0
+	if !coalesce && len(d.pending) >= 1024 {
 		return fmt.Errorf("USB HID report queue full")
 	}
+	if coalesce {
+		copy(d.pending[len(d.pending)-1], report)
+	} else {
+		d.pending = append(d.pending, append([]byte(nil), report...))
+	}
+	d.pointerMotionTail = motion
 	d.report = append(d.report[:0], report...)
-	d.pending = append(d.pending, append([]byte(nil), report...))
+	if d.pointer {
+		// GET_REPORT and reconfiguration report state, not old relative input.
+		d.report[5] = 0
+	}
 	return nil
 }
 

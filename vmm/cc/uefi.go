@@ -143,7 +143,7 @@ func (p *pc) installUEFI() error {
 	if image == nil {
 		return fmt.Errorf("cc: GPT ESP has no EFI/Boot/bootx64.efi")
 	}
-	diskPath := []byte{2, 1, 12, 0, 0xd0, 0x41, 0x03, 0x0a, 0, 0, 0, 0, 1, 1, 6, 0, 0, 1, 3, 1, 8, 0, 0, 0, 0, 0}
+	diskPath := storageDevicePath(p.nvme != nil)
 	end := []byte{0x7f, 0xff, 4, 0}
 	partPath := func(part gpt.Partition) []byte {
 		b := append([]byte(nil), diskPath...)
@@ -163,7 +163,7 @@ func (p *pc) installUEFI() error {
 	p.efiMemory = &efiMemory{p: p}
 	p.efi, err = uefi.NewFirmware(image, uefi.FirmwareOptions{
 		PhysicalMemory: efiMemory{p: p},
-		Options: uefi.Options{MemoryBase: 0x10000, Memory: uint64(len(p.ram)) - 0x10000, Reservations: []uefi.MemoryReservation{{Address: 0xa0000, Pages: 0x60, Type: 0}}, TimeUnix: p.started.Unix(), DevicePath: partPath(partitions[espIndex]), Observe: func(e uefi.Event) error {
+		Options: uefi.Options{MemoryBase: 0x10000, Memory: efiPhysicalEnd(uint64(len(p.ram))) - 0x10000, Reservations: efiReservations(uint64(len(p.ram))), TimeUnix: p.started.Unix(), DevicePath: partPath(partitions[espIndex]), Observe: func(e uefi.Event) error {
 			if e.Kind == "console" {
 				p.console = append(p.console, []byte(e.Text)...)
 			}
@@ -197,16 +197,16 @@ func (p *pc) installUEFI() error {
 	if _, err = p.efi.InstallConfigurationTable("{8868E871-E4F1-11D3-BC22-0080C73C8881}", p.ram[0xe0000:0xe0000+36], 9); err != nil {
 		return err
 	}
+	var systemUUID [16]byte
+	if _, err = source.ReadAt(systemUUID[:], 512+56); err != nil {
+		return err
+	}
+	if err = p.installSMBIOS(systemUUID); err != nil {
+		return err
+	}
 	// Bootstrap tables are outside the firmware allocation arena. Map all PCI
 	// MMIO and RAM identity-wise; Windows replaces these tables itself.
-	clear(p.ram[0x1000:0x7000])
-	binary.LittleEndian.PutUint64(p.ram[0x1000:], 0x2003)
-	for i := uint64(0); i < 4; i++ {
-		binary.LittleEndian.PutUint64(p.ram[0x2000+i*8:], 0x3003+i*4096)
-		for j := uint64(0); j < 512; j++ {
-			binary.LittleEndian.PutUint64(p.ram[0x3000+i*4096+j*8:], (i*512+j)*(2<<20)|0x83)
-		}
-	}
+	installEFIBootstrapTables(p.ram, efiPhysicalEnd(uint64(len(p.ram))))
 	binary.LittleEndian.PutUint64(p.ram[0x9008:], 0x00af9b000000ffff)
 	binary.LittleEndian.PutUint64(p.ram[0x9010:], 0x00cf93000000ffff)
 	s, err := p.cpu.SystemRegisters()
@@ -224,7 +224,7 @@ func (p *pc) installUEFI() error {
 	s.Cr4 = 0x620
 	s.Efer = 0x500
 	s.Gdt = x86state.DescriptorTable{Base: 0x9000, Limit: 23}
-	s.Idt = x86state.DescriptorTable{}
+	s.Idt = installEFIExceptionGates(p.ram)
 	if err = p.cpu.SetSystemRegisters(s); err != nil {
 		return err
 	}
@@ -265,8 +265,19 @@ func (p *pc) efiCall() error {
 	for i := 4; i < 10; i++ {
 		args[i] = binary.LittleEndian.Uint64(extra[(i-4)*8:])
 	}
+	// Save the caller before dispatch: shutdown exits on some accelerators can
+	// expose reset state rather than the original faulting registers. This is
+	// a last-known firmware boundary, not the eventual fault location.
+	record := map[string]any{"service": name, "args": fmt.Sprintf("%#x", args[:6]),
+		"rip": fmt.Sprintf("%#x", r.Rip), "rsp": fmt.Sprintf("%#x", r.Rsp), "cr3": fmt.Sprintf("%#x", s.Cr3)}
+	var caller [8]byte
+	if e := p.efiMemory.ReadMemory(r.Rsp, caller[:], cpu.Read); e == nil {
+		record["caller"] = fmt.Sprintf("%#x", binary.LittleEndian.Uint64(caller[:]))
+	} else {
+		record["caller_error"] = e.Error()
+	}
 	status, err := p.efi.Call(address, args)
-	record := map[string]any{"service": name, "status": fmt.Sprintf("%#x", status), "args": fmt.Sprintf("%#x", args[:6])}
+	record["status"] = fmt.Sprintf("%#x", status)
 	if name == "OpenProtocol" || name == "HandleProtocol" {
 		var raw [16]byte
 		if e := p.efiMemory.ReadMemory(args[1], raw[:], cpu.Read); e == nil {
@@ -282,4 +293,37 @@ func (p *pc) efiCall() error {
 	}
 	r.Rax = status
 	return p.cpu.SetRegisters(r)
+}
+
+// The firmware arena uses guest physical addresses, not compact backing offsets.
+func efiPhysicalEnd(memory uint64) uint64 {
+	if memory > pciMemoryBase {
+		return highRAMBase + memory - pciMemoryBase
+	}
+	return memory
+}
+func efiReservations(memory uint64) []uefi.MemoryReservation {
+	r := []uefi.MemoryReservation{
+		{Address: 0x80000, Pages: 0x20, Type: 0}, // bootstrap page directories
+		{Address: 0xa0000, Pages: 0x60, Type: 0}, // VGA and legacy firmware
+	}
+	if memory > pciMemoryBase {
+		r = append(r, uefi.MemoryReservation{Address: pciMemoryBase, Pages: (highRAMBase - pciMemoryBase) / 4096, Type: 0})
+	}
+	return r
+}
+func installEFIBootstrapTables(ram []byte, end uint64) {
+	clear(ram[0x1000:0x3000])
+	clear(ram[0x80000:0xa0000])
+	binary.LittleEndian.PutUint64(ram[0x1000:], 0x2003)
+	// Include the PCI aperture even on small machines. 2MiB pages do not
+	// require the optional 1GiB-page CPU feature.
+	count := (max(end, uint64(highRAMBase)) + (1 << 30) - 1) >> 30
+	for i := uint64(0); i < count; i++ {
+		table := uint64(0x80000) + i*4096
+		binary.LittleEndian.PutUint64(ram[0x2000+i*8:], table|3)
+		for j := uint64(0); j < 512; j++ {
+			binary.LittleEndian.PutUint64(ram[table+j*8:], (i*512+j)*(2<<20)|0x83)
+		}
+	}
 }

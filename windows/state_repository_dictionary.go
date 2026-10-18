@@ -45,6 +45,8 @@ func stateRepositoryDictionaryBounded(properties *starlark.Dict, depth int, budg
 		}
 		var value any
 		switch v := item[1].(type) {
+		case starlark.Bool:
+			value = bool(v)
 		case starlark.String:
 			value = string(v)
 		case *starlark.Dict:

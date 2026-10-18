@@ -9,17 +9,44 @@ small real-mode firmware entrypoints. Video calls exchange register values
 through I/O packets, including when a guest interprets the BIOS ROM. No external firmware binary or process
 is used.
 
-UEFI requires `x86_64` and enables ACPI and PCI IDE. It reads the GPT and FAT
+UEFI requires `x86_64` and enables ACPI. Storage defaults to PCI IDE;
+`vmm.disk(..., bus="nvme")` selects the shared NVMe controller instead. It reads the GPT and FAT
 EFI System Partition through native parsers, loads `EFI/Boot/BootX64.efi`,
 and executes the original AMD64 image. Its firmware services share the
-portable `emulator/uefi` implementation and the IDE device's disk overlay.
+portable `emulator/uefi` implementation and the selected device's disk overlay.
 The graphics output protocol exposes a 1280×720 BGRX framebuffer with a
 hardware device path. Guest page tables translate firmware-call arguments;
 runtime address mapping updates the firmware tables and their checksums.
 Usable low RAM remains available for Windows startup stubs; VGA and firmware
-ranges are reserved. BIOS and direct-Darwin x86_64 machines accept 16 MiB–8 GiB RAM; i386 accepts up to 3 GiB and native UEFI retains its 2 GiB ceiling. Low RAM ends at the PCI MMIO window (0xc0000000). Additional RAM is mapped above 4 GiB, with compact host backing. BIOS E820 and the Darwin EFI map describe both ranges; E801 reports only low RAM. Native memory inspection and DMA reject the PCI hole rather than aliasing it to RAM.
+ranges are reserved. BIOS and direct-Darwin x86_64 machines accept 16 MiB–8 GiB RAM; i386 accepts up to 3 GiB and native x86_64 UEFI accepts up to 16 GiB. Low RAM ends at the PCI MMIO window (0xc0000000). Additional RAM is mapped above 4 GiB, with compact host backing. BIOS E820 and the Darwin/native UEFI maps describe both ranges; E801 reports only low RAM. Native memory inspection and DMA reject the PCI hole rather than aliasing it to RAM.
 The `efi` inspection field contains the last 32 firmware calls and statuses.
 Unsupported firmware services stop execution with their name and arguments.
+
+
+### Native UEFI multicore
+
+Use `vmm.machine(architecture="x86_64", cpus=4, ...)` with
+`cc.backend(uefi=True, ...)` for four cores. The UEFI PC accepts one through
+four CPUs; legacy BIOS, direct Darwin and ARM64 profiles retain their existing
+single-CPU limits. The default remains one CPU.
+
+Multicore CPUID describes one package, one hardware thread per core, and local
+APIC IDs matching the ACPI MADT and AML processors. It adds sanitized cache and
+extended topology enumeration without enabling XSAVE/AVX. Each CPU executes
+concurrently through KVM, including architectural INIT/SIPI startup. A single
+coordinator serializes device exits and polls timers independently of CPU0.
+Pause, stop, inspection and capture join every CPU; close also joins storage
+before releasing shared RAM. Machine-wide A20 changes run at an all-CPU stop.
+
+`vm.extension("cc.v1").cpus()` returns a bounded list of per-CPU register
+summaries (`id`, `rip`, `rsp`, `cr0`, `cr3`, `cr4`, `efer`) from one all-CPU stop.
+Existing `state()` and virtual-address inspection use CPU0. Execution breakpoints
+and instruction stepping are explicitly unavailable on multicore machines.
+
+Windows 11 build 26300 has been verified from a fresh in-memory image through
+the Trex REPL with four cores, 16 GiB RAM, USB input, per-core affinity workloads,
+all-core pause/resume, and clean ACPI S5 shutdown. This does not change the
+standalone desktop application's CPU default or establish a performance speedup.
 
 Fixed-disk BIOS services include EDD probing, extended reads/writes, verification,
 seek and drive parameters. Larger disks use translated BIOS CHS independently
@@ -33,7 +60,7 @@ The `x86_64` target also exposes supported long-mode, SYSCALL, NX and
 CMPXCHG16B, SSE3, SSSE3, SSE4.1, SSE4.2 and POPCNT features when supported
 by the accelerator.
 
-The PC contains one CPU, KVM PIC/PIT, a CMOS RTC with periodic IRQ8, one primary
+The PC defaults to one CPU and contains KVM PIC/PIT, a CMOS RTC with periodic IRQ8, one primary
 ATA PIO disk, standard planar VGA and i8042 keyboard/mouse. The disk uses the
 portable block interface; snapshot attachments use bounded memory overlays.
 `cc.backend(overlay_limit=...)` sets the dirty-memory bound in bytes; the
@@ -181,7 +208,7 @@ Reading a screenshot or state serializes with execution. Closing the VM
 releases KVM and RAM and is idempotent; stopping preserves inspection until
 close. Events support `debug.select` and the portable automation helpers.
 
-This platform supports one IDE disk, BIOS modes 03h/06h/10h/12h, UEFI GOP, PNG capture,
+This platform supports one IDE disk (or one NVMe disk with x86_64 UEFI), BIOS modes 03h/06h/10h/12h, UEFI GOP, PNG capture,
 keyboard transitions, chords and relative PS/2 pointer input. Text injection,
 interactive host windows, reset, guest snapshots and debugger
 channels are not advertised capabilities. ARM64 UEFI continuation remains
@@ -301,3 +328,65 @@ extension retain the existing accumulated-coordinate input behavior.
 completion count, pending reports, and delivered report count. Windows-specific
 driver source and installation policy live in TinyRangeX; no guest-driver
 code is embedded in the backend or compiler.
+
+## USB desktop input
+
+`cc.backend(usb=True)` on x86_64 adds the UHCI PCI controller and native
+USB HID keyboard/absolute pointer (including wheel), using guest inbox drivers.
+Keyboard input falls back to PS/2 until the USB keyboard is configured.
+`AbsolutePointer` reports availability only after the guest configures the HID
+pointer, so frontends can release relative capture and switch coordinates safely.
+Native Windows 11 build 26300 has been boot-tested with 16 GiB, USB keyboard,
+absolute pointer, and wheel scrolling. This does not add SMP or an NVMe device.
+
+## Native x86 NVMe
+
+Use `vmm.disk(device, bus="nvme", unit=0)` with `cc.backend(uefi=True)`.
+Do not also enable `pci_ide`, PIO-only mode, an alternate IDE model, or CHS
+geometry. Legacy BIOS and `bus="auto"` retain IDE behavior.
+
+The PC reuses cc's transport-independent NVMe controller at PCI 00:01.0
+(1b36:0010, class 010802), with a relocatable 16-KiB MMIO BAR, namespace 1,
+64-bit queue/DMA addresses and one I/O queue pair. PCI MSI is advertised when
+supported by the accelerator, with INTx/GSI16 fallback. ACPI routing and the EFI
+namespace device path match the controller; no IDE function or legacy ATA ports
+are exposed for this profile. The existing snapshot/read-only disk policy is
+preserved. `cc.v1.state().nvme` reports PCI configuration and controller registers.
+
+This is a synchronous emulated block controller, not physical NVMe passthrough
+or a multiqueue throughput promise. Guest boot policy must install an NVMe driver;
+changing the VM bus alone does not make an IDE-specific image bootable.
+
+
+## Hyper-V clock and timer enlightenments
+
+The x86_64 machine enables a bounded Hyper-V interface when the accelerator
+reports the required features. Legacy BIOS CPUID policy is unchanged. On Linux,
+`KVM_GET_SUPPORTED_HV_CPUID` (system capability 191) is queried separately from
+ordinary supported CPUID; kernels without it keep the existing hardware clocks.
+The machine advertises `Hv#1`, reference-time counter and reference-TSC page,
+and the guest-OS-ID/hypercall MSRs. It exposes SynIC, synthetic timers and VP
+index only after `KVM_CAP_HYPERV_SYNIC` activation succeeds on each vCPU's
+lifetime owner thread. Direct timers are exposed only if KVM reports support.
+Clock-only support remains usable if SynIC activation is unavailable; ioctl
+errors fail construction rather than claiming a feature that was not enabled.
+
+Timer delivery and clock MSRs stay kernel-owned. SynIC configuration exits need
+no userspace device routing in this machine. There is no VMBus implementation:
+userspace hypercalls, including Windows' extended-capabilities query, receive
+`HV_STATUS_INVALID_HYPERCALL_CODE`; unhandled Hyper-V exit kinds remain fatal.
+Reset, crash, nested virtualization, TLB/IPI and APIC-assist enlightenments are
+not advertised. This is not a claim of complete Hyper-V compatibility.
+
+Paused `cc.v1.state().interrupts` includes bounded `hypervN.*` clock/timer MSR
+values and rejected-hypercall count/last input. All CPU-local ioctls use the
+same lifetime owner as execution. The usual pause/join requirement applies.
+Native tests execute guest MSR instructions, validate the reference-TSC page,
+and verify both SynIC message delivery and direct timer interrupts. Policy
+coverage checks prerequisites, unavailable capability, activation errors and
+legacy exclusion. ABI coverage verifies rejected-hypercall completion.
+
+Specification references: Linux KVM API sections `KVM_GET_SUPPORTED_HV_CPUID`
+and `KVM_CAP_HYPERV_SYNIC`; Hyper-V TLFS feature/MSR definitions; QEMU's
+`docs/system/i386/hyperv.rst` describes the clock/timer dependencies. No QEMU
+process is involved in this implementation.

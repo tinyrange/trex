@@ -3,6 +3,7 @@ package srdictionary
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"reflect"
 	"testing"
 )
@@ -97,4 +98,45 @@ func FuzzDecodeDictionary(f *testing.F) {
 			t.Fatalf("noncanonical accepted dictionary: %v", err)
 		}
 	})
+}
+
+// Captured from the primary tile created by Windows 26300.9457 for Settings.
+// Unlike strings, type 1 stores its scalar directly after the UTF-16 key.
+func TestNativeTileBooleanWire(t *testing.T) {
+	wire, err := hex.DecodeString("5352443129000000010000001d00000001000000120033003400350033003700350035003900000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []bool{true, false} {
+		if value {
+			wire[len(wire)-1] = 1
+		} else {
+			wire[len(wire)-1] = 0
+		}
+		want := Dictionary{{"34537559", value}}
+		got, err := Decode(wire)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("native boolean: %#v %v", got, err)
+		}
+		encoded, err := Encode(want)
+		if err != nil || !bytes.Equal(encoded, wire) {
+			t.Fatalf("native wire: %x %v", encoded, err)
+		}
+	}
+	for n := range len(wire) {
+		if _, err := Decode(wire[:n]); err == nil {
+			t.Fatalf("accepted truncation %d", n)
+		}
+	}
+	wire[len(wire)-1] = 2
+	if _, err := Decode(wire); err == nil {
+		t.Fatal("accepted invalid boolean")
+	}
+	empty, err := Encode(Dictionary{{"", true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(empty); err != nil {
+		t.Fatal(err)
+	}
 }

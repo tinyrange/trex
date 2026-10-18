@@ -13,6 +13,9 @@ import (
 // step is a bounded native debugger operation. It does not interpret or patch
 // guest instructions. Devices and firmware retain their normal execution path.
 func (i inspection) step(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if len(i.driver.pc.cpus) > 1 {
+		return nil, fmt.Errorf("single stepping requires a single-CPU machine")
+	}
 	count := 1
 	var stopBelow uint64
 	if err := starlark.UnpackArgs("cc.step", args, kwargs, "count?", &count, "stop_below?", &stopBelow); err != nil {

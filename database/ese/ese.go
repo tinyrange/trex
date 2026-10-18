@@ -606,7 +606,14 @@ func (d *Database) decodeTaggedValues(data []byte) (map[uint32]taggedValue, erro
 	if len(data) < 4 {
 		return result, nil
 	}
-	first := int(binary.LittleEndian.Uint16(data[2:4]) & 0x7fff)
+	// TAGFLD reserves bits 13 and 14 for NULL and extended-info on
+	// 2/4/8 KiB pages; on large pages those bits are part of the offset.
+	mask := uint16(0x7fff)
+	small := d.info.PageSize <= 8192
+	if small {
+		mask = 0x1fff
+	}
+	first := int(binary.LittleEndian.Uint16(data[2:4]) & mask)
 	if first == 0 || first%4 != 0 || first > len(data) {
 		return nil, fmt.Errorf("invalid tagged-value directory size %d", first)
 	}
@@ -615,13 +622,19 @@ func (d *Database) decodeTaggedValues(data []byte) (map[uint32]taggedValue, erro
 		directory := index * 4
 		identifier := uint32(binary.LittleEndian.Uint16(data[directory : directory+2]))
 		rawStart := binary.LittleEndian.Uint16(data[directory+2 : directory+4])
-		start := int(rawStart & 0x7fff)
+		start := int(rawStart & mask)
 		end := len(data)
 		if index+1 < count {
-			end = int(binary.LittleEndian.Uint16(data[directory+6:directory+8]) & 0x7fff)
+			end = int(binary.LittleEndian.Uint16(data[directory+6:directory+8]) & mask)
 		}
 		if start < first || end < start || end > len(data) {
 			return nil, fmt.Errorf("tagged value %d has invalid range %d:%d", identifier, start, end)
+		}
+		if small && rawStart&0x2000 != 0 {
+			if rawStart&0x4000 != 0 || start != end {
+				return nil, fmt.Errorf("tagged value %d has invalid NULL encoding", identifier)
+			}
+			continue
 		}
 		flags := uint8(0)
 		if d.info.Revision >= 0x11 && d.info.PageSize > 8192 || rawStart&0x4000 != 0 {

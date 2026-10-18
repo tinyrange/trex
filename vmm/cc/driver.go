@@ -96,6 +96,9 @@ func (d *driver) finish(reason, detail string, clean bool) {
 	close(d.finished)
 }
 func (d *driver) loop() {
+	if d.pc.pciNIC != nil {
+		defer d.pc.pciNIC.port.Close()
+	}
 	if d.pc.nic != nil {
 		defer d.pc.nic.port.Close()
 	}
@@ -109,6 +112,10 @@ func (d *driver) loop() {
 		d.mu.Unlock()
 	}()
 	d.emit("started", nil)
+	if len(d.pc.cpus) > 1 {
+		d.loopSMP()
+		return
+	}
 	for {
 		state, _ := d.Status(d.ctx)
 		if !state.Running {
@@ -161,7 +168,7 @@ func (d *driver) loop() {
 			case hypervisor.X86ExitMMIO:
 				err = d.pc.handleMMIO(ex)
 			case hypervisor.X86ExitShutdown:
-				d.finish("guest_failure", "x86 triple fault", false)
+				d.finish("guest_failure", d.pc.tripleFaultDetail(d.pc.cpu), false)
 				continue
 			default:
 				err = fmt.Errorf("unhandled x86 exit %d", ex.Reason)
@@ -184,7 +191,7 @@ func (d *driver) call(ctx context.Context, fn func() error) error {
 		return &vmm.Error{Code: vmm.ErrorState, Message: "cc VM is closed"}
 	case d.requests <- r:
 	}
-	_ = d.pc.cpu.Cancel()
+	d.cancelCPUs()
 	select {
 	case err := <-r.reply:
 		return err
@@ -261,7 +268,7 @@ func (d *driver) Powerdown(ctx context.Context) error {
 }
 func (d *driver) Close(ctx context.Context) error {
 	d.cancel()
-	_ = d.pc.cpu.Cancel()
+	d.cancelCPUs()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
