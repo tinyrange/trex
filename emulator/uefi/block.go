@@ -134,7 +134,16 @@ func (m *Machine) blockCall(name string, a [8]uint64) uint64 {
 	if !ok {
 		return invalidParameter
 	}
-	if name == "Block.Reset" || name == "Block.Flush" {
+	if name == "Block.Flush" {
+		device := m.diskStores[endpoint.Store].device
+		if flusher, ok := device.(block.Flusher); ok {
+			if err := flusher.Flush(); err != nil {
+				return efiError | 7
+			}
+		}
+		return 0
+	}
+	if name == "Block.Reset" {
 		return 0
 	}
 	if a[1] != 1 {
@@ -211,4 +220,17 @@ func (s diskStore) clone() (diskStore, error) {
 		return diskStore{}, err
 	}
 	return diskStore{overlay: overlay, limit: s.limit}, nil
+}
+
+// Native continuation keeps caller-owned backing shared with firmware. Memory
+// overlays retain the existing independent-copy behavior for experiments.
+func (s diskStore) nativeDevice() (block.Device, error) {
+	if s.device != nil {
+		return s.device, nil
+	}
+	cloned, err := s.clone()
+	if err != nil {
+		return nil, err
+	}
+	return cloned.overlay, nil
 }

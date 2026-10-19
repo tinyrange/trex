@@ -227,3 +227,34 @@ func TestMemoryMapCoversRAMWithoutOverlap(t *testing.T) {
 		t.Fatal("incomplete map")
 	}
 }
+
+func TestFourGiBRAMHighAddresses(t *testing.T) {
+	// Load and store through the CPU's initial identity map above 4 GiB.
+	m, err := New(fixture(t, 0xf9000001, 0xf9400002, 0xd65f03c0), Options{Memory: 4 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	high := ramBase + (4 << 30) - page
+	if got := m.allocate(2, 2, 1, high); got != high {
+		t.Fatalf("high allocation: %#x", got)
+	}
+	m.processor.SetRegister("x0", high)
+	m.processor.SetRegister("x1", 0x12345678)
+	result := m.Run(context.Background(), 10)
+	got, _ := m.Register("x2")
+	if got != 0x12345678 || m.read64(high) != got {
+		t.Fatalf("high memory: %#x, result=%+v", got, result)
+	}
+	end := uint64(ramBase)
+	for data := m.descriptors(); len(data) != 0; data = data[40:] {
+		base, pages := binary.LittleEndian.Uint64(data[8:]), binary.LittleEndian.Uint64(data[24:])
+		if base != end || pages == 0 {
+			t.Fatal("memory map gap or overlap")
+		}
+		end = base + pages*page
+	}
+	if end != ramBase+(4<<30) {
+		t.Fatalf("RAM end: %#x", end)
+	}
+}

@@ -140,7 +140,13 @@ func blockViewBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if err != nil {
 		return nil, fmt.Errorf("view: device: %w", err)
 	}
-	return &blockDeviceFile{name: "block device view", device: device}, nil
+	return View(device), nil
+}
+
+// View exposes live device bytes; it is not an immutable snapshot. The caller
+// must stop concurrent writers before interpreting filesystem metadata.
+func View(device BlockDevice) starfile.File {
+	return &blockDeviceFile{name: "block device view", device: device}
 }
 
 func (v *Value) String() string {

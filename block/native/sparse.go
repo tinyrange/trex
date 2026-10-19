@@ -45,6 +45,6 @@ func NewTemporaryOverlay(base block.Device, dir string) (*TemporaryOverlay, erro
 }
 func (d *TemporaryOverlay) Path() string { return d.file.Name() }
 func (d *TemporaryOverlay) Close() error {
-	d.once.Do(func() { d.closeErr = errors.Join(d.file.Close(), os.Remove(d.file.Name())) })
+	d.once.Do(func() { d.closeErr = errors.Join(d.Err(), d.file.Close(), os.Remove(d.file.Name())) })
 	return d.closeErr
 }

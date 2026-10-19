@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	blockstar "github.com/tinyrange/trex/block/star"
+	"github.com/tinyrange/trex/block"
 	"github.com/tinyrange/trex/emulator/arm64"
 	"github.com/tinyrange/trex/emulator/cpu"
 	"j5.nz/cc/devices/ramfb"
@@ -16,7 +16,7 @@ import (
 )
 
 // NativeExecution is independent of the emulator checkpoint. It owns a copy of
-// RAM and resumes the architectural state after validated ExitBootServices.
+// RAM and runs from either the EFI entry point or a suspended firmware state.
 type NativeExecution struct {
 	pci                                                         hypervisor.MMIODevice
 	Keyboard, Pointer                                           hypervisor.InputDevice
@@ -28,15 +28,19 @@ type NativeExecution struct {
 	gates                                                       map[uint16]string
 	virtualMap                                                  runtimeMap
 	WindowsDebug                                                bool
+	TrapDebug                                                   bool
 	Modules                                                     map[uint64]NativeModule
 	devices                                                     []hypervisor.MMIODevice
 	Counts                                                      map[string]uint64
 	MMIOLimit                                                   int
 	MMIO                                                        []MMIOAccess
+	FirmwareLimit                                               int
+	FirmwareCalls                                               []NativeFirmwareCall
 	Console                                                     []string
 	consoleBytes                                                uint64
 	Display                                                     *ramfb.Device
-	Disk                                                        *blockstar.OverlayDevice
+	graphics                                                    *Firmware
+	Disk                                                        block.Device
 	clockBase, clockFrequency, firmwareTicks, firmwareFrequency uint64
 }
 
@@ -46,7 +50,7 @@ func (m nativePhysical) ReadPhysical(a uint64, b []byte) error  { return m.n.Rea
 func (m nativePhysical) WritePhysical(a uint64, b []byte) error { return m.n.WriteMemory(a, b) }
 
 func (n *NativeExecution) AttachRAMFB(base uint64) error {
-	if n.Display != nil {
+	if n.Display != nil || n.graphics != nil {
 		return fmt.Errorf("native RAMFB already attached")
 	}
 	d, err := ramfb.New(base, nativePhysical{n})
@@ -95,28 +99,45 @@ func (d observedMMIO) Write(a uint64, s int, v uint64) error {
 	return e
 }
 
-type nativeDisk struct{ *blockstar.OverlayDevice }
+type nativeDisk struct{ block.Device }
+
+func (d nativeDisk) WriteAt(p []byte, offset int64) (int, error) {
+	writer, ok := d.Device.(block.Writer)
+	if !ok {
+		return 0, block.ErrReadOnly
+	}
+	return writer.WriteAt(p, offset)
+}
+func (d nativeDisk) Flush() error {
+	if f, ok := d.Device.(block.Flusher); ok {
+		return f.Flush()
+	}
+	return nil
+}
 
 func (d nativeDisk) Size() int64 { return d.Geometry().Size }
 
 func (n *NativeExecution) AttachNVMe(m *Machine, handle uint64, config hypervisor.NVMePCIConfiguration) error {
 	endpoint, ok := m.blockHandles[handle]
-	if !ok || endpoint.Offset != 0 || endpoint.Size != m.diskStores[endpoint.Store].overlay.Geometry().Size {
+	if !ok || endpoint.Offset != 0 {
 		return fmt.Errorf("native NVMe requires a whole-disk firmware handle")
 	}
 	if len(n.devices) != 0 {
 		return fmt.Errorf("native PCI bus already attached")
 	}
-	store, err := m.diskStores[endpoint.Store].clone()
+	disk, err := n.firmware.diskStores[endpoint.Store].nativeDevice()
 	if err != nil {
 		return err
 	}
-	dev, err := n.cpu.NewNVMePCI(config, nativeDisk{store.overlay})
+	if endpoint.Size != disk.Geometry().Size {
+		return fmt.Errorf("native NVMe requires a whole-disk firmware handle")
+	}
+	dev, err := n.cpu.NewNVMePCI(config, nativeDisk{disk})
 	if err != nil {
 		return err
 	}
 	n.devices = append(n.devices, observedMMIO{dev, n})
-	n.Disk = store.overlay
+	n.Disk = disk
 	n.pci = dev
 	return nil
 }
@@ -127,8 +148,8 @@ type NativeModule struct {
 }
 
 func (m *Machine) StartNative(ctx context.Context) (*NativeExecution, error) {
-	if m.memory == nil || !m.exited {
-		return nil, fmt.Errorf("uefi: native continuation requires successful ExitBootServices")
+	if m.memory == nil {
+		return nil, fmt.Errorf("uefi: native execution requires an open machine")
 	}
 	s := hypervisor.ARM64State{System: map[uint16]uint64{}}
 	for i := range s.X {
@@ -181,20 +202,52 @@ func (m *Machine) StartNative(ctx context.Context) (*NativeExecution, error) {
 		_ = backend.Close()
 		return nil, err
 	}
-	n := &NativeExecution{cpu: backend, ram: ram, base: m.ramBase, gates: map[uint16]string{}}
+	n := &NativeExecution{cpu: backend, ram: ram, base: m.ramBase, gates: map[uint16]string{}, TrapDebug: true}
 	n.Modules = map[uint64]NativeModule{}
 	n.Counts = map[string]uint64{}
 	fw := *m
+	fw.allocations = slices.Clone(m.allocations)
+	fw.services = maps.Clone(m.services)
+	fw.configuration = maps.Clone(m.configuration)
+	fw.protocolOpens = maps.Clone(m.protocolOpens)
+	fw.blockHandles = maps.Clone(m.blockHandles)
+	fw.blockInterfaces = maps.Clone(m.blockInterfaces)
+	fw.protocols = make(map[uint64]map[string]uint64, len(m.protocols))
+	for handle, protocols := range m.protocols {
+		fw.protocols[handle] = maps.Clone(protocols)
+	}
+	fw.diskStores = make([]diskStore, len(m.diskStores))
+	for i, store := range m.diskStores {
+		device, err := store.nativeDevice()
+		if err != nil {
+			_ = backend.Close()
+			return nil, err
+		}
+		fw.diskStores[i] = diskStore{device: device}
+	}
 	fw.processor = m.processor.Clone().(*arm64.CPU)
 	fw.memory = nil
 	fw.runtimeMemory = n
-	fw.opts.Observe = nil
+	fw.opts.Observe = func(e Event) error {
+		if e.Kind == "console" && n.consoleBytes+uint64(len(e.Text)) <= 65536 {
+			n.Console = append(n.Console, e.Text)
+			n.consoleBytes += uint64(len(e.Text))
+		}
+		return nil
+	}
 	fw.variables = maps.Clone(m.variables)
 	for k, v := range fw.variables {
 		v.Data = slices.Clone(v.Data)
 		fw.variables[k] = v
 	}
 	n.firmware = &fw
+	fw.firmwareGate = func(addr uint64) []byte {
+		id := uint16((addr-fw.firstService)/4 + 1)
+		n.gates[id] = fw.services[addr]
+		var code [4]byte
+		binary.LittleEndian.PutUint32(code[:], 0xd4000002|uint32(id)<<5)
+		return code[:]
+	}
 	n.clockBase, n.clockFrequency, err = backend.Counter()
 	if err != nil {
 		_ = backend.Close()
@@ -209,15 +262,42 @@ func (m *Machine) StartNative(ctx context.Context) (*NativeExecution, error) {
 		n.gates[id] = name
 		binary.LittleEndian.PutUint32(ram[addr-m.ramBase:], 0xd4000002|uint32(id)<<5)
 	}
+	// An EFI image returning to its caller is a terminal firmware outcome.
+	binary.LittleEndian.PutUint32(ram[m.returnAddress-m.ramBase:], 0xd4000002|0xffff<<5)
 	return n, nil
 }
 
 func (n *NativeExecution) Run(ctx context.Context) (hypervisor.Exit, error) {
+	// A backing failure must stop execution even if the guest ignores the
+	// controller's I/O error. Cancellation wakes a blocked native CPU.
+	if disk, ok := n.Disk.(interface {
+		Done() <-chan struct{}
+		Err() error
+	}); ok {
+		if err := disk.Err(); err != nil {
+			return hypervisor.Exit{}, err
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-disk.Done():
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
 	if n.stopped != nil {
 		return *n.stopped, nil
 	}
 	for {
 		ex, err := n.cpu.Run(ctx)
+		if disk, ok := n.Disk.(interface{ Err() error }); ok {
+			if failure := disk.Err(); failure != nil {
+				return ex, failure
+			}
+		}
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 				pc, readErr := n.cpu.Register(31)
@@ -232,6 +312,13 @@ func (n *NativeExecution) Run(ctx context.Context) (hypervisor.Exit, error) {
 			continue
 		}
 		if ex.Reason == 1 && ex.Syndrome>>26 == 0x16 {
+			if uint16(ex.Syndrome) == 0xffff {
+				status, err := n.cpu.Register(0)
+				if err != nil {
+					return ex, err
+				}
+				return ex, fmt.Errorf("EFI image returned status %#x", status)
+			}
 			if name, ok := n.gates[uint16(ex.Syndrome)]; ok {
 				if err := n.runtimeCall(name); err != nil {
 					return ex, err
@@ -409,6 +496,7 @@ func (n *NativeExecution) runtimeCall(name string) error {
 		args[i] = value
 	}
 	status := unsupported
+	n.Counts["firmware_"+name]++
 	if name == "GetTime" {
 		now, _, err := n.cpu.Counter()
 		if err != nil {
@@ -421,6 +509,28 @@ func (n *NativeExecution) runtimeCall(name string) error {
 		}
 	}
 	switch name {
+	case "GOP.QueryMode", "GOP.SetMode", "GOP.Blt":
+		if n.graphics == nil {
+			return fmt.Errorf("native GOP not installed")
+		}
+		var values [10]uint64
+		copy(values[:], args[:])
+		if name == "GOP.Blt" {
+			sp, err := n.cpu.SystemRegister(0xe208)
+			if err != nil {
+				return err
+			}
+			var stack [16]byte
+			if err := n.ReadVirtualMemory(sp, stack[:]); err != nil {
+				return err
+			}
+			values[8], values[9] = binary.LittleEndian.Uint64(stack[:]), binary.LittleEndian.Uint64(stack[8:])
+		}
+		var err error
+		status, err = n.graphics.graphicsCall(name, values)
+		if err != nil {
+			return err
+		}
 	case "SetVirtualAddressMap":
 		status = n.setVirtualAddressMap(args)
 	case "GetTime", "GetVariable", "SetVariable", "GetNextVariableName", "QueryVariableInfo":
@@ -430,11 +540,19 @@ func (n *NativeExecution) runtimeCall(name string) error {
 			return fmt.Errorf("unimplemented native runtime service %s", name)
 		}
 	default:
-		return fmt.Errorf("unimplemented native runtime service %s args=%#x", name, args)
+		if fw.exited {
+			return fmt.Errorf("unimplemented native runtime service %s args=%#x", name, args)
+		}
+		var supported bool
+		status, supported = fw.dispatch(name, args)
+		if !supported {
+			return fmt.Errorf("unimplemented native boot service %s args=%#x", name, args)
+		}
 	}
 	if fw.err != nil {
 		return fmt.Errorf("native runtime %s: %w", name, fw.err)
 	}
+	n.observeFirmware(name, args, status)
 	lr, err := n.cpu.Register(30)
 	if err != nil {
 		return err
