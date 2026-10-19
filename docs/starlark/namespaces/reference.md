@@ -2933,6 +2933,12 @@ Creates an NBD protocol server for a block device. serve(channel) processes requ
 
 Creates a bounded writable copy-on-write layer over a base block device. Writes affect the overlay, leaving the base unchanged; max_dirty_bytes bounds retained changes.
 
+### `block.temporary_overlay`
+
+`block.temporary_overlay(base, directory) -> disposable sparse block device`
+
+Creates disposable native sparse backing in the explicit host directory, with no changed-data quota or memory fallback. The immutable base remains unchanged. Create it before its VM; runtime cleanup closes users before removing the backing at script exit. Available host disk space bounds writes; backing I/O errors are terminal. It is not a snapshot or reusable disk image.
+
 ### `block.view`
 
 `block.view(device) -> live read-only file view`
@@ -3177,7 +3183,7 @@ Creates a portable in-process ARM64 or AMD64 instruction context independently o
 
 `emulator.uefi(image, memory=256MiB, memory_base=0x40000000, image_base=0, stack_size=1MiB, time_unix=0, image_path='\\EFI\\Boot\\BootAA64.efi', registers={}, observe=None, device_path=b'', event_kinds=None)`
 
-Loads an ARM64 EFI image into a configurable in-process interpreter. Runs stop at budgets, watches, explicit breakpoints, unsupported operations or validated ExitBootServices. CPU, RAM, firmware and disk overlays support checkpoints; digest-checked rewrites accelerate recognized routines. See the [UEFI inspection API](../../../emulator/uefi/README.md) for configuration and limitations. Native HVF continuation is not implemented.
+Loads an ARM64 EFI image into a configurable in-process interpreter. Runs stop at budgets, watches, explicit breakpoints, unsupported operations or validated ExitBootServices. CPU, RAM, firmware and disk overlays support checkpoints; digest-checked rewrites accelerate recognized routines. See the [UEFI inspection API](../../../emulator/uefi/README.md) for configuration and limitations. Native HVF can execute directly from the EFI entry point or continue suspended firmware state; see the [native UEFI API](../../../docs/uefi-native.md).
 
 ### `emulator.x86`
 

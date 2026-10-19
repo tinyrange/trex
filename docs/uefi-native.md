@@ -1,25 +1,27 @@
-# ARM64 UEFI continuation
+# ARM64 native UEFI execution
 
-`emulator.uefi` can seed an independent native machine after a successful,
-validated `ExitBootServices`. The native backend is Crumblecracker, checked out
+`emulator.uefi` can start an independent native machine at the EFI entry point,
+or continue a suspended software boot. The native backend is Crumblecracker, checked out
 as the `cc` submodule. Apple Silicon hosts use Hypervisor.framework through
 purego and a small ARM64 SIMD-register ABI bridge. Build with `CGO_ENABLED=0`.
 The executable needs the `com.apple.security.hypervisor` entitlement; the
 entitlements file is `cc/tools/entitlements.xml`.
 
-The handoff copies RAM, general/SIMD registers, EL1 translation state and the
-disk overlay. Firmware runtime entrypoints become identified HVC calls. The
-runtime adapter handles virtual-address conversion, time and variable services.
+The handoff copies RAM, general/SIMD registers and EL1 translation state.
+File inputs get an independent memory-overlay copy; explicitly supplied block
+devices retain the same caller-owned backing. Firmware entrypoints become identified HVC calls.
+Boot services use the shared Go firmware implementation; runtime services handle
+virtual-address conversion, time and variables.
 Unexpected firmware services, exceptions and MMIO accesses remain explicit
 stops. Software accelerators do not patch the Windows kernel.
 
 ## Starlark lifecycle
 
-Configure ACPI and firmware block devices before the software boot. After
-`vm.run(...)` returns `reason == "exit_boot_services"`:
+Configure ACPI and firmware block devices, then start native execution directly
+without calling `vm.run`. Boot Manager, winload and the kernel execute on HVF:
 
 ```starlark
-vm.native_start(disk_handle = disk_handle, ramfb_base = 0x09020000)
+vm.native_start(disk_handle = disk_handle, gop = True, input = True)
 stop = vm.native_run(timeout = 30.0, windows_debug = True, mmio_trace = 64)
 print(stop)
 print(vm.native_console())
@@ -30,10 +32,42 @@ vm.native_close()
 ```
 
 `native_start` creates one native execution. Calling it twice is an error.
+`trap_debug=False` leaves debug exceptions and debug-register accesses to the
+guest. This avoids a host exit on Windows' frequent MDSCR accesses during
+syscalls and page faults. Choose this at creation for ordinary desktop runs;
+the default `True` retains debugger stops and Windows debug-service observations.
+`windows_debug=True` requires debug trapping. The policy remains fixed for the
+execution, so switching cannot mix emulated and native debug-register state.
+`gop=True` provides a 1280×720 BGRX firmware framebuffer in reserved guest
+RAM for the OS's built-in display driver. It is mutually exclusive with
+`ramfb_base`, which exposes the fw_cfg device for a guest RAMFB driver.
 `native_close` releases only the native execution and is idempotent; another
-`native_start` can reuse the software EBS state. `vm.close()` closes both.
+`native_start` can reuse the original software state. `vm.close()` closes both.
 Software `checkpoint`/`restore` affect only software state, never the running
 native machine. Native snapshots/restore are not exposed by this adapter.
+
+`emulator.uefi(..., memory=4<<30)` supports 4 GiB of guest RAM. The physical
+range starts at 1 GiB, so its upper GiB is above physical address 4 GiB.
+Guest RAM is additional to image construction and software/native handoff memory.
+
+For disposable sparse backing without a changed-data quota, create the device
+before the VM and pass it directly to `vm.block_device`:
+
+```starlark
+working = block.temporary_overlay(block.device(disk), directory="local")
+vm = emulator.uefi(boot, memory=4<<30)
+disk_handle = vm.block_device(working, device_path=disk_path)
+```
+
+The native frontend owns the temporary backing file and removes it at script
+exit, including script failures. UEFI machines are also runtime-owned and close
+before backing created earlier. Explicit `vm.close()` stops the VM immediately;
+the backing remains available until script exit. There is no memory fallback or
+dirty-byte quota: available host filesystem space bounds writes. A backing I/O
+failure stops native execution. Abrupt process termination can leave an orphan.
+The immutable base image is never modified or materialized in this file.
+Caller-owned devices cannot be checkpointed; file inputs retain bounded memory
+overlays for independent software experiments.
 
 `native_start` accepts an optional whole-disk firmware handle and these native
 PCI parameters. ACPI must describe the same topology:
@@ -85,16 +119,24 @@ module names, bases and sizes. `native_stats()` reports cumulative exit/MMIO
 counts and a stopped GIC/timer state observation. Its counter uses
 `mach_absolute_time() - vtimer_offset`, the HVF clock domain.
 
+`firmware_trace` similarly retains up to 4096 completed firmware calls per run.
+`native_firmware()` returns service names, argument values, EFI status and the
+protocol GUID for protocol lookup/open/close calls. The GUID is captured at the
+call, before the guest can reuse its buffer. Both traces default to disabled.
+
 Use `vm.register(name, native=True)`, `vm.memory(address, size, native=True)` and
 `vm.disassemble(address, count=..., native=True)` to inspect native execution.
 Memory/disassembly accept `physical=True`; otherwise they walk the native
 guest's current translation tables. Native register writes are not exposed.
 
 `native_screenshot()` returns a PNG file abstraction, copied from the configured
-RAMFB while the guest is stopped. `native_disk()` returns an immutable in-memory
+GOP framebuffer or RAMFB while the guest is stopped. `native_disk()` returns an immutable in-memory
 overlay snapshot. Neither operation creates a host file. Guest filesystem
 caches must be flushed before treating that snapshot as a report of guest
-writes.
+writes. Caller-owned backing does not offer immutable snapshots: request
+`native_disk(snapshot=False)` for a live file view while execution is stopped.
+That view remains valid only while its backing is open and must not be mistaken
+for a filesystem-consistent snapshot.
 
 With `input=True`, the two input BARs start at `0x21004000` and `0x21008000`.
 ACPI must route their INTx interrupts. The guest needs a modern virtio PCI input
@@ -147,6 +189,11 @@ For an interactive native window, supply the original virtio-win 0.1.285 ISO:
 ```sh
 local/trex-hvf scripts/run/windows_hvf.star validationos-arm64.iso virtio-win-0.1.285.iso
 ```
+
+The native run and smoke scripts use 4 GiB guest RAM and disposable sparse
+overlays in the enclosing checkout's `local/` directory, using the same backing
+implementation as `cmd/windows11`. These settings do not establish full Windows
+11 client boot support; that image recipe still needs ARM64 provisioning.
 
 The recipe constructs both the driver files and PnP registry database in memory,
 using the ARM64 input package's INF declarations and a development signing

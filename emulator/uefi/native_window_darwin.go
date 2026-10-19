@@ -11,8 +11,8 @@ import (
 )
 
 func (n *NativeExecution) OpenWindow(title string) error {
-	if n.Display == nil || n.Keyboard == nil || n.Pointer == nil {
-		return fmt.Errorf("native window requires RAMFB, keyboard and pointer")
+	if (n.Display == nil && n.graphics == nil) || n.Keyboard == nil || n.Pointer == nil {
+		return fmt.Errorf("native window requires a display, keyboard and pointer")
 	}
 	runner := display.StartRunner(context.Background(), &NativeDisplaySession{Execution: n}, n.advanceDisplay)
 	defer runner.Close()

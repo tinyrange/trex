@@ -198,6 +198,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"block.nbd":                         "block.nbd(device, export_name='', max_request=8MiB, structured=True, handshake_timeout=10, request_timeout=30, workers=4)",
 	"block.overlay":                     "block.overlay(base, max_dirty_bytes=128MiB, chunk_size=64KiB, trace_operations=0)",
 	"block.view":                        "block.view(device) -> live read-only file view",
+	"block.temporary_overlay":           "block.temporary_overlay(base, directory) -> disposable sparse block device",
 	"archive.ar":                        "archive.ar(file, maximum_entries=1M, maximum_metadata=64MiB) -> ar",
 	"archive.aws":                       "archive.aws(file, maximum_records=1M) -> record",
 	"archive.rms_variable":              "archive.rms_variable(file, attributes, maximum_records=1M) -> record",

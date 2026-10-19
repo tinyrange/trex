@@ -135,8 +135,8 @@ func New(image storage.Reader, opts Options) (*Machine, error) {
 	if opts.Memory == 0 {
 		opts.Memory = 256 << 20
 	}
-	if opts.Memory < 16<<20 || opts.Memory > 2<<30 || opts.Memory%page != 0 {
-		return nil, fmt.Errorf("uefi: memory must be page aligned, between 16 MiB and 2 GiB")
+	if opts.Memory < 16<<20 || opts.Memory > 4<<30 || opts.Memory%page != 0 {
+		return nil, fmt.Errorf("uefi: memory must be page aligned, between 16 MiB and 4 GiB")
 	}
 	if opts.MemoryBase%page != 0 || opts.MemoryBase > ^uint64(0)-opts.Memory || opts.StackSize%page != 0 || opts.StackSize > opts.Memory {
 		return nil, fmt.Errorf("uefi: invalid RAM/stack layout")
@@ -186,6 +186,9 @@ func New(image storage.Reader, opts Options) (*Machine, error) {
 	m.processor.SetRegister("tcr_el1", 16|16<<16|2<<30|3<<12|1<<10|1<<8|3<<28|1<<26|1<<24|5<<32)
 	m.processor.SetRegister("mair_el1", 255)
 	m.processor.SetRegister("sctlr_el1", 0x30d01805)
+	// AArch64 UEFI permits FP/SIMD instructions at EL1. Native execution
+	// observes this access control even though the software CPU does not.
+	m.processor.SetRegister("cpacr_el1", 3<<20)
 	registerNames := make([]string, 0, len(opts.Registers))
 	for name := range opts.Registers {
 		registerNames = append(registerNames, name)

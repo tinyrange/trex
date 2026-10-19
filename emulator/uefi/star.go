@@ -3,8 +3,11 @@ package uefi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	blockstar "github.com/tinyrange/trex/block/star"
 	"github.com/tinyrange/trex/emulator/cpu"
+	"github.com/tinyrange/trex/lifecycle"
 	"image"
 	"image/png"
 	"j5.nz/cc/hypervisor"
@@ -24,13 +27,23 @@ type value struct {
 	native    *NativeExecution
 }
 
+func (v *value) Close() error {
+	var err error
+	if v.native != nil {
+		err = v.native.Close()
+		v.native = nil
+	}
+	v.machine.Close()
+	return err
+}
+
 func (*value) String() string        { return "uefi.arm64" }
 func (*value) Type() string          { return "uefi.arm64" }
 func (*value) Freeze()               {}
 func (*value) Truth() starlark.Bool  { return starlark.True }
 func (*value) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: uefi.arm64") }
 func (*value) AttrNames() []string {
-	return []string{"native_window", "native_key", "native_pointer", "native_close", "native_disk", "native_screenshot", "native_console", "native_mmio", "native_stats", "native_start", "native_run", "native_modules", "run", "rewrite", "register", "vector", "memory", "write_memory", "copy_memory", "fill_memory", "disassemble", "addresses", "block_device", "block_partition", "install_protocol", "configuration_table", "set_variable", "checkpoint", "restore", "plugin", "close"}
+	return []string{"native_firmware", "native_window", "native_key", "native_pointer", "native_close", "native_disk", "native_screenshot", "native_console", "native_mmio", "native_stats", "native_start", "native_run", "native_modules", "run", "rewrite", "register", "vector", "memory", "write_memory", "copy_memory", "fill_memory", "disassemble", "addresses", "block_device", "block_partition", "install_protocol", "configuration_table", "set_variable", "checkpoint", "restore", "plugin", "close"}
 }
 func record(kind string, fields starlark.StringDict) starlark.Value {
 	return starlarkstruct.FromStringDict(starlark.String(kind), fields)
@@ -111,7 +124,7 @@ func (v *value) call(thread *starlark.Thread, builtin *starlark.Builtin, args st
 		if v.native == nil {
 			return nil, fmt.Errorf("native execution not started")
 		}
-		v.native.WindowsDebug = true
+		v.native.WindowsDebug = v.native.TrapDebug
 		return starlark.None, v.native.OpenWindow(title)
 	case "native_key":
 		var code uint16
@@ -132,8 +145,8 @@ func (v *value) call(thread *starlark.Thread, builtin *starlark.Builtin, args st
 		if v.native == nil || v.native.Pointer == nil {
 			return nil, fmt.Errorf("native pointer not attached")
 		}
-		if v.native.Display != nil {
-			w, h := v.native.Display.Dimensions()
+		if v.native.Display != nil || v.native.graphics != nil {
+			w, h := v.native.displayDimensions()
 			if w > 0 && h > 0 {
 				v.native.Pointer.SetDimensions(uint32(w), uint32(h))
 			}
@@ -151,21 +164,28 @@ func (v *value) call(thread *starlark.Thread, builtin *starlark.Builtin, args st
 		}
 		return starlark.None, nil
 	case "native_disk":
-		if err := starlark.UnpackArgs(name, args, kwargs); err != nil {
+		snapshot := true
+		if err := starlark.UnpackArgs(name, args, kwargs, "snapshot?", &snapshot); err != nil {
 			return nil, err
 		}
 		if v.native == nil || v.native.Disk == nil {
 			return nil, fmt.Errorf("native disk not attached")
 		}
-		return v.native.Disk.Snapshot()
+		if !snapshot {
+			return blockstar.View(v.native.Disk), nil
+		}
+		if disk, ok := v.native.Disk.(interface{ Snapshot() (starfile.File, error) }); ok {
+			return disk.Snapshot()
+		}
+		return nil, fmt.Errorf("caller-owned backing has no snapshot; use native_disk(snapshot=False) for a live view while execution is stopped")
 	case "native_screenshot":
 		if err := starlark.UnpackArgs(name, args, kwargs); err != nil {
 			return nil, err
 		}
-		if v.native == nil || v.native.Display == nil {
-			return nil, fmt.Errorf("native RAMFB not attached")
+		if v.native == nil || v.native.Display == nil && v.native.graphics == nil {
+			return nil, fmt.Errorf("native display not attached")
 		}
-		frame, err := v.native.Display.Snapshot()
+		frame, err := v.native.displaySnapshotInto(nil)
 		if err != nil {
 			return nil, err
 		}
@@ -229,11 +249,25 @@ func (v *value) call(thread *starlark.Thread, builtin *starlark.Builtin, args st
 			fields["gic_"+k] = starlark.MakeUint64(n)
 		}
 		return record("native.stats", fields), nil
+	case "native_firmware":
+		if err := starlark.UnpackArgs(name, args, kwargs); err != nil {
+			return nil, err
+		}
+		if v.native == nil {
+			return nil, fmt.Errorf("native execution not started")
+		}
+		var calls []starlark.Value
+		for _, c := range v.native.FirmwareCalls {
+			calls = append(calls, record("native.firmware_call", starlark.StringDict{"service": starlark.String(c.Service), "args": numbers(c.Args[:]), "status": starlark.MakeUint64(c.Status), "protocol": starlark.String(c.Protocol)}))
+		}
+		return starlark.NewList(calls), nil
 	case "native_start":
 		var disk, ramfbBase uint64
+		gop := false
 		input := false
+		trapDebug := true
 		config := hypervisor.NVMePCIConfiguration{ConfigBase: 0x20000000, ConfigSize: 0x1000000, WindowBase: 0x21000000, WindowSize: 0x1000000, BAR: 0x21000000, Device: 1, Interrupt: 78}
-		if err := starlark.UnpackArgs(name, args, kwargs, "disk_handle?", &disk, "config_base?", &config.ConfigBase, "config_size?", &config.ConfigSize, "window_base?", &config.WindowBase, "window_size?", &config.WindowSize, "nvme_bar?", &config.BAR, "nvme_device?", &config.Device, "nvme_interrupt?", &config.Interrupt, "ramfb_base?", &ramfbBase, "input?", &input); err != nil {
+		if err := starlark.UnpackArgs(name, args, kwargs, "disk_handle?", &disk, "config_base?", &config.ConfigBase, "config_size?", &config.ConfigSize, "window_base?", &config.WindowBase, "window_size?", &config.WindowSize, "nvme_bar?", &config.BAR, "nvme_device?", &config.Device, "nvme_interrupt?", &config.Interrupt, "ramfb_base?", &ramfbBase, "input?", &input, "gop?", &gop, "trap_debug?", &trapDebug); err != nil {
 			return nil, err
 		}
 		if v.native != nil {
@@ -243,8 +277,21 @@ func (v *value) call(thread *starlark.Thread, builtin *starlark.Builtin, args st
 		if err != nil {
 			return nil, err
 		}
+		if !trapDebug {
+			if err := n.cpu.SetDebugExceptionTrapping(false); err != nil {
+				_ = n.Close()
+				return nil, err
+			}
+			n.TrapDebug = false
+		}
 		if disk != 0 {
 			if err := n.AttachNVMe(v.machine, disk, config); err != nil {
+				_ = n.Close()
+				return nil, err
+			}
+		}
+		if gop {
+			if err := n.AttachGraphicsOutput(1280, 720); err != nil {
 				_ = n.Close()
 				return nil, err
 			}
@@ -256,7 +303,11 @@ func (v *value) call(thread *starlark.Thread, builtin *starlark.Builtin, args st
 			}
 		}
 		if input {
-			err := n.AttachInput(hypervisor.InputPCIConfiguration{Device: 2, BAR: 0x21004000, Interrupt: 79}, hypervisor.InputPCIConfiguration{Device: 3, BAR: 0x21008000, Interrupt: 80, Pointer: true, Width: 2560, Height: 1664})
+			width, height := 2560, 1664
+			if gop {
+				width, height = n.displayDimensions()
+			}
+			err := n.AttachInput(hypervisor.InputPCIConfiguration{Device: 2, BAR: 0x21004000, Interrupt: 79}, hypervisor.InputPCIConfiguration{Device: 3, BAR: 0x21008000, Interrupt: 80, Pointer: true, Width: uint32(width), Height: uint32(height)})
 			if err != nil {
 				_ = n.Close()
 				return nil, err
@@ -280,7 +331,8 @@ func (v *value) call(thread *starlark.Thread, builtin *starlark.Builtin, args st
 		seconds := 5.0
 		windowsDebug := false
 		mmioLimit := 0
-		if err := starlark.UnpackArgs(name, args, kwargs, "timeout?", &seconds, "windows_debug?", &windowsDebug, "mmio_trace?", &mmioLimit); err != nil {
+		firmwareLimit := 0
+		if err := starlark.UnpackArgs(name, args, kwargs, "timeout?", &seconds, "windows_debug?", &windowsDebug, "mmio_trace?", &mmioLimit, "firmware_trace?", &firmwareLimit); err != nil {
 			return nil, err
 		}
 		if seconds <= 0 || seconds > 3600 || math.IsNaN(seconds) {
@@ -291,11 +343,19 @@ func (v *value) call(thread *starlark.Thread, builtin *starlark.Builtin, args st
 		if v.native == nil {
 			return nil, fmt.Errorf("call native_start before native_run")
 		}
+		if windowsDebug && !v.native.TrapDebug {
+			return nil, fmt.Errorf("windows_debug requires trap_debug")
+		}
 		if mmioLimit < 0 || mmioLimit > 4096 {
 			return nil, fmt.Errorf("MMIO trace bound must be in [0,4096]")
 		}
 		v.native.MMIOLimit = mmioLimit
 		v.native.MMIO = nil
+		if firmwareLimit < 0 || firmwareLimit > 4096 {
+			return nil, fmt.Errorf("firmware trace bound must be in [0,4096]")
+		}
+		v.native.FirmwareLimit = firmwareLimit
+		v.native.FirmwareCalls = nil
 		v.native.WindowsDebug = windowsDebug
 		r, err := v.native.Run(ctx)
 		if err != nil {
@@ -589,23 +649,29 @@ func (v *value) call(thread *starlark.Thread, builtin *starlark.Builtin, args st
 		if err := starlark.UnpackArgs(name, args, kwargs); err != nil {
 			return nil, err
 		}
-		if v.native != nil {
-			if err := v.native.Close(); err != nil {
-				return nil, err
-			}
-			v.native = nil
-		}
-		v.machine.Close()
-		return starlark.None, nil
+		return starlark.None, v.Close()
 	case "block_device":
-		var source starfile.File
+		var source starlark.Value
 		opts := BlockOptions{}
 		var path starlark.Bytes
 		if err := starlark.UnpackArgs(name, args, kwargs, "source", &source, "device_path?", &path, "handle?", &opts.Handle, "read_only?", &opts.ReadOnly, "block_size?", &opts.BlockSize, "overlay_bytes?", &opts.OverlayBytes); err != nil {
 			return nil, err
 		}
 		opts.DevicePath = []byte(path)
-		handle, err := v.machine.AttachBlockDevice(source, opts)
+		var handle uint64
+		var err error
+		if file, ok := source.(starfile.File); ok {
+			handle, err = v.machine.AttachBlockDevice(file, opts)
+		} else {
+			device, e := blockstar.AsDevice(source)
+			if e != nil {
+				return nil, e
+			}
+			if opts.OverlayBytes != 0 || opts.BlockSize != 0 {
+				return nil, fmt.Errorf("caller-owned device supplies its own geometry and overlay policy")
+			}
+			handle, err = v.machine.AttachDevice(device, opts)
+		}
 		return starlark.MakeUint64(handle), err
 	case "block_partition":
 		var parent, handle uint64
@@ -670,6 +736,11 @@ func Builtin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 		return nil, err
 	}
 	v.machine = m
+	if resources, err := lifecycle.ForThread(thread); err == nil {
+		if _, err := resources.Add(v); err != nil {
+			return nil, errors.Join(err, v.Close())
+		}
+	}
 	return v, nil
 }
 
