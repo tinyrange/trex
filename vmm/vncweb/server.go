@@ -18,7 +18,7 @@ import (
 	"github.com/tinyrange/trex/vmm/rfb"
 )
 
-//go:embed index.html client.js app.js
+//go:embed index.html client.js app.js desktop.html desktop.js login.html
 var assets embed.FS
 
 // Server serves a self-contained client and one controlling RFB connection per VM.

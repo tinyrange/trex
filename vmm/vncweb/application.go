@@ -24,12 +24,8 @@ func NewApplication(workspace vmm.Workspace, handler http.Handler, public []stri
 	if err != nil {
 		return nil, err
 	}
-	if origin != "" {
-		u, err := url.Parse(origin)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || u.Opaque != "" {
-			return nil, fmt.Errorf("web.application origin must be an HTTPS origin without path, credentials, query or fragment")
-		}
-		console.publicOrigin = origin
+	if err := console.setPublicOrigin(origin); err != nil {
+		return nil, err
 	}
 	app := &Application{Console: console, handler: handler, public: make(map[string]bool)}
 	for _, name := range public {
@@ -82,4 +78,15 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.handler.ServeHTTP(w, r)
+}
+
+func (s *Server) setPublicOrigin(origin string) error {
+	if origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || u.Opaque != "" {
+			return fmt.Errorf("console origin must be an HTTPS origin without path, credentials, query or fragment")
+		}
+		s.publicOrigin = origin
+	}
+	return nil
 }
