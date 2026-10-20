@@ -18,11 +18,12 @@ import (
 
 // serveStarlarkWeb is the native listener adapter. The request/response
 // framework itself lives in web/star and is independent of process setup.
-func serveStarlarkWeb(addr, script string, arguments []string) error {
+func serveStarlarkWeb(addr, script string, arguments []string, allowInternet bool) error {
 	thread, environment, err := newStarlarkRuntime(script)
 	if err != nil {
 		return err
 	}
+	installInternet(thread, allowInternet)
 	installStarlarkConsole(thread, newStreamStarlarkConsole(os.Stdin, os.Stdout, os.Stderr))
 	resources, err := resourcesForThread(thread)
 	if err != nil {
