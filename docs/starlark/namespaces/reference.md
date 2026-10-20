@@ -3823,7 +3823,7 @@ Validates a machine specification against a backend and starts a VM. Returns the
 
 `vmm.switch()`
 
-Creates an isolated in-memory Ethernet switch. Attach guests with vmm.network('ethernet', switch=lan, mac='02:00:00:00:00:01'), using a distinct unicast MAC for each NIC. Ports have bounded receive queues and disconnect when their VM closes.
+Creates an isolated in-memory Ethernet switch. internet=True explicitly requests a single-guest IPv4 TCP/DNS gateway and requires trex -allow-internet; mac defaults to 02:54:52:00:00:01 and must match the guest. Private/LAN destinations, IPv6 and general UDP are not forwarded. Attach guests with vmm.network('ethernet', switch=lan, mac='02:00:00:00:00:01'), using a distinct unicast MAC for each NIC. Ports have bounded receive queues and disconnect when their VM closes.
 
 ### `vmm.validate`
 

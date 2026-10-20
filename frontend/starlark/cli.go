@@ -26,6 +26,7 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	allowInternet := fs.Bool("allow-internet", false, "permit VM switches to proxy public IPv4 TCP and DNS (not host/LAN access)")
 	webAddr := fs.String("web", "", "serve a web archive browser on this address")
 	webPublic := fs.Bool("web-public", false, "allow the archive browser to bind a non-loopback address")
 	serveAddr := fs.String("serve", "", "serve a Starlark web application or VM browser display on this address")
@@ -124,7 +125,7 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "Usage: %s -serve <addr> <script> [args...]\n", name)
 			return 1
 		}
-		if err := serveStarlarkWeb(*serveAddr, fs.Arg(0), fs.Args()[1:]); err != nil {
+		if err := serveStarlarkWeb(*serveAddr, fs.Arg(0), fs.Args()[1:], *allowInternet); err != nil {
 			fmt.Fprintf(stderr, "Error serving Starlark web application: %v\n", err)
 			return 1
 		}
@@ -165,6 +166,7 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Error initializing Starlark runtime: %v\n", err)
 		return 1
 	}
+	installInternet(thread, *allowInternet)
 	installStarlarkConsole(thread, newStreamStarlarkConsole(stdin, stdout, stderr))
 	printOutput := stderr // Preserve script print diagnostics separately from binary stdout.
 	if *replMode {

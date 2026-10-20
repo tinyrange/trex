@@ -20,9 +20,26 @@ func (*switchValue) Type() string          { return "vmm_switch" }
 func (*switchValue) Freeze()               {}
 func (*switchValue) Truth() starlark.Bool  { return true }
 func (*switchValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable vmm switch") }
-func switchBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	if err := starlark.UnpackArgs("switch", args, kwargs); err != nil {
+func switchBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var internet bool
+	mac := "02:54:52:00:00:01"
+	if err := starlark.UnpackArgs("switch", args, kwargs, "internet?", &internet, "mac?", &mac); err != nil {
 		return nil, err
+	}
+	if internet {
+		factory, ok := thread.Local(internetFactoryKey).(InternetFactory)
+		if !ok {
+			return nil, fmt.Errorf("internet requires trex -allow-internet")
+		}
+		guest, err := parseMAC(mac)
+		if err != nil {
+			return nil, err
+		}
+		lan, err := factory(guest)
+		if err != nil {
+			return nil, err
+		}
+		return NewSwitchValue(lan), nil
 	}
 	return &switchValue{ethernet.NewSwitch()}, nil
 }

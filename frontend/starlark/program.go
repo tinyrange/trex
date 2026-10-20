@@ -14,11 +14,13 @@ import (
 // Modules never fall back to the working directory. Native builtins retain their
 // normal authority; this API is embedding, not a sandbox for untrusted scripts.
 type Program struct {
-	Files    fs.FS
-	Entry    string
-	Args     []string
-	Builtins starlark.StringDict
-	Print    func(string)
+	// AllowInternet explicitly grants VM gateway creation; disabled by default.
+	AllowInternet bool
+	Files         fs.FS
+	Entry         string
+	Args          []string
+	Builtins      starlark.StringDict
+	Print         func(string)
 	// Optional scoped repl() console. The caller owns the streams and must unblock
 	// Input on cancellation; nil Input leaves interactive evaluation unavailable.
 	Input               io.Reader
@@ -42,6 +44,7 @@ func RunProgram(ctx context.Context, p Program) (err error) {
 	loader := newModuleLoaderFS(p.Files, environment)
 	thread := &starlark.Thread{Name: "application", Load: loader.Load}
 	resources := installRuntimeResources(thread)
+	installInternet(thread, p.AllowInternet)
 	defer func() {
 		var eval *starlark.EvalError
 		if ctx.Err() != nil && errors.As(err, &eval) && strings.HasPrefix(eval.Msg, "Starlark computation cancelled:") {
