@@ -158,6 +158,8 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("list_dir", d.listDirBuiltin), nil
 	case "remove":
 		return starlark.NewBuiltin("remove", d.removeBuiltin), nil
+	case "set_reparse":
+		return starlark.NewBuiltin("set_reparse", d.setReparseBuiltin), nil
 	case "set_attributes":
 		return starlark.NewBuiltin("set_attributes", d.setAttributesBuiltin), nil
 	case "set_security":
@@ -172,7 +174,7 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (d *Directory) AttrNames() []string {
-	return []string{"fat_short_path", "files", "find", "get_security", "hardlink", "list_dir", "mkdir", "remove", "set_attributes", "set_security", "write"}
+	return []string{"fat_short_path", "files", "find", "get_security", "hardlink", "list_dir", "mkdir", "remove", "set_attributes", "set_reparse", "set_security", "write"}
 }
 
 func (d *Directory) hardlinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -514,6 +516,46 @@ func (d *Directory) SetMetadata(name string, metadata Metadata) {
 		}
 	}
 	d.metadata[cleaned] = metadata
+}
+
+func (d *Directory) setReparseBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	var tag uint32
+	var data starlark.Bytes
+	if err := starlark.UnpackArgs("set_reparse", args, kwargs, "name", &name, "tag", &tag, "data", &data); err != nil {
+		return nil, err
+	}
+	if err := d.SetReparse(name, tag, []byte(data)); err != nil {
+		return nil, err
+	}
+	return starlark.None, nil
+}
+
+// SetReparse attaches an opaque Microsoft reparse payload to an existing object.
+// Data excludes the eight-byte REPARSE_DATA_BUFFER header. No target is followed
+// and no host filesystem object is created. Non-Microsoft GUID buffers and
+// multiply-linked files require different semantics and are rejected.
+func (d *Directory) SetReparse(name string, tag uint32, data []byte) error {
+	cleaned := storage.CleanPath(name)
+	if _, isDir := d.dirs[cleaned]; !isDir {
+		if _, isFile := d.files[cleaned]; !isFile {
+			return fmt.Errorf("set_reparse: path %q does not exist", name)
+		}
+	}
+	if tag&0x80000000 == 0 || tag&0xffff < 2 {
+		return fmt.Errorf("set_reparse: a nonreserved Microsoft reparse tag is required")
+	}
+	if len(data) > 0x3ff8 {
+		return fmt.Errorf("set_reparse: payload exceeds 16376 bytes")
+	}
+	metadata := d.metadata[cleaned]
+	if metadata.HardLink != 0 && d.hardLinkRefs[metadata.HardLink] > 1 {
+		return fmt.Errorf("set_reparse: multiply-linked files are unsupported")
+	}
+	metadata.ReparseTag = tag
+	metadata.ReparseData = &starfile.Bytes{Name: "reparse payload", Data: append([]byte(nil), data...)}
+	d.SetMetadata(cleaned, metadata)
+	return nil
 }
 
 func (d *Directory) setAttributesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

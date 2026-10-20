@@ -2057,6 +2057,8 @@ A mutable in-memory directory tree. write adds file content, mkdir creates direc
 
 `set_security(name, descriptor)` updates the existing file or directory's security. For a hardlinked file, every alias receives the same descriptor; link-local metadata such as short names is preserved.
 
+`set_reparse(name, tag, data)` attaches an opaque Microsoft reparse payload to an existing file or directory for image construction. `tag` is an unsigned 32-bit Microsoft tag (bit 31 set; reserved low values 0 and 1 are rejected). `data` is immutable bytes, at most 16376 bytes, excluding the eight-byte REPARSE_DATA_BUFFER header. The payload is copied; existing metadata is preserved. No target is followed and no host filesystem object is created. Missing paths, non-Microsoft GUID buffers, and multiply-linked files are rejected. NTFS writes both the payload and its reparse index entry.
+
 ### `error`
 
 `error(message)`
@@ -4761,7 +4763,7 @@ Methods and attributes: `index_entries(table, index, maximum=100000)`, `info`, `
 
 A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
-Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_security(name)`, `list_dir(path)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_security(name, descriptor)`, `write(name, value)`.
+Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_security(name)`, `list_dir(path)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_reparse(name, tag, data)`, `set_security(name, descriptor)`, `write(name, value)`.
 
 ### `emulator.execution` value
 
