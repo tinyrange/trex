@@ -1,8 +1,9 @@
-//go:build linux
+//go:build linux || darwin
 
 package native
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -20,6 +21,27 @@ type largeBase struct{}
 
 func (largeBase) Geometry() block.Geometry {
 	return block.Geometry{Size: 8 << 30, LogicalBlockSize: 512}
+}
+
+func TestTemporaryOverlayBeyondOldMemoryLimit(t *testing.T) {
+	d, err := NewTemporaryOverlay(largeBase{}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	chunk := bytes.Repeat([]byte{0xa5}, 1<<20)
+	for offset := int64(0); offset < 129<<20; offset += int64(len(chunk)) {
+		if _, err := d.WriteAt(chunk, offset); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d.DirtyBytes() != 129<<20 {
+		t.Fatal(d.DirtyBytes())
+	}
+	got := make([]byte, len(chunk))
+	if _, err := d.ReadAt(got, 128<<20); err != nil || !bytes.Equal(got, chunk) {
+		t.Fatalf("write beyond old limit lost: %v", err)
+	}
 }
 func (largeBase) Capabilities() block.Capabilities { return block.Capabilities{} }
 func (largeBase) ReadAt(p []byte, _ int64) (int, error) {

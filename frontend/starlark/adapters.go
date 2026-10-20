@@ -26,6 +26,7 @@ func resourcesForThread(thread *starlark.Thread) (*runtimeResources, error) {
 
 func blockNamespace() namespace {
 	builtins := blockstar.Builtins()
+	builtins["temporary_overlay"] = starlark.NewBuiltin("temporary_overlay", temporaryOverlayBuiltin)
 	builtins["nbd"] = starlark.NewBuiltin("nbd", nbdapi.Builtin)
 	return namespace{name: "block", attrs: builtins}
 }

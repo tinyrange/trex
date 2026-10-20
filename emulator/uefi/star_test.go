@@ -1,12 +1,56 @@
 package uefi
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"github.com/tinyrange/trex/block"
+	blocknative "github.com/tinyrange/trex/block/native"
+	blockstar "github.com/tinyrange/trex/block/star"
+	"github.com/tinyrange/trex/lifecycle"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 	"io"
 	"testing"
 )
+
+func TestStarlarkCallerDeviceAndRuntimeCleanup(t *testing.T) {
+	data, err := io.ReadAll(fixture(t, 0xd65f03c0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := &starlark.Thread{Name: "device-lifecycle"}
+	resources := lifecycle.Install(thread)
+	defer resources.Close()
+	base, err := block.NewFileDevice(io.NewSectionReader(bytes.NewReader(make([]byte, 4096)), 0, 4096), block.FileDeviceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backing, err := blocknative.NewTemporaryOverlay(base, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backing.Close()
+	globals, err := starlark.ExecFile(thread, "device.star", `
+vm = uefi(image,memory=16<<20)
+disk = vm.block_device(working)
+`, starlark.StringDict{"uefi": starlark.NewBuiltin("uefi", Builtin), "image": &starfile.Bytes{Data: data}, "working": blockstar.NewValue("test", backing)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := globals["vm"].(*value)
+	if v.machine.diskStores[0].device != backing || v.machine.diskStores[0].overlay != nil {
+		t.Fatal("caller backing wrapped in memory overlay")
+	}
+	if err := resources.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if v.machine.memory != nil || len(v.machine.diskStores) != 0 {
+		t.Fatal("runtime retained firmware")
+	}
+	if err := v.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestStarlarkNativeRewriteCheckpoint(t *testing.T) {
 	data, err := io.ReadAll(fixture(t, 0x91000400, 0xd65f03c0))

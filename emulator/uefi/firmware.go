@@ -149,11 +149,20 @@ func (f *Firmware) InstallConfigurationTable(identifier string, data []byte, mem
 // AttachBlockDevice shares the caller's device, including its snapshot policy,
 // with firmware and the eventual operating-system storage controller.
 func (f *Firmware) AttachBlockDevice(device block.Device, opts BlockOptions) (uint64, error) {
+	return f.machine.AttachDevice(device, opts)
+}
+
+// AttachDevice uses caller-owned backing directly, without another memory
+// overlay. The caller must keep it alive until firmware and native execution
+// stop. Such devices cannot participate in emulator checkpoints.
+func (m *Machine) AttachDevice(device block.Device, opts BlockOptions) (uint64, error) {
+	if device == nil {
+		return 0, fmt.Errorf("uefi: nil block device")
+	}
 	g := device.Geometry()
 	if g.Size <= 0 || g.LogicalBlockSize == 0 || g.Size%int64(g.LogicalBlockSize) != 0 {
 		return 0, fmt.Errorf("uefi: invalid block geometry")
 	}
-	m := f.machine
 	index := len(m.diskStores)
 	m.diskStores = append(m.diskStores, diskStore{device: device})
 	return m.attachEndpoint(blockEndpoint{Store: index, Size: g.Size, BlockSize: g.LogicalBlockSize, ReadOnly: opts.ReadOnly || !device.Capabilities().Writable}, opts.Handle, opts.DevicePath, false)

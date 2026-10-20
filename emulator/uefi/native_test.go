@@ -168,6 +168,96 @@ func (s *debugUnloadStub) Register(i uint32) (uint64, error)     { return s.regs
 func (s *debugUnloadStub) SetRegister(i uint32, v uint64) error  { s.regs[i] = v; return nil }
 func (s *debugUnloadStub) SystemRegister(uint16) (uint64, error) { return 0, nil }
 
+func TestNativeBootServicesValidateExitAndUseNativeRAM(t *testing.T) {
+	m := machine(t, 0x14000000)
+	stub := &debugUnloadStub{}
+	n := &NativeExecution{cpu: stub, base: m.ramBase, ram: make([]byte, m.opts.Memory), firmware: m, Counts: map[string]uint64{}}
+	m.runtimeMemory = n
+	stub.regs[0], stub.regs[1], stub.regs[2] = 4, 128, m.ramBase+0x30000
+	stub.regs[30] = 0x12345678
+	if err := n.runtimeCall("AllocatePool"); err != nil {
+		t.Fatal(err)
+	}
+	if stub.regs[0] != 0 || stub.regs[31] != stub.regs[30] || binary.LittleEndian.Uint64(n.ram[0x30000:]) == 0 {
+		t.Fatal("native boot allocation or return failed")
+	}
+	stub.regs[0], stub.regs[1] = m.imageHandle, m.mapKey+1
+	if err := n.runtimeCall("ExitBootServices"); err != nil {
+		t.Fatal(err)
+	}
+	if stub.regs[0] != invalidParameter || m.exited {
+		t.Fatal("accepted stale map key")
+	}
+	stub.regs[0], stub.regs[1] = m.imageHandle, m.mapKey
+	if err := n.runtimeCall("ExitBootServices"); err != nil {
+		t.Fatal(err)
+	}
+	if stub.regs[0] != 0 || !m.exited {
+		t.Fatal("valid native exit failed")
+	}
+	if err := n.runtimeCall("AllocatePool"); err == nil {
+		t.Fatal("boot service accepted after exit")
+	}
+}
+
+func TestNativeFirmwareTraceCapturesProtocolAndBoundedTail(t *testing.T) {
+	m := machine(t, 0x14000000)
+	n := &NativeExecution{cpu: &debugUnloadStub{}, base: m.ramBase, ram: make([]byte, m.opts.Memory), firmware: m, FirmwareLimit: 2}
+	m.runtimeMemory = n
+	// The GOP GUID in EFI byte order.
+	raw := []byte{0xde, 0xa9, 0x42, 0x90, 0xdc, 0x23, 0x38, 0x4a, 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}
+	copy(n.ram[0x20000:], raw)
+	args := [8]uint64{2, m.ramBase + 0x20000}
+	n.observeFirmware("LocateHandle", args, bufferTooSmall)
+	clear(n.ram[0x20000 : 0x20000+16])
+	if n.FirmwareCalls[0].Protocol != graphicsOutputGUID || n.FirmwareCalls[0].Status != bufferTooSmall {
+		t.Fatal("protocol/status were not captured at the call")
+	}
+	n.observeFirmware("GetTime", [8]uint64{}, 0)
+	n.observeFirmware("ExitBootServices", [8]uint64{}, invalidParameter)
+	if len(n.FirmwareCalls) != 2 || n.FirmwareCalls[0].Service != "GetTime" || n.FirmwareCalls[1].Status != invalidParameter {
+		t.Fatal("firmware trace did not retain the bounded tail")
+	}
+	n.FirmwareLimit = 0
+	n.observeFirmware("FreePages", [8]uint64{}, 0)
+	if len(n.FirmwareCalls) != 2 {
+		t.Fatal("disabled trace appended a call")
+	}
+}
+
+func TestNativeGOPBltUsesARM64StackArguments(t *testing.T) {
+	m := machine(t, 0x14000000)
+	stub := &debugUnloadStub{}
+	n := &NativeExecution{cpu: stub, base: m.ramBase, ram: make([]byte, m.opts.Memory), firmware: m, Counts: map[string]uint64{}}
+	m.runtimeMemory = n
+	// This stub has MMU disabled and SP=0; use RAM at zero for stack arguments.
+	n.base = 0
+	m.ramBase = 0
+	m.allocations = []allocation{{Base: 0, Pages: 16, Type: 0}}
+	m.processor.SetRegister("sctlr_el1", 0)
+	if err := n.AttachGraphicsOutput(4, 3); err != nil {
+		t.Fatal(err)
+	}
+	stub.regs[0], stub.regs[1], stub.regs[2] = n.graphics.graphics.protocol, 0x1000, 0
+	stub.regs[5], stub.regs[6], stub.regs[7] = 1, 1, 2
+	binary.LittleEndian.PutUint64(n.ram, 1) // Height is the ninth AAPCS64 argument.
+	copy(n.ram[0x1000:], []byte{1, 2, 3, 0})
+	if err := n.runtimeCall("GOP.Blt"); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := n.displaySnapshotInto(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Width != 4 || frame.Height != 3 || !bytes.Equal(frame.Pixels[20:28], []byte{1, 2, 3, 0, 1, 2, 3, 0}) || frame.Pixels[16] != 0 || frame.Pixels[28] != 0 {
+		t.Fatalf("bad GOP rectangle: %v", frame.Pixels)
+	}
+	frame.Pixels[20] = 99
+	if n.graphics.graphics.pixels[20] != 1 {
+		t.Fatal("snapshot aliases guest memory")
+	}
+}
+
 func TestNativeDebugUnloadWithoutName(t *testing.T) {
 	for _, base := range []uint64{0x1234, ^uint64(0)} {
 		m := machine(t, 0x14000000)
