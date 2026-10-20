@@ -701,19 +701,6 @@ func (b *ntfsBuild) importDirectory(dir *filesystemapi.Directory) error {
 		name = storage.CleanPath(name)
 		if node := byPath[strings.ToLower(name)]; node != nil {
 			node.metadata = metadata
-			if metadata.ReparseTag != 0 {
-				if metadata.ReparseData == nil {
-					return fmt.Errorf("ntfs: reparse point %q has no data", name)
-				}
-				data, err := starfile.ReadAll(metadata.ReparseData)
-				if err != nil {
-					return fmt.Errorf("ntfs: read reparse point %q: %w", name, err)
-				}
-				if len(data) > 0x3ff8 {
-					return fmt.Errorf("ntfs: reparse point %q data exceeds 16376 bytes", name)
-				}
-				node.reparseData = data
-			}
 			if node.parent != nil {
 				for _, link := range node.parent.children {
 					if link.node == node {
@@ -725,6 +712,19 @@ func (b *ntfsBuild) importDirectory(dir *filesystemapi.Directory) error {
 		}
 	}
 	for _, node := range b.nodes {
+		if node.metadata.ReparseTag != 0 {
+			if node.metadata.ReparseData == nil {
+				return fmt.Errorf("ntfs: reparse point %q has no data", node.fullPath)
+			}
+			data, err := starfile.ReadAll(node.metadata.ReparseData)
+			if err != nil {
+				return fmt.Errorf("ntfs: read reparse point %q: %w", node.fullPath, err)
+			}
+			if len(data) > 0x3ff8 {
+				return fmt.Errorf("ntfs: reparse point %q data exceeds 16376 bytes", node.fullPath)
+			}
+			node.reparseData = data
+		}
 		var eaErr error
 		node.eaInfo, node.eaData, eaErr = ntfsEncodeEAs(node.metadata.ExtendedAttributes)
 		if eaErr != nil {
@@ -1351,6 +1351,9 @@ func (b *ntfsBuild) prepareReparseIndex() error {
 
 func ntfsReparseIndexEntry(node *ntfsNode) []byte {
 	entry := make([]byte, 32)
+	// View-index entries require DataOffset=16+align4(KeyLength), even
+	// with no value. NtfsCheckViewIndexEntries rejects zero at mount time.
+	binary.LittleEndian.PutUint16(entry[0:2], 28)
 	binary.LittleEndian.PutUint16(entry[8:10], uint16(len(entry)))
 	binary.LittleEndian.PutUint16(entry[10:12], 12)
 	binary.LittleEndian.PutUint32(entry[16:20], node.metadata.ReparseTag)
@@ -1597,13 +1600,6 @@ func (b *ntfsBuild) mftRecord(node *ntfsNode) ([]byte, error) {
 			)
 		}
 	default:
-		if node.metadata.ReparseTag != 0 {
-			value := make([]byte, 8+len(node.reparseData))
-			binary.LittleEndian.PutUint32(value[0:4], node.metadata.ReparseTag)
-			binary.LittleEndian.PutUint16(value[4:6], uint16(len(node.reparseData)))
-			copy(value[8:], node.reparseData)
-			attrs = append(attrs, ntfsResidentAttr(ntfsAttrReparsePoint, "", value))
-		}
 		switch node.id {
 		case 0:
 			attrs = append(attrs, ntfsNonResidentAttr(ntfsAttrData, "", b.mftLCN, b.mftRecords*ntfsRecordSize))
@@ -1646,6 +1642,15 @@ func (b *ntfsBuild) mftRecord(node *ntfsNode) ([]byte, error) {
 
 	for _, stream := range node.streams {
 		attrs = append(attrs, ntfsStreamAttr(stream, stream.lcn))
+	}
+	// NTFS requires attributes in ascending type order. A reparse file
+	// still has an unnamed $DATA stream (0x80), before $REPARSE_POINT (0xc0).
+	if node.metadata.ReparseTag != 0 {
+		value := make([]byte, 8+len(node.reparseData))
+		binary.LittleEndian.PutUint32(value[0:4], node.metadata.ReparseTag)
+		binary.LittleEndian.PutUint16(value[4:6], uint16(len(node.reparseData)))
+		copy(value[8:], node.reparseData)
+		attrs = append(attrs, ntfsResidentAttr(ntfsAttrReparsePoint, "", value))
 	}
 	attrs = append(attrs, ntfsEAAttrs(node, node.eaLCN)...)
 	offset := attrOff
@@ -1962,6 +1967,9 @@ func ntfsFileFlags(node *ntfsNode) uint32 {
 	}
 	if node.id < 16 {
 		flags |= ntfsFileAttrHide | ntfsFileAttrSys
+	}
+	if node.metadata.ReparseTag != 0 {
+		flags |= 0x400 // FILE_ATTRIBUTE_REPARSE_POINT
 	}
 	if node.attrs.ReadOnly {
 		flags |= ntfsFileAttrRO
@@ -2682,6 +2690,9 @@ func (b *ntfsBuild) volumeBitmap() []byte {
 		}
 		if len(b.secureHashIndex.blocks) > 0 {
 			mark(b.secureHashLCN, fsinternal.CeilDiv(int64(len(b.secureHashIndex.blocks)), ntfsCluster))
+		}
+		if len(b.reparseIndex.blocks) > 0 {
+			mark(b.reparseLCN, fsinternal.CeilDiv(int64(len(b.reparseIndex.blocks)), ntfsCluster))
 		}
 	}
 	mark(b.bitmapLCN, fsinternal.CeilDiv(b.bitmapSize, ntfsCluster))

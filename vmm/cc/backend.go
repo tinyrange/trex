@@ -214,6 +214,18 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		}
 		disk.Device = overlay
 	}
+	platform, err := b.newPlatform(ctx, m, disk)
+	if err != nil {
+		return nil, err
+	}
+	// Capture immutable configuration and the already-selected writable disk.
+	// A reboot must not create a fresh snapshot overlay.
+	options := *b
+	rebuild := func() (*pc, error) { return options.newPlatform(ctx, m, disk) }
+	return newRestartableDriver(ctx, platform, m.StartPaused, rebuild), nil
+}
+
+func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk) (*pc, error) {
 	cpus, err := hypervisor.NewX86WithCPUs(ctx, m.CPUs)
 	if err != nil {
 		return nil, err
@@ -330,5 +342,5 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 			return nil, err
 		}
 	}
-	return newDriver(ctx, platform, m.StartPaused), nil
+	return platform, nil
 }

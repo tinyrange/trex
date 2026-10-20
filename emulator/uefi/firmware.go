@@ -97,6 +97,14 @@ func (f *Firmware) Call(address uint64, args [10]uint64) (uint64, error) {
 	}
 	m.firmwarePC = address
 	m.emit(Event{Kind: "service", Name: name, PC: address, Args: [8]uint64(args[:8])})
+	if name == "ResetSystem" {
+		// ResetSystem is non-returning. The machine owner must stop all CPUs
+		// before replacing hardware; never return EFI_SUCCESS to the guest.
+		if uint32(args[0]) > 2 {
+			return 0, fmt.Errorf("uefi: unsupported platform reset type %d", uint32(args[0]))
+		}
+		return 0, &ResetRequest{Type: uint32(args[0])}
+	}
 	if name == "SetVirtualAddressMap" {
 		return f.setVirtualAddressMap(args)
 	}

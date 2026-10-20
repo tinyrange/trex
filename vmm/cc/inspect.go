@@ -40,15 +40,15 @@ func (d *driver) Extension(ctx context.Context, name string) (starlark.Value, er
 }
 
 func (i inspection) breakpoint(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	if len(i.driver.pc.cpus) > 1 {
-		return nil, fmt.Errorf("execution breakpoints require a single-CPU machine")
-	}
 	var address uint64
 	skip := 0
 	if err := starlark.UnpackArgs("cc.breakpoint", args, kwargs, "address", &address, "skip?", &skip); err != nil {
 		return nil, err
 	}
 	err := i.driver.call(i.ctx, func() error {
+		if len(i.driver.pc.cpus) > 1 {
+			return fmt.Errorf("execution breakpoints require a single-CPU machine")
+		}
 		debug, ok := i.driver.pc.cpu.(interface{ SetBreakpoint(uint64) error })
 		if !ok {
 			return fmt.Errorf("execution breakpoints unavailable")
@@ -155,6 +155,11 @@ func (p *pc) inspectState() (starlark.Value, error) {
 		"eax": int64(r.Rax), "ebx": int64(r.Rbx), "ecx": int64(r.Rcx), "edx": int64(r.Rdx),
 		"esi": int64(r.Rsi), "edi": int64(r.Rdi), "esp": int64(r.Rsp), "ebp": int64(r.Rbp),
 		"eip": int64(r.Rip), "eflags": int64(r.Rflags),
+		"rax": int64(r.Rax), "rbx": int64(r.Rbx), "rcx": int64(r.Rcx), "rdx": int64(r.Rdx),
+		"rsi": int64(r.Rsi), "rdi": int64(r.Rdi), "rsp": int64(r.Rsp), "rbp": int64(r.Rbp),
+		"rip": int64(r.Rip), "rflags": int64(r.Rflags),
+		"r8": int64(r.R8), "r9": int64(r.R9), "r10": int64(r.R10), "r11": int64(r.R11),
+		"r12": int64(r.R12), "r13": int64(r.R13), "r14": int64(r.R14), "r15": int64(r.R15),
 	}
 	var timer any
 	if h := p.hpet; h != nil {

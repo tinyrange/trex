@@ -113,6 +113,7 @@ func (d *driver) loopSMP() {
 		default:
 			err = fmt.Errorf("unhandled x86 exit %d", result.exit.Reason)
 		}
+		err = d.firmwareTransition(err)
 		if err != nil && failure == nil {
 			failure = fmt.Errorf("CPU%d: %w", result.id, err)
 		}
@@ -139,7 +140,7 @@ func (d *driver) loopSMP() {
 	}
 	start := func() {
 		state, _ := d.Status(d.ctx)
-		if !state.Running || failure != nil || d.ctx.Err() != nil {
+		if !state.Running || failure != nil || d.resetRequested || d.ctx.Err() != nil {
 			return
 		}
 		for id := range cpus {
@@ -153,6 +154,15 @@ func (d *driver) loopSMP() {
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
 	for {
+		if d.resetRequested {
+			stop()
+			if failure != nil {
+				d.resetRequested = false
+				finishFailure()
+			} else {
+				return
+			}
+		}
 		if failure != nil || d.pc.acpi != nil && d.pc.acpi.poweroff {
 			stop()
 			if failure != nil {
@@ -196,6 +206,7 @@ func (d *driver) loopSMP() {
 			state, _ := d.Status(d.ctx)
 			if state.Running {
 				_, _, _, err := d.pc.pollDevices()
+				err = d.firmwareTransition(err)
 				if err != nil && failure == nil {
 					failure = err
 				}
@@ -205,6 +216,11 @@ func (d *driver) loopSMP() {
 }
 
 func (d *driver) cancelCPUs() {
+	d.cpuMu.Lock()
+	defer d.cpuMu.Unlock()
+	if d.platformClosed {
+		return
+	}
 	if len(d.pc.cpus) == 0 {
 		_ = d.pc.cpu.Cancel()
 		return
