@@ -40,24 +40,27 @@ func newVGA(text []byte) *vga {
 	v.crtc[7] = 2
 	v.crtc[9] = 15
 	v.crtc[0x13] = 40
-	for i := 0; i < 16; i++ {
-		v.attr[i] = byte(i)
+	for i := 0; i < 64; i++ {
 		for c := 0; c < 3; c++ {
 			level := byte(0)
 			if i&(1<<uint(2-c)) != 0 {
 				level = 42
 			}
-			if i&8 != 0 {
+			if i&(1<<uint(5-c)) != 0 {
 				level += 21
 			}
 			v.dac[i][c] = level
 		}
 	}
+	for i, index := range []byte{0, 1, 2, 3, 4, 5, 20, 7, 56, 57, 58, 59, 60, 61, 62, 63} {
+		v.attr[i] = index
+	}
+	v.installTextFont()
 	return v
 }
 
 func (v *vga) setMode(mode byte) error {
-	if mode&0x7f != 3 && mode&0x7f != 0x12 {
+	if mode&0x7f != 3 && mode&0x7f != 0x10 && mode&0x7f != 0x12 {
 		return fmt.Errorf("unsupported VGA BIOS mode %#x", mode)
 	}
 	if mode&0x80 == 0 {
@@ -65,11 +68,15 @@ func (v *vga) setMode(mode byte) error {
 			clear(v.planes[i][:])
 		}
 	}
-	if mode&0x7f == 0x12 {
+	v.installTextFont()
+	if mode&0x7f == 0x12 || mode&0x7f == 0x10 {
 		v.misc = 0xe3
 		v.seq = [8]byte{3, 1, 15, 0, 6}
 		v.gc = [16]byte{0, 0, 0, 0, 0, 0, 5, 15, 255}
 		v.crtc = [32]byte{0x5f, 0x4f, 0x50, 0x82, 0x54, 0x80, 0x0b, 0x3e, 0, 0x40, 0, 0, 0, 0, 0, 0, 0xea, 0x8c, 0xdf, 0x28, 0, 0xe7, 4, 0xe3, 0xff}
+		if mode&0x7f == 0x10 {
+			v.crtc[0x12] = 0x5d
+		} // 640x350, same four-plane memory layout.
 		v.attr[0x10] = 1
 		v.attr[0x12] = 15
 	} else {

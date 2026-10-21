@@ -2998,6 +2998,12 @@ Decodes HTML character references in a string. It does not parse or validate mar
 
 Compares decoded images and returns difference measurements using the specified per-pixel threshold. Pixel differences alone are not proof that a guest application launched successfully.
 
+### `image.decode`
+
+`image.decode(source, maximum=128MiB, max_pixels=16MiP) -> record`
+
+Decodes one bounded immutable image snapshot with width, height, pixels, format and pixel(x,y). Repeated snapshot pixel reads never reopen or redecode the source. Useful for glyph and framebuffer probes; encoded input and decoded pixel limits apply.
+
 ### `image.info`
 
 `image.info(source, maximum=128MiB, max_pixels=16MiP) -> record`
@@ -3129,6 +3135,12 @@ Compiles a virtual Go source tree with Renvo for the selected target. Returns co
 `renvo.make(source, target, input='Makefile', targets=[], output='', arena_size=32MiB) -> compiledModule; rebuilds Renvo recipes in memory; output selects the binary by virtual path relative to the Makefile`
 
 Evaluates supported Renvo make recipes against a virtual source tree and rebuilds their outputs in memory. output selects the desired binary relative to the Makefile; no host make process is launched.
+
+### `rfe.backend`
+
+`rfe.backend(overlay_limit=268435456) -> vmm_backend`
+
+Creates an experimental in-process software x86 PC backend from Renvo x86.rfe. JIT-compiles hot 16-, 32- and 64-bit code using Renvo native blocks, without KVM or QEMU. Requires a supported 64-bit native-JIT host; unavailable executable memory is an error. Privileged/device/unsupported instructions use precise architectural slow paths. Shares BIOS, IDE, VGA, input and overlays with cc. MS-DOS 6.22 startup, Windows 3.11 standard/enhanced-mode Notepad, and Windows 98 SE Explorer/Notepad are verified. The graphical smokes verify keyboard input, PS/2 mouse-selected Save and changed bytes on the guest disk. Enhanced-mode paging and actual native-tier retirement are explicitly asserted. Implements basic x87, string port I/O, paging and protected/v8086 gates; parts of x87 and other legacy CPU/device features remain incomplete. overlay_limit bounds dirty snapshot memory in bytes. Inspect with vm.extension("rfe.v1").state().
 
 ### `runtime.stats`
 

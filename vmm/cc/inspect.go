@@ -2,6 +2,7 @@ package cc
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 
 	starvalue "github.com/tinyrange/trex/script/value"
@@ -112,6 +113,10 @@ func (p *pc) inspectState() (starlark.Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	biosGaps := map[string]any{}
+	for name, count := range p.unsupportedBIOS {
+		biosGaps[name] = int64(count)
+	}
 	irq, err := p.cpu.InterruptState()
 	if err != nil {
 		return nil, err
@@ -151,15 +156,56 @@ func (p *pc) inspectState() (starlark.Value, error) {
 	for i, failure := range p.ide.failures {
 		failures[i] = map[string]any{"command": int(failure.command), "feature": int(failure.feature), "error": int(failure.code), "reason": failure.reason, "task": fmt.Sprintf("%x", failure.task)}
 	}
+	text := make([]byte, 0, 2025)
+	for row := 0; row < 25; row++ {
+		for col := 0; col < 80; col++ {
+			ch := p.ram[0xb8000+row*160+col*2]
+			if ch < 32 {
+				ch = ' '
+			}
+			text = append(text, ch)
+		}
+		text = append(text, '\n')
+	}
+	mapping := map[string]any{}
+	linear := s.Cs.Base + r.Rip
+	if physical, err := p.physical(linear, s); err == nil {
+		mapping["physical"] = int64(physical)
+	}
+	if s.Cr0&(1<<31) != 0 && s.Cr4&(1<<5) == 0 {
+		if b, err := p.memory((s.Cr3&0xfffff000)+(linear>>22&1023)*4, 4); err == nil {
+			pde := binary.LittleEndian.Uint32(b)
+			mapping["pde"] = int64(pde)
+			if pte, err := p.memory(uint64(pde&0xfffff000)+(linear>>12&1023)*4, 4); err == nil {
+				mapping["pte"] = int64(binary.LittleEndian.Uint32(pte))
+			}
+		}
+	}
+	var pcBytes []byte
+	for j := uint64(0); j < 16; j++ {
+		address, err := p.physical(s.Cs.Base+r.Rip+j, s)
+		if err != nil {
+			break
+		}
+		value, err := p.memory(address, 1)
+		if err != nil {
+			break
+		}
+		pcBytes = append(pcBytes, value[0])
+	}
 	return starvalue.Starlark(map[string]any{
+		"console": string(p.console[max(0, len(p.console)-2048):]), "text": string(text), "instruction_bytes": fmt.Sprintf("%x", pcBytes), "bios_ticks": int64(binary.LittleEndian.Uint32(p.ram[0x46c:])),
 		"virtio_input": map[string]any{"status": int(p.input.status), "reports": int64(p.input.reports), "queue_ready": p.input.queues[0].ready, "used": int(p.input.queues[0].written), "descriptor": int64(p.input.queues[0].desc), "available": int64(p.input.queues[0].avail), "pending": len(p.input.pending)},
 		"ata_failures": failures, "ata_last_command": int(p.ide.lastCommand), "ata_dma_pending": p.ide.dmaPending, "ata_irq_pending": p.ide.pending,
 		"pci_address": int64(p.pciAddress), "pci_ide": pciIDE,
 		"network": network, "hpet": timer,
-		"pc": int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
+		"code_mapping": mapping,
+		"segments":     map[string]any{"cs": int64(s.Cs.Selector), "cs_base": int64(s.Cs.Base), "cs_flags": int64(s.Cs.Db)<<14 | int64(s.Cs.Type), "ss": int64(s.Ss.Selector), "ss_base": int64(s.Ss.Base), "ss_flags": int64(s.Ss.Db)<<14 | int64(s.Ss.Type), "ds": int64(s.Ds.Selector), "ds_base": int64(s.Ds.Base)},
+		"pc":           int64(s.Cs.Base + r.Rip), "cr0": int64(s.Cr0), "cr3": int64(s.Cr3),
 		"cr2": int64(s.Cr2), "cr4": int64(s.Cr4),
 		"registers": registers, "idt_base": int64(s.Idt.Base),
-		"efi": p.efiTrace, "last_bios": p.lastService, "ata_commands": int64(p.ide.commands),
+		"efi": p.efiTrace, "unsupported_bios": biosGaps,
+		"last_bios": p.lastService, "ata_commands": int64(p.ide.commands),
 		"ata_task": fmt.Sprintf("%x", p.ide.task), "vga_accesses": int64(p.vga.accesses),
 		"keyboard_commands": keyboard, "rtc": p.rtcTrace, "interrupts": interrupts,
 	})

@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/tinyrange/trex/vmm"
+	"j5.nz/cc/hypervisor/x86state"
 )
 
 // BIOS CHS translation is independent of ATA's four-bit head register.
@@ -20,11 +21,16 @@ func translatedGeometry(sectors uint64) vmm.CHSGeometry {
 
 // extendedDiskTransfer implements the 16-byte EDD disk address packet. The
 // advertised fixed-disk subset uses segment:offset buffers, not flat addresses.
-func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte) byte {
-	packet, err := p.memory(address, 16)
+func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte, states ...x86state.SystemRegisters) byte {
+	var state x86state.SystemRegisters
+	if len(states) > 0 {
+		state = states[0]
+	}
+	packet, flushPacket, err := p.guestMemory(address, 16, state, true)
 	if err != nil || packet[0] < 16 || packet[1] != 0 {
 		return 1
 	}
+	defer flushPacket()
 	count := uint64(binary.LittleEndian.Uint16(packet[2:]))
 	lba := binary.LittleEndian.Uint64(packet[8:])
 	bufferAddress := uint64(binary.LittleEndian.Uint16(packet[6:]))*16 + uint64(binary.LittleEndian.Uint16(packet[4:]))
@@ -36,10 +42,11 @@ func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte) byte {
 	if lba >= capacity || count > capacity-lba {
 		return 4
 	}
-	buffer, err := p.memory(bufferAddress, count*512)
+	buffer, flushBuffer, err := p.guestMemory(bufferAddress, count*512, state, !write)
 	if err != nil {
 		return 9
 	}
+	defer flushBuffer()
 	var n int
 	if write {
 		writer, ok := p.disk.Device.(io.WriterAt)
@@ -64,15 +71,20 @@ func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte) byte {
 	return 0
 }
 
-func (p *pc) extendedDiskParameters(address uint64) byte {
-	header, err := p.memory(address, 2)
+func (p *pc) extendedDiskParameters(address uint64, states ...x86state.SystemRegisters) byte {
+	var state x86state.SystemRegisters
+	if len(states) > 0 {
+		state = states[0]
+	}
+	header, _, err := p.guestMemory(address, 2, state, false)
 	if err != nil || binary.LittleEndian.Uint16(header) < 26 {
 		return 1
 	}
-	buffer, err := p.memory(address, 26)
+	buffer, flushBuffer, err := p.guestMemory(address, 26, state, true)
 	if err != nil {
 		return 9
 	}
+	defer flushBuffer()
 	clear(buffer)
 	binary.LittleEndian.PutUint16(buffer, 26)
 	// Geometry is the BIOS logical geometry. EDD sector count remains complete
@@ -87,11 +99,16 @@ func (p *pc) extendedDiskParameters(address uint64) byte {
 
 // Verify and seek are part of the EDD fixed-disk subset. Neither transfers data
 // to the packet's buffer; seek only validates the destination on this device.
-func (p *pc) extendedDiskPosition(address uint64, verify bool) byte {
-	packet, err := p.memory(address, 16)
+func (p *pc) extendedDiskPosition(address uint64, verify bool, states ...x86state.SystemRegisters) byte {
+	var state x86state.SystemRegisters
+	if len(states) > 0 {
+		state = states[0]
+	}
+	packet, flushPacket, err := p.guestMemory(address, 16, state, true)
 	if err != nil || packet[0] < 16 || packet[1] != 0 {
 		return 1
 	}
+	defer flushPacket()
 	count := uint64(binary.LittleEndian.Uint16(packet[2:]))
 	lba := binary.LittleEndian.Uint64(packet[8:])
 	capacity := uint64(p.disk.Device.Geometry().Size / 512)

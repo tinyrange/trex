@@ -149,6 +149,14 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 	if ex.Port >= 0x1f0 && ex.Port <= 0x1f7 || ex.Port == 0x3f6 {
 		return p.ideIO(ex)
 	}
+	if ex.Port == biosMousePort && ex.Write && ex.Size == 1 && ex.Count == 1 {
+		p.biosMouseByte(ex.Data[0])
+		return nil
+	}
+	if ex.Port == biosKeyboardPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
+		p.biosKeyboardScan(ex.Data[0])
+		return nil
+	}
 	if ex.Port == biosPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		return p.bios()
 	}
@@ -215,12 +223,25 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 			}
 			p.observeRTC(false, value)
 		case 0x61:
-			value = p.ports[ex.Port] ^ 0x20
+			if ex.Write {
+				p.ports[ex.Port] = data[0] & 15
+				break
+			}
+			// AT refresh request flip-flop: PIT channel 1 clocks it at about
+			// 66 kHz. HIMEM calibrates delays by waiting for bit 4 transitions,
+			// including with interrupts disabled; reads must not freeze that clock.
+			refresh := byte((p.now().Sub(p.started).Nanoseconds()/15085)&1) << 4
+			value = (p.ports[ex.Port]^0x20)&^0x10 | refresh
 			p.ports[ex.Port] = value
 		case 0x80, 0x92:
 			value = p.ports[ex.Port]
 			if ex.Write {
 				p.ports[ex.Port] = data[0]
+				if ex.Port == 0x92 && p.keyboard.a20 != nil {
+					if err := p.keyboard.a20(data[0]&2 != 0); err != nil {
+						return err
+					}
+				}
 			}
 		default:
 			// Unpopulated ISA ports float high; writes have no receiver.

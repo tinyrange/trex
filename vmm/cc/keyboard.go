@@ -23,6 +23,7 @@ func (d *driver) AbsolutePointer(ctx context.Context) (bool, error) {
 }
 
 type keyboard struct {
+	a20                                          func(bool) error
 	queue                                        []ps2byte
 	command, output, pending, parameter, scanSet byte
 	enabled                                      bool
@@ -133,6 +134,11 @@ func (k *keyboard) io(ex hypervisor.X86Exit) error {
 			}
 			continue
 		case 0xd1:
+			if k.a20 != nil {
+				if err := k.a20(v&2 != 0); err != nil {
+					return err
+				}
+			}
 			k.output = v
 			k.pending = 0
 			continue

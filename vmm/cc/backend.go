@@ -20,14 +20,34 @@ type Backend struct {
 	PIOOnly bool
 	// OverlayLimit bounds dirty snapshot memory; zero uses 256 MiB.
 	OverlayLimit int64
+	// CPUFactory selects a software execution engine while retaining identical
+	// firmware and PC device semantics. Nil selects CrumbleCracker/KVM.
+	CPUFactory func(context.Context) (hypervisor.X86, error)
+	// Name overrides the backend identity for an alternate CPU engine.
+	Name string
 }
 
 func Available() bool { return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" }
 func Capabilities() []string {
 	return []string{"disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
 }
-func (*Backend) ID() string             { return "cc.v1" }
-func (*Backend) Capabilities() []string { return Capabilities() }
+func (b *Backend) ID() string {
+	if b.Name != "" {
+		return b.Name
+	}
+	return "cc.v1"
+}
+func (b *Backend) Capabilities() []string {
+	caps := Capabilities()
+	if b.ID() != "cc.v1" {
+		for j, c := range caps {
+			if c == "extension.cc.v1" {
+				caps[j] = "extension." + b.ID()
+			}
+		}
+	}
+	return caps
+}
 func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	var issues []vmm.ValidationIssue
 	add := func(field, message string) {
@@ -39,7 +59,7 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if b.OverlayLimit < 0 {
 		add("overlay_limit", "snapshot overlay limit must be positive")
 	}
-	if !Available() {
+	if b.CPUFactory == nil && !Available() {
 		add("backend", "cc PC execution requires Linux/amd64 KVM")
 	}
 	if m.Architecture != "i386" && m.Architecture != "x86_64" {
@@ -69,7 +89,7 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		}
 		if d.CHS != nil {
 			c := d.CHS
-			if c.Cylinders < 1 || c.Cylinders > 1024 || c.Heads < 1 || c.Heads > 16 || c.Sectors < 1 || c.Sectors > 63 || int64(c.Cylinders*c.Heads*c.Sectors)*512 > g.Size {
+			if c.Cylinders < 1 || c.Cylinders > 1024 || c.Heads < 1 || c.Heads > 16 || c.Sectors < 1 || c.Sectors > 63 || int64(c.Cylinders*c.Heads*c.Sectors)*512-g.Size >= int64(c.Heads*c.Sectors)*512 {
 				add(field+".chs", "invalid legacy ATA geometry")
 			}
 		}
@@ -101,7 +121,7 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	}
 	for _, required := range m.RequiredCapabilities {
 		found := false
-		for _, c := range Capabilities() {
+		for _, c := range b.Capabilities() {
 			if c == required {
 				found = true
 			}
@@ -128,7 +148,11 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		}
 		disk.Device = overlay
 	}
-	cpu, err := hypervisor.NewX86(ctx)
+	factory := b.CPUFactory
+	if factory == nil {
+		factory = hypervisor.NewX86
+	}
+	cpu, err := factory(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -188,5 +212,11 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 			return nil, err
 		}
 	}
-	return newDriver(ctx, platform, m.StartPaused), nil
+	// Legacy firmware/DMA paths notify before lending mutable RAM spans;
+	// direct BDA and mouse scratch updates have explicit barriers. UEFI retains
+	// conservative boundaries until its separate firmware path is audited.
+	if tracked, ok := cpu.(interface{ SetRAMWriteTracking(bool) }); ok {
+		tracked.SetRAMWriteTracking(!b.UEFI && len(m.Channels) == 0)
+	}
+	return newDriverFor(ctx, platform, m.StartPaused, b), nil
 }

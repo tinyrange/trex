@@ -31,6 +31,7 @@ func (r request) execute() {
 }
 
 type driver struct {
+	backend        *Backend
 	pc             *pc
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -46,9 +47,12 @@ type driver struct {
 }
 
 func newDriver(ctx context.Context, p *pc, paused bool) *driver {
+	return newDriverFor(ctx, p, paused, &Backend{})
+}
+func newDriverFor(ctx context.Context, p *pc, paused bool, backend *Backend) *driver {
 	ctx, cancel := context.WithCancel(ctx)
 	d := &driver{
-		pc: p, ctx: ctx, cancel: cancel,
+		backend: backend, pc: p, ctx: ctx, cancel: cancel,
 		requests: make(chan request, 16),
 		events:   make(chan vmm.Event, 32),
 		ready:    make(chan struct{}, 1),
@@ -62,8 +66,8 @@ func newDriver(ctx context.Context, p *pc, paused bool) *driver {
 	go d.loop()
 	return d
 }
-func (d *driver) BackendID() string           { return "cc.v1" }
-func (d *driver) Capabilities() []string      { return Capabilities() }
+func (d *driver) BackendID() string           { return d.backend.ID() }
+func (d *driver) Capabilities() []string      { return d.backend.Capabilities() }
 func (d *driver) DebugReady() <-chan struct{} { return d.ready }
 func (d *driver) Status(context.Context) (vmm.State, error) {
 	d.mu.Lock()
@@ -148,8 +152,15 @@ func (d *driver) loop() {
 					err = d.pc.hpet.mmio(ex, d.pc.cpu, d.pc.now())
 				} else if ex.Address >= inputAddress && ex.Address < inputAddress+0x1000 {
 					err = d.pc.input.mmio(ex, d.pc.cpu)
-				} else {
+				} else if ex.Address >= 0xa0000 && ex.Address+uint64(ex.Size) <= 0xc0000 {
 					err = d.pc.vga.mmio(ex, d.pc.cpu)
+				} else {
+					// Unassigned physical bus addresses have no responder. Legacy
+					// memory probes rely on floating reads and discarded writes to
+					// distinguish the end of installed RAM from a mapped device.
+					if !ex.Write {
+						d.pc.cpu.CompleteMMIORead(^uint64(0), uint32(ex.Size))
+					}
 				}
 			case hypervisor.X86ExitShutdown:
 				d.finish("guest_failure", "x86 triple fault", false)

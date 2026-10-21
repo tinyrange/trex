@@ -18,40 +18,43 @@ const biosPort = 0xf1
 // Interrupt entries execute small real-mode ROM routines; native execution
 // retains all mode switches and executes the original boot sector and loader.
 type pc struct {
-	efiTrace      []any
-	efi           *uefi.Firmware
-	efiMemory     *efiMemory
-	acpi          *acpiPM
-	hpet          *hpet
-	nic           *ne2000
-	framebuffer   []byte
-	input         *virtioInput
-	channelMemory []byte
-	channelName   string
-	cpu           hypervisor.X86
-	ram           []byte
-	disk          vmm.Disk
-	geometry      vmm.CHSGeometry
-	biosGeometry  vmm.CHSGeometry
-	now           func() time.Time
-	started       time.Time
-	console       []byte
-	cursor        uint16
-	mode          byte
-	ports         map[uint16]byte
-	cmos          [128]byte
-	cmosIndex     byte
-	lastService   string
-	rtcNext       time.Time
-	rtcIRQ        bool
-	ide           *ide
-	vga           *vga
-	inputTrace    []string
-	keyboard      *keyboard
-	rtcTrace      []any
-	videoPacket   videoPacket
-	pciAddress    uint32
-	pciIDE        *pciIDE
+	efiTrace        []any
+	efi             *uefi.Firmware
+	efiMemory       *efiMemory
+	acpi            *acpiPM
+	hpet            *hpet
+	nic             *ne2000
+	framebuffer     []byte
+	input           *virtioInput
+	channelMemory   []byte
+	channelName     string
+	cpu             hypervisor.X86
+	ram             []byte
+	disk            vmm.Disk
+	geometry        vmm.CHSGeometry
+	biosGeometry    vmm.CHSGeometry
+	now             func() time.Time
+	started         time.Time
+	console         []byte
+	cursor          uint16
+	mode            byte
+	ports           map[uint16]byte
+	cmos            [128]byte
+	cmosIndex       byte
+	unsupportedBIOS map[string]uint64
+	lastService     string
+	rtcNext         time.Time
+	rtcIRQ          bool
+	ide             *ide
+	vga             *vga
+	inputTrace      []string
+	keyboard        *keyboard
+	rtcTrace        []any
+	biosKeyPrefix   byte
+	biosMouse       biosMouse
+	videoPacket     videoPacket
+	pciAddress      uint32
+	pciIDE          *pciIDE
 }
 
 func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) (*pc, error) {
@@ -71,6 +74,9 @@ func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) 
 	}
 	p.vga = newVGA(ram[0xb8000:0xc0000])
 	p.keyboard = newKeyboard(cpu.SetIRQ)
+	if gate, ok := cpu.(interface{ SetA20(bool) error }); ok {
+		p.keyboard.a20 = gate.SetA20
+	}
 	p.input = &virtioInput{memory: p.inputMemory, irq: cpu.SetIRQ}
 	p.initializeCMOS()
 	for i := 0; i < 256; i++ {
@@ -82,11 +88,23 @@ func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) 
 	copy(ram[0xf2000:], []byte{0x50, 0x1e, 0xb8, 0x40, 0, 0x8e, 0xd8, 0x66, 0xff, 0x06, 0x6c, 0, 0xcd, 0x1c, 0xb0, 0x20, 0xe6, 0x20, 0x1f, 0x58, 0xcf})
 	binary.LittleEndian.PutUint16(ram[8*4:], 0x2000)
 	ram[0xf1000+0x1c*4] = 0xcf // default user timer hook
+	// The unclaimed software interrupt range has no BIOS service. Unclaimed
+	// vectors return through IRET, allowing DOS extenders to probe/chains hooks.
+	for i := 0x20; i < 256; i++ {
+		ram[0xf1000+i*4] = 0xcf
+	}
+	// No NetBIOS provider is installed. Windows tests this vector for
+	// zero before invoking INT 5Ch.
+	clear(ram[0x5c*4 : 0x5c*4+4])
+	p.installKeyboardFirmware()
+	p.installMouseFirmware()
 	p.installVideoFirmware()
 	// POST programs the real interrupt controllers and timer before entering
 	// the original MBR. These instructions execute against KVM's PC devices.
+	// IRQ2 must remain enabled for the slave PIC, including a BIOS PS/2
+	// handler whose OS driver saves/restores the POST mask around calls.
 	post := []byte{0xfa}
-	for _, io := range [][2]byte{{0x20, 0x11}, {0xa0, 0x11}, {0x21, 8}, {0xa1, 0x70}, {0x21, 4}, {0xa1, 2}, {0x21, 1}, {0xa1, 1}, {0x21, 0xfe}, {0xa1, 0xff}, {0x43, 0x36}, {0x40, 0}, {0x40, 0}} {
+	for _, io := range [][2]byte{{0x20, 0x11}, {0xa0, 0x11}, {0x21, 8}, {0xa1, 0x70}, {0x21, 4}, {0xa1, 2}, {0x21, 1}, {0xa1, 1}, {0x21, 0xf8}, {0xa1, 0xff}, {0x43, 0x36}, {0x40, 0}, {0x40, 0}} {
 		post = append(post, 0xb0, io[1], 0xe6, io[0])
 	}
 	post = append(post, 0x31, 0xc0, 0xfb, 0xea, 0, 0x7c, 0, 0)
@@ -166,6 +184,9 @@ func (p *pc) memory(addr, size uint64) ([]byte, error) {
 	if addr > uint64(len(p.ram)) || size > uint64(len(p.ram))-addr {
 		return nil, fmt.Errorf("guest memory out of range: %#x+%#x", addr, size)
 	}
+	// This helper lends a mutable physical span to firmware or DMA. Notify
+	// software CPUs before exposing it; ordinary accelerators need no hook.
+	p.beforeRAMWrite(addr, size)
 	return p.ram[addr : addr+size], nil
 }
 
@@ -176,38 +197,46 @@ func (p *pc) inputMemory(addr, size uint64) ([]byte, error) {
 	return p.memory(addr, size)
 }
 
+// physical is a side-effect-free translation used by inspection. Firmware
+// accesses use physicalPage and explicitly account for paging A/D bits.
 func (p *pc) physical(address uint64, s x86state.SystemRegisters) (uint64, error) {
+	physical, _, _, err := p.physicalPage(address, s)
+	return physical, err
+}
+
+func (p *pc) physicalPage(address uint64, s x86state.SystemRegisters) (uint64, []byte, []byte, error) {
 	if s.Cr0&(1<<31) == 0 {
-		return address, nil
+		return address, nil, nil, nil
 	}
 	if s.Cr4&(1<<5) != 0 {
-		return 0, fmt.Errorf("PAE address translation is not implemented")
+		return 0, nil, nil, fmt.Errorf("PAE address translation is not implemented")
 	}
 	dir, err := p.memory((s.Cr3&0xfffff000)+(address>>22&1023)*4, 4)
 	if err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
 	pde := uint64(binary.LittleEndian.Uint32(dir))
 	if pde&1 == 0 {
-		return 0, fmt.Errorf("unmapped PDE for %#x", address)
+		return 0, nil, nil, fmt.Errorf("unmapped PDE for %#x", address)
 	}
 	if pde&128 != 0 && s.Cr4&16 != 0 {
-		return pde&0xffc00000 | address&0x3fffff, nil
+		return pde&0xffc00000 | address&0x3fffff, dir, dir, nil
 	}
 	table, err := p.memory((pde&0xfffff000)+(address>>12&1023)*4, 4)
 	if err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
 	pte := uint64(binary.LittleEndian.Uint32(table))
 	if pte&1 == 0 {
-		return 0, fmt.Errorf("unmapped PTE for %#x", address)
+		return 0, nil, nil, fmt.Errorf("unmapped PTE for %#x", address)
 	}
-	return pte&0xfffff000 | address&4095, nil
+	return pte&0xfffff000 | address&4095, dir, table, nil
 }
 func setLow(r *uint64, v uint16) { *r = (*r &^ 0xffff) | uint64(v) }
 func setAH(r *uint64, v byte)    { *r = (*r &^ 0xff00) | uint64(v)<<8 }
 
 func (p *pc) bios() error {
+	p.beforeRAMWrite(0x400, 0x100) // direct BIOS Data Area updates
 	if err := p.cpu.CompleteIO(); err != nil {
 		return err
 	}
@@ -220,22 +249,28 @@ func (p *pc) bios() error {
 		return err
 	}
 	addr := s.Cs.Base + r.Rip
-	if addr < 0xf1000 || addr >= 0xf1400 || (addr-0xf1000)%4 != 2 {
+	mouseTrap := addr == 0xf2207 || addr == 0xf2282
+	if !mouseTrap && (addr < 0xf1000 || addr >= 0xf1400 || ((addr-0xf1000)%4 != 2 && addr != 0xf105b)) {
 		return fmt.Errorf("BIOS trap outside firmware: %#x", addr)
 	}
 	vector := (addr - 0xf1000) / 4
+	if mouseTrap {
+		vector = 0x15
+	}
 	ah, al := byte(r.Rax>>8), byte(r.Rax)
 	p.lastService = fmt.Sprintf("INT %02x AX=%04x", vector, uint16(r.Rax))
-	flags, err := p.memory(s.Ss.Base+uint64(uint16(r.Rsp+4)), 2)
+	flags, flushFlags, err := p.guestMemory(s.Ss.Base+uint64(uint16(r.Rsp+4)), 2, s, true)
 	if err != nil {
 		return err
 	}
+	defer flushFlags()
 	f := binary.LittleEndian.Uint16(flags)
 	carry := false
-	unsupported := func() { carry = true; setAH(&r.Rax, 0x86) }
+	unsupported := func() { p.observeUnsupportedBIOS(p.lastService); carry = true; setAH(&r.Rax, 0x86) }
 	switch vector {
 	case 0x10:
-		carry, err = p.videoBIOS(&r)
+		carry, err = p.videoBIOS(&r, &s.Es.Selector)
+		s.Es.Base = uint64(s.Es.Selector) << 4
 		if err != nil {
 			return err
 		}
@@ -264,10 +299,11 @@ func (p *pc) bios() error {
 				setAH(&r.Rax, 4)
 				break
 			}
-			buf, e := p.memory(s.Es.Base+uint64(uint16(r.Rbx)), uint64(count*512))
+			buf, flushBuffer, e := p.guestMemory(s.Es.Base+uint64(uint16(r.Rbx)), uint64(count*512), s, ah == 2)
 			if e != nil {
 				return e
 			}
+			defer flushBuffer()
 			if ah == 3 {
 				w, ok := p.disk.Device.(io.WriterAt)
 				if !ok || p.disk.ReadOnly {
@@ -304,20 +340,35 @@ func (p *pc) bios() error {
 			setLow(&r.Rcx, 1) // Fixed-disk access subset; no removable media.
 			setAH(&r.Rax, 0x21)
 		case 0x42, 0x43:
-			status := p.extendedDiskTransfer(s.Ds.Base+uint64(uint16(r.Rsi)), ah == 0x43, al)
+			status := p.extendedDiskTransfer(s.Ds.Base+uint64(uint16(r.Rsi)), ah == 0x43, al, s)
 			carry = status != 0
 			setAH(&r.Rax, status)
 		case 0x44, 0x47:
-			status := p.extendedDiskPosition(s.Ds.Base+uint64(uint16(r.Rsi)), ah == 0x44)
+			status := p.extendedDiskPosition(s.Ds.Base+uint64(uint16(r.Rsi)), ah == 0x44, s)
 			carry = status != 0
 			setAH(&r.Rax, status)
 		case 0x48:
-			status := p.extendedDiskParameters(s.Ds.Base + uint64(uint16(r.Rsi)))
+			status := p.extendedDiskParameters(s.Ds.Base+uint64(uint16(r.Rsi)), s)
 			carry = status != 0
 			setAH(&r.Rax, status)
 		default:
 			carry = true
 			setAH(&r.Rax, 1)
+		}
+	case 0x14:
+		// No COM ports are installed in the BDA. Report a serial timeout rather
+		// than terminating a guest which initializes the DOS AUX devices.
+		if ah <= 3 {
+			setAH(&r.Rax, 0x80)
+		} else {
+			unsupported()
+		}
+	case 0x17:
+		// No printer ports: timeout, not a ready/acknowledged printer.
+		if ah <= 2 {
+			setAH(&r.Rax, 1)
+		} else {
+			unsupported()
 		}
 	case 0x15:
 		switch ah {
@@ -326,28 +377,13 @@ func (p *pc) bios() error {
 				unsupported()
 			}
 		case 0xc2:
-			// NTDETECT uses the BIOS pointing-device reset/ID services before
-			// the protected-mode i8042 driver takes over the auxiliary port.
-			switch al {
-			case 1, 5:
-				if al == 5 && byte(r.Rbx>>8) != 3 {
-					carry = true
-					setAH(&r.Rax, 2)
-					break
-				}
-				p.keyboard.mouseEnabled = false
-				p.keyboard.mouseRemote = false
-				p.keyboard.mouseScaling = false
-				p.keyboard.mouseRate = 100
-				p.keyboard.mouseResolution = 2
-				setLow(&r.Rbx, 0x00aa)
-				setAH(&r.Rax, 0)
-			case 4:
-				r.Rbx &^= 0xff00
-				setAH(&r.Rax, 0)
-			default:
-				unsupported()
-			}
+			status := p.mouseBIOS(&r, s)
+			carry = status != 0
+			setAH(&r.Rax, status)
+		case 0x87:
+			status := p.moveExtendedMemory(s.Es.Base+uint64(uint16(r.Rsi)), uint16(r.Rcx), s)
+			setAH(&r.Rax, status)
+			carry = status != 0
 		case 0x88:
 			setLow(&r.Rax, uint16(min((len(p.ram)-(1<<20))/1024, 0xfc00)))
 		case 0xc0:
@@ -358,32 +394,49 @@ func (p *pc) bios() error {
 		case 0xc1:
 			unsupported()
 		case 0x24:
-			setAH(&r.Rax, 0)
+			switch al {
+			case 0, 1:
+				if p.keyboard.a20 != nil {
+					if err = p.keyboard.a20(al == 1); err != nil {
+						return err
+					}
+				}
+				p.keyboard.output = p.keyboard.output&^2 | al<<1
+				setAH(&r.Rax, 0)
+			case 2:
+				setLow(&r.Rax, uint16(p.keyboard.output>>1&1))
+			case 3:
+				setLow(&r.Rbx, 3)
+				setAH(&r.Rax, 0)
+			default:
+				unsupported()
+			}
 		case 0x86, 0x90, 0x91:
 			setAH(&r.Rax, 0)
 		default:
 			unsupported()
 		}
 	case 0x16:
-		switch ah {
-		case 1, 0x11:
-			f |= 0x40
-		case 2:
-			setLow(&r.Rax, 0)
-		case 0, 0x10:
-			return fmt.Errorf("BIOS awaiting keyboard input")
-		default:
-			unsupported()
+		if p.keyboardBIOS(&r, &f) {
+			// Blocking reads retry with interrupts enabled, so the real IRQ1
+			// firmware can fill the BDA ring. The interrupt frame stays intact.
+			r.Rip -= 2
+			r.Rflags |= 0x200
+			return p.cpu.SetRegisters(r)
 		}
 	case 0x1a:
 		t := p.now().UTC()
 		bcd := func(v int) uint16 { return uint16(v/10*16 + v%10) }
 		switch ah {
 		case 0:
-			ticks := uint32(p.now().Sub(p.started).Seconds() * 18.2065)
+			ticks := binary.LittleEndian.Uint32(p.ram[0x46c:])
 			setLow(&r.Rcx, uint16(ticks>>16))
 			setLow(&r.Rdx, uint16(ticks))
-			r.Rax &^= 255
+			r.Rax = r.Rax&^255 | uint64(p.ram[0x470])
+			p.ram[0x470] = 0
+		case 1:
+			binary.LittleEndian.PutUint32(p.ram[0x46c:], uint32(uint16(r.Rcx))<<16|uint32(uint16(r.Rdx)))
+			p.ram[0x470] = 0
 		case 2:
 			setLow(&r.Rcx, bcd(t.Hour())<<8|bcd(t.Minute()))
 			setLow(&r.Rdx, bcd(t.Second())<<8)

@@ -39,10 +39,11 @@ func (p *pc) extendedMemory(r *x86state.Registers, s x86state.SystemRegisters) b
 		if uint32(r.Rcx) >= 24 {
 			size = 24
 		}
-		buffer, err := p.memory(s.Es.Base+uint64(uint16(r.Rdi)), size)
+		buffer, flushBuffer, err := p.guestMemory(s.Es.Base+uint64(uint16(r.Rdi)), size, s, true)
 		if err != nil {
 			return false
 		}
+		defer flushBuffer()
 		region := regions[index]
 		binary.LittleEndian.PutUint64(buffer, region.base)
 		binary.LittleEndian.PutUint64(buffer[8:], region.size)
