@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tinyrange/trex/emulator/uefi"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"github.com/tinyrange/trex/vmm"
 	"github.com/tinyrange/trex/vmm/ramfb"
@@ -33,6 +34,10 @@ func (r request) execute() {
 type driver struct {
 	backend        *Backend
 	pc             *pc
+	cpuMu          sync.Mutex // protects cancellation targets across reconstruction
+	rebuild        func() (*pc, error)
+	resetRequested bool
+	platformClosed bool
 	ctx            context.Context
 	cancel         context.CancelFunc
 	requests       chan request
@@ -43,16 +48,22 @@ type driver struct {
 	state          vmm.State
 	result         *vmm.Result
 	closeErr       error
+	breakpointSkip int
 	breakpointHit  bool // owned by the native CPU loop
 }
 
 func newDriver(ctx context.Context, p *pc, paused bool) *driver {
-	return newDriverFor(ctx, p, paused, &Backend{})
+	return newRestartableDriver(ctx, p, paused, nil)
 }
 func newDriverFor(ctx context.Context, p *pc, paused bool, backend *Backend) *driver {
+	return newRestartableDriverFor(ctx, p, paused, nil, backend)
+}
+func newRestartableDriver(ctx context.Context, p *pc, paused bool, rebuild func() (*pc, error)) *driver {
+	return newRestartableDriverFor(ctx, p, paused, rebuild, &Backend{})
+}
+func newRestartableDriverFor(ctx context.Context, p *pc, paused bool, rebuild func() (*pc, error), backend *Backend) *driver {
 	ctx, cancel := context.WithCancel(ctx)
-	d := &driver{
-		backend: backend, pc: p, ctx: ctx, cancel: cancel,
+	d := &driver{backend: backend, pc: p, ctx: ctx, cancel: cancel, rebuild: rebuild,
 		requests: make(chan request, 16),
 		events:   make(chan vmm.Event, 32),
 		ready:    make(chan struct{}, 1),
@@ -63,6 +74,7 @@ func newDriverFor(ctx context.Context, p *pc, paused bool, backend *Backend) *dr
 	if paused {
 		d.state.Name = "paused"
 	}
+	p.asyncDMAReads = true
 	go d.loop()
 	return d
 }
@@ -97,15 +109,101 @@ func (d *driver) finish(reason, detail string, clean bool) {
 	d.emit("exit", r)
 	close(d.finished)
 }
-func (d *driver) loop() {
-	if d.pc.nic != nil {
-		defer d.pc.nic.port.Close()
+func (d *driver) closePlatform() error {
+	if d.platformClosed {
+		return nil
 	}
+	d.platformClosed = true
+	err := d.pc.completeIDEDMARead(true)
+	if d.pc.pciNIC != nil {
+		err = errors.Join(err, d.pc.pciNIC.port.Close())
+	}
+	if d.pc.nic != nil {
+		err = errors.Join(err, d.pc.nic.port.Close())
+	}
+	return errors.Join(err, d.pc.cpu.Close())
+}
+
+func (d *driver) loop() {
 	defer close(d.done)
 	defer close(d.events)
-	defer func() { d.mu.Lock(); d.closeErr = d.pc.cpu.Close(); d.mu.Unlock() }()
+	defer func() {
+		d.cpuMu.Lock()
+		err := d.closePlatform()
+		d.cpuMu.Unlock()
+		d.mu.Lock()
+		d.closeErr = err
+		d.mu.Unlock()
+	}()
 	d.emit("started", nil)
 	for {
+		if len(d.pc.cpus) > 1 {
+			d.loopSMP()
+		} else {
+			d.loopSingle()
+		}
+		if d.ctx.Err() != nil {
+			d.finish("closed", "", true)
+			return
+		}
+		if !d.resetRequested {
+			return
+		}
+		// Both execution loops have joined all vCPUs before returning here.
+		// Free the old RAM before allocating the replacement machine.
+		var variables []uefi.Variable
+		if d.pc.efi != nil {
+			variables = d.pc.efi.NonvolatileVariables()
+		}
+		d.cpuMu.Lock()
+		err := d.closePlatform()
+		if err == nil {
+			var next *pc
+			next, err = d.rebuild()
+			if err == nil {
+				d.pc = next
+				d.platformClosed = false
+				d.pc.asyncDMAReads = true
+				if d.pc.efi != nil {
+					err = d.pc.efi.RestoreNonvolatileVariables(variables)
+				}
+			}
+		}
+		d.cpuMu.Unlock()
+		d.resetRequested = false
+		if err != nil {
+			d.finish("guest_failure", "reset: "+err.Error(), false)
+			return
+		}
+		d.breakpointHit = false
+		d.emit("reset", nil)
+	}
+}
+
+func (d *driver) firmwareTransition(err error) error {
+	var reset *uefi.ResetRequest
+	if !errors.As(err, &reset) {
+		return err
+	}
+	if reset.Type == 2 {
+		if d.pc.acpi == nil {
+			return fmt.Errorf("cc: firmware shutdown requires ACPI")
+		}
+		d.pc.acpi.poweroff = true
+		return nil
+	}
+	if d.rebuild == nil {
+		return fmt.Errorf("cc: machine cannot be reconstructed for reset")
+	}
+	d.resetRequested = true
+	return nil
+}
+
+func (d *driver) loopSingle() {
+	for {
+		if d.resetRequested {
+			return
+		}
 		state, _ := d.Status(d.ctx)
 		if !state.Running {
 			select {
@@ -139,6 +237,13 @@ func (d *driver) loop() {
 			switch ex.Reason {
 			case hypervisor.X86ExitDebug:
 				d.breakpointHit = true
+				if d.breakpointSkip > 0 {
+					d.breakpointSkip--
+					err = d.skipBreakpoint()
+					if err == nil {
+						continue
+					}
+				}
 				d.mu.Lock()
 				d.state = vmm.State{Name: "paused"}
 				d.mu.Unlock()
@@ -148,26 +253,17 @@ func (d *driver) loop() {
 			case hypervisor.X86ExitIO:
 				err = d.pc.handleIO(ex)
 			case hypervisor.X86ExitMMIO:
-				if d.pc.hpet != nil && ex.Address >= hpetAddress && ex.Address < hpetAddress+0x400 {
-					err = d.pc.hpet.mmio(ex, d.pc.cpu, d.pc.now())
-				} else if ex.Address >= inputAddress && ex.Address < inputAddress+0x1000 {
-					err = d.pc.input.mmio(ex, d.pc.cpu)
-				} else if ex.Address >= 0xa0000 && ex.Address+uint64(ex.Size) <= 0xc0000 {
-					err = d.pc.vga.mmio(ex, d.pc.cpu)
-				} else {
-					// Unassigned physical bus addresses have no responder. Legacy
-					// memory probes rely on floating reads and discarded writes to
-					// distinguish the end of installed RAM from a mapped device.
-					if !ex.Write {
-						d.pc.cpu.CompleteMMIORead(^uint64(0), uint32(ex.Size))
-					}
-				}
+				err = d.pc.handleMMIO(ex)
 			case hypervisor.X86ExitShutdown:
-				d.finish("guest_failure", "x86 triple fault", false)
+				d.finish("guest_failure", d.pc.tripleFaultDetail(d.pc.cpu), false)
 				continue
 			default:
 				err = fmt.Errorf("unhandled x86 exit %d", ex.Reason)
 			}
+		}
+		err = d.firmwareTransition(err)
+		if d.resetRequested {
+			return
 		}
 		if err != nil {
 			d.finish("guest_failure", err.Error(), false)
@@ -186,7 +282,7 @@ func (d *driver) call(ctx context.Context, fn func() error) error {
 		return &vmm.Error{Code: vmm.ErrorState, Message: "cc VM is closed"}
 	case d.requests <- r:
 	}
-	_ = d.pc.cpu.Cancel()
+	d.cancelCPUs()
 	select {
 	case err := <-r.reply:
 		return err
@@ -198,6 +294,9 @@ func (d *driver) call(ctx context.Context, fn func() error) error {
 }
 func (d *driver) Pause(ctx context.Context) error {
 	return d.call(ctx, func() error {
+		if err := d.pc.completeIDEDMARead(true); err != nil {
+			return err
+		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		if d.result != nil {
@@ -208,18 +307,24 @@ func (d *driver) Pause(ctx context.Context) error {
 		return nil
 	})
 }
+func (d *driver) skipBreakpoint() error {
+	if d.breakpointHit {
+		r, err := d.pc.cpu.Registers()
+		if err != nil {
+			return err
+		}
+		r.Rflags |= 1 << 16 // RF suppresses the current execution breakpoint once
+		if err := d.pc.cpu.SetRegisters(r); err != nil {
+			return err
+		}
+		d.breakpointHit = false
+	}
+	return nil
+}
 func (d *driver) Resume(ctx context.Context) error {
 	return d.call(ctx, func() error {
-		if d.breakpointHit {
-			r, err := d.pc.cpu.Registers()
-			if err != nil {
-				return err
-			}
-			r.Rflags |= 1 << 16 // RF suppresses the current execution breakpoint once
-			if err := d.pc.cpu.SetRegisters(r); err != nil {
-				return err
-			}
-			d.breakpointHit = false
+		if err := d.skipBreakpoint(); err != nil {
+			return err
 		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
@@ -232,23 +337,29 @@ func (d *driver) Resume(ctx context.Context) error {
 	})
 }
 func (d *driver) Stop(ctx context.Context) error {
-	return d.call(ctx, func() error { d.finish("stopped", "", true); return nil })
+	return d.call(ctx, func() error {
+		if err := d.pc.completeIDEDMARead(true); err != nil {
+			return err
+		}
+		d.finish("stopped", "", true)
+		return nil
+	})
 }
 func (d *driver) Reset(context.Context) error {
 	return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "cc reset is not implemented"}
 }
 func (d *driver) Powerdown(ctx context.Context) error {
-	if d.pc.acpi != nil {
-		return d.call(ctx, func() error {
-			d.pc.acpi.status |= 1 << 8
-			return d.pc.acpi.updateIRQ()
-		})
-	}
-	return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "the legacy PC has no ACPI power button"}
+	return d.call(ctx, func() error {
+		if d.pc.acpi == nil {
+			return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "the legacy PC has no ACPI power button"}
+		}
+		d.pc.acpi.status |= 1 << 8
+		return d.pc.acpi.updateIRQ()
+	})
 }
 func (d *driver) Close(ctx context.Context) error {
 	d.cancel()
-	_ = d.pc.cpu.Cancel()
+	d.cancelCPUs()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

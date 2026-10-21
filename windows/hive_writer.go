@@ -282,10 +282,24 @@ func hiveFromPatchesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starla
 	var patches *starlark.List
 	keysValue := starlark.Value(starlark.None)
 	formatValue := starlark.Value(starlark.None)
-	if err := starlark.UnpackArgs("hive_from_patches", args, kwargs, "name", &name, "patches", &patches, "keys?", &keysValue, "format?", &formatValue); err != nil {
+	sourceValue := starlark.Value(starlark.None)
+	excludeKeys := starlark.Value(starlark.None)
+	excludeValues := starlark.Value(starlark.None)
+	var sourceDrive, targetDrive string
+	if err := starlark.UnpackArgs("hive_from_patches", args, kwargs, "name", &name, "patches", &patches, "keys?", &keysValue, "format?", &formatValue, "source?", &sourceValue, "source_drive?", &sourceDrive, "target_drive?", &targetDrive, "exclude_keys?", &excludeKeys, "exclude_values?", &excludeValues); err != nil {
 		return nil, err
 	}
 	root := newRegistryTree(name)
+	if sourceValue != starlark.None {
+		if err := importRegistryHive(root, sourceValue, sourceDrive, targetDrive, excludeKeys, excludeValues); err != nil {
+			return nil, err
+		}
+		if formatValue == starlark.None {
+			formatValue = sourceValue
+		}
+	} else if sourceDrive != "" || targetDrive != "" || excludeKeys != starlark.None || excludeValues != starlark.None {
+		return nil, fmt.Errorf("hive_from_patches: source options require source")
+	}
 	if keysValue != starlark.None {
 		keys, ok := keysValue.(*starlark.List)
 		if !ok {
@@ -410,6 +424,13 @@ type hiveRawValue struct {
 }
 
 func (h *registryHive) appendPatches(key hiveKey, keyParts []string, patches *starlark.List) error {
+	return h.appendPatchesVisited(key, keyParts, patches, make(hiveTraversal))
+}
+
+func (h *registryHive) appendPatchesVisited(key hiveKey, keyParts []string, patches *starlark.List, seen hiveTraversal) error {
+	if err := seen.enter(key, len(keyParts)); err != nil {
+		return err
+	}
 	keyPath := registryDisplayPath(keyParts)
 	values, err := h.readRawValues(key)
 	if err != nil {
@@ -430,7 +451,7 @@ func (h *registryHive) appendPatches(key hiveKey, keyParts []string, patches *st
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
-		if err := h.appendPatches(child, childParts, patches); err != nil {
+		if err := h.appendPatchesVisited(child, childParts, patches, seen); err != nil {
 			return err
 		}
 	}
@@ -438,6 +459,13 @@ func (h *registryHive) appendPatches(key hiveKey, keyParts []string, patches *st
 }
 
 func (h *registryHive) appendRawPatches(key hiveKey, keyParts []string, patches *starlark.List) error {
+	return h.appendRawPatchesVisited(key, keyParts, patches, make(hiveTraversal))
+}
+
+func (h *registryHive) appendRawPatchesVisited(key hiveKey, keyParts []string, patches *starlark.List, seen hiveTraversal) error {
+	if err := seen.enter(key, len(keyParts)); err != nil {
+		return err
+	}
 	keyPath := registryDisplayPath(keyParts)
 	values, err := h.readRawValues(key)
 	if err != nil {
@@ -469,7 +497,7 @@ func (h *registryHive) appendRawPatches(key hiveKey, keyParts []string, patches 
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
-		if err := h.appendRawPatches(child, childParts, patches); err != nil {
+		if err := h.appendRawPatchesVisited(child, childParts, patches, seen); err != nil {
 			return err
 		}
 	}
@@ -477,6 +505,13 @@ func (h *registryHive) appendRawPatches(key hiveKey, keyParts []string, patches 
 }
 
 func (h *registryHive) appendKeys(key hiveKey, keyParts []string, keys *starlark.List) error {
+	return h.appendKeysVisited(key, keyParts, keys, make(hiveTraversal))
+}
+
+func (h *registryHive) appendKeysVisited(key hiveKey, keyParts []string, keys *starlark.List, seen hiveTraversal) error {
+	if err := seen.enter(key, len(keyParts)); err != nil {
+		return err
+	}
 	keyPath := registryDisplayPath(keyParts)
 	if err := keys.Append(starlark.String(keyPath)); err != nil {
 		return err
@@ -487,7 +522,7 @@ func (h *registryHive) appendKeys(key hiveKey, keyParts []string, keys *starlark
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
-		if err := h.appendKeys(child, childParts, keys); err != nil {
+		if err := h.appendKeysVisited(child, childParts, keys, seen); err != nil {
 			return err
 		}
 	}
@@ -495,6 +530,13 @@ func (h *registryHive) appendKeys(key hiveKey, keyParts []string, keys *starlark
 }
 
 func (h *registryHive) appendKeyMetadata(key hiveKey, keyParts []string, keys *starlark.List) error {
+	return h.appendKeyMetadataVisited(key, keyParts, keys, make(hiveTraversal))
+}
+
+func (h *registryHive) appendKeyMetadataVisited(key hiveKey, keyParts []string, keys *starlark.List, seen hiveTraversal) error {
+	if err := seen.enter(key, len(keyParts)); err != nil {
+		return err
+	}
 	keyPath := registryDisplayPath(keyParts)
 	classData, err := h.readKeyClass(key)
 	if err != nil {
@@ -529,7 +571,7 @@ func (h *registryHive) appendKeyMetadata(key hiveKey, keyParts []string, keys *s
 	}
 	for _, child := range children {
 		childParts := appendRegistryPathPart(keyParts, child.name)
-		if err := h.appendKeyMetadata(child, childParts, keys); err != nil {
+		if err := h.appendKeyMetadataVisited(child, childParts, keys, seen); err != nil {
 			return err
 		}
 	}
@@ -537,20 +579,13 @@ func (h *registryHive) appendKeyMetadata(key hiveKey, keyParts []string, keys *s
 }
 
 func (h *registryHive) readRawValues(key hiveKey) ([]hiveRawValue, error) {
-	if key.values == 0 || key.valueList == 0xffffffff {
-		return nil, nil
-	}
-	list, err := h.readCell(key.valueList)
+	cells, err := h.valueCells(key)
 	if err != nil {
 		return nil, err
 	}
-	needed := int(key.values) * 4
-	if needed > len(list) {
-		return nil, fmt.Errorf("hive_patches: truncated value list")
-	}
-	values := make([]hiveRawValue, 0, key.values)
-	for offset := 0; offset < needed; offset += 4 {
-		value, err := h.readRawValue(binary.LittleEndian.Uint32(list[offset : offset+4]))
+	values := make([]hiveRawValue, 0, len(cells))
+	for _, cell := range cells {
+		value, err := h.readRawValue(cell)
 		if err != nil {
 			return nil, err
 		}
@@ -560,31 +595,19 @@ func (h *registryHive) readRawValues(key hiveKey) ([]hiveRawValue, error) {
 }
 
 func (h *registryHive) readRawValue(cell uint32) (hiveRawValue, error) {
-	data, err := h.readCell(cell)
+	reader, err := h.portableReader()
 	if err != nil {
 		return hiveRawValue{}, err
 	}
-	if len(data) < 0x14 || string(data[0:2]) != "vk" {
-		return hiveRawValue{}, fmt.Errorf("hive_patches: cell 0x%x is not a value node", cell)
-	}
-	nameLength := int(binary.LittleEndian.Uint16(data[0x02:0x04]))
-	dataLengthRaw := binary.LittleEndian.Uint32(data[0x04:0x08])
-	dataCell := binary.LittleEndian.Uint32(data[0x08:0x0c])
-	valueType := binary.LittleEndian.Uint32(data[0x0c:0x10])
-	flags := binary.LittleEndian.Uint16(data[0x10:0x12])
-	nameStart := 0x14
-	nameEnd := nameStart + nameLength
-	if nameEnd > len(data) {
-		return hiveRawValue{}, fmt.Errorf("hive_patches: invalid value name length")
-	}
-	valueData, err := h.readValueData(dataLengthRaw, dataCell)
+	value, err := reader.ReadValue(cell)
 	if err != nil {
 		return hiveRawValue{}, err
 	}
-	return hiveRawValue{
-		name:  hiveValueName(data[nameStart:nameEnd], flags),
-		value: registryData{typ: valueType, data: append([]byte(nil), valueData...)},
-	}, nil
+	name := value.Name
+	if name == "" {
+		name = "(default)"
+	}
+	return hiveRawValue{name: name, value: registryData{typ: value.Type, data: value.Data}}, nil
 }
 
 func registryPatchDict(keyPath string, keyParts []string, name string, data registryData) (*starlark.Dict, error) {
@@ -889,6 +912,7 @@ func hiveLogBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 type mutableHive struct {
 	data             []byte
 	legacyCellPrefix bool
+	freeCells        *hiveFreeIndex
 }
 
 func (h *mutableHive) cellBodyOffset() int {
@@ -1957,43 +1981,30 @@ func (h *mutableHive) allocateCell(body []byte) (uint32, error) {
 		}
 	}
 	h.data = append(h.data, newHbin...)
+	if h.freeCells != nil {
+		bin := hiveBaseBlockSize + oldSize
+		h.freeCells.bins = append(h.freeCells.bins, bin)
+		if remaining := hbinSize - 0x20 - used; remaining >= h.minimumFreeCellSize() {
+			h.freeCells.add(bin, bin+0x20+used, remaining)
+		}
+	}
 	binary.LittleEndian.PutUint32(h.data[0x28:0x2c], uint32(oldSize+hbinSize))
 	h.updateBaseChecksum()
 	return uint32(oldSize + 0x20), nil
 }
 
 func (h *mutableHive) allocateExistingCell(body []byte, needed int) (uint32, bool) {
-	hiveSize := int(binary.LittleEndian.Uint32(h.data[0x28:0x2c]))
-	for binRel := 0; binRel+0x20 <= hiveSize; {
-		binOff := hiveBaseBlockSize + binRel
-		if binOff+0x20 > len(h.data) || string(h.data[binOff:binOff+4]) != "hbin" {
-			return 0, false
-		}
-		binSize := int(binary.LittleEndian.Uint32(h.data[binOff+8 : binOff+12]))
-		if binSize <= 0 || binOff+binSize > len(h.data) {
-			return 0, false
-		}
-		for cellOff := binOff + 0x20; cellOff+4 <= binOff+binSize; {
-			rawSize := int32(binary.LittleEndian.Uint32(h.data[cellOff : cellOff+4]))
-			if rawSize == 0 {
-				break
-			}
-			cellSize := int(rawSize)
-			if cellSize < 0 {
-				cellSize = -cellSize
-			}
-			if cellSize < 8 || cellOff+cellSize > binOff+binSize {
-				break
-			}
-			if rawSize > 0 && cellSize >= needed {
-				h.writeAllocatedCell(binOff, cellOff, cellSize, body, needed)
-				return uint32(cellOff - hiveBaseBlockSize), true
-			}
-			cellOff += cellSize
-		}
-		binRel += binSize
+	if h.freeCells == nil {
+		h.indexFreeCells()
 	}
-	return 0, false
+	n := h.freeCells.firstFit(needed)
+	if n == nil {
+		return 0, false
+	}
+	binOff, cellOff, size := n.bin, n.offset, n.size
+	h.freeCells.root = removeHiveFree(h.freeCells.root, cellOff)
+	h.writeAllocatedCell(binOff, cellOff, size, body, needed)
+	return uint32(cellOff - hiveBaseBlockSize), true
 }
 
 func (h *mutableHive) writeAllocatedCell(binOff, cellOff, cellSize int, body []byte, needed int) {
@@ -2014,6 +2025,9 @@ func (h *mutableHive) writeAllocatedCell(binOff, cellOff, cellSize int, body []b
 	}
 	if remaining := cellSize - used; remaining >= h.minimumFreeCellSize() {
 		restOff := cellOff + used
+		if h.freeCells != nil {
+			h.freeCells.add(binOff, restOff, remaining)
+		}
 		binary.LittleEndian.PutUint32(h.data[restOff:restOff+4], uint32(remaining))
 		clear(h.data[restOff+4 : cellOff+cellSize])
 		if h.legacyCellPrefix {
@@ -2069,6 +2083,12 @@ func (h *mutableHive) freeCell(cell uint32) error {
 		return fmt.Errorf("patch_hive: cell 0x%x is not allocated", cell)
 	}
 	binary.LittleEndian.PutUint32(h.data[offset:offset+4], uint32(-rawSize))
+	if h.freeCells != nil {
+		i := sort.Search(len(h.freeCells.bins), func(i int) bool { return h.freeCells.bins[i] > offset }) - 1
+		if i >= 0 {
+			h.freeCells.add(h.freeCells.bins[i], offset, int(-rawSize))
+		}
+	}
 	return nil
 }
 

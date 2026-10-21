@@ -56,9 +56,14 @@ type Entry struct {
 	mu       sync.Mutex
 	reader   io.ReadCloser
 	data     []byte
+	base     int64
 	err      error
 	verified bool
 }
+
+// Retain a bounded decoded window. Backward reads outside it restart the
+// compressed stream; forward reads discard skipped bytes without host files.
+const decodedWindow = 8 << 20
 
 func NewEntry(entry *zip.File) *Entry { return &Entry{entry: entry} }
 
@@ -72,18 +77,38 @@ func (f *Entry) ReadAt(p []byte, off int64) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if f.Size() < 0 {
+		return 0, fmt.Errorf("zip: decoded size exceeds file addressing range")
+	}
 	if off >= f.Size() {
 		return 0, io.EOF
 	}
+	if f.err != nil {
+		return 0, f.err
+	}
+	if off < f.base {
+		if f.reader != nil {
+			_ = f.reader.Close()
+		}
+		f.reader = nil
+		f.data = f.data[:0]
+		f.base = 0
+	}
+	n := 0
 	end := off + min(int64(len(p)), f.Size()-off)
-	if err := f.cacheUntil(end); err != nil && err != io.EOF {
-		return 0, err
+	for off < end {
+		if off >= f.base+int64(len(f.data)) {
+			if err := f.cacheUntil(off + min(end-off, int64(128*1024))); err != nil {
+				return n, err
+			}
+		}
+		if off < f.base {
+			return n, fmt.Errorf("zip: decoded window missed requested bytes")
+		}
+		count := copy(p[n:], f.data[off-f.base:])
+		n += count
+		off += int64(count)
 	}
-	if int64(len(f.data)) < end {
-		return 0, io.ErrUnexpectedEOF
-	}
-
-	n := copy(p, f.data[off:end])
 	if n < len(p) {
 		return n, io.EOF
 	}
@@ -101,6 +126,12 @@ func (f *Entry) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", f.Type())
 }
 func (f *Entry) Attr(name string) (starlark.Value, error) {
+	if name == "compression_method" {
+		return starlark.MakeUint64(uint64(f.entry.Method)), nil
+	}
+	if name == "compressed_size" {
+		return starlark.MakeUint64(f.entry.CompressedSize64), nil
+	}
 	if name == "name" || name == "path" {
 		return starlark.String(f.entry.Name), nil
 	}
@@ -121,7 +152,7 @@ func (f *Entry) Attr(name string) (starlark.Value, error) {
 	return starfile.Attr(f, name), nil
 }
 func (f *Entry) AttrNames() []string {
-	return append(starfile.AttrNames(), "name", "path", "entry_type", "verify")
+	return append(starfile.AttrNames(), "name", "path", "entry_type", "verify", "compression_method", "compressed_size")
 }
 
 // Verify reads the complete payload and checks its ZIP checksum, including for
@@ -132,18 +163,14 @@ func (f *Entry) Verify() error {
 	if f.Size() < 0 {
 		return fmt.Errorf("zip: decoded size exceeds file addressing range")
 	}
-	err := f.cacheUntil(f.Size())
-	if err == io.EOF && f.verified {
-		return nil
-	}
-	return err
+	return f.cacheUntil(f.Size())
 }
 
 func (f *Entry) cacheUntil(end int64) error {
 	if f.err != nil {
 		return f.err
 	}
-	if int64(len(f.data)) >= end && (end < f.Size() || f.verified) {
+	if f.base+int64(len(f.data)) >= end && (end < f.Size() || f.verified) {
 		return nil
 	}
 	if f.reader == nil {
@@ -155,31 +182,41 @@ func (f *Entry) cacheUntil(end int64) error {
 		f.reader = reader
 	}
 
-	buf := make([]byte, min(int64(128*1024), end-int64(len(f.data))))
-	for int64(len(f.data)) < end {
-		need := int(end - int64(len(f.data)))
-		if need > len(buf) {
-			need = len(buf)
-		}
+	buf := make([]byte, min(int64(128*1024), end-f.base-int64(len(f.data))))
+	for f.base+int64(len(f.data)) < end {
+		need := int(min(int64(len(buf)), end-f.base-int64(len(f.data))))
 		n, err := f.reader.Read(buf[:need])
 		if n > 0 {
+			if len(f.data)+n > decodedWindow {
+				keep := min(len(f.data), 128*1024)
+				f.base += int64(len(f.data) - keep)
+				copy(f.data, f.data[len(f.data)-keep:])
+				f.data = f.data[:keep]
+			}
 			f.data = append(f.data, buf[:n]...)
 		}
 		if err != nil {
 			_ = f.reader.Close()
 			f.reader = nil
 			if err == io.EOF {
-				if int64(len(f.data)) != f.Size() {
+				if f.base+int64(len(f.data)) != f.Size() {
 					err = io.ErrUnexpectedEOF
 				} else {
 					f.verified = true
+					return nil
 				}
 			}
 			f.err = err
 			return err
 		}
+		if n == 0 {
+			_ = f.reader.Close()
+			f.reader = nil
+			f.err = io.ErrNoProgress
+			return f.err
+		}
 	}
-	if end == f.Size() && !f.verified {
+	if end == f.Size() && f.reader != nil {
 		// Stored ZIP readers can return the final requested bytes with nil
 		// error; their CRC check runs only on the next EOF read. Do not let
 		// an exact-sized ReadAt bypass it.
@@ -194,8 +231,10 @@ func (f *Entry) cacheUntil(end int64) error {
 		} else if err == nil {
 			err = io.ErrNoProgress
 		}
-		f.err = err
-		return err
+		if err != io.EOF {
+			f.err = err
+			return err
+		}
 	}
 	return nil
 }

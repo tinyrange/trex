@@ -137,8 +137,12 @@ func HiveEntries(file starfile.File) ([]HiveEntry, error) {
 		return nil, err
 	}
 	var result []HiveEntry
-	var walk func(hiveKey, string) error
-	walk = func(key hiveKey, name string) error {
+	seen := make(hiveTraversal)
+	var walk func(hiveKey, string, int) error
+	walk = func(key hiveKey, name string, depth int) error {
+		if err := seen.enter(key, depth); err != nil {
+			return err
+		}
 		result = append(result, HiveEntry{Name: name, Directory: true})
 		values, err := hive.readValues(key)
 		if err != nil {
@@ -163,13 +167,16 @@ func HiveEntries(file starfile.File) ([]HiveEntry, error) {
 		}
 		sort.Slice(children, func(i, j int) bool { return children[i].name < children[j].name })
 		for _, child := range children {
-			if err := walk(child, path.Join(name, child.name)); err != nil {
+			if err := walk(child, path.Join(name, child.name), depth+1); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	return result, walk(root, "/")
+	if err := walk(root, "/", 0); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func HiveJSON(file starfile.File, maximumDepth int) (string, error) {
@@ -181,8 +188,12 @@ func HiveJSON(file starfile.File, maximumDepth int) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	seen := make(hiveTraversal)
 	var build func(hiveKey, string, int) (map[string]any, error)
 	build = func(key hiveKey, name string, depth int) (map[string]any, error) {
+		if err := seen.enter(key, depth); err != nil {
+			return nil, err
+		}
 		values, err := hive.readValues(key)
 		if err != nil {
 			return nil, err

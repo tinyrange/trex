@@ -27,9 +27,11 @@ type Database struct {
 	Codepage       uint32
 }
 
-// Stream names pack pairs from a 64-character alphabet into UTF-16 codepoints.
-// See the MIT go-msi format reference recorded in the format documentation.
-func decodeName(name string) string {
+// DecodeStreamName unpacks the MSI 64-character alphabet from CFB UTF-16
+// names. It preserves the U+4840 table marker and characters outside the
+// encoding range. Only apply it to a confirmed Windows Installer storage,
+// not arbitrary CFB files whose Unicode names can use the same codepoints.
+func DecodeStreamName(name string) string {
 	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._"
 	var b strings.Builder
 	for _, r := range name {
@@ -54,7 +56,7 @@ func Open(file starfile.File) (*Database, error) {
 	}
 	d := &Database{container: container, streams: map[string]starfile.File{}, Schema: map[string][]Column{}, Tables: map[string][]map[string]starlark.Value{}, referenceWidth: 2}
 	for _, name := range container.Files() {
-		decoded := strings.TrimPrefix(decodeName(name), "/")
+		decoded := strings.TrimPrefix(DecodeStreamName(name), "/")
 		if _, found := d.streams[decoded]; found {
 			return nil, fmt.Errorf("msi: duplicate decoded stream %q", decoded)
 		}

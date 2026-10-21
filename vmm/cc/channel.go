@@ -25,8 +25,13 @@ type memoryChannel struct {
 }
 
 func (d *driver) Channel(ctx context.Context, name string) (channel.ByteChannel, error) {
-	if d.pc.channelName == "" || name != d.pc.channelName {
-		return nil, fmt.Errorf("unknown cc channel %q", name)
+	if err := d.call(ctx, func() error {
+		if d.pc.channelName == "" || name != d.pc.channelName {
+			return fmt.Errorf("unknown cc channel %q", name)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return &memoryChannel{driver: d}, nil
 }

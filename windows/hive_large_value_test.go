@@ -24,6 +24,8 @@ func TestRegistryLargeValueIgnoresCellPadding(t *testing.T) {
 	cell := w.writeCell(desc)
 	w.finishBin()
 	data := append(make([]byte, hiveBaseBlockSize), w.data...)
+	copy(data, "regf")
+	binary.LittleEndian.PutUint32(data[20:], 1)
 	binary.LittleEndian.PutUint32(data[24:], 5)
 	h := &registryHive{file: testHiveFile(data)}
 	got, err := h.readValueData(uint32(len(wanted)), cell)
@@ -110,6 +112,8 @@ func TestRegistryModernHiveRejectsDirectLargeValue(t *testing.T) {
 	cell := w.writeCell(bytes.Repeat([]byte{0x71}, 20592))
 	w.finishBin()
 	data := append(make([]byte, hiveBaseBlockSize), w.data...)
+	copy(data, "regf")
+	binary.LittleEndian.PutUint32(data[20:], 1)
 	binary.LittleEndian.PutUint32(data[24:], 5)
 	h := &registryHive{file: testHiveFile(data)}
 	if _, err := h.readValueData(20592, cell); err == nil {
@@ -167,6 +171,8 @@ func TestRegistryLargeValueRejectsMalformedSegments(t *testing.T) {
 			cell := w.writeCell(desc)
 			w.finishBin()
 			data := append(make([]byte, hiveBaseBlockSize), w.data...)
+			copy(data, "regf")
+			binary.LittleEndian.PutUint32(data[20:], 1)
 			binary.LittleEndian.PutUint32(data[24:], 5)
 			h := &registryHive{file: testHiveFile(data)}
 			if _, err := h.readValueData(hiveBigDataSegmentSize+1, cell); err == nil {

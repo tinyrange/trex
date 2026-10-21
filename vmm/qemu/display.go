@@ -208,6 +208,11 @@ func qemuTextKeys(character rune) ([]string, error) {
 }
 
 func (d *qemuDriver) Screenshot(ctx context.Context, format string) (starfile.File, error) {
+	d.captureMu.Lock()
+	defer d.captureMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if d.capture == nil || d.captureFD == 0 {
 		return nil, unsupportedVMM("screenshot")
 	}
@@ -216,6 +221,14 @@ func (d *qemuDriver) Screenshot(ctx context.Context, format string) (starfile.Fi
 	}
 	var data []byte
 	if qemuCaptureUsesStream() {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadline = time.Now().Add(30 * time.Second)
+		}
+		if err := d.capture.SetReadDeadline(deadline); err != nil {
+			return nil, err
+		}
+		defer d.capture.SetReadDeadline(time.Time{})
 		result := make(chan qemuCaptureResult, 1)
 		go func() {
 			value, err := readQEMUPPMStream(d.capture, 128<<20)

@@ -18,16 +18,30 @@ const biosPort = 0xf1
 // Interrupt entries execute small real-mode ROM routines; native execution
 // retains all mode switches and executes the original boot sector and loader.
 type pc struct {
+	nvme            *pciNVMe
+	performance     *pcPerformance
+	biosDiskCalls   []any
+	biosCalls       []any
+	biosCounts      [256]uint64
+	a20Disabled     bool
+	biosKeyExtended bool
+	biosKeyPause    byte
+	darwin          map[string]any
+	darwinSymbols   map[string]uint64
+	serial          [8]byte
 	efiTrace        []any
 	efi             *uefi.Firmware
 	efiMemory       *efiMemory
 	acpi            *acpiPM
 	hpet            *hpet
+	smc             *smc
 	nic             *ne2000
+	pciNIC          *e1000
 	framebuffer     []byte
 	input           *virtioInput
 	channelMemory   []byte
 	channelName     string
+	cpus            []hypervisor.X86 // CPU0 owns the machine; cpu selects the serialized exit owner.
 	cpu             hypervisor.X86
 	ram             []byte
 	disk            vmm.Disk
@@ -46,18 +60,25 @@ type pc struct {
 	rtcNext         time.Time
 	rtcIRQ          bool
 	ide             *ide
+	asyncDMAReads   bool
+	dmaRead         *ideDMARead
 	vga             *vga
 	inputTrace      []string
 	keyboard        *keyboard
 	rtcTrace        []any
-	biosKeyPrefix   byte
 	biosMouse       biosMouse
 	videoPacket     videoPacket
 	pciAddress      uint32
 	pciIDE          *pciIDE
+	pciDisplay      *pciDisplay
+	uhci            *uhci
 }
 
 func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) (*pc, error) {
+	return newPCBoot(cpu, ram, disk, now, true)
+}
+
+func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time, legacyBoot bool) (*pc, error) {
 	p := &pc{cpu: cpu, ram: ram, disk: disk, now: now, started: now(), mode: 3, ports: make(map[uint16]byte)}
 	p.cmos[0x0a], p.cmos[0x0b] = 0x26, 2
 	p.geometry = vmm.CHSGeometry{Cylinders: int(disk.Device.Geometry().Size / 512 / 16 / 63), Heads: 16, Sectors: 63}
@@ -82,7 +103,13 @@ func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) 
 	for i := 0; i < 256; i++ {
 		binary.LittleEndian.PutUint16(ram[i*4:], uint16(0x1000+i*4))
 		binary.LittleEndian.PutUint16(ram[i*4+2:], 0xf000)
-		copy(ram[0xf1000+i*4:], []byte{0xe6, biosPort, 0xcf, 0x90})
+		// Low vectors retain exception and BIOS service traps. Unowned
+		// software vectors have inert returns, not phantom host services.
+		if i < 0x20 {
+			copy(ram[0xf1000+i*4:], []byte{0xe6, biosPort, 0xcf, 0x90})
+		} else {
+			copy(ram[0xf1000+i*4:], []byte{0xcf, 0x90, 0x90, 0x90})
+		}
 	}
 	// IRQ0 advances the BDA tick count and acknowledges the master PIC.
 	copy(ram[0xf2000:], []byte{0x50, 0x1e, 0xb8, 0x40, 0, 0x8e, 0xd8, 0x66, 0xff, 0x06, 0x6c, 0, 0xcd, 0x1c, 0xb0, 0x20, 0xe6, 0x20, 0x1f, 0x58, 0xcf})
@@ -132,6 +159,9 @@ func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) 
 		ram[i+1] = 7
 	}
 	p.vga.syncText()
+	if !legacyBoot {
+		return p, nil
+	}
 	if n, err := disk.Device.ReadAt(ram[0x7c00:0x7e00], 0); err != nil || n != 512 {
 		return nil, fmt.Errorf("read boot sector: %w", err)
 	}
@@ -181,13 +211,29 @@ func (p *pc) initializeCMOS() {
 }
 
 func (p *pc) memory(addr, size uint64) ([]byte, error) {
-	if addr > uint64(len(p.ram)) || size > uint64(len(p.ram))-addr {
-		return nil, fmt.Errorf("guest memory out of range: %#x+%#x", addr, size)
+	offset, err := ramOffset(uint64(len(p.ram)), addr, size)
+	if err != nil {
+		return nil, err
 	}
-	// This helper lends a mutable physical span to firmware or DMA. Notify
-	// software CPUs before exposing it; ordinary accelerators need no hook.
+	// Mutable firmware and DMA spans must revoke software CPU write proofs.
 	p.beforeRAMWrite(addr, size)
-	return p.ram[addr : addr+size], nil
+	return p.ram[offset : offset+size], nil
+}
+
+// ramOffset translates a guest physical range into compact RAM backing. Never
+// let firmware, inspection, or DMA treat the PCI hole as ordinary memory.
+func ramOffset(total, addr, size uint64) (uint64, error) {
+	low := min(total, uint64(pciMemoryBase))
+	if addr <= low && size <= low-addr {
+		return addr, nil
+	}
+	if total > low && addr >= highRAMBase {
+		offset := addr - highRAMBase
+		if offset <= total-low && size <= total-low-offset {
+			return low + offset, nil
+		}
+	}
+	return 0, fmt.Errorf("guest memory out of range: %#x+%#x", addr, size)
 }
 
 func (p *pc) inputMemory(addr, size uint64) ([]byte, error) {
@@ -249,8 +295,15 @@ func (p *pc) bios() error {
 		return err
 	}
 	addr := s.Cs.Base + r.Rip
-	mouseTrap := addr == 0xf2207 || addr == 0xf2282
-	if !mouseTrap && (addr < 0xf1000 || addr >= 0xf1400 || ((addr-0xf1000)%4 != 2 && addr != 0xf105b)) {
+	if addr == 0xf2105 {
+		p.keyboardScan(byte(r.Rax))
+		return nil
+	}
+	if addr == 0xf2202 {
+		addr = 0xf1000 + 0x16*4 + 2
+	}
+	mouseTrap := addr == 0xf2507 || addr == 0xf2582
+	if !mouseTrap && (addr < 0xf1000 || addr >= 0xf1400 || (addr-0xf1000)%4 != 2) {
 		return fmt.Errorf("BIOS trap outside firmware: %#x", addr)
 	}
 	vector := (addr - 0xf1000) / 4
@@ -259,12 +312,44 @@ func (p *pc) bios() error {
 	}
 	ah, al := byte(r.Rax>>8), byte(r.Rax)
 	p.lastService = fmt.Sprintf("INT %02x AX=%04x", vector, uint16(r.Rax))
-	flags, flushFlags, err := p.guestMemory(s.Ss.Base+uint64(uint16(r.Rsp+4)), 2, s, true)
+	flagsAddress := s.Ss.Base + uint64(uint16(r.Rsp+4))
+	flags, err := p.biosReadContext(flagsAddress, 2, s)
 	if err != nil {
 		return err
 	}
-	defer flushFlags()
 	f := binary.LittleEndian.Uint16(flags)
+	frameIP, err := p.biosReadContext(s.Ss.Base+uint64(uint16(r.Rsp)), 2, s)
+	if err != nil {
+		return err
+	}
+	frameCS, err := p.biosReadContext(s.Ss.Base+uint64(uint16(r.Rsp+2)), 2, s)
+	if err != nil {
+		return err
+	}
+	call := map[string]any{"vector": int(vector), "ax": int(uint16(r.Rax)), "bx": int(uint16(r.Rbx)), "cx": int(uint16(r.Rcx)), "dx": int(uint16(r.Rdx)), "ds": int(s.Ds.Selector), "es": int(s.Es.Selector), "caller": int64(uint64(binary.LittleEndian.Uint16(frameCS))*16 + uint64(binary.LittleEndian.Uint16(frameIP))), "caller_cs": int(binary.LittleEndian.Uint16(frameCS)), "caller_ip": int(binary.LittleEndian.Uint16(frameIP)), "ss": int(s.Ss.Selector), "sp": int(uint16(r.Rsp))}
+	call["cr0"] = int64(s.Cr0)
+	call["cr3"] = int64(s.Cr3)
+	if vector == 0x13 {
+		if ah == 2 || ah == 3 {
+			linear := s.Es.Base + uint64(uint16(r.Rbx))
+			call["buffer_linear"] = int64(linear)
+			if physical, e := p.physical(linear, s); e == nil {
+				call["buffer_physical"] = int64(physical)
+			} else {
+				call["translation_error"] = e.Error()
+			}
+		}
+		p.biosDiskCalls = append(p.biosDiskCalls, call)
+		if len(p.biosDiskCalls) > 8 {
+			p.biosDiskCalls = p.biosDiskCalls[1:]
+		}
+	}
+	p.biosCounts[vector]++
+	p.biosCalls = append(p.biosCalls, call)
+	if len(p.biosCalls) > 16 {
+		p.biosCalls = p.biosCalls[1:]
+	}
+	defer func() { call["return_ax"] = int(uint16(r.Rax)); call["return_flags"] = int(f) }()
 	carry := false
 	unsupported := func() { p.observeUnsupportedBIOS(p.lastService); carry = true; setAH(&r.Rax, 0x86) }
 	switch vector {
@@ -299,11 +384,11 @@ func (p *pc) bios() error {
 				setAH(&r.Rax, 4)
 				break
 			}
-			buf, flushBuffer, e := p.guestMemory(s.Es.Base+uint64(uint16(r.Rbx)), uint64(count*512), s, ah == 2)
+			bufferAddress := s.Es.Base + uint64(uint16(r.Rbx))
+			buf, e := p.biosReadContext(bufferAddress, uint64(count*512), s)
 			if e != nil {
 				return e
 			}
-			defer flushBuffer()
 			if ah == 3 {
 				w, ok := p.disk.Device.(io.WriterAt)
 				if !ok || p.disk.ReadOnly {
@@ -312,7 +397,13 @@ func (p *pc) bios() error {
 					_, e = w.WriteAt(buf, int64(lba)*512)
 				}
 			} else {
-				_, e = p.disk.Device.ReadAt(buf, int64(lba)*512)
+				n, readErr := p.disk.Device.ReadAt(buf, int64(lba)*512)
+				e = readErr
+				if n > 0 {
+					if writeErr := p.biosCopy(bufferAddress, buf[:n], true, s); writeErr != nil {
+						e = writeErr
+					}
+				}
 			}
 			if e != nil {
 				carry = true
@@ -355,21 +446,9 @@ func (p *pc) bios() error {
 			carry = true
 			setAH(&r.Rax, 1)
 		}
-	case 0x14:
-		// No COM ports are installed in the BDA. Report a serial timeout rather
-		// than terminating a guest which initializes the DOS AUX devices.
-		if ah <= 3 {
-			setAH(&r.Rax, 0x80)
-		} else {
-			unsupported()
-		}
-	case 0x17:
-		// No printer ports: timeout, not a ready/acknowledged printer.
-		if ah <= 2 {
-			setAH(&r.Rax, 1)
-		} else {
-			unsupported()
-		}
+	case 0x14, 0x17:
+		// No serial or parallel ports are advertised; return invalid service.
+		unsupported()
 	case 0x15:
 		switch ah {
 		case 0xe8:
@@ -396,18 +475,24 @@ func (p *pc) bios() error {
 		case 0x24:
 			switch al {
 			case 0, 1:
-				if p.keyboard.a20 != nil {
-					if err = p.keyboard.a20(al == 1); err != nil {
-						return err
-					}
+				if al == 0 {
+					p.keyboard.output &^= 2
+					p.ports[0x92] &^= 2
+				} else {
+					p.keyboard.output |= 2
 				}
-				p.keyboard.output = p.keyboard.output&^2 | al<<1
+				if err := p.updateA20(); err != nil {
+					return err
+				}
 				setAH(&r.Rax, 0)
 			case 2:
-				setLow(&r.Rax, uint16(p.keyboard.output>>1&1))
+				setLow(&r.Rax, 0)
+				if !p.a20Disabled {
+					r.Rax |= 1
+				}
 			case 3:
-				setLow(&r.Rbx, 3)
 				setAH(&r.Rax, 0)
+				setLow(&r.Rbx, 3)
 			default:
 				unsupported()
 			}
@@ -417,13 +502,11 @@ func (p *pc) bios() error {
 			unsupported()
 		}
 	case 0x16:
-		if p.keyboardBIOS(&r, &f) {
-			// Blocking reads retry with interrupts enabled, so the real IRQ1
-			// firmware can fill the BDA ring. The interrupt frame stays intact.
-			r.Rip -= 2
-			r.Rflags |= 0x200
-			return p.cpu.SetRegisters(r)
+		if !p.keyboardBIOS(&r, &f) {
+			unsupported()
 		}
+		// INT16 preserves CF; only status queries modify the saved ZF.
+		carry = f&1 != 0
 	case 0x1a:
 		t := p.now().UTC()
 		bcd := func(v int) uint16 { return uint16(v/10*16 + v%10) }
@@ -454,6 +537,9 @@ func (p *pc) bios() error {
 		f |= 1
 	}
 	binary.LittleEndian.PutUint16(flags, f)
+	if err = p.biosCopy(flagsAddress, flags, true, s); err != nil {
+		return err
+	}
 	if err = p.cpu.SetSystemRegisters(s); err != nil {
 		return err
 	}

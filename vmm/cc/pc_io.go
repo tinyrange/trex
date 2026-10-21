@@ -2,6 +2,7 @@ package cc
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"j5.nz/cc/hypervisor"
 	"time"
@@ -20,13 +21,14 @@ func (p *pc) runDevices(ctx context.Context) (hypervisor.X86Exit, error) {
 			// Bulk disk data can use hundreds of native exits per sector.
 			// Leave control-port writes to the outer loop so timer changes
 			// immediately recompute their native execution deadline.
-			if ex.Port == 0x1f0 {
-				return true, p.ideIO(ex)
+			if ex.Port == p.ideDataPort() {
+				return p.routeIDE(ex)
 			}
 			return false, nil
 		case hypervisor.X86ExitMMIO:
-			if ex.Address >= 0xa0000 && ex.Address+uint64(ex.Size) <= 0xc0000 {
-				return true, p.vga.mmio(ex, p.cpu)
+			ex.Address = p.cpuAddress(ex.Address)
+			if ex.Address >= 0xa0000 && ex.Address <= 0xc0000 && uint64(ex.Size) <= 0xc0000-ex.Address {
+				return true, p.handleMMIO(ex)
 			}
 			return false, nil
 		default:
@@ -40,57 +42,11 @@ func (p *pc) runWithHandler(ctx context.Context, handle func(hypervisor.X86Exit)
 		if err := ctx.Err(); err != nil {
 			return hypervisor.X86Exit{}, err
 		}
+		deadline, deliver, commit, err := p.pollDevices()
+		if err != nil {
+			return hypervisor.X86Exit{}, err
+		}
 		now := p.now()
-		if p.acpi != nil {
-			if err := p.acpi.poll(now); err != nil {
-				return hypervisor.X86Exit{}, err
-			}
-		}
-		if p.nic != nil {
-			if err := p.nic.poll(); err != nil {
-				return hypervisor.X86Exit{}, err
-			}
-		}
-		if p.hpet != nil {
-			if err := p.hpet.poll(now); err != nil {
-				return hypervisor.X86Exit{}, err
-			}
-		}
-		var deadline time.Time
-		var deliver func() error
-		var commit func()
-		rate := p.cmos[0xa] & 15
-		if p.cmos[0xb]&0x40 == 0 || rate < 3 {
-			p.rtcNext = time.Time{}
-		} else {
-			period := time.Second * time.Duration(uint64(1)<<(rate-1)) / 32768
-			if p.rtcNext.IsZero() {
-				p.rtcNext = now.Add(period)
-			}
-			if !now.Before(p.rtcNext) {
-				p.rtcNext = now.Add(period)
-				p.cmos[0xc] |= 0xc0
-				if !p.rtcIRQ {
-					if err := p.cpu.SetIRQ(8, true); err != nil {
-						return hypervisor.X86Exit{}, err
-					}
-					p.rtcIRQ = true
-				}
-			}
-			if !p.rtcIRQ {
-				deadline = p.rtcNext
-				deliver = func() error { return p.cpu.SetIRQ(8, true) }
-				commit = func() { p.rtcIRQ = true; p.cmos[0xc] |= 0xc0; p.rtcNext = p.now().Add(period) }
-			}
-		}
-		if p.hpet != nil {
-			i, next := p.hpet.deadline()
-			if i >= 0 && (deadline.IsZero() || next.Before(deadline)) {
-				deadline = next
-				deliver = p.hpet.delivery(i)
-				commit = func() { p.hpet.expire(i, p.now()) }
-			}
-		}
 		if deadline.IsZero() {
 			return p.cpu.RunUntil(ctx, handle)
 		}
@@ -113,11 +69,20 @@ func (p *pc) runWithHandler(ctx context.Context, handle func(hypervisor.X86Exit)
 }
 
 func (p *pc) handleIO(ex hypervisor.X86Exit) error {
+	if ex.Port >= 0x3f8 && ex.Port <= 0x3ff {
+		return p.serialIO(ex)
+	}
+	if p.efi != nil && ex.Port == efiExceptionPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
+		return p.efiException()
+	}
 	if p.efi != nil && ex.Port == efiPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		return p.efiCall()
 	}
 	if p.acpi != nil && ex.Port >= 0xcf8 && ex.Port <= 0xcff {
 		return p.pciIO(ex)
+	}
+	if p.uhci != nil && p.uhci.config[4]&1 != 0 && uint32(ex.Port) >= p.uhci.ioBase() && uint32(ex.Port) < p.uhci.ioBase()+32 {
+		return p.uhci.io(ex, p.now())
 	}
 	if p.pciIDE != nil && p.pciIDE.config[4]&1 != 0 {
 		base := p.pciIDE.busMasterBase()
@@ -131,6 +96,15 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 	if p.acpi != nil && ex.Port >= acpiPMBase && ex.Port < acpiPMBase+12 {
 		return p.acpi.io(ex, p.now())
 	}
+	if p.smc != nil && ex.Port >= smcBase && ex.Port < smcBase+32 {
+		return p.smc.io(ex)
+	}
+	if p.pciNIC != nil && p.pciNIC.config[4]&1 != 0 {
+		base := uint16(binary.LittleEndian.Uint32(p.pciNIC.config[0x14:]) &^ 7)
+		if ex.Port == base || ex.Port == base+4 {
+			return p.pciNIC.io(ex)
+		}
+	}
 	if p.nic != nil && ex.Port >= 0x300 && ex.Port <= 0x31f {
 		return p.nic.io(ex)
 	}
@@ -141,22 +115,22 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 		}
 	}
 	if ex.Port == 0x60 || ex.Port == 0x64 {
-		return p.keyboard.io(ex)
+		if err := p.keyboard.io(ex); err != nil {
+			return err
+		}
+		return p.updateA20()
 	}
 	if ex.Port >= 0x3b0 && ex.Port <= 0x3df {
 		return p.vga.io(ex)
 	}
-	if ex.Port >= 0x1f0 && ex.Port <= 0x1f7 || ex.Port == 0x3f6 {
-		return p.ideIO(ex)
+	if handled, err := p.routeIDE(ex); handled {
+		return err
 	}
 	if ex.Port == biosMousePort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		p.biosMouseByte(ex.Data[0])
 		return nil
 	}
-	if ex.Port == biosKeyboardPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
-		p.biosKeyboardScan(ex.Data[0])
-		return nil
-	}
+
 	if ex.Port == biosPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		return p.bios()
 	}
@@ -224,21 +198,23 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 			p.observeRTC(false, value)
 		case 0x61:
 			if ex.Write {
-				p.ports[ex.Port] = data[0] & 15
+				p.ports[ex.Port] = (p.ports[ex.Port] & 0x20) | (data[0] & 0x0f)
 				break
 			}
-			// AT refresh request flip-flop: PIT channel 1 clocks it at about
-			// 66 kHz. HIMEM calibrates delays by waiting for bit 4 transitions,
-			// including with interrupts disabled; reads must not freeze that clock.
-			refresh := byte((p.now().Sub(p.started).Nanoseconds()/15085)&1) << 4
-			value = (p.ports[ex.Port]^0x20)&^0x10 | refresh
+			// AT refresh clock: PIT channel 1 divides the input by 18.
+			// HIMEM waits for bit 4 to change twice before using the 8042.
+			// Reading the port must not advance the refresh clock itself.
+			elapsed := max(p.now().Sub(p.started), 0)
+			ticks := uint64(elapsed/time.Second)*1193182 + uint64(elapsed%time.Second)*1193182/1000000000
+			value = p.ports[ex.Port] ^ 0x20
 			p.ports[ex.Port] = value
+			value |= byte((ticks/18)&1) << 4
 		case 0x80, 0x92:
 			value = p.ports[ex.Port]
 			if ex.Write {
 				p.ports[ex.Port] = data[0]
-				if ex.Port == 0x92 && p.keyboard.a20 != nil {
-					if err := p.keyboard.a20(data[0]&2 != 0); err != nil {
+				if ex.Port == 0x92 {
+					if err := p.updateA20(); err != nil {
 						return err
 					}
 				}
@@ -261,4 +237,74 @@ func (p *pc) observeRTC(write bool, value byte) {
 			p.rtcTrace = p.rtcTrace[1:]
 		}
 	}
+}
+
+// pollDevices is called only by the platform owner, never a CPU worker.
+func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
+	if err := p.completeIDEDMARead(false); err != nil {
+		return time.Time{}, nil, nil, err
+	}
+	now := p.now()
+	if p.uhci != nil {
+		if err := p.uhci.poll(now); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	if p.acpi != nil {
+		if err := p.acpi.poll(now); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	if p.pciNIC != nil {
+		if err := p.pciNIC.poll(); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	if p.nic != nil {
+		if err := p.nic.poll(); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	if p.hpet != nil {
+		if err := p.hpet.poll(now); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
+	var deadline time.Time
+	var deliver func() error
+	var commit func()
+	rate := p.cmos[0xa] & 15
+	if p.cmos[0xb]&0x40 == 0 || rate < 3 || (p.hpet != nil && p.hpet.config&2 != 0) {
+		p.rtcNext = time.Time{}
+	} else {
+		period := time.Second * time.Duration(uint64(1)<<(rate-1)) / 32768
+		if p.rtcNext.IsZero() {
+			p.rtcNext = now.Add(period)
+		}
+		if !now.Before(p.rtcNext) {
+			p.rtcNext = now.Add(period)
+			p.cmos[0xc] |= 0xc0
+			if !p.rtcIRQ {
+				if err := p.cpu.SetIRQ(8, true); err != nil {
+					return time.Time{}, nil, nil, err
+				}
+				p.rtcIRQ = true
+			}
+		}
+		if !p.rtcIRQ {
+			deadline = p.rtcNext
+			deliver = func() error { return p.cpu.SetIRQ(8, true) }
+			commit = func() { p.rtcIRQ = true; p.cmos[0xc] |= 0xc0; p.rtcNext = p.now().Add(period) }
+		}
+	}
+	if p.hpet != nil {
+		i, next := p.hpet.deadline()
+		if i >= 0 && (deadline.IsZero() || next.Before(deadline)) {
+			deadline = next
+			deliver = p.hpet.delivery(i)
+			commit = func() { p.hpet.expire(i, p.now()) }
+		}
+	}
+
+	return deadline, deliver, commit, nil
 }

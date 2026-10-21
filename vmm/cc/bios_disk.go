@@ -22,9 +22,12 @@ func translatedGeometry(sectors uint64) vmm.CHSGeometry {
 // extendedDiskTransfer implements the 16-byte EDD disk address packet. The
 // advertised fixed-disk subset uses segment:offset buffers, not flat addresses.
 func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte, states ...x86state.SystemRegisters) byte {
-	var state x86state.SystemRegisters
+	state, stateErr := p.biosAccessSystem()
 	if len(states) > 0 {
-		state = states[0]
+		state, stateErr = states[0], nil
+	}
+	if stateErr != nil {
+		return 9
 	}
 	packet, flushPacket, err := p.guestMemory(address, 16, state, true)
 	if err != nil || packet[0] < 16 || packet[1] != 0 {
@@ -72,9 +75,12 @@ func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte, states
 }
 
 func (p *pc) extendedDiskParameters(address uint64, states ...x86state.SystemRegisters) byte {
-	var state x86state.SystemRegisters
+	state, stateErr := p.biosAccessSystem()
 	if len(states) > 0 {
-		state = states[0]
+		state, stateErr = states[0], nil
+	}
+	if stateErr != nil {
+		return 9
 	}
 	header, _, err := p.guestMemory(address, 2, state, false)
 	if err != nil || binary.LittleEndian.Uint16(header) < 26 {
@@ -100,9 +106,12 @@ func (p *pc) extendedDiskParameters(address uint64, states ...x86state.SystemReg
 // Verify and seek are part of the EDD fixed-disk subset. Neither transfers data
 // to the packet's buffer; seek only validates the destination on this device.
 func (p *pc) extendedDiskPosition(address uint64, verify bool, states ...x86state.SystemRegisters) byte {
-	var state x86state.SystemRegisters
+	state, stateErr := p.biosAccessSystem()
 	if len(states) > 0 {
-		state = states[0]
+		state, stateErr = states[0], nil
+	}
+	if stateErr != nil {
+		return 9
 	}
 	packet, flushPacket, err := p.guestMemory(address, 16, state, true)
 	if err != nil || packet[0] < 16 || packet[1] != 0 {

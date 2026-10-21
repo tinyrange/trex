@@ -34,6 +34,7 @@ type ide struct {
 	lastCommand, lastFeature byte
 	failures                 []ideFailure
 	dmaError                 string
+	sleeping                 bool
 }
 
 func newIDE(disk vmm.Disk, g vmm.CHSGeometry, irq func(uint32, bool) error) *ide {
@@ -49,6 +50,7 @@ func (d *ide) reset() {
 	d.identify = false
 	d.dmaPending = false
 	d.dmaMode = 0xff
+	d.sleeping = false
 }
 func (d *ide) signal(level bool) error {
 	d.pending = level
@@ -103,6 +105,11 @@ func (d *ide) readSector() error {
 	return d.signal(true)
 }
 func (d *ide) command(command byte) error {
+	// SLEEP exits only through reset, not by accepting the next command.
+	// Status reads may acknowledge its completion interrupt in the meantime.
+	if d.sleeping {
+		return nil
+	}
 	d.commands++
 	feature := d.task[1]
 	d.lastCommand, d.lastFeature = command, feature
@@ -138,6 +145,14 @@ func (d *ide) command(command byte) error {
 			word(63, modes)
 		}
 		word(53, 1)
+		if d.dmaEnabled {
+			// ATA field-validity bit 1 covers the multiword DMA timing data.
+			// Advertising word 63 without it makes original IOATADevConfig
+			// (and other standards-compliant clients) select PIO instead.
+			word(53, 3)
+			word(65, 120) // Minimum MWDMA cycle time, modes 0..2 supported.
+			word(66, 120) // Recommended cycle time, in nanoseconds.
+		}
 		word(54, uint16(d.geometry.Cylinders))
 		word(55, uint16(d.geometry.Heads))
 		word(56, uint16(d.geometry.Sectors))
@@ -220,11 +235,16 @@ func (d *ide) command(command byte) error {
 		} else if feature != 2 && feature != 0x82 {
 			return d.fail(4)
 		}
-	case command == 0xe7:
+	case command == 0xe6 || command == 0xe7:
 		if flusher, ok := d.disk.Device.(block.Flusher); ok && d.disk.Device.Capabilities().Flush {
 			if err := flusher.Flush(); err != nil {
+				d.dmaError = fmt.Sprintf("ATA cache flush: %v", err)
 				return d.fail(4)
 			}
+		}
+		if command == 0xe6 {
+			d.remaining = 0
+			d.sleeping = true
 		}
 	default:
 		return d.fail(4)

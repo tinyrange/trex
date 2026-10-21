@@ -1,0 +1,6 @@
+rtgasm 1
+assembly {
+ interrupt21(out:emitter) { emitDOSInterruptBridge(out, 0x21) }
+ interrupt21ES(out:emitter) { emitDOSInterrupt21ES(out) }
+ interrupt14(out:emitter) { emitDOSInterruptBridge(out, 0x14) }
+}

@@ -206,74 +206,110 @@ func TestNTFSHardLinksShareAFileRecord(t *testing.T) {
 }
 
 func TestNTFSPreservesReparsePointData(t *testing.T) {
-	root := filesystemapi.New()
-	root.Mkdir("/Users")
-	root.Mkdir("/Users/All Users")
-	root.SetMetadata("/Users/All Users", filesystemapi.Metadata{
-		FileAttributes:    ntfsFileAttrDir | 0x400,
-		HasFileAttributes: true,
-		ReparseTag:        0xa0000003,
-		ReparseData: &starfile.Bytes{
-			Name: "junction",
-			Data: []byte{1, 2, 3, 4, 5, 6},
-		},
-	})
-	indexBuild := &ntfsBuild{nextID: 16, versionMajor: 3, versionMinor: 1}
-	if err := indexBuild.importDirectory(root); err != nil {
-		t.Fatal(err)
-	}
-	if err := indexBuild.prepareReparseIndex(); err != nil {
-		t.Fatal(err)
-	}
-	indexBlock := append([]byte(nil), indexBuild.reparseIndex.blocks...)
-	if err := applyNTFSReadFixup(indexBlock, ntfsSectorSize, "$R index block"); err != nil {
-		t.Fatal(err)
-	}
-	indexEntry := indexBlock[0x58 : 0x58+32]
-	if got := binary.LittleEndian.Uint32(indexEntry[16:20]); got != 0xa0000003 {
-		t.Fatalf("$R index tag = %#x, want %#x", got, uint32(0xa0000003))
-	}
-	if got := binary.LittleEndian.Uint64(indexEntry[20:28]) & 0xffffffffffff; got != 28 {
-		t.Fatalf("$R index file record = %d, want 28", got)
-	}
-	image, err := buildNTFSImageWithOptions(root, 64<<20, nil, 0, "REPARSE", 3, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	volume, err := newNTFSVolume(image)
-	if err != nil {
-		t.Fatal(err)
-	}
-	node := volume.paths["/users/all users"]
-	if node == nil {
-		t.Fatal("reparse directory is missing")
-	}
-	boot := make([]byte, ntfsSectorSize)
-	if _, err := image.ReadAt(boot, 0); err != nil {
-		t.Fatal(err)
-	}
-	record := make([]byte, ntfsRecordSize)
-	mftOffset := int64(binary.LittleEndian.Uint64(boot[48:56])) * ntfsCluster
-	if _, err := image.ReadAt(record, mftOffset+int64(node.id)*ntfsRecordSize); err != nil {
-		t.Fatal(err)
-	}
-	if err := applyNTFSReadFixup(record, ntfsSectorSize, "reparse directory"); err != nil {
-		t.Fatal(err)
-	}
-	attributes, err := parseNTFSReadAttributes(record, ntfsCluster)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []byte{3, 0, 0, 0xa0, 6, 0, 0, 0, 1, 2, 3, 4, 5, 6}
-	for _, attribute := range attributes {
-		if attribute.typ == ntfsAttrReparsePoint {
-			if !bytes.Equal(attribute.value, want) {
-				t.Fatalf("reparse value = %x, want %x", attribute.value, want)
-			}
-			return
+	for _, file := range []bool{false, true} {
+		name := "directory"
+		if file {
+			name = "file"
 		}
+		t.Run(name, func(t *testing.T) {
+			root := filesystemapi.New()
+			root.Mkdir("/Users")
+			if file {
+				root.PutFile("/Users/All Users", filesystemapi.FileRecord{Data: []byte{}, Size: 0})
+			} else {
+				root.Mkdir("/Users/All Users")
+			}
+			root.SetMetadata("/Users/All Users", filesystemapi.Metadata{
+				FileAttributes:    0x20,
+				HasFileAttributes: true,
+				ReparseTag:        0xa0000003,
+				ReparseData: &starfile.Bytes{
+					Name: "junction",
+					Data: []byte{1, 2, 3, 4, 5, 6},
+				},
+			})
+			indexBuild := &ntfsBuild{nextID: 16, versionMajor: 3, versionMinor: 1}
+			if err := indexBuild.importDirectory(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := indexBuild.prepareReparseIndex(); err != nil {
+				t.Fatal(err)
+			}
+			indexBlock := append([]byte(nil), indexBuild.reparseIndex.blocks...)
+			if err := applyNTFSReadFixup(indexBlock, ntfsSectorSize, "$R index block"); err != nil {
+				t.Fatal(err)
+			}
+			indexEntry := indexBlock[0x58 : 0x58+32]
+			keyLength := binary.LittleEndian.Uint16(indexEntry[10:12])
+			if dataOffset := binary.LittleEndian.Uint16(indexEntry[:2]); dataOffset != 16+(keyLength+3)&^3 {
+				t.Fatalf("invalid view-index data offset %d for key length %d", dataOffset, keyLength)
+			}
+			if got := binary.LittleEndian.Uint32(indexEntry[16:20]); got != 0xa0000003 {
+				t.Fatalf("$R index tag = %#x, want %#x", got, uint32(0xa0000003))
+			}
+			if got := binary.LittleEndian.Uint64(indexEntry[20:28]) & 0xffffffffffff; got != 28 {
+				t.Fatalf("$R index file record = %d, want 28", got)
+			}
+			image, err := buildNTFSImageWithOptions(root, 64<<20, nil, 0, "REPARSE", 3, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			volume, err := newNTFSVolume(image)
+			if err != nil {
+				t.Fatal(err)
+			}
+			node := volume.paths["/users/all users"]
+			if node == nil {
+				t.Fatal("reparse directory is missing")
+			}
+			boot := make([]byte, ntfsSectorSize)
+			if _, err := image.ReadAt(boot, 0); err != nil {
+				t.Fatal(err)
+			}
+			record := make([]byte, ntfsRecordSize)
+			mftOffset := int64(binary.LittleEndian.Uint64(boot[48:56])) * ntfsCluster
+			if _, err := image.ReadAt(record, mftOffset+int64(node.id)*ntfsRecordSize); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyNTFSReadFixup(record, ntfsSectorSize, "reparse directory"); err != nil {
+				t.Fatal(err)
+			}
+			attributes, err := parseNTFSReadAttributes(record, ntfsCluster)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var previous uint32
+			hasData := false
+			for _, attribute := range attributes {
+				if attribute.typ < previous {
+					t.Fatalf("attribute type %#x follows %#x", attribute.typ, previous)
+				}
+				previous = attribute.typ
+				if attribute.typ == ntfsAttrStandardInformation && binary.LittleEndian.Uint32(attribute.value[32:36])&0x400 == 0 {
+					t.Fatal("missing standard-information reparse flag")
+				}
+				if attribute.typ == ntfsAttrFileName && binary.LittleEndian.Uint32(attribute.value[56:60])&0x400 == 0 {
+					t.Fatal("missing filename reparse flag")
+				}
+				if attribute.typ == ntfsAttrData {
+					hasData = true
+				}
+			}
+			if file && !hasData {
+				t.Fatal("reparse file lost its unnamed data stream")
+			}
+			want := []byte{3, 0, 0, 0xa0, 6, 0, 0, 0, 1, 2, 3, 4, 5, 6}
+			for _, attribute := range attributes {
+				if attribute.typ == ntfsAttrReparsePoint {
+					if !bytes.Equal(attribute.value, want) {
+						t.Fatalf("reparse value = %x, want %x", attribute.value, want)
+					}
+					return
+				}
+			}
+			t.Fatal("reparse directory has no $REPARSE_POINT attribute")
+		})
 	}
-	t.Fatal("reparse directory has no $REPARSE_POINT attribute")
 }
 
 func TestNTFSNormalizesWIMStyleExtensionlessDOSName(t *testing.T) {
@@ -979,13 +1015,15 @@ func TestNTFS31SecurityStoreUsesMirroredSegments(t *testing.T) {
 	}
 }
 
-func TestNTFS31VolumeBitmapMarksSecurityIndexes(t *testing.T) {
+func TestNTFS31VolumeBitmapMarksMetadataIndexes(t *testing.T) {
 	b := &ntfsBuild{
 		size:          64 << 20,
 		versionMajor:  3,
 		versionMinor:  1,
 		secureIDLCN:   120,
 		secureHashLCN: 140,
+		reparseLCN:    180,
+		reparseIndex:  ntfsSecurityIndex{blocks: make([]byte, ntfsIndexSize)},
 		secureIDIndex: ntfsSecurityIndex{
 			blocks: make([]byte, 2*ntfsIndexSize),
 		},
@@ -994,10 +1032,10 @@ func TestNTFS31VolumeBitmapMarksSecurityIndexes(t *testing.T) {
 		},
 	}
 	bitmap := b.volumeBitmap()
-	for first, count := range map[int64]int64{120: 16, 140: 24} {
+	for first, count := range map[int64]int64{120: 16, 140: 24, 180: 8} {
 		for cluster := first; cluster < first+count; cluster++ {
 			if bitmap[cluster/8]&(1<<uint(cluster%8)) == 0 {
-				t.Fatalf("security-index cluster %d is free in the volume bitmap", cluster)
+				t.Fatalf("metadata-index cluster %d is free in the volume bitmap", cluster)
 			}
 		}
 	}

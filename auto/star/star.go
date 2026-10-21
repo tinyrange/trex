@@ -110,10 +110,14 @@ func (v *Value) Attr(name string) (starlark.Value, error) {
 			return starlark.None, nil
 		}
 		return adapter.File(v.Node.Reader()), nil
-	case "metadata":
-		m, err := v.Node.Metadata()
-		if err != nil {
-			return nil, err
+	case "metadata", "summary":
+		m := v.Node.Summary()
+		if name == "metadata" {
+			var err error
+			m, err = v.Node.Metadata()
+			if err != nil {
+				return nil, err
+			}
 		}
 		out := Metadata(m)
 		if m.Attributes != nil {
@@ -179,7 +183,7 @@ func (v *Value) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (*Value) AttrNames() []string {
-	return append(starfile.AttrNames(), "file", "files", "find", "page", "metadata", "name", "plans")
+	return append(starfile.AttrNames(), "file", "files", "find", "page", "metadata", "summary", "name", "plans")
 }
 func Metadata(m auto.Metadata) *starlark.Dict {
 	d := starlark.NewDict(6)

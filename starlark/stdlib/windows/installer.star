@@ -1580,10 +1580,13 @@ def _ieval_support(package, plan, target, system_time):
         "source": "installer evaluation key" if derived_time else "explicit installer system_time",
     })
 
-def _nested_installer_locations(nested, inherited, target):
+def _nested_installer_locations(nested, inherited, target, explicit = {}):
     locations = dict(inherited)
     if nested.format == "installshield5" and nested.payload != None and hasattr(nested.payload, "components"):
-        locations.update(_installshield5_component_locations(nested.payload.components, target, locations["<WINSYSDIR>"]))
+        defaults = _installshield5_component_locations(nested.payload.components, target, locations["<WINSYSDIR>"])
+        for name, destination in defaults.items():
+            if _casefold_get(locations, name) == None:
+                locations[name] = destination
     discovery = nested.plan(locations = locations)
     data_dir = None
     for write in discovery["definitive_registry_writes"]:
@@ -1593,11 +1596,11 @@ def _nested_installer_locations(nested, inherited, target):
         for component in nested.payload.components:
             name = component["name"]
             leaf = name.replace("\\", "/").split("/")[-1]
-            if component["groups"] and leaf.lower() != "preinstall":
+            if component["groups"] and leaf.lower() != "preinstall" and _casefold_get(explicit, name) == None:
                 locations[name] = data_dir + "\\" + leaf
     return locations
 
-def _nested_installers(package, plan, resolved_locations, target, system_root, system_time, version):
+def _nested_installers(package, plan, resolved_locations, target, system_root, system_time, version, explicit_locations):
     script = package.installscript
     references = {_base(value).lower(): True for value in script.strings} if script != None else {}
     output = []
@@ -1615,7 +1618,7 @@ def _nested_installers(package, plan, resolved_locations, target, system_root, s
         output.append(installer(
             nested,
             target = target,
-            locations = _nested_installer_locations(nested, resolved_locations, target),
+            locations = _nested_installer_locations(nested, resolved_locations, target, explicit_locations),
             system_root = system_root,
             system_time = system_time,
             nested_installers = False,
@@ -1776,7 +1779,7 @@ def installer(source, target = None, components = None, locations = {}, variable
             "source": shortcut_file,
         })
 
-    nested_results = _nested_installers(package, plan, resolved_locations, target, system_root, system_time, version) if nested_installers else []
+    nested_results = _nested_installers(package, plan, resolved_locations, target, system_root, system_time, version, locations) if nested_installers else []
     for result in nested_results:
         modifications.extend(result["modifications"])
 

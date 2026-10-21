@@ -25,13 +25,16 @@ func catalogMetadata(body starfile.File) (map[string]any, *auto.Entry, error) {
 		return nil, nil, err
 	}
 	be := binary.BigEndian
-	// 024a is an observed layout discriminator, not a length or record stride.
-	if be.Uint16(prefix[:]) != 0x024a || be.Uint16(prefix[32:]) != 0x0401 {
+	// 024a and 044a are independently observed layout discriminators, not
+	// lengths or record strides. Both qualified profiles share the bounded
+	// 112-byte prefix and 151-byte common records; unknown attributes stay raw.
+	generation := be.Uint16(prefix[:])
+	if (generation != 0x024a && generation != 0x044a) || be.Uint16(prefix[32:]) != 0x0401 {
 		return map[string]any{"recognized": false, "reason": "unsupported catalog prefix"}, nil, nil
 	}
 	count := int64(be.Uint32(prefix[42:]))
 	meta := map[string]any{
-		"recognized": true, "library": textIdentifier(prefix[2:32]),
+		"recognized": true, "layout_prefix_hex": fmt.Sprintf("%04x", generation), "library": textIdentifier(prefix[2:32]),
 		"library_name_hex": fmt.Sprintf("%x", prefix[2:32]),
 		"library_type_hex": "0401", "entry_count": count,
 		"section": 1, "offset": pageSize, "entries_offset": pageSize + catalogPrefixSize,

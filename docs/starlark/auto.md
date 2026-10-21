@@ -36,11 +36,26 @@ exposes a single decoded content file when the payload is an ordinary file.
 An archive node's `Reader()` always returns its original archive bytes.
 
 Built-in detectors cover ZIP, tar, gzip, bzip2, XZ, 7z, ar, CAB, CFB (including
-MSI storage), WIM, SFP, SZDD, KWAJ, FAT, NTFS, ISO9660, UDF, MBR, GPT, and VHDX.
+MSI storage), CPIO, Apple BOM inventories, WIM, SFP, SZDD, KWAJ, FAT, NTFS,
+SquashFS 4.0, ISO9660, High Sierra (`high_sierra`), UDF, MBR, GPT, and VHDX. See
+`docs/format-support.md` for the supported generations and payload limitations.
+
+Windows Installer package storages are identified as `msi` by their root CLSID.
+Their packed CFB stream names are decoded for browsing: table streams use a
+visible `!` prefix (for example `!File` and `!_StringPool`), and property-stream
+control characters are rendered as `[U+0005]`. Literal `!` and `[` characters
+are escaped to keep names distinct. Each stream retains `cfb_path`,
+`msi_stream_name` (decoded, with the original table marker), and `msi_table`
+metadata. The raw CFB API and payload bytes are unchanged; non-MSI compound
+documents retain their Unicode names. This stream view does not require
+decoding the database tables or supporting their codepage.
+
 Legacy detectors add UNIX compress/pack, LHA, StuffIt (including version 5),
 CompactPro, Tome, Macintosh resource forks, BSD dump, BRU, SGI standalone tape,
 VMS BACKUP, Amiga Hunk objects/load modules, HFS, EFS, historical UFS, XFS v4,
-ODS-2, Apple partition maps, SGI disk headers and Ultrix partition labels.
+ODS-2, Apple partition maps, SGI disk headers, Ultrix partition labels and
+version-1 OpenBSD disklabels. UFS1 detection covers historical and 4.4BSD
+inode/directory generations, including OpenBSD FFS1.
 AWS detection requires the observed VM/370 volume-header record; other AWS
 tapes remain available through `archive.aws` explicitly.
 
@@ -64,6 +79,15 @@ Standalone UFS volumes can retain their parent disk's label: if its partition
 ranges extend beyond this source, detection opens the independently recognized
 UFS volume rather than claiming the input is the complete disk.
 
+OpenBSD labels at byte 512 expose slots `a` through `z`/`A` through `Z`,
+retaining empty slots, absolute sector addresses and filesystem types. Raw slot
+`c` retains its bytes without recursively opening another copy of the label.
+Zero-start FFS slots open directly as filesystems. Standalone FFS volumes whose
+embedded label declares a larger parent disk open as UFS instead. In MBR media,
+the OpenBSD partition therefore remains directly browsable as `partition4`
+(or its actual MBR slot). To inspect its whole-disk label explicitly, use
+`filesystem.openbsd_label(disk, label_offset=partition.offset + 512)`.
+
 Recognition is not installation support or exhaustive nested-format coverage.
 Unsupported confirmed generations and damaged archives report parser errors.
 IRIX image/IDB pairs, RMS attributes and ADCR seed dictionaries require explicit
@@ -77,13 +101,22 @@ MZ executables are checked with the existing installer recognizers for embedded
 CABs, InstallShield packages and SFX envelopes, and Wise overlays. Confirmed
 installers expose their payload files and specific format, plus payload offset
 and size metadata; their reader still returns the original EXE. Ordinary EXEs
-remain readable files. Installer recognition may scan beyond the prefix, bounded
+remain readable files; those with resources expose a `pe_resources` view as a
+last-priority fallback. Resource payloads participate in ordinary recursive
+detection. The ANSI Inno Setup Extensions 3.0.6.1 reader exposes declared file
+destinations, not executed setup effects. Installer recognition may scan beyond the prefix, bounded
 by the smaller of 256 MiB and `maximum`. Detection does not execute installers.
 UDF takes precedence on bridge discs. Filesystems that use case-insensitive
 lookup retain that behavior; case-sensitive archive members remain distinct.
-Duplicate archive paths select the first member. Symlinks are metadata entries,
-not traversal instructions. Split archives still require the corresponding
-format's explicit multi-volume API.
+Duplicate archive paths normally select the first member; concatenated CPIO
+uses the last path in archive order. Symlinks are metadata entries, not traversal
+instructions. Split archives require the corresponding format's explicit
+multi-volume API unless the detector supports bounded companion discovery.
+CAB sets can find adjacent members in the supplied source tree, including one
+layer of independent CAB wrappers in the containing directory (the IE_Sn/IE_n
+layout). Inno external slices and literal or wildcard `{src}` files likewise
+require the supplied source tree. Neither detector searches arbitrary host
+paths; missing and ambiguous companions remain explicit.
 
 ## Starlark
 
@@ -194,7 +227,7 @@ navigation and encoding selection. Downloads retain the original bytes.
 and special files, and reads directory listings only when requested. Its source
 handle is closed with the Starlark application lifecycle.
 
-### Historical UFS browsing
+### UFS1 browsing
 
 UFS detection validates the superblock and root inode without walking the whole
 volume. Opening a directory validates its records and child inodes, retaining
@@ -204,6 +237,11 @@ remain errors. Unvisited directories have not been validated. Use
 `filesystem.ufs(file)` when explicit full-tree enumeration and validation are
 required. This avoids decoding unrelated directory trees merely to browse a
 single path inside a compressed disk image.
+
+The superblock's inode-format declaration selects the directory and inode
+layout; filenames do not. Modern 4.4BSD directories retain type/name-length
+bytes and use 32-bit inode ownership. Inline symlink targets are readable bytes,
+not followed paths. UFS2 and unknown inode formats remain unsupported.
 
 ### Streaming TAR pages
 

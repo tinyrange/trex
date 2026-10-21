@@ -111,7 +111,7 @@ func TestResourceChunksRejectsCompressedZeroChunkSize(t *testing.T) {
 func TestResourceChunksRejectsTruncatedTable(t *testing.T) {
 	archive := &Archive{file: &countingWIMFile{data: []byte{0, 0}}, chunkSize: 4}
 	_, err := archive.resourceChunks(wimResource{flags: wimResourceCompressed, size: 10, originalSize: 8})
-	if err == nil || !strings.Contains(err.Error(), "read chunk table") {
+	if err == nil || !strings.Contains(err.Error(), "resource range exceeds input") {
 		t.Fatalf("resourceChunks error = %v, want truncated table rejection", err)
 	}
 }

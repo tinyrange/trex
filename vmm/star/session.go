@@ -164,6 +164,8 @@ func (v *vmmSessionValue) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("type_and_enter", v.typeAndEnterBuiltin), nil
 	case "pointer":
 		return starlark.NewBuiltin("pointer", v.pointerBuiltin), nil
+	case "record":
+		return starlark.NewBuiltin("vm.record", v.recordBuiltin), nil
 	case "screenshot":
 		return starlark.NewBuiltin("screenshot", v.screenshotBuiltin), nil
 	case "extension":
@@ -178,7 +180,7 @@ func (v *vmmSessionValue) AttrNames() []string {
 	return []string{
 		"backend_id", "capabilities", "channel", "chord", "close", "debugger", "detach", "extension",
 		"has_capability", "key", "next_event", "pause", "pointer", "powerdown", "reset", "result", "resume",
-		"running", "screenshot", "send_keys", "send_text", "shutdown", "status", "stop", "tap", "type_and_enter", "wait",
+		"record", "running", "screenshot", "send_keys", "send_text", "shutdown", "status", "stop", "tap", "type_and_enter", "wait",
 	}
 }
 

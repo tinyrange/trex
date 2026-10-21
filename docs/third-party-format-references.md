@@ -1,5 +1,29 @@
 # Third-party format references
 
+## Chrome packages and Android recovery filesystems
+
+The CRX3 envelope, signed-data framing, and developer-ID derivation follow
+Chromium's [CRX3 schema](https://chromium.googlesource.com/chromium/src/+/main/components/crx_file/crx3.proto)
+and [verifier](https://chromium.googlesource.com/chromium/src/+/main/components/crx_file/crx_verifier.cc).
+Signature verification is independently implemented with Go's standard crypto
+packages; it does not pin a Chrome Web Store signing key.
+
+Android logical-partition metadata versions 10.0–10.2 follow AOSP's
+[liblp declarations](https://android.googlesource.com/platform/system/core/+/refs/heads/main/fs_mgr/liblp/include/liblp/metadata_format.h).
+Boot and vendor-boot versions 3–4 follow AOSP's
+[bootimg.h](https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/include/bootimg/bootimg.h).
+These readers validate structural bounds and liblp checksums, not AVB trust.
+
+EROFS inode, directory, compression-index, and checksum layouts were checked
+against Linux's [EROFS structures](https://github.com/torvalds/linux/blob/master/fs/erofs/erofs_fs.h)
+and compression mapping rules in `fs/erofs/zmap.c`. The Go implementation and
+synthetic regression fixtures are independently written; no kernel decoder is
+copied, linked, or invoked. LZ4 block decoding follows the published
+[block format](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md).
+Real-media checks used the signed Device Recovery Utility extension and ASUS
+Googlebook 14 recovery build `16452207_CL3B.260622.271.R1`, without incorporating
+their contents into the repository.
+
 ## Legacy Microsoft setup media
 
 Office media supplied the fixtures for the native SZ/KWAJ adaptations. The
@@ -245,3 +269,42 @@ no source implementation was copied. The upstream notice is retained here:
 > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
+
+
+## Linux image and Alpine package foundations
+
+CPIO newc, ext filesystem metadata/checksum layouts and the x86 boot header
+follow the Linux kernel's format documentation. Implementations and synthetic
+fixtures are native and independent; no external filesystem or package tool is
+invoked or linked.
+
+The Apache-2.0 repository `tinyrange/pkg2`, pinned at
+`fc584d5fed9ed3f0a29826dd8b3c3d675a2be0ca`, was consulted for Alpine's Starlark
+metadata handling, virtual-provide planning and explicit script/trigger plans.
+The new `unix/alpine.star` is independently implemented; no source files were
+copied. The older guest runner and disabled version-matching behavior are not
+incorporated. The Apache License 2.0 is retained in this repository's LICENSE.
+
+Upstream apk-tools format/version behavior was inspected as a reference only.
+No GPL implementation is copied, translated or linked; unsupported version
+range constraints are explicitly rejected by the basic pinned policy.
+
+## IBM i optical TERSE and XCOFF
+
+Native inspection of original media established LD_TRS outer framing, the
+02000080 inner header, record boundaries and byte-aligned zero end-code tails.
+The prefix-chain LRU dictionary behavior was informed by the Open Mainframe
+Project `tersedecompress` NonSpack algorithm at commit
+`12f5f9f34821defeef696c3232d97b7733dc79a6`. It is implemented natively in Go with
+bounded arrays, strict declared-output/trailer checks and synthetic fixtures;
+no external decompressor or host extraction command is used. Upstream is
+Apache-2.0; its full license is retained by the repository LICENSE. The project
+and reference source are at
+https://github.com/openmainframeproject/tersedecompress/tree/12f5f9f34821defeef696c3232d97b7733dc79a6.
+
+XCOFF64 fields and auxiliary tags were checked against the primary format
+declarations in Go's `src/internal/xcoff/xcoff.go` and LLVM's
+`llvm/include/llvm/Object/XCOFFObjectFile.h`, alongside native original-media
+inspection. No third-party XCOFF parser code is incorporated or invoked.
+The native APIs preserve raw names, unknown auxiliary records and non-restored
+BSS; saved addresses are never automatically equated with execution addresses.

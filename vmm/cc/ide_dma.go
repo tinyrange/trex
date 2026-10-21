@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"j5.nz/cc/hypervisor"
 )
@@ -13,6 +14,13 @@ func (d *pciIDE) busMasterBase() uint32 {
 }
 
 func (p *pc) busMasterIO(ex hypervisor.X86Exit) error {
+	// Serialize control changes against the captured transfer. Status polls
+	// remain nonblocking while the storage read is in flight.
+	if ex.Write {
+		if err := p.completeIDEDMARead(true); err != nil {
+			return err
+		}
+	}
 	d := p.pciIDE
 	for i := uint32(0); i < ex.Count; i++ {
 		for j := uint32(0); j < uint32(ex.Size); j++ {
@@ -53,8 +61,11 @@ func (p *pc) busMasterIO(ex hypervisor.X86Exit) error {
 // portable block device. Descriptor bounds are checked before changing memory
 // or disk, and each buffer must stay within its specified 64 KiB window.
 func (p *pc) tryIDEDMA() error {
+	if p.dmaRead != nil {
+		return nil
+	}
 	d, ata := p.pciIDE, p.ide
-	if d == nil || ata == nil || !ata.dmaPending || d.bm[0]&1 == 0 || d.config[4]&5 != 5 {
+	if d == nil || ata == nil || !ata.dmaPending || d.bm[0]&1 == 0 || d.config[4]&5 != 5 || !d.primaryEnabled() {
 		return nil
 	}
 	d.bm[2] |= 1
@@ -67,8 +78,7 @@ func (p *pc) tryIDEDMA() error {
 	if (d.bm[0]&8 == 0) != ata.write {
 		return fail("direction mismatch")
 	}
-	type region struct{ address, size uint64 }
-	var regions []region
+	var regions []ideDMARegion
 	remaining := uint64(ata.remaining) * 512
 	ptr := uint64(binary.LittleEndian.Uint32(d.bm[4:8]))
 	for remaining > 0 {
@@ -88,7 +98,7 @@ func (p *pc) tryIDEDMA() error {
 		if _, err = p.memory(address, count); err != nil {
 			return fail(fmt.Sprintf("buffer %#x size %#x: %v", address, count, err))
 		}
-		regions = append(regions, region{address, count})
+		regions = append(regions, ideDMARegion{address, count})
 		remaining -= count
 		if remaining != 0 && prd[7]&0x80 != 0 {
 			return fail("descriptor chain ended before transfer")
@@ -96,6 +106,10 @@ func (p *pc) tryIDEDMA() error {
 		ptr += 8
 	}
 	offset := ata.lba * 512
+	if p.asyncDMAReads && !ata.write {
+		p.startIDEDMARead(regions, offset, ata.remaining*512)
+		return nil
+	}
 	for _, r := range regions {
 		buffer, _ := p.memory(r.address, r.size)
 		var n int
@@ -105,7 +119,14 @@ func (p *pc) tryIDEDMA() error {
 			if !ok || ata.disk.ReadOnly {
 				return fail("disk is not writable")
 			}
+			var began time.Time
+			if p.performance != nil {
+				began = time.Now()
+			}
 			n, err = writer.WriteAt(buffer, offset)
+			if p.performance != nil {
+				p.performance.Write.add(time.Since(began), n)
+			}
 		} else {
 			n, err = ata.disk.Device.ReadAt(buffer, offset)
 		}

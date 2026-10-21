@@ -122,11 +122,26 @@ func (p *pc) installACPI() error {
 	if err != nil {
 		return err
 	}
-	aml, err := acpi.LegacyProcessorAML("CPU0", 0)
-	if err != nil {
-		return err
+	var aml []byte
+	count := max(1, len(p.cpus))
+	for id := 0; id < count; id++ {
+		data, err := acpi.LegacyProcessorAML(fmt.Sprintf("CPU%X", id), byte(id))
+		if err != nil {
+			return err
+		}
+		aml = append(aml, data...)
 	}
-	pciAML, err := (acpi.PCIRoot{Legacy: true, MemoryBase: 0xc0000000, MemorySize: 0x3ec00000}).AML()
+	root := acpi.PCIRoot{Legacy: true, MemoryBase: pciMemoryBase, MemorySize: 0x3ec00000}
+	if p.nvme != nil || p.pciIDE != nil && p.pciIDE.ich7 {
+		root.Interrupts = []acpi.PCIInterrupt{{Device: 1, Pin: 0, Interrupt: 16}}
+	}
+	if p.uhci != nil {
+		root.Interrupts = append(root.Interrupts, acpi.PCIInterrupt{Device: 3, Pin: 0, Interrupt: 17})
+	}
+	if p.pciNIC != nil {
+		root.Interrupts = append(root.Interrupts, acpi.PCIInterrupt{Device: 4, Pin: 0, Interrupt: 18})
+	}
+	pciAML, err := root.AML()
 	if err != nil {
 		return err
 	}
@@ -140,7 +155,7 @@ func (p *pc) installACPI() error {
 		{Name: "IDE0", ID: "PNP0600", Ports: [][2]uint16{{0x1f0, 8}, {0x3f6, 1}}, IRQs: []uint8{14}},
 		{Name: "PM00", ID: "PNP0C02", Ports: [][2]uint16{{acpiPMBase, 12}}},
 	} {
-		if dev.Name == "IDE0" && p.pciIDE != nil {
+		if dev.Name == "IDE0" && (p.pciIDE != nil || p.nvme != nil) {
 			continue // PCI enumerates this controller and owns its resources.
 		}
 		// Fixed legacy devices belong below the root bus. Windows starts
@@ -148,6 +163,13 @@ func (p *pc) installACPI() error {
 		// children's interrupt resources.
 		dev.Parent = `\_SB.PCI0`
 		data, err := dev.AML()
+		if err != nil {
+			return err
+		}
+		aml = append(aml, data...)
+	}
+	if p.smc != nil {
+		data, err := (acpi.ISADevice{Name: "SMC0", ID: "APP0001", Ports: [][2]uint16{{smcBase, 32}}, IRQs: []uint8{6}}).AML()
 		if err != nil {
 			return err
 		}
@@ -189,7 +211,9 @@ func (p *pc) installACPI() error {
 	}
 	madt := binary.LittleEndian.AppendUint32(nil, 0xfee00000)
 	madt = binary.LittleEndian.AppendUint32(madt, 1) // Dual PIC present.
-	madt = append(madt, 0, 8, 0, 0, 1, 0, 0, 0)      // CPU0, local APIC ID0, enabled.
+	for id := 0; id < count; id++ {
+		madt = append(madt, 0, 8, byte(id), byte(id), 1, 0, 0, 0)
+	}
 	madt = append(madt, 1, 12, 0, 0)
 	madt = binary.LittleEndian.AppendUint32(madt, 0xfec00000)
 	madt = binary.LittleEndian.AppendUint32(madt, 0)
@@ -203,7 +227,7 @@ func (p *pc) installACPI() error {
 	roots := []uint32{fadtAddr, madtAddr}
 	if p.hpet != nil {
 		body := make([]byte, 20)
-		binary.LittleEndian.PutUint32(body, uint32(hpetCapabilities&0xffffffff))
+		binary.LittleEndian.PutUint32(body, uint32(p.hpet.read(0, p.now())&0xffffffff))
 		body[5] = 64 // System-memory GAS, 64-bit registers.
 		binary.LittleEndian.PutUint64(body[8:], hpetAddress)
 		binary.LittleEndian.PutUint16(body[17:], 128)

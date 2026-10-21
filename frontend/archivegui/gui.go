@@ -243,8 +243,8 @@ func (b *browser) key(e window.InputEvent, pageSize int) {
 	}
 	ctrl := e.Mods&(window.ModCtrl|window.ModSuper) != 0
 	if b.save == nil && ctrl && e.Key == window.KeyEnter {
-		n, p := b.target()
-		b.openSystem(n, p)
+		n, _ := b.target()
+		b.promptSave(n)
 		return
 	}
 	if ctrl && e.Key == window.KeyL {

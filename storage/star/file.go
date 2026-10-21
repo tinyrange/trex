@@ -18,10 +18,39 @@ type File interface {
 	starlark.Value
 }
 
-func AttrNames() []string { return []string{"binary", "bytes", "hex", "read", "size", "slice"} }
+func AttrNames() []string {
+	return []string{"binary", "bytes", "hex", "read", "size", "slice", "splice"}
+}
 
 func Attr(file File, name string) starlark.Value {
 	switch name {
+	case "splice":
+		return starlark.NewBuiltin("splice", func(_ *starlark.Thread, _ *starlark.Builtin, a starlark.Tuple, k []starlark.Tuple) (starlark.Value, error) {
+			var offset, remove int64
+			var value starlark.Value
+			if err := starlark.UnpackArgs("splice", a, k, "offset", &offset, "remove", &remove, "value", &value); err != nil {
+				return nil, err
+			}
+			if offset < 0 || remove < 0 || offset > file.Size() || remove > file.Size()-offset {
+				return nil, fmt.Errorf("invalid splice range")
+			}
+			var insert storage.Reader
+			switch v := value.(type) {
+			case storage.Reader:
+				insert = v
+			case starlark.String:
+				insert = &Bytes{Data: []byte(v)}
+			case starlark.Bytes:
+				insert = &Bytes{Data: []byte(v)}
+			default:
+				return nil, fmt.Errorf("splice: want file, string or bytes")
+			}
+			composed, err := storage.Compose(storage.Range{Source: file, Length: offset}, storage.Range{Source: insert, Length: insert.Size()}, storage.Range{Source: file, Offset: offset + remove, Length: file.Size() - offset - remove})
+			if err != nil {
+				return nil, err
+			}
+			return NewReader(file.String(), composed), nil
+		})
 	case "read":
 		return starlark.NewBuiltin("read", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			if err := starlark.UnpackArgs("read", args, kwargs); err != nil {

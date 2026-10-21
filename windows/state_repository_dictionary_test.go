@@ -10,7 +10,7 @@ import (
 
 func TestStateRepositoryDictionaryBuiltin(t *testing.T) {
 	value, err := starlark.Eval(&starlark.Thread{Name: "dictionary"}, "test.star",
-		`encode({"LaunchPolicy": {"#text": "1"}, "Capability": [{"Name": "a"}, {"Name": "b"}]})`,
+		`encode({"LaunchPolicy": {"#text": "1"}, "Capability": [{"Name": "a"}, {"Name": "b"}], "34537559": True, "51314775": False})`,
 		starlark.StringDict{"encode": Builtins()["state_repository_dictionary"]})
 	if err != nil {
 		t.Fatal(err)
@@ -19,7 +19,7 @@ func TestStateRepositoryDictionaryBuiltin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d[0].Key != "LaunchPolicy" || d[0].Value.(srdictionary.Dictionary)[0].Value != "1" || len(d[1].Value.([]srdictionary.Dictionary)) != 2 {
+	if d[0].Key != "LaunchPolicy" || d[0].Value.(srdictionary.Dictionary)[0].Value != "1" || len(d[1].Value.([]srdictionary.Dictionary)) != 2 || d[2].Value != true || d[3].Value != false {
 		t.Fatalf("wrong dictionary: %#v", d)
 	}
 	for _, expr := range []string{`encode({"x": 1})`, `encode({1: "x"})`, `encode({"x": ["not a map"]})`} {

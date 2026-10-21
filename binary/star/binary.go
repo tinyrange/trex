@@ -13,6 +13,11 @@ import (
 	"strings"
 
 	binaryapi "github.com/tinyrange/trex/binary"
+	"github.com/tinyrange/trex/binary/androidboot"
+	"github.com/tinyrange/trex/binary/berkeleydb"
+	"github.com/tinyrange/trex/binary/elfmeta"
+	irixbinary "github.com/tinyrange/trex/binary/irix"
+	"github.com/tinyrange/trex/binary/perf"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	starfile "github.com/tinyrange/trex/storage/star"
 	windowsapi "github.com/tinyrange/trex/windows"
@@ -63,22 +68,40 @@ func binaryScalarCodecNamed(name string) (binaryScalarCodec, bool) {
 
 func Builtins() starlark.StringDict {
 	attrs := starlark.StringDict{
-		"annotate": starlark.NewBuiltin("annotate", binaryAnnotateBuiltin),
-		"base64":   starlark.NewBuiltin("base64", binaryBase64Builtin),
-		"bits":     starlark.NewBuiltin("bits", binaryBitsBuiltin),
-		"builder":  starlark.NewBuiltin("builder", binaryBuilderBuiltin),
-		"concat":   starlark.NewBuiltin("concat", binaryConcatBuiltin),
-		"cursor":   starlark.NewBuiltin("cursor", binaryCursorBuiltin),
-		"decode":   starlark.NewBuiltin("decode", binaryDecodeBuiltin),
-		"encode":   starlark.NewBuiltin("encode", binaryEncodeBuiltin),
-		"extents":  starlark.NewBuiltin("extents", binaryExtentsBuiltin),
-		"hex":      starlark.NewBuiltin("hex", binaryHexBuiltin),
-		"layout":   starlark.NewBuiltin("layout", binaryLayoutBuiltin),
-		"replace":  starlark.NewBuiltin("replace", binaryReplaceBuiltin),
-		"strings":  starlark.NewBuiltin("strings", binaryStringsBuiltin),
-		"text":     starlark.NewBuiltin("text", binaryTextBuiltin),
-		"view":     starlark.NewBuiltin("view", binaryViewBuiltin),
-		"xml":      starlark.NewBuiltin("xml", binaryXMLBuiltin),
+		"irix_executable":              starlark.NewBuiltin("irix_executable", irixbinary.Builtin),
+		"apple_device_tree":            starlark.NewBuiltin("apple_device_tree", appleDeviceTreeBuiltin),
+		"encode_apple_device_tree":     starlark.NewBuiltin("encode_apple_device_tree", encodeAppleDeviceTreeBuiltin),
+		"arm64_disassemble":            starlark.NewBuiltin("arm64_disassemble", arm64DisassembleBuiltin),
+		"android_boot":                 starlark.NewBuiltin("android_boot", androidboot.Builtin),
+		"berkeley_db":                  starlark.NewBuiltin("berkeley_db", berkeleydb.Builtin),
+		"software_update_catalog":      starlark.NewBuiltin("software_update_catalog", softwareUpdateCatalogBuiltin),
+		"software_update_distribution": starlark.NewBuiltin("software_update_distribution", softwareUpdateDistributionBuiltin),
+
+		"annotate":             starlark.NewBuiltin("annotate", binaryAnnotateBuiltin),
+		"appledouble":          starlark.NewBuiltin("appledouble", appleDoubleBuiltin),
+		"appledouble_metadata": starlark.NewBuiltin("appledouble_metadata", appleDoubleMetadataBuiltin),
+		"base64":               starlark.NewBuiltin("base64", binaryBase64Builtin),
+		"bits":                 starlark.NewBuiltin("bits", binaryBitsBuiltin),
+		"builder":              starlark.NewBuiltin("builder", binaryBuilderBuiltin),
+		"concat":               starlark.NewBuiltin("concat", binaryConcatBuiltin),
+		"cursor":               starlark.NewBuiltin("cursor", binaryCursorBuiltin),
+		"decode":               starlark.NewBuiltin("decode", binaryDecodeBuiltin),
+		"encode":               starlark.NewBuiltin("encode", binaryEncodeBuiltin),
+		"extents":              starlark.NewBuiltin("extents", binaryExtentsBuiltin),
+		"hex":                  starlark.NewBuiltin("hex", binaryHexBuiltin),
+		"layout":               starlark.NewBuiltin("layout", binaryLayoutBuiltin),
+		"macho":                starlark.NewBuiltin("macho", machoBuiltin),
+		"perf":                 starlark.NewBuiltin("perf", perf.Builtin),
+		"elf_symbols":          starlark.NewBuiltin("elf_symbols", elfmeta.Builtin),
+		"ppc_instructions":     starlark.NewBuiltin("ppc_instructions", powerPCInstructionsBuiltin),
+		"plist":                starlark.NewBuiltin("plist", plistBuiltin),
+		"plist_encode":         starlark.NewBuiltin("plist_encode", plistEncodeBuiltin),
+		"replace":              starlark.NewBuiltin("replace", binaryReplaceBuiltin),
+		"strings":              starlark.NewBuiltin("strings", binaryStringsBuiltin),
+		"text":                 starlark.NewBuiltin("text", binaryTextBuiltin),
+		"view":                 starlark.NewBuiltin("view", binaryViewBuiltin),
+		"xml":                  starlark.NewBuiltin("xml", binaryXMLBuiltin),
+		"zlib":                 starlark.NewBuiltin("zlib", binaryZlibBuiltin),
 	}
 	for _, codec := range binaryScalarCodecs {
 		codec := codec
@@ -369,18 +392,20 @@ func binaryStringsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark
 	if file, ok := value.(File); ok && file.Size() > int64(maximum) {
 		return nil, fmt.Errorf("strings: input size %d exceeds limit %d", file.Size(), maximum)
 	}
-	data, err := bytesForBinaryValue(value)
+	data, err := starfile.BytesForValue(value, int64(maximum))
 	if err != nil {
 		return nil, fmt.Errorf("strings: %w", err)
 	}
 	var found []string
 	switch strings.ToLower(encoding) {
+	case "ibm037", "cp037":
+		found = scanIBM037Strings(data, minimum)
 	case "ascii":
 		found = scanASCIIStrings(data, minimum)
 	case "utf16le", "utf-16le":
 		found = windowsapi.ScanUTF16Strings(data, minimum)
 	default:
-		return nil, fmt.Errorf("strings: encoding must be ascii or utf16le")
+		return nil, fmt.Errorf("strings: encoding must be ascii, utf16le or ibm037")
 	}
 	values := make([]starlark.Value, len(found))
 	for index, value := range found {

@@ -241,6 +241,92 @@ def test_ultrix_label():
     equal(label.partitions[2].data.size, image.size)
     raises(filesystem.ultrix_label, [image.slice(0, 16383)])
 
+def test_openbsd_label_and_ffs1():
+    # Complete disk with a typed FFS1 directory and 32-bit ownership.
+    def extent(offset, value):
+        return (offset, value)
+    raw_label = binary.extents(196, [
+        extent(0, binary.u32le(0x82564557)),
+        extent(40, binary.u32le(512)),
+        extent(60, binary.u32le(128)),
+        extent(84, binary.u32le(128)),
+        extent(114, binary.u16le(1)),
+        extent(132, binary.u32le(0x82564557)),
+        extent(138, binary.u16le(3)),
+        extent(148, binary.u32le(128)),
+        extent(160, b"\x07\x04"),
+        extent(180, binary.u32le(128)),
+    ])
+    checksum = 0
+    for off in range(0, 196, 2):
+        checksum ^= binary.read_u16le(raw_label, off)
+    label_bytes = binary.concat([raw_label.slice(0, 136), binary.u16le(checksum), raw_label.slice(138, 58)])
+    fields = {16: 32, 36: 128, 44: 1, 48: 4096, 52: 512, 56: 8, 116: 1024, 120: 32, 184: 32, 188: 128, 1320: 60, 1324: 2, 1372: 0x11954}
+    root_inode = binary.concat([binary.u16le(0o40755), binary.u16le(2), b"\x00" * 4, binary.u64le(512), b"\x00" * 24, binary.u32le(48), b"\x00" * 84])
+    file_inode = binary.concat([binary.u16le(0o100644), binary.u16le(1), b"\x00" * 4, binary.u64le(3), b"\x00" * 24, binary.u32le(56), b"\x00" * 68, binary.u32le(70000), binary.u32le(80000), b"\x00" * 8])
+    names = binary.concat([
+        binary.u32le(2), binary.u16le(12), b"\x04\x01.\x00\x00\x00",
+        binary.u32le(2), binary.u16le(12), b"\x04\x02..\x00\x00",
+        binary.u32le(3), binary.u16le(488), b"\x08\x04file\x00", b"\x00" * 475,
+    ])
+    disk = binary.extents(128 * 512, [
+        extent(512, label_bytes),
+        extent(32 * 512 + 2 * 128, root_inode),
+        extent(32 * 512 + 3 * 128, file_inode),
+        extent(48 * 512, names),
+        extent(56 * 512, b"abc"),
+    ] + [extent(8192 + off, binary.u32le(value)) for off, value in fields.items()])
+    label = filesystem.openbsd_label(disk)
+    equal(label.sector_size, 512)
+    equal(label.partitions[1].data, None)
+    equal(label.partitions[2].data.size, disk.size)
+    volume = filesystem.ufs(label.partitions[0].data)
+    equal(volume.inode_format, 2)
+    equal(volume.find("/file").uid, 70000)
+    equal(volume.find("/file").gid, 80000)
+    equal(volume.find("/file").data.read(), "abc")
+    equal(auto(disk).find("a/file").file.read(), "abc")
+    raises(filesystem.openbsd_label, [disk.slice(0, disk.size - 1)], message = "past input")
+
+def test_high_sierra():
+    def both32(value):
+        return binary.concat([binary.u32le(value), binary.u32be(value)])
+
+    def record(name, block, size, flags):
+        length = 33 + len(name)
+        length += length % 2
+        return binary.concat([
+            binary.u8(length), b"\x00", both32(block), both32(size),
+            b"\x00" * 6, binary.u8(flags), b"\x00" * 3,
+            binary.u16le(1), binary.u16be(1), binary.u8(len(name)),
+            name, b"\x00" * (length - 33 - len(name)),
+        ])
+
+    image = binary.extents(24 * 2048, [
+        (16 * 2048, binary.concat([both32(16), b"\x01CDROM\x01"])),
+        (16 * 2048 + 88, both32(24)),
+        (16 * 2048 + 136, binary.concat([binary.u16le(2048), binary.u16be(2048)])),
+        (16 * 2048 + 180, record(b"\x00", 20, 2048, 2)),
+        (17 * 2048, binary.concat([both32(17), b"\xffCDROM\x01"])),
+        (20 * 2048, binary.concat([record(b"\x00", 20, 2048, 2), record(b"DIR", 21, 2048, 2)])),
+        (21 * 2048, binary.concat([record(b"\x00", 21, 2048, 2), record(b"FILE.TXT;1", 22, 3, 0)])),
+        (22 * 2048, b"abc"),
+    ])
+    equal(filesystem.iso9660(image).find("dir/file.txt").read(), "abc")
+    equal(auto(image).metadata["format"], "high_sierra")
+    equal(auto(image).find("dir/file.txt").file.read(), "abc")
+    raises(filesystem.iso9660, [image.slice(0, image.size - 1)], message = "volume exceeds")
+    for stride in [2352, 2448]:
+        for mode in [1, 2]:
+            offset = 16 if mode == 1 else 24
+            header = binary.concat([b"\x00", b"\xff" * 10, b"\x00" * 4, binary.u8(mode), b"\x00" * (offset - 16)])
+            raw = binary.extents(24 * stride, [
+                (sector * stride, binary.concat([header, image.slice(sector * 2048, 2048)]))
+                for sector in range(24)
+            ])
+            equal(auto(raw).metadata["format"], "rawcd")
+            equal(auto(raw).find("DIR/FILE.TXT").file.read(), "abc")
+
 def test_lha():
     file = binary.concat([binary.decode("1ad72d6c68302d03000000030000000000000000000466696c65389761626300", "hex")])
     decoded = archive.lha(file)
@@ -315,13 +401,62 @@ def test_bff():
     equal(auto(file).find("file").file.read(), "ABBA")
     raises(archive.bff, [file], {"maximum_decoded_bytes": 3})
 
+
+def _pd_text(value):
+    return binary.concat([binary.u16be(len(value)), value])
+
+def _irix_product_fixture():
+    return binary.concat([
+        b"pd001V650P00\x00", binary.u16be(1988), binary.u16be(1),
+        binary.u16be(1987), binary.u16be(3), _pd_text("main"), _pd_text("Main"), binary.u16be(0),
+        binary.u16be(1), binary.u16be(0), _pd_text("sw"), _pd_text("Software"),
+        binary.u16be(2), binary.u16be(7), binary.u32be(2), binary.u32be(0), binary.u32be(0),
+        binary.u16be(1), binary.u16be(2), _pd_text("bin"), _pd_text("Binaries"), _pd_text("source.bin"),
+        binary.u32be(0), binary.u16be(0), binary.u16be(0),
+    ])
+
+def test_irix_product_plan():
+    descriptor = _irix_product_fixture()
+    product = archive.irix_product(descriptor).products[0]
+    equal(product.name, "main")
+    equal(product.images[0].version, 2)
+    equal(product.images[0].subsystems[0].expression, "source.bin")
+    image = binary.concat([b"im001V630P00\x00\x00\x01aA"])
+    index = binary.concat([b"f 0755 root sys a source/a main.sw.bin size(1) sum(65) off(13) cmpsize(0) links(b)\n"])
+    plan = archive.irix_plan([descriptor], ["main.sw.bin"],
+                             indexes = {"main@2": index}, images = {"main.sw@2": image})
+    true(plan.resolved)
+    equal(plan.selected[0].version, 2)
+    equal([(op.kind, op.path) for op in plan.operations], [("file", "/a"), ("hardlink", "/b")])
+    equal(plan.operations[0].data.read(), "A")
+    equal(plan.operations[1].target, "/a")
+    unresolved = archive.irix_plan([descriptor], ["main.sw.bin"])
+    equal(unresolved.resolved, False)
+    equal(unresolved.issues[0].kind, "missing_idb")
+    raises(archive.irix_product, [descriptor.slice(0, descriptor.size - 1)])
+
+def test_irix_executable():
+    image = binary.concat([
+        b"\x7fELF\x02\x02\x01", b"\x00" * 9,
+        binary.u16be(2), binary.u16be(8), binary.u32be(1), binary.u64be(0x100000000),
+        binary.u64be(0), binary.u64be(0), binary.u32be(0x20000000),
+        binary.u16be(64), binary.u16be(56), binary.u16be(0), binary.u16be(64), binary.u16be(0), binary.u16be(0),
+    ])
+    decoded = binary.irix_executable(image)
+    equal((decoded.format, getattr(decoded, "class"), decoded.abi, decoded.isa), ("elf", 64, "n64", "mips3"))
+    equal(decoded.entry, 0x100000000)
+    equal(decoded.sections, [])
+    raises(binary.irix_executable, [image.slice(0, 63)])
+
 TEST_SUITE = suite("media_decode", [
+    case("high_sierra", test_high_sierra),
     case("bff", test_bff),
     case("aix_small_ar", test_aix_small_ar),
     case("hunk_load", test_hunk_load),
     case("hunk_objects", test_hunk_objects),
     case("lha", test_lha),
     case("ultrix_label", test_ultrix_label),
+    case("openbsd_label_and_ffs1", test_openbsd_label_and_ffs1),
     case("adcr", test_adcr),
     case("apm", test_apm),
     case("tome", test_tome),
@@ -333,6 +468,8 @@ TEST_SUITE = suite("media_decode", [
     case("bzip2_layer", test_bzip2_layer),
     case("aws_record_boundaries", test_aws_record_boundaries),
     case("irix_indexed_image", test_irix_indexed_image),
+    case("irix_product_plan", test_irix_product_plan),
+    case("irix_executable", test_irix_executable),
     case("pack_layer", test_pack_layer),
     case("irix_standalone_tape", test_irix_standalone_tape),
 ])

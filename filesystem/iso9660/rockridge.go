@@ -295,9 +295,15 @@ func (r *rockRidge) timestamps(p []byte) error {
 		}
 		stamp, err := isoTimestamp(p[:width])
 		if err != nil {
-			return err
+			// Some otherwise readable pressed CDs declare impossible calendar
+			// values (including month zero). Keep the exact metadata instead of
+			// inventing a normalized time or losing access to the whole tree.
+			// The TF record's framing and lengths are still checked above.
+			r.attributes[key+"_raw"] = append([]byte(nil), p[:width]...)
+			r.attributes[key+"_error"] = err.Error()
+		} else {
+			r.attributes[key] = stamp.Unix()
 		}
-		r.attributes[key] = stamp.Unix()
 		p = p[width:]
 	}
 	if len(p) != 0 {
@@ -388,14 +394,20 @@ func (r isoDirRecord) attr(name string) starlark.Value {
 			return starlark.String(v)
 		case int64:
 			return starlark.MakeInt64(v)
+		case []byte:
+			return starlark.Bytes(v)
 		}
 	}
 	return nil
 }
 
-var isoMetadataAttrs = []string{"entry_type", "link", "mode", "uid", "gid", "nlink", "inode", "mtime", "atime", "ctime", "created", "backup_time", "expiration_time", "effective_time", "device_high", "device_low"}
+var isoMetadataAttrs = []string{"entry_type", "link", "mode", "uid", "gid", "nlink", "inode", "mtime", "atime", "ctime", "created", "backup_time", "expiration_time", "effective_time", "device_high", "device_low",
+	"mtime_raw", "mtime_error", "atime_raw", "atime_error", "ctime_raw", "ctime_error", "created_raw", "created_error", "backup_time_raw", "backup_time_error", "expiration_time_raw", "expiration_time_error", "effective_time_raw", "effective_time_error"}
 
 func (i *isoImage) parseRecord(raw []byte) (isoDirRecord, error) {
+	if i.highSierra {
+		return i.highSierraRecord(raw)
+	}
 	record, err := parseISODirRecordWithEncoding(raw, i.joliet)
 	if err != nil {
 		return record, err

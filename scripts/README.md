@@ -24,6 +24,18 @@ also tested. `examples/renvo.star` is the larger compilation demonstration,
 and `renvo_support.star` is a helper library, not a command. See
 [renvo](../docs/renvo.md) for constraints and supported targets.
 
+## Build GNU Hello in memory (network required)
+
+```console
+go run -tags renvo_bundle ./cmd/trex scripts/smoke/hello.star
+```
+
+The Starlark recipe pins and hashes the source, installs a virtual tool set,
+then runs configure, make and all seven upstream tests. Nine CLI cases exercise
+the generated ELF. Sources and intermediate products remain in memory; no host
+shell or compiler is used. See [the shell/build guide](../docs/shell-emulator.md)
+for the optional native same-image comparison and explicit compatibility limits.
+
 ## Inspect caller-owned input
 
 ```console
@@ -65,6 +77,16 @@ media and commands for `smoke/reactos.star` and
 `smoke/reactos_custom_account.star`, including screenshot and report outputs.
 These are QEMU integration tests, separate from in-process PE emulation.
 
+## Windows 1.01 native computer use
+
+`examples/windows_101_computer.star` builds the installed DOS/Windows image and
+a native Win16 computer-use agent from caller-supplied floppy images. The
+[computer-use guide](../docs/windows-101-computer-use.md) covers connection,
+keyboard/mouse gesture helpers, offline REPL wire documentation, and a native
+Paint drawing. Optional `video=boot-and-paint.mp4` records continuously from
+BIOS boot using FFmpeg; `repl=true` enters the public trex REPL. No StarAgent or
+private SDK is needed. No original Microsoft media or installed image is bundled.
+
 ## Debugging and transport integration
 
 | Script under `debug/` | Purpose / requirements |
@@ -74,6 +96,9 @@ These are QEMU integration tests, separate from in-process PE emulation.
 | `reactos_kernel.star` | ReactOS guest kernel observation |
 | `nbd_boot_smoke.star` | Generated BIOS sector proving direct NBD boot; requires QEMU/KVM |
 | `code_watch.star`, `pe_calls.star` | Reusable bounded observation helpers, not commands |
+
+ARM64 board composition is exposed through the [generic platform API](../docs/arm64-platforms.md).
+Product-specific boot and restore recipes belong to the containing recipe repository.
 
 See [debugging](../docs/starlark/debugging.md) for channels, symbols, events,
 timeouts, and cleanup. These tools do not extract media for use by host parsers

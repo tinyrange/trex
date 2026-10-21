@@ -2,6 +2,7 @@ package gpt
 
 import (
 	"encoding/binary"
+	"go.starlark.net/starlark"
 	"hash/crc32"
 	"testing"
 
@@ -156,5 +157,50 @@ func TestGPTPropagatesPartitionSparseExtents(t *testing.T) {
 	}
 	if !foundPartitionData {
 		t.Fatal("partition allocation was not propagated into GPT extent map")
+	}
+}
+
+func TestGPTSparseEntryNumbersAgreeAcrossAPIs(t *testing.T) {
+	diskGUID, _ := fsinternal.ParseGUID("{01234567-89AB-CDEF-8123-456789ABCDEF}")
+	typeGUID, _ := fsinternal.ParseGUID(gptBasicDataType)
+	partitionGUID, _ := fsinternal.ParseGUID("{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}")
+	builder := &gptBuilder{size: 2 << 20, diskGUID: diskGUID}
+	builder, err := builder.withPartition(&starfile.Bytes{Data: make([]byte, 512)}, typeGUID, partitionGUID, "Data", 2048, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := starfile.ReadAll(builder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := data[1024 : 1024+gptEntryArrayBytes]
+	copy(table[256:384], table[:128])
+	clear(table[:128])
+	header := data[512:1024]
+	binary.LittleEndian.PutUint32(header[88:], crc32.ChecksumIEEE(table))
+	clear(header[16:20])
+	binary.LittleEndian.PutUint32(header[16:], crc32.ChecksumIEEE(header[:92]))
+	source := &starfile.Bytes{Data: data}
+	partitions, err := Read(source)
+	if err != nil || len(partitions) != 1 || partitions[0].Index != 3 {
+		t.Fatalf("native partitions=%+v err=%v", partitions, err)
+	}
+	volume, err := newGPTVolume(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := volume.Attr("partitions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, _, err := values.(*starlark.List).Index(0).(*starlark.Dict).Get(starlark.String("index"))
+	if err != nil || index.String() != "3" {
+		t.Fatalf("Starlark index=%v err=%v", index, err)
+	}
+	if _, found, err := volume.Get(starlark.String("/partition3")); err != nil || !found {
+		t.Fatalf("partition3: found=%v err=%v", found, err)
+	}
+	if _, found, _ := volume.Get(starlark.String("/partition1")); found {
+		t.Fatal("unused slot exposed")
 	}
 }

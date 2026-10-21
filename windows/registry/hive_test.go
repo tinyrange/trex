@@ -2,6 +2,8 @@ package registry
 
 import (
 	"encoding/binary"
+	"errors"
+	"io"
 	"testing"
 
 	starfile "github.com/tinyrange/trex/storage/star"
@@ -10,6 +12,8 @@ import (
 func TestHiveSubkeyValues(t *testing.T) {
 	data := make([]byte, 4096)
 	copy(data, "regf")
+	binary.LittleEndian.PutUint32(data[0x14:], 1)
+	binary.LittleEndian.PutUint32(data[0x18:], 5)
 	appendCell := func(body []byte) uint32 {
 		offset := uint32(len(data) - 4096)
 		size := len(body) + 4
@@ -76,4 +80,67 @@ func TestHiveSubkeyValues(t *testing.T) {
 	if len(values) != 1 || !values[0].Found || values[0].Value.Type != 4 || binary.LittleEndian.Uint32(values[0].Value.Data) != 0x70 {
 		t.Fatalf("values = %#v", values)
 	}
+}
+
+type shortReader struct {
+	*starfile.Bytes
+	cut int64
+}
+
+func (r shortReader) ReadAt(p []byte, offset int64) (int, error) {
+	if offset >= r.cut && len(p) > 0 {
+		n, _ := r.Bytes.ReadAt(p[:len(p)-1], offset)
+		return n, io.EOF
+	}
+	return r.Bytes.ReadAt(p, offset)
+}
+
+func TestHiveRejectsShortReadsAndInvalidVersion(t *testing.T) {
+	data := make([]byte, 4112)
+	copy(data, "regf")
+	binary.LittleEndian.PutUint32(data[20:], 1)
+	binary.LittleEndian.PutUint32(data[24:], 5)
+	binary.LittleEndian.PutUint32(data[4096:], uint32(0xfffffff0))
+	for _, cut := range []int64{0, 4096, 4100} {
+		hive, err := Open(shortReader{&starfile.Bytes{Data: data}, cut})
+		if cut == 0 {
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("header: %v", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := hive.ReadCell(0); !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("cell cut %d: %v", cut, err)
+		}
+	}
+	binary.LittleEndian.PutUint32(data[24:], 7)
+	if _, err := Open(&starfile.Bytes{Data: data}); err == nil {
+		t.Fatal("unsupported hive version accepted")
+	}
+}
+
+func FuzzHiveReadCells(f *testing.F) {
+	data := make([]byte, 4096+32)
+	copy(data, "regf")
+	binary.LittleEndian.PutUint32(data[20:], 1)
+	binary.LittleEndian.PutUint32(data[24:], 5)
+	binary.LittleEndian.PutUint32(data[4096:], 0xffffffe0)
+	copy(data[4100:], "ri")
+	binary.LittleEndian.PutUint16(data[4102:], 1)
+	f.Add(data)
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 64<<10 {
+			t.Skip()
+		}
+		hive, err := Open(&starfile.Bytes{Data: data})
+		if err != nil {
+			return
+		}
+		_, _ = hive.ReadKey(hive.RootCell())
+		_, _ = hive.ReadValue(hive.RootCell())
+		_, _ = hive.SubkeyCells(hive.RootCell())
+	})
 }

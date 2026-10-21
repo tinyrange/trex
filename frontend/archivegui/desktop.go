@@ -9,45 +9,15 @@ import (
 	"github.com/tinyrange/trex/storage"
 )
 
-// desktopActions keeps shell execution and final-output paths at the native
-// frontend boundary. Format detection and preview never call these actions.
+// desktopActions keeps explicit final-output paths at the native frontend
+// boundary. Preview and navigation operate on portable readers in process.
 type desktopActions interface {
-	CanOpen(storage.Reader) bool
-	Open(storage.Reader) error
 	SuggestedDestination(string) string
-	Save(storage.Reader, string, bool) error
+	Save(storage.Reader, string) error
 }
 
 type nativeDesktop struct{}
 
-func (nativeDesktop) CanOpen(r storage.Reader) bool { _, ok := r.(*nativeReader); return ok }
-func (nativeDesktop) Open(reader storage.Reader) error {
-	r, ok := reader.(*nativeReader)
-	if !ok {
-		return fmt.Errorf("save the archive member before opening it")
-	}
-	// Resolve the same source confined by os.Root, then validate its identity
-	// before handing the final host path to the user's desktop shell.
-	s := r.source
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return os.ErrClosed
-	}
-	name, err := filepath.EvalSymlinks(filepath.Join(s.root.Name(), filepath.FromSlash(r.name)))
-	if err == nil {
-		var info os.FileInfo
-		info, err = os.Stat(name)
-		if err == nil && (!os.SameFile(info, r.info) || info.Size() != r.size || !info.ModTime().Equal(r.info.ModTime())) {
-			err = fmt.Errorf("source file changed; reopen the browser")
-		}
-	}
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return shellOpen(name)
-}
 func (nativeDesktop) SuggestedDestination(name string) string {
 	dir, err := os.UserHomeDir()
 	if err != nil {
@@ -59,7 +29,7 @@ func (nativeDesktop) SuggestedDestination(name string) string {
 	}
 	return filepath.Join(dir, filepath.Base(name))
 }
-func (nativeDesktop) Save(r storage.Reader, name string, open bool) error {
+func (nativeDesktop) Save(r storage.Reader, name string) error {
 	if r == nil || r.Size() < 0 {
 		return fmt.Errorf("file has no known readable size")
 	}
@@ -84,11 +54,6 @@ func (nativeDesktop) Save(r storage.Reader, name string, open bool) error {
 			return copyErr
 		}
 		return closeErr
-	}
-	if open {
-		if err := shellOpen(abs); err != nil {
-			return fmt.Errorf("saved to %s, but could not open: %w", abs, err)
-		}
 	}
 	return nil
 }

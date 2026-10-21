@@ -20,11 +20,11 @@ func TestATRefreshBitAdvancesWithoutGuestReads(t *testing.T) {
 	if read() != 0 {
 		t.Fatal("initial refresh phase")
 	}
-	now = now.Add(15085 * time.Nanosecond)
+	now = now.Add(15086 * time.Nanosecond)
 	if read() != 16 || read() != 16 {
 		t.Fatal("refresh is tied to reads instead of time")
 	}
-	now = now.Add(15085 * time.Nanosecond)
+	now = now.Add(15086 * time.Nanosecond)
 	if read() != 0 {
 		t.Fatal("refresh did not toggle back")
 	}

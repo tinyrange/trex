@@ -11,7 +11,8 @@ import (
 
 func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var source, maximum starlark.Value
-	if err := starlark.UnpackArgs("bzip2", args, kwargs, "file", &source, "maximum_bytes?", &maximum); err != nil {
+	var cache bool
+	if err := starlark.UnpackArgs("bzip2", args, kwargs, "file", &source, "maximum_bytes?", &maximum, "cache?", &cache); err != nil {
 		return nil, err
 	}
 	reader, ok := source.(storage.Reader)
@@ -26,6 +27,13 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 		if limit <= 0 {
 			return nil, fmt.Errorf("bzip2: maximum_bytes must be positive")
 		}
+	}
+	if cache {
+		decoded, err := Materialize(reader, limit)
+		if err != nil {
+			return nil, err
+		}
+		return starfile.NewReader("cached bzip2", decoded), nil
 	}
 	decoded := NewReader(reader, limit)
 	var first [1]byte

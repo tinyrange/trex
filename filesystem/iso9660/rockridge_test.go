@@ -1,6 +1,7 @@
 package iso9660
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -268,6 +269,36 @@ func TestRockRidgeAbsoluteAndLongTimestamp(t *testing.T) {
 	}
 	if rr.link != "/usr/bin" || rr.attributes["mtime"] != time.Date(2024, 9, 26, 13, 30, 45, 0, time.UTC).Unix() {
 		t.Fatal(rr)
+	}
+}
+
+func TestRockRidgeInvalidCalendarPreservesFileAndRawMetadata(t *testing.T) {
+	// An observed 1997 CD has month zero in its root TF records. Invalid
+	// calendar metadata must not discard otherwise valid file contents.
+	stamp := []byte{97, 0, 10, 0, 10, 38, 0}
+	data := testDisc(true, false)
+	root := testFields(testRecord("\x00", 20, 2048, 2,
+		testFields(testSU("SP", 0xbe, 0xef, 0), testER("RRIP_1991A"), testSU("TF", append([]byte{2}, stamp...)...))),
+		testRecord("FILE.;1", 22, 5, 0, testNM("file"), testSU("TF", append([]byte{2}, stamp...)...)))
+	clear(data[20*2048 : 21*2048])
+	copy(data[20*2048:], root)
+	img, err := newISOImage(&starfile.Bytes{Data: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := img.lookup("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.attr("mtime") != nil || entry.attr("mtime_error") == nil {
+		t.Fatal("invalid date was normalized or discarded", entry.rr.attributes)
+	}
+	if raw, ok := entry.rr.attributes["mtime_raw"].([]byte); !ok || !bytes.Equal(raw, stamp) {
+		t.Fatal("raw timestamp not retained", entry.rr.attributes)
+	}
+	contents, err := starfile.ReadAll(&isoFile{image: img, record: entry})
+	if err != nil || string(contents) != "hello" {
+		t.Fatal(string(contents), err)
 	}
 }
 

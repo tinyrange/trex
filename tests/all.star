@@ -6,7 +6,15 @@ load(":emulation_conformance_test.star", emulation_conformance = "TEST_SUITE")
 load(":reactos_test.star", reactos = "TEST_SUITE")
 load(":media_decode_test.star", media_decode = "TEST_SUITE")
 
+load(":scs_test.star", scs = "TEST_SUITE")
+
+load(":linux_test.star", linux = "TEST_SUITE")
+load(":macos_softwareupdate_test.star", macos_softwareupdate = "TEST_SUITE")
+
 TEST_SUITES = [
+    macos_softwareupdate,
+    linux,
+    scs,
     media_decode,
     reactos,
     stdlib,

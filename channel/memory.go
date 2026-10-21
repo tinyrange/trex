@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// ErrWouldBlock means a cooperative channel has no bytes available yet.
+// ErrWouldBlock means a cooperative channel has no bytes or capacity available.
 var ErrWouldBlock = errors.New("channel would block")
 
 // AvailableReader supports polling without a host clock or blocking a scheduler.
@@ -28,6 +28,18 @@ type memoryPair struct {
 	mu      sync.Mutex
 	maximum int
 	state   memoryState
+	changed [2]chan struct{}
+}
+
+var memoryReady = func() <-chan struct{} {
+	ready := make(chan struct{})
+	close(ready)
+	return ready
+}()
+
+func (p *memoryPair) notifyLocked(side int) {
+	close(p.changed[side])
+	p.changed[side] = make(chan struct{})
 }
 
 // Memory is one endpoint of a bounded, cooperative, entirely in-memory stream.
@@ -42,12 +54,33 @@ func NewMemoryPair(maximum int) (*Memory, *Memory, error) {
 	if maximum <= 0 {
 		return nil, nil, errors.New("memory channel requires a positive capacity")
 	}
-	pair := &memoryPair{maximum: maximum}
+	pair := &memoryPair{maximum: maximum, changed: [2]chan struct{}{make(chan struct{}), make(chan struct{})}}
 	return &Memory{pair: pair}, &Memory{pair: pair, side: 1}, nil
 }
 
 func (m *Memory) ReadAvailable(p []byte) (int, error)  { return m.Read(p) }
 func (m *Memory) WriteAvailable(p []byte) (int, error) { return m.Write(p) }
+
+// ReadReady does not change the cooperative behavior of Read or ReadAvailable.
+// Closing either endpoint makes reads ready to return data or a terminal error.
+func (m *Memory) ReadReady() <-chan struct{} {
+	m.pair.mu.Lock()
+	defer m.pair.mu.Unlock()
+	if len(m.pair.state.data[m.side]) != 0 || m.pair.state.closed[m.side] || m.pair.state.closed[1-m.side] {
+		return memoryReady
+	}
+	return m.pair.changed[m.side]
+}
+
+func (m *Memory) WriteCapacity() (int, <-chan struct{}, error) {
+	m.pair.mu.Lock()
+	defer m.pair.mu.Unlock()
+	peer := 1 - m.side
+	if m.pair.state.closed[m.side] || m.pair.state.closed[peer] {
+		return 0, nil, io.ErrClosedPipe
+	}
+	return m.pair.maximum - len(m.pair.state.data[peer]), m.pair.changed[peer], nil
+}
 
 func (m *Memory) Read(p []byte) (int, error) {
 	m.pair.mu.Lock()
@@ -70,6 +103,7 @@ func (m *Memory) Read(p []byte) (int, error) {
 	if n == len(data) {
 		m.pair.state.data[m.side] = nil
 	}
+	m.pair.notifyLocked(m.side)
 	return n, nil
 }
 
@@ -84,13 +118,20 @@ func (m *Memory) Write(p []byte) (int, error) {
 		return 0, ErrWouldBlock
 	}
 	m.pair.state.data[peer] = append(m.pair.state.data[peer], p...)
+	if len(p) != 0 {
+		m.pair.notifyLocked(peer)
+	}
 	return len(p), nil
 }
 
 func (m *Memory) Close() error {
 	m.pair.mu.Lock()
 	defer m.pair.mu.Unlock()
-	m.pair.state.closed[m.side] = true
+	if !m.pair.state.closed[m.side] {
+		m.pair.state.closed[m.side] = true
+		m.pair.notifyLocked(0)
+		m.pair.notifyLocked(1)
+	}
 	return nil
 }
 
@@ -109,6 +150,9 @@ func (m *Memory) CaptureCheckpoint() (func() error, error) {
 		m.pair.state = saved
 		for i := range saved.data {
 			m.pair.state.data[i] = append([]byte(nil), saved.data[i]...)
+			// Observers belong to the live stream, not the captured state.
+			// Wake them even when restoration makes the stream empty again.
+			m.pair.notifyLocked(i)
 		}
 		return nil
 	}, nil

@@ -31,6 +31,9 @@ type MirrorRequest struct {
 	Size         int64
 	MaximumBytes int64
 	Retries      int
+	// Validate checks format-specific invariants before publication and on
+	// every cache hit. It must not retain the borrowed reader.
+	Validate func(storage.Reader) error
 }
 
 // MirrorCache downloads immutable files into a configured local cache and
@@ -240,7 +243,14 @@ func openVerifiedCacheFile(name string, request MirrorRequest, digest []byte) (*
 			return nil, fmt.Errorf("mirror cache object SHA-256 mismatch")
 		}
 	}
-	return &CachedFile{name: name, file: file, size: info.Size()}, nil
+	result := &CachedFile{name: name, file: file, size: info.Size()}
+	if request.Validate != nil {
+		if err := request.Validate(result); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("validate mirror cache object: %w", err)
+		}
+	}
+	return result, nil
 }
 
 func (c *MirrorCache) downloadFrom(ctx context.Context, partial *os.File, rawURL string, request MirrorRequest, digest []byte) error {
@@ -316,6 +326,13 @@ func (c *MirrorCache) downloadFrom(ctx context.Context, partial *os.File, rawURL
 	if len(digest) != 0 && !equalDigest(hasher.Sum(nil), digest) {
 		_ = partial.Truncate(0)
 		return fmt.Errorf("%s: SHA-256 mismatch", displayURL)
+	}
+	if request.Validate != nil {
+		reader := &CachedFile{file: partial, size: actualSize}
+		if err := request.Validate(reader); err != nil {
+			_ = partial.Truncate(0)
+			return fmt.Errorf("%s: validate download: %w", displayURL, err)
+		}
 	}
 	return nil
 }

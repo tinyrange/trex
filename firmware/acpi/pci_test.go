@@ -49,3 +49,10 @@ func TestARM64PlatformTables(t *testing.T) {
 		t.Fatal("accepted invalid INTx pin")
 	}
 }
+
+func TestX86LowGSIINTARoute(t *testing.T) {
+	aml, err := (PCIRoot{MemoryBase: 0xe0000000, MemorySize: 0x10000000, Interrupts: []PCIInterrupt{{Device: 1, Pin: 0, Interrupt: 16}}}).AML()
+	if err != nil || !bytes.Contains(aml, []byte("_PRT")) {
+		t.Fatal("x86 IOAPIC GSI16 route rejected", err)
+	}
+}

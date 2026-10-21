@@ -1,7 +1,6 @@
 package archiveweb
 
 import (
-	"archive/zip"
 	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
@@ -21,13 +20,9 @@ import (
 	"sync"
 	"time"
 
-	cabarchive "github.com/tinyrange/trex/archive/cab"
-	"github.com/tinyrange/trex/archive/wim"
-	ziparchive "github.com/tinyrange/trex/archive/zip"
-	filesystemapi "github.com/tinyrange/trex/filesystem"
-	filesystemfat "github.com/tinyrange/trex/filesystem/fat"
-	filesystemiso9660 "github.com/tinyrange/trex/filesystem/iso9660"
-	filesystemudf "github.com/tinyrange/trex/filesystem/udf"
+	"github.com/tinyrange/trex/auto"
+	"github.com/tinyrange/trex/auto/adapter"
+	_ "github.com/tinyrange/trex/auto/imports"
 	"github.com/tinyrange/trex/storage"
 	starfile "github.com/tinyrange/trex/storage/star"
 	windowsapi "github.com/tinyrange/trex/windows"
@@ -35,9 +30,10 @@ import (
 )
 
 const (
-	webPreviewLimit = 64 * 1024
-	webMountLimit   = 64
-	webNodeLimit    = 250000
+	webPreviewLimit           = 64 * 1024
+	webStructuredPreviewLimit = 64 << 20
+	webMountLimit             = 64
+	webNodeLimit              = 250000
 )
 
 type File = starfile.File
@@ -70,6 +66,8 @@ type webNode struct {
 	Lazy         bool       `json:"lazy,omitempty"`
 	Children     []*webNode `json:"children,omitempty"`
 	file         File
+	autoNode     *auto.Node // Retains explicit views and companion-file context.
+	browsable    bool
 	loadChildren func() ([]webArchiveEntry, error)
 	loaded       bool
 	mountErrors  []string
@@ -81,6 +79,8 @@ type webTreeNode struct {
 	Path        string        `json:"path"`
 	Kind        string        `json:"kind"`
 	Size        int64         `json:"size,omitempty"`
+	Readable    bool          `json:"readable"`
+	Browsable   bool          `json:"browsable"`
 	MountedAs   string        `json:"mountedAs,omitempty"`
 	Lazy        bool          `json:"lazy,omitempty"`
 	MountErrors []string      `json:"mountErrors,omitempty"`
@@ -90,8 +90,11 @@ type webTreeNode struct {
 type webArchiveEntry struct {
 	Name         string
 	Dir          bool
+	Kind         string
 	Size         int64
 	File         File
+	Browsable    bool
+	autoNode     *auto.Node
 	Lazy         bool
 	loadChildren func() ([]webArchiveEntry, error)
 }
@@ -368,7 +371,7 @@ func (s *webServer) handlePreview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"name":      node.Name,
 			"path":      node.Path,
-			"size":      node.file.Size(),
+			"size":      webFileSize(node.file),
 			"truncated": truncated,
 			"content":   hex.Dump(data),
 		})
@@ -381,7 +384,7 @@ func (s *webServer) handlePreview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"name":      node.Name,
 			"path":      node.Path,
-			"size":      node.file.Size(),
+			"size":      webFileSize(node.file),
 			"truncated": truncated,
 			"content":   string(bytes.ToValidUTF8(data, []byte("\ufffd"))),
 		})
@@ -397,7 +400,7 @@ func (s *webServer) handlePreview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"name":      node.Name,
 			"path":      node.Path,
-			"size":      node.file.Size(),
+			"size":      webFileSize(node.file),
 			"truncated": truncated,
 			"content":   strings.TrimRight(windowsapi.DecodeUTF16LE(data), "\x00"),
 		})
@@ -435,12 +438,17 @@ func (s *webServer) handleMount(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 
 	node := s.nodes[id]
-	if node == nil || node.file == nil {
+	if node == nil || node.file == nil && node.autoNode == nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
-	mountKey := id + "\x00" + format
+	// A source has one detected view, whether requested by name or through auto.
+	mountKey := id
 	if mount := s.mounts[mountKey]; mount != nil {
+		if format != "" && format != "auto" && format != mount.MountedAs {
+			http.Error(w, fmt.Sprintf("detected %s, not requested %s", mount.MountedAs, format), http.StatusBadRequest)
+			return
+		}
 		writeJSON(w, cloneWebTree(mount))
 		return
 	}
@@ -448,25 +456,23 @@ func (s *webServer) handleMount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("mount limit of %d reached", webMountLimit), http.StatusTooManyRequests)
 		return
 	}
-	if format == "wim" {
-		archive, err := wim.Open(node.file)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		mount := s.addMountPoint(node, format)
-		if err := s.addWIMMountEntries(mount, archive); err != nil {
-			s.removeMountPoint(mount)
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		node.MountedAs = format
-		node.mountErrors = nil
-		s.mounts[mountKey] = mount
-		writeJSON(w, cloneWebTree(mount))
+	container := node.autoNode
+	if container == nil {
+		container = auto.Open(node.file, node.Name, auto.Options{MaxEntries: webNodeLimit, MaxDepth: 32})
+	}
+	metadata, err := container.Metadata()
+	if err == nil && !metadata.Container {
+		err = auto.ErrNotContainer
+	}
+	if err == nil && format != "" && format != "auto" && format != metadata.Format {
+		err = fmt.Errorf("detected %s, not requested %s", metadata.Format, format)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	entries, err := mountWebArchive(format, node.file)
+	format = metadata.Format
+	entries, err := webAutoEntries(container, 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -484,7 +490,11 @@ func (s *webServer) handleMount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *webServer) addMountPoint(source *webNode, format string) *webNode {
-	baseName := fmt.Sprintf("%s (%s)", source.Name, format)
+	label := format
+	if label == "" {
+		label = "contents"
+	}
+	baseName := fmt.Sprintf("%s (%s)", source.Name, label)
 	name := s.uniqueMountPointName(baseName)
 	mount := s.addNode(&webNode{
 		Name:      name,
@@ -494,16 +504,6 @@ func (s *webServer) addMountPoint(source *webNode, format string) *webNode {
 	})
 	s.root.Children = append(s.root.Children, mount)
 	return mount
-}
-
-func (s *webServer) removeMountPoint(mount *webNode) {
-	delete(s.nodes, mount.ID)
-	for index, child := range s.root.Children {
-		if child == mount {
-			s.root.Children = append(s.root.Children[:index], s.root.Children[index+1:]...)
-			break
-		}
-	}
 }
 
 func (s *webServer) ensureNodeCapacity(additional int) error {
@@ -565,6 +565,7 @@ func (s *webServer) addArchiveEntries(parent *webNode, entries []webArchiveEntry
 		}
 		if entry.Dir {
 			dir := ensureWebDir(s, byPath, parent, cleaned)
+			dir.file, dir.autoNode = entry.File, entry.autoNode
 			if entry.Lazy {
 				dir.Lazy = true
 				dir.loaded = false
@@ -573,12 +574,18 @@ func (s *webServer) addArchiveEntries(parent *webNode, entries []webArchiveEntry
 			continue
 		}
 		dir := ensureWebDir(s, byPath, parent, path.Dir(cleaned))
+		kind := entry.Kind
+		if kind == "" {
+			kind = "file"
+		}
 		dir.Children = append(dir.Children, s.addNode(&webNode{
-			Name: path.Base(cleaned),
-			Path: path.Join(parent.Path, cleaned),
-			Kind: "file",
-			Size: entry.Size,
-			file: entry.File,
+			Name:      path.Base(cleaned),
+			Path:      path.Join(parent.Path, cleaned),
+			Kind:      kind,
+			Size:      entry.Size,
+			file:      entry.File,
+			autoNode:  entry.autoNode,
+			browsable: entry.Browsable,
 		}))
 	}
 	sortWebChildren(parent)
@@ -634,176 +641,102 @@ func sortWebChildren(node *webNode) {
 	}
 }
 
-func mountWebArchive(format string, file File) ([]webArchiveEntry, error) {
-	switch format {
-	case "zip":
-		reader, err := zip.NewReader(file, file.Size())
-		if err != nil {
-			return nil, err
-		}
-		entries := make([]webArchiveEntry, 0, len(reader.File))
-		for _, entry := range reader.File {
-			if entry.FileInfo().IsDir() {
-				entries = append(entries, webArchiveEntry{Name: entry.Name, Dir: true})
-				continue
-			}
-			entries = append(entries, webArchiveEntry{
-				Name: entry.Name,
-				Size: int64(entry.UncompressedSize64),
-				File: ziparchive.NewEntry(entry),
-			})
-		}
-		return entries, nil
-	case "cab":
-		cab, err := cabarchive.Open(file, true)
-		if err != nil {
-			return nil, err
-		}
-		files := cab.Files()
-		entries := make([]webArchiveEntry, 0, len(files))
-		for _, entry := range files {
-			file, err := cab.Lookup(entry.Name)
-			if err != nil {
-				return nil, err
-			}
-			entries = append(entries, webArchiveEntry{
-				Name: entry.Name,
-				Size: entry.Size,
-				File: file,
-			})
-		}
-		return entries, nil
-	case "iso9660":
-		entries, err := filesystemiso9660.Entries(file)
-		return webFilesystemEntries(entries), err
-	case "hive":
-		entries, err := windowsapi.HiveEntries(file)
-		if err != nil {
-			return nil, err
-		}
-		result := make([]webArchiveEntry, len(entries))
-		for index, entry := range entries {
-			result[index] = webArchiveEntry{Name: entry.Name, Dir: entry.Directory, File: entry.File}
-			if entry.File != nil {
-				result[index].Size = entry.File.Size()
-			}
-		}
-		return result, nil
-	case "fat":
-		entries, err := filesystemfat.Entries(file)
-		return webFilesystemEntries(entries), err
-	case "udf":
-		entries, err := filesystemudf.Entries(file)
-		return webFilesystemEntries(entries), err
-	default:
-		return nil, fmt.Errorf("unknown archive format %q", format)
+// Browser nodes adapt the same lazy auto tree used by desktop and Starlark
+// browsing. Format parsers, duplicate naming and limits stay in that tree.
+func webAutoEntries(node *auto.Node, depth int) ([]webArchiveEntry, error) {
+	if depth >= 32 {
+		return nil, fmt.Errorf("%w: browser path depth", auto.ErrLimit)
 	}
-}
-
-func webFilesystemEntries(entries []filesystemapi.ArchiveEntry) []webArchiveEntry {
-	result := make([]webArchiveEntry, len(entries))
-	for index, entry := range entries {
-		result[index] = webArchiveEntry{Name: entry.Name, Size: entry.Size, Dir: entry.Directory, File: entry.File}
-	}
-	return result
-}
-
-func (s *webServer) addWIMMountEntries(parent *webNode, archive *wim.Archive) error {
-	resources := archive.MetadataFiles()
-	roots, err := archive.List("/")
-	if err != nil {
-		return err
-	}
-	if err := s.ensureNodeCapacity(1 + len(resources) + len(roots)); err != nil {
-		return err
-	}
-	metadata := s.addNode(&webNode{Name: "$metadata", Path: path.Join(parent.Path, "$metadata"), Kind: "dir"})
-	parent.Children = append(parent.Children, metadata)
-	for _, resource := range resources {
-		metadata.Children = append(metadata.Children, s.addNode(&webNode{
-			Name: path.Base(resource.Name),
-			Path: path.Join(parent.Path, strings.TrimPrefix(resource.Name, "/")),
-			Kind: "file",
-			Size: resource.File.Size(),
-			file: resource.File,
-		}))
-	}
-	for _, root := range roots {
-		parent.Children = append(parent.Children, s.addWIMDirNode(parent, archive, root))
-	}
-	sortWebChildren(parent)
-	return nil
-}
-
-func (s *webServer) addWIMDirNode(parent *webNode, archive *wim.Archive, entry wim.EntryInfo) *webNode {
-	node := s.addNode(&webNode{
-		Name: entry.Name,
-		Path: path.Join(parent.Path, strings.TrimPrefix(entry.Path, "/")),
-		Kind: "dir",
-		Lazy: true,
-	})
-	node.loadChildren = func() ([]webArchiveEntry, error) {
-		return webWIMDirEntries(archive, entry.Path)
-	}
-	return node
-}
-
-func webWIMDirEntries(archive *wim.Archive, directory string) ([]webArchiveEntry, error) {
-	children, err := archive.List(directory)
+	children, err := node.Children()
 	if err != nil {
 		return nil, err
 	}
 	entries := make([]webArchiveEntry, 0, len(children))
 	for _, child := range children {
-		if child.Directory {
-			child := child
-			entries = append(entries, webArchiveEntry{
-				Name: "/" + child.Name,
-				Dir:  true,
-				Lazy: true,
-				loadChildren: func() ([]webArchiveEntry, error) {
-					return webWIMDirEntries(archive, child.Path)
-				},
-			})
-			continue
+		info := child.Summary()
+		entry := webArchiveEntry{Name: child.Name(), Dir: info.Kind == "directory", Kind: info.Kind, Size: info.Size, autoNode: child}
+		if reader := child.Reader(); reader != nil {
+			entry.File = adapter.File(reader)
+		} else if !entry.Dir {
+			// Without bytes, Metadata only describes the existing view. Do not
+			// mistake symlinks or metadata-only entries for containers, while
+			// preserving explicit views such as resource forks and occurrences.
+			metadata, err := child.Metadata()
+			entry.Browsable = err != nil || metadata.Container
 		}
-		file, err := archive.OpenFile(child.Path)
-		if err != nil {
-			return nil, err
+		if entry.Dir {
+			entry.Lazy = true
+			entry.loadChildren = func() ([]webArchiveEntry, error) { return webAutoEntries(child, depth+1) }
 		}
-		entries = append(entries, webArchiveEntry{
-			Name: "/" + child.Name,
-			Size: child.Size,
-			File: file,
-		})
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }
 
-func readPreviewBytes(file File) ([]byte, bool, error) {
-	size := file.Size()
-	if size < 0 {
-		return nil, false, fmt.Errorf("negative file size")
+// A decoded stream may not know its length until it has been read completely.
+// Preview and listing must not turn that optional discovery into a full scan.
+func webFileSize(file File) int64 {
+	if stream, ok := file.(interface{ KnownSize() (int64, bool) }); ok {
+		if size, known := stream.KnownSize(); known {
+			return size
+		}
+		return -1
 	}
-	limit := size
-	truncated := false
-	if limit > webPreviewLimit {
-		limit = webPreviewLimit
-		truncated = true
+	return file.Size()
+}
+
+func readPreviewBytes(file File) ([]byte, bool, error) {
+	limit := int64(webPreviewLimit + 1)
+	if size := webFileSize(file); size >= 0 && size < limit {
+		limit = size
 	}
 	data := make([]byte, limit)
-	if _, err := file.ReadAt(data, 0); err != nil && err != io.EOF {
+	n, err := file.ReadAt(data, 0)
+	if err != nil && err != io.EOF {
 		return nil, false, err
+	}
+	data = data[:n]
+	truncated := len(data) > webPreviewLimit
+	if truncated {
+		data = data[:webPreviewLimit]
 	}
 	return data, truncated, nil
 }
 
 func infView(file File) (string, error) {
+	file, err := structuredPreviewFile(file)
+	if err != nil {
+		return "", err
+	}
 	return windowsapi.INFJSON(file)
 }
 
 func hiveView(file File) (string, error) {
+	file, err := structuredPreviewFile(file)
+	if err != nil {
+		return "", err
+	}
 	return windowsapi.HiveJSON(file, 3)
+}
+
+func structuredPreviewFile(file File) (File, error) {
+	size := webFileSize(file)
+	if size > webStructuredPreviewLimit {
+		return nil, fmt.Errorf("structured preview exceeds %d-byte input limit", webStructuredPreviewLimit)
+	}
+	if size >= 0 {
+		// The parser may use Size; keep it on the already-known length rather
+		// than asking the underlying stream to discover its length again.
+		return adapter.File(io.NewSectionReader(file, 0, size)), nil
+	}
+	data, err := io.ReadAll(io.NewSectionReader(file, 0, webStructuredPreviewLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > webStructuredPreviewLimit {
+		return nil, fmt.Errorf("structured preview exceeds %d-byte input limit", webStructuredPreviewLimit)
+	}
+	return adapter.File(bytes.NewReader(data)), nil
 }
 
 func cloneWebTree(node *webNode) webTreeNode {
@@ -813,6 +746,8 @@ func cloneWebTree(node *webNode) webTreeNode {
 		Path:        node.Path,
 		Kind:        node.Kind,
 		Size:        node.Size,
+		Readable:    node.file != nil,
+		Browsable:   node.Kind != "dir" && (node.file != nil || node.browsable),
 		MountedAs:   node.MountedAs,
 		Lazy:        node.Lazy,
 		MountErrors: append([]string(nil), node.mountErrors...),
@@ -946,13 +881,7 @@ var webIndexTemplate = template.Must(template.New("index").Parse(`<!doctype html
         <button id="utf16" disabled>UTF-16</button>
         <button id="inf" disabled>INF JSON</button>
         <button id="hive" disabled>Hive JSON</button>
-        <button id="zip" disabled>Mount ZIP</button>
-        <button id="cab" disabled>Mount CAB</button>
-        <button id="wim" disabled>Mount WIM</button>
-        <button id="iso9660" disabled>Mount ISO9660</button>
-        <button id="fat" disabled>Mount FAT</button>
-        <button id="udf" disabled>Mount UDF</button>
-        <button id="mountHive" disabled>Mount Hive</button>
+        <button id="auto" disabled>Browse contents</button>
       </div>
       <pre id="preview">Select a file to preview or mount it.</pre>
     </section>
@@ -964,7 +893,7 @@ let rootChildList = null;
 const treeEl = document.getElementById('tree');
 const previewEl = document.getElementById('preview');
 const csrfToken = document.querySelector('meta[name="trex-csrf-token"]').content;
-const actions = ['hex', 'text', 'utf16', 'inf', 'hive', 'zip', 'cab', 'wim', 'iso9660', 'fat', 'udf', 'mountHive'];
+const actions = ['hex', 'text', 'utf16', 'inf', 'hive', 'auto'];
 
 async function loadTree() {
   const res = await fetch('/api/tree');
@@ -992,7 +921,7 @@ function renderNode(node) {
   name.textContent = node.name || '/';
   const meta = document.createElement('span');
   meta.className = 'meta';
-  meta.textContent = node.kind === 'file' ? formatSize(node.size || 0) : (node.mountedAs ? node.mountedAs : '');
+  meta.textContent = node.readable ? formatSize(node.size || 0) : (node.kind === 'dir' ? (node.mountedAs || '') : node.kind);
   button.append(twisty, name, meta);
   button.onclick = () => selectNode(node, button, childList, twisty);
   li.appendChild(button);
@@ -1025,7 +954,7 @@ async function selectNode(node, button, childList, twisty) {
   if (selectedButton) selectedButton.classList.remove('selected');
   selectedButton = button;
   selectedButton.classList.add('selected');
-  for (const id of actions) document.getElementById(id).disabled = node.kind !== 'file';
+  for (const id of actions) document.getElementById(id).disabled = id === 'auto' ? !node.browsable : !node.readable;
   if (childList) {
     if (node.lazy && !node.childrenLoaded) {
       twisty.textContent = '...';
@@ -1043,7 +972,8 @@ async function selectNode(node, button, childList, twisty) {
     const collapsed = childList.classList.toggle('collapsed');
     twisty.textContent = collapsed ? '>' : 'v';
   }
-  if (node.kind === 'file') preview('hex');
+  if (node.readable) preview('hex');
+  else previewEl.textContent = node.browsable ? 'Browse contents to inspect this item.' : node.kind;
 }
 
 async function loadChildren(id) {
@@ -1079,7 +1009,7 @@ async function mount(format) {
   }
   const mountPoint = await res.json();
   appendMountPoint(mountPoint);
-  previewEl.textContent = 'Mounted as ' + format + '.';
+  previewEl.textContent = mountPoint.mountedAs ? 'Mounted as ' + mountPoint.mountedAs + '.' : 'Contents opened.';
 }
 
 function appendMountPoint(mountPoint) {
@@ -1092,6 +1022,7 @@ function appendMountPoint(mountPoint) {
 }
 
 function formatSize(size) {
+  if (size < 0) return 'unknown size';
   if (size < 1024) return size + ' B';
   const units = ['KiB', 'MiB', 'GiB', 'TiB'];
   let value = size / 1024;
@@ -1105,13 +1036,7 @@ document.getElementById('text').onclick = () => preview('text');
 document.getElementById('utf16').onclick = () => preview('utf16');
 document.getElementById('inf').onclick = () => preview('inf');
 document.getElementById('hive').onclick = () => preview('hive');
-document.getElementById('zip').onclick = () => mount('zip');
-document.getElementById('cab').onclick = () => mount('cab');
-document.getElementById('wim').onclick = () => mount('wim');
-document.getElementById('iso9660').onclick = () => mount('iso9660');
-document.getElementById('fat').onclick = () => mount('fat');
-document.getElementById('udf').onclick = () => mount('udf');
-document.getElementById('mountHive').onclick = () => mount('hive');
+document.getElementById('auto').onclick = () => mount('auto');
 loadTree().catch(err => previewEl.textContent = err);
 </script>
 </body>

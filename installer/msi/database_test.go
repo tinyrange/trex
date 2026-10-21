@@ -24,7 +24,7 @@ func TestColumnMajorRowsAndNull(t *testing.T) {
 	}
 }
 func TestPackedStreamName(t *testing.T) {
-	if got := decodeName(string([]rune{0x4840, 0x3800 + 63 + (28 << 6), 0x4800 + 55})); got != "\u4840_St" {
+	if got := DecodeStreamName(string([]rune{0x4840, 0x3800 + 63 + (28 << 6), 0x4800 + 55})); got != "\u4840_St" {
 		t.Fatal(got)
 	}
 }

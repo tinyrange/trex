@@ -35,6 +35,9 @@ type isoImage struct {
 	pathCache   map[string]isoDirRecord
 	joliet      bool
 	rockRidge   bool
+	highSierra  bool
+	blockSize   int64
+	volumeSize  int64
 	suspSkip    int
 }
 
@@ -50,14 +53,31 @@ func newISOImage(file starfile.File) (*isoImage, error) {
 	sector := make([]byte, 2048)
 	img := &isoImage{
 		file:      file,
+		blockSize: 2048,
 		dirCache:  make(map[uint32][]isoDirRecord),
 		dirIndex:  make(map[uint32]map[string]isoDirRecord),
 		pathCache: make(map[string]isoDirRecord),
 	}
 	var primary isoDirRecord
 	for i := int64(16); i < 256; i++ {
-		if _, err := file.ReadAt(sector, i*2048); err != nil {
+		if n, err := file.ReadAt(sector, i*2048); err != nil {
 			return nil, err
+		} else if n != len(sector) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		if i == 16 {
+			img.highSierra = string(sector[1:6]) != "CD001" && string(sector[9:14]) == "CDROM"
+		}
+		if img.highSierra {
+			done, err := img.highSierraDescriptor(sector, uint32(i))
+			if err != nil {
+				return nil, err
+			}
+			if done {
+				img.pathCache["/"] = img.root
+				return img, nil
+			}
+			continue
 		}
 		if string(sector[1:6]) != "CD001" {
 			return nil, fmt.Errorf("invalid ISO9660 volume descriptor")
@@ -301,7 +321,7 @@ func (i *isoImage) readDir(dir isoDirRecord) ([]isoDirRecord, error) {
 	}
 	i.mu.Unlock()
 
-	offset := int64(dir.extent) * 2048
+	offset := int64(dir.extent) * i.blockSize
 	if dir.size > 64<<20 || offset > i.file.Size() || int64(dir.size) > i.file.Size()-offset {
 		return nil, fmt.Errorf("iso: directory exceeds source or size limit")
 	}
@@ -313,10 +333,10 @@ func (i *isoImage) readDir(dir isoDirRecord) ([]isoDirRecord, error) {
 	for offset := 0; offset < len(data); {
 		length := int(data[offset])
 		if length == 0 {
-			offset = ((offset / 2048) + 1) * 2048
+			offset = ((offset / int(i.blockSize)) + 1) * int(i.blockSize)
 			continue
 		}
-		if offset+length > len(data) || offset%2048+length > 2048 {
+		if offset+length > len(data) || offset%int(i.blockSize)+length > int(i.blockSize) {
 			return nil, fmt.Errorf("invalid ISO9660 directory record")
 		}
 		record, err := i.parseRecord(data[offset : offset+length])
@@ -492,7 +512,7 @@ func (f *isoFile) ReadAt(p []byte, off int64) (int, error) {
 	if int64(len(p)) > remaining {
 		p = p[:remaining]
 	}
-	n, err := f.image.file.ReadAt(p, int64(f.record.extent)*2048+off)
+	n, err := f.image.file.ReadAt(p, int64(f.record.extent)*f.image.blockSize+off)
 	if err != nil {
 		return n, err
 	}
@@ -511,7 +531,7 @@ func (f *isoFile) WriteAt(p []byte, off int64) (int, error) {
 	if off+int64(len(p)) > f.Size() {
 		return 0, fmt.Errorf("write exceeds ISO file size")
 	}
-	return f.image.file.WriteAt(p, int64(f.record.extent)*2048+off)
+	return f.image.file.WriteAt(p, int64(f.record.extent)*f.image.blockSize+off)
 }
 func (f *isoFile) Size() int64 {
 	if f.record.rr != nil && f.record.rr.hasLink {

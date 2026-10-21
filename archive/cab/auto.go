@@ -2,7 +2,9 @@ package cab
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"path"
 	"strings"
 
@@ -99,6 +101,9 @@ func discoverSet(initial *Archive, options auto.Options, store *bytecache.Cache)
 			return nil, "", auto.ErrLimit
 		}
 		entry, err := context.Lookup(name, options)
+		if errors.Is(err, fs.ErrNotExist) {
+			entry, err = wrappedCompanion(context, name, options, store)
+		}
 		if err != nil {
 			return nil, "", fmt.Errorf("cab: companion %q: %w", name, err)
 		}

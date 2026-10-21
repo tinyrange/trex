@@ -1,6 +1,6 @@
 // Package nsis decodes payloads and plans bounded declarative installation effects
 // without executing installer code.
-// It reads the standard NSIS 2 ANSI, non-solid stored/DEFLATE layout. See README.md
+// It reads NSIS 2 ANSI stored/DEFLATE blocks and solid LZMA streams. See README.md
 // for the format references and the distinction between a listing and a plan.
 package nsis
 
@@ -29,12 +29,21 @@ var signature = []byte{0xef, 0xbe, 0xad, 0xde, 'N', 'u', 'l', 'l', 's', 'o', 'f'
 type Options struct {
 	MaxScanBytes     int64
 	MaxMetadataBytes int64
-	MaxInstructions  int
+	// MaxSolidBytes bounds the decoded solid stream, which cannot be indexed
+	// without decoding preceding member data. Zero selects 512 MiB.
+	MaxSolidBytes   int64
+	MaxInstructions int
 }
 
 func (o Options) defaults() (Options, error) {
-	if o.MaxScanBytes < 0 || o.MaxMetadataBytes < 0 || o.MaxInstructions < 0 {
+	if o.MaxSolidBytes < 0 || o.MaxScanBytes < 0 || o.MaxMetadataBytes < 0 || o.MaxInstructions < 0 {
 		return o, fmt.Errorf("nsis: limits must be nonnegative")
+	}
+	if o.MaxSolidBytes == 0 {
+		o.MaxSolidBytes = 512 << 20
+	}
+	if o.MaxSolidBytes >= int64(^uint64(0)>>1) {
+		return o, ErrLimit
 	}
 	if o.MaxScanBytes == 0 {
 		o.MaxScanBytes = 16 << 20
@@ -60,7 +69,7 @@ type Entry struct {
 	OutputDirectory      string
 	DirectoryInstruction int
 	// DataOffset is relative to the data block. Offset addresses the member's
-	// four-byte packed-length prefix in the original source.
+	// four-byte length prefix in the original source (or decoded solid stream).
 	DataOffset int64
 	Offset     int64
 	PackedSize int64
@@ -92,6 +101,7 @@ type Listing struct {
 	Sections          []Section
 	strings           []byte
 	ContainerSize     int64
+	solidData         []byte
 }
 
 func readAt(r storage.Reader, p []byte, off int64) error {
@@ -105,8 +115,9 @@ func readAt(r storage.Reader, p []byte, off int64) error {
 	return fmt.Errorf("nsis: read at %d: %w", off, err)
 }
 
-// List reads only metadata and member length prefixes, never member contents.
-// CRC verification and payload decompression are deliberately not claimed.
+// List reads metadata and member length prefixes for non-solid installers.
+// Solid LZMA requires decoding the bounded complete stream to locate members.
+// Container CRC verification is not claimed.
 func List(source storage.Reader, options Options) (*Listing, error) {
 	o, err := options.defaults()
 	if err != nil {
@@ -162,6 +173,18 @@ func List(source storage.Reader, options Options) (*Listing, error) {
 	var length [4]byte
 	if err := readAt(source, length[:], block); err != nil {
 		return nil, err
+	}
+	// Solid LZMA begins with five properties bytes instead of a block length.
+	// Confirm the dictionary and range-coder leading zero before decoding.
+	var props [6]byte
+	if end-block >= 6 {
+		if err := readAt(source, props[:], block); err != nil {
+			return nil, err
+		}
+		dict := u32(props[1:5])
+		if props[0] == 0x5d && dict >= 4096 && dict <= 64<<20 && dict&(dict-1) == 0 && props[5] == 0 {
+			return listSolidLZMA(source, offset, block, end, total, headerSize, props[:5], o)
+		}
 	}
 	lengthWord := u32(length[:])
 	packed := int64(lengthWord & 0x7fffffff)

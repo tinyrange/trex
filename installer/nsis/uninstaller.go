@@ -10,11 +10,16 @@ import (
 
 func (a *Archive) readBlock(offset, maximum int64) ([]byte, int64, error) {
 	end := a.Listing.HeaderOffset + a.Listing.ContainerSize
+	source := a.source
+	if a.Listing.solidData != nil {
+		source = a.payload
+		end = source.Size()
+	}
 	if offset < a.Listing.DataOffset || offset > end-4 {
 		return nil, 0, fmt.Errorf("nsis: data block offset out of bounds")
 	}
 	var word [4]byte
-	if err := readAt(a.source, word[:], offset); err != nil {
+	if err := readAt(source, word[:], offset); err != nil {
 		return nil, 0, err
 	}
 	size := int64(binary.LittleEndian.Uint32(word[:]) & 0x7fffffff)
@@ -22,7 +27,7 @@ func (a *Archive) readBlock(offset, maximum int64) ([]byte, int64, error) {
 		return nil, 0, ErrLimit
 	}
 	packed := make([]byte, int(size))
-	if err := readAt(a.source, packed, offset+4); err != nil {
+	if err := readAt(source, packed, offset+4); err != nil {
 		return nil, 0, err
 	}
 	next := offset + 4 + size

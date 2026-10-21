@@ -12,6 +12,53 @@ import (
 
 var errNativeShutdown = errors.New("guest powered off")
 
+// AttachGraphicsOutput exposes reserved guest RAM through the shared UEFI GOP.
+// Windows can retain this framebuffer through its built-in BasicDisplay driver.
+func (n *NativeExecution) AttachGraphicsOutput(width, height uint32) error {
+	if n.graphics != nil || n.Display != nil || n.firmware.exited || width == 0 || height == 0 || width > 8192 || height > 8192 {
+		return fmt.Errorf("invalid native GOP configuration or boot phase")
+	}
+	size := uint64(width) * uint64(height) * 4
+	m := n.firmware
+	address := m.allocate(1, 0, (size+page-1)/page, 0xffffffff)
+	if address == 0 {
+		return fmt.Errorf("no reserved GOP framebuffer memory")
+	}
+	f := &Firmware{machine: m, physical: n}
+	if err := f.InstallGraphicsOutput(address, n.ram[address-n.base:address-n.base+size], width, height, width); err != nil {
+		return err
+	}
+	n.graphics = f
+	return nil
+}
+
+func (n *NativeExecution) displayDimensions() (int, int) {
+	if n.graphics != nil {
+		return int(n.graphics.graphics.width), int(n.graphics.graphics.height)
+	}
+	if n.Display != nil {
+		return n.Display.Dimensions()
+	}
+	return 0, 0
+}
+
+func (n *NativeExecution) displaySnapshotInto(storage []byte) (display.FramebufferUpdate, error) {
+	if n.graphics == nil {
+		if n.Display == nil {
+			return display.FramebufferUpdate{}, fmt.Errorf("native display not attached")
+		}
+		return n.Display.SnapshotInto(storage)
+	}
+	g := n.graphics.graphics
+	if cap(storage) < len(g.pixels) {
+		storage = make([]byte, len(g.pixels))
+	}
+	storage = storage[:len(g.pixels)]
+	copy(storage, g.pixels)
+	w, h := int(g.width), int(g.height)
+	return display.FramebufferUpdate{Width: w, Height: h, Rect: image.Rect(0, 0, w, h), Pixels: storage}, nil
+}
+
 func (n *NativeExecution) advanceDisplay(ctx context.Context) error {
 	ex, err := n.Run(ctx)
 	if err != nil {
@@ -53,10 +100,7 @@ type NativeDisplaySession struct {
 func (s *NativeDisplaySession) Size() (int, int) { return s.width, s.height }
 func (s *NativeDisplaySession) Snapshot(_ image.Rectangle, since uint64, incremental bool) display.FramebufferUpdate {
 	n := s.Execution
-	if n.Display == nil {
-		return display.FramebufferUpdate{}
-	}
-	f, err := n.Display.SnapshotInto(s.scratch)
+	f, err := n.displaySnapshotInto(s.scratch)
 	if err != nil {
 		return display.FramebufferUpdate{}
 	}

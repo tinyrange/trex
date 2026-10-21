@@ -126,7 +126,7 @@ func Open(file starfile.File, maximumEntries int, maximumBytes int64) (*Archive,
 					return nil, fmt.Errorf("bsd dump: decoded size limit")
 				}
 				remaining -= size
-				e := ufs.Entry{Inode: number, Mode: order.Uint16(raw), Links: order.Uint16(raw[2:]), UID: order.Uint16(raw[4:]), GID: order.Uint16(raw[6:]), Accessed: order.Uint32(raw[16:]), Modified: order.Uint32(raw[24:]), Changed: order.Uint32(raw[32:]), Flags: order.Uint32(raw[100:])}
+				e := ufs.Entry{Inode: number, Mode: order.Uint16(raw), Links: order.Uint16(raw[2:]), UID: uint32(order.Uint16(raw[4:])), GID: uint32(order.Uint16(raw[6:])), Accessed: order.Uint32(raw[16:]), Modified: order.Uint32(raw[24:]), Changed: order.Uint32(raw[32:]), Flags: order.Uint32(raw[100:])}
 				switch e.Mode & 0xf000 {
 				case 0x4000:
 					e.Kind = "directory"

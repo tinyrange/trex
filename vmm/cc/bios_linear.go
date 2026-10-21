@@ -17,7 +17,7 @@ func (p *pc) guestMemory(address, size uint64, s x86state.SystemRegisters, write
 	if size > 1<<20 || address+size < address {
 		return nil, nil, fmt.Errorf("invalid BIOS memory span")
 	}
-	if s.Cr0&(1<<31) == 0 {
+	if s.Cr0&(1<<31) == 0 && !p.a20Disabled {
 		b, err := p.memory(address, size)
 		return b, func() {}, err
 	}
@@ -28,7 +28,7 @@ func (p *pc) guestMemory(address, size uint64, s x86state.SystemRegisters, write
 			return nil, nil, err
 		}
 		n := min(size-at, 4096-((address+at)&4095))
-		b, err := p.memory(physical, n)
+		b, err := p.memory(p.cpuAddress(physical), n)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -39,6 +39,9 @@ func (p *pc) guestMemory(address, size uint64, s x86state.SystemRegisters, write
 	}
 	mark := func(entries [][]byte, bits uint32) {
 		for _, entry := range entries {
+			if len(entry) == 0 {
+				continue
+			}
 			binary.LittleEndian.PutUint32(entry, binary.LittleEndian.Uint32(entry)|bits)
 		}
 	}

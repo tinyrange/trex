@@ -1,0 +1,5 @@
+rtgasm 1
+assembly {
+ dataSegment(out:emitter) { win16.neDS(out) }
+ interrupt21(out:emitter) { out.Bytes2(0x1e,0x07); emitDOSInterruptBridge(out, 0x21) }
+}

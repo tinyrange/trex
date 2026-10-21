@@ -26,9 +26,9 @@ func (p *pc) installMouseFirmware() {
 		code[j] = byte(done - j - 1)
 	}
 	code[21] = byte(enable - 22)
-	copy(p.ram[0xf2200:], code)
-	copy(p.ram[0xf2280:], []byte{0xe6, biosPort, 0xcf})
-	binary.LittleEndian.PutUint16(p.ram[0x15*4:], 0x2200)
+	copy(p.ram[0xf2500:], code)
+	copy(p.ram[0xf2580:], []byte{0xe6, biosPort, 0xcf})
+	binary.LittleEndian.PutUint16(p.ram[0x15*4:], 0x2500)
 	// IRQ12 dispatches one complete three-byte PS/2 packet as a real far call
 	// with status, X, Y, Z words on the caller's stack. Save the full 32-bit
 	// register file and all data segments across the installed callback.

@@ -23,8 +23,9 @@ type File struct {
 }
 
 // Open recognizes a single-track raw data CD using its sector framing and
-// ISO volume descriptor. Both 2352-byte sectors and 2448-byte sectors with
-// subchannel bytes are accepted. Mixed-mode tracks require an explicit map.
+// ISO9660 or High Sierra volume descriptor. Both 2352-byte sectors and 2448-byte
+// sectors with subchannel bytes are accepted. Mixed-mode tracks require an
+// explicit map.
 func Open(source storage.Reader) (*File, error) {
 	var h [24]byte
 	if _, e := source.ReadAt(h[:], 0); e != nil {
@@ -41,12 +42,16 @@ func Open(source storage.Reader) (*File, error) {
 		if source.Size()%stride != 0 || source.Size() < 17*stride {
 			continue
 		}
-		var descriptor [7]byte
-		if _, e := source.ReadAt(descriptor[:], 16*stride+offset); e == nil && string(descriptor[1:6]) == "CD001" && descriptor[6] == 1 {
-			return &File{source: source, stride: stride, mode: int64(h[15]), offset: offset}, nil
+		var descriptor [15]byte
+		if _, e := source.ReadAt(descriptor[:], 16*stride+offset); e == nil {
+			iso := string(descriptor[1:6]) == "CD001" && descriptor[6] == 1
+			hs := string(descriptor[9:14]) == "CDROM" && descriptor[14] == 1
+			if iso || hs {
+				return &File{source: source, stride: stride, mode: int64(h[15]), offset: offset}, nil
+			}
 		}
 	}
-	return nil, fmt.Errorf("raw CD: no ISO9660 descriptor in a supported sector layout")
+	return nil, fmt.Errorf("raw CD: no ISO9660 or High Sierra descriptor in a supported sector layout")
 }
 func (f *File) Size() int64 { return f.source.Size() / f.stride * 2048 }
 func (f *File) ReadAt(p []byte, off int64) (int, error) {

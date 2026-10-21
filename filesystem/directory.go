@@ -25,18 +25,20 @@ func DirectoryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 }
 
 type Directory struct {
-	dirs           map[string]struct{}
-	files          map[string]FileRecord
-	attributes     map[string]Attributes
-	metadata       map[string]Metadata
-	hardLinkRefs   map[uint64]uint64
-	nextHardLink   uint64
-	nextWriteOrder uint64
-	revision       uint64
-	fatShortIndex  map[string]string
-	fatShortErr    error
-	fatShortRev    uint64
-	fatShortValid  bool
+	dirs             map[string]struct{}
+	files            map[string]FileRecord
+	attributes       map[string]Attributes
+	metadata         map[string]Metadata
+	hardLinkRefs     map[uint64]uint64
+	nextHardLink     uint64
+	nextWriteOrder   uint64
+	revision         uint64
+	children         map[string][]string
+	childrenRevision uint64
+	fatShortIndex    map[string]string
+	fatShortErr      error
+	fatShortRev      uint64
+	fatShortValid    bool
 }
 
 // Attributes contains portable DOS-style file attributes.
@@ -49,7 +51,15 @@ type Attributes struct {
 
 // Metadata contains optional Windows filesystem metadata used by image
 // builders that can represent it.
+// ExtendedAttribute is an uninterpreted Windows EA, not a trust verdict.
+type ExtendedAttribute struct {
+	Name  string
+	Flags byte
+	Value []byte
+}
+
 type Metadata struct {
+	ExtendedAttributes []ExtendedAttribute
 	NamedStreams       map[string]starfile.File
 	FileAttributes     uint32
 	HasFileAttributes  bool
@@ -110,6 +120,10 @@ func (d *Directory) Snapshot() Snapshot {
 	metadata := make(map[string]Metadata, len(d.metadata))
 	for name, value := range d.metadata {
 		value.SecurityDescriptor = append([]byte(nil), value.SecurityDescriptor...)
+		value.ExtendedAttributes = append([]ExtendedAttribute(nil), value.ExtendedAttributes...)
+		for i := range value.ExtendedAttributes {
+			value.ExtendedAttributes[i].Value = append([]byte(nil), value.ExtendedAttributes[i].Value...)
+		}
 		if value.NamedStreams != nil {
 			streams := make(map[string]starfile.File, len(value.NamedStreams))
 			for key, file := range value.NamedStreams {
@@ -140,8 +154,12 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("hardlink", d.hardlinkBuiltin), nil
 	case "find":
 		return starlark.NewBuiltin("find", d.findBuiltin), nil
+	case "list_dir":
+		return starlark.NewBuiltin("list_dir", d.listDirBuiltin), nil
 	case "remove":
 		return starlark.NewBuiltin("remove", d.removeBuiltin), nil
+	case "set_reparse":
+		return starlark.NewBuiltin("set_reparse", d.setReparseBuiltin), nil
 	case "set_attributes":
 		return starlark.NewBuiltin("set_attributes", d.setAttributesBuiltin), nil
 	case "set_security":
@@ -156,7 +174,7 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (d *Directory) AttrNames() []string {
-	return []string{"fat_short_path", "files", "find", "get_security", "hardlink", "mkdir", "remove", "set_attributes", "set_security", "write"}
+	return []string{"fat_short_path", "files", "find", "get_security", "hardlink", "list_dir", "mkdir", "remove", "set_attributes", "set_reparse", "set_security", "write"}
 }
 
 func (d *Directory) hardlinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -201,6 +219,38 @@ func (d *Directory) HardLink(source, destination string) error {
 	destinationMetadata.HardLink = metadata.HardLink
 	d.SetMetadata(destination, destinationMetadata)
 	return nil
+}
+
+// listDirBuiltin enumerates only immediate children, without allocating and
+// sorting the entire tree's file list per call. Missing paths return an empty list.
+func (d *Directory) listDirBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs("list_dir", args, kwargs, "path", &name); err != nil {
+		return nil, err
+	}
+	if d.children == nil || d.childrenRevision != d.revision {
+		children := make(map[string][]string)
+		for candidate := range d.dirs {
+			if candidate != "/" {
+				children[path.Dir(candidate)] = append(children[path.Dir(candidate)], candidate)
+			}
+		}
+		for candidate := range d.files {
+			if _, isDir := d.dirs[candidate]; !isDir {
+				children[path.Dir(candidate)] = append(children[path.Dir(candidate)], candidate)
+			}
+		}
+		for _, names := range children {
+			sort.Strings(names)
+		}
+		d.children, d.childrenRevision = children, d.revision
+	}
+	names := d.children[storage.CleanPath(name)]
+	result := make([]starlark.Value, len(names))
+	for i, child := range names {
+		result[i] = starlark.String(child)
+	}
+	return starlark.NewList(result), nil
 }
 
 func (d *Directory) findBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -286,13 +336,21 @@ func (d *Directory) currentFATShortIndex() (map[string]string, error) {
 	if d.fatShortValid && d.fatShortRev == d.revision {
 		return d.fatShortIndex, d.fatShortErr
 	}
-	children := make(map[string][]string)
+	// FAT builders merge case variants of both directories and files. Build
+	// the same case-insensitive sibling sets before assigning aliases, or a
+	// virtual /PROGRAM FILES plus /Program Files can consume two short names
+	// even though the resulting volume contains just one directory.
+	paths := make(map[string]bool, len(d.dirs)+len(d.files))
 	for name := range d.dirs {
 		if name != "/" {
-			children[path.Dir(name)] = append(children[path.Dir(name)], name)
+			paths[strings.ToLower(name)] = true
 		}
 	}
 	for name := range d.files {
+		paths[strings.ToLower(name)] = true
+	}
+	children := make(map[string][]string)
+	for name := range paths {
 		children[path.Dir(name)] = append(children[path.Dir(name)], name)
 	}
 	index := make(map[string]string, len(d.dirs)+len(d.files))
@@ -458,6 +516,46 @@ func (d *Directory) SetMetadata(name string, metadata Metadata) {
 		}
 	}
 	d.metadata[cleaned] = metadata
+}
+
+func (d *Directory) setReparseBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	var tag uint32
+	var data starlark.Bytes
+	if err := starlark.UnpackArgs("set_reparse", args, kwargs, "name", &name, "tag", &tag, "data", &data); err != nil {
+		return nil, err
+	}
+	if err := d.SetReparse(name, tag, []byte(data)); err != nil {
+		return nil, err
+	}
+	return starlark.None, nil
+}
+
+// SetReparse attaches an opaque Microsoft reparse payload to an existing object.
+// Data excludes the eight-byte REPARSE_DATA_BUFFER header. No target is followed
+// and no host filesystem object is created. Non-Microsoft GUID buffers and
+// multiply-linked files require different semantics and are rejected.
+func (d *Directory) SetReparse(name string, tag uint32, data []byte) error {
+	cleaned := storage.CleanPath(name)
+	if _, isDir := d.dirs[cleaned]; !isDir {
+		if _, isFile := d.files[cleaned]; !isFile {
+			return fmt.Errorf("set_reparse: path %q does not exist", name)
+		}
+	}
+	if tag&0x80000000 == 0 || tag&0xffff < 2 {
+		return fmt.Errorf("set_reparse: a nonreserved Microsoft reparse tag is required")
+	}
+	if len(data) > 0x3ff8 {
+		return fmt.Errorf("set_reparse: payload exceeds 16376 bytes")
+	}
+	metadata := d.metadata[cleaned]
+	if metadata.HardLink != 0 && d.hardLinkRefs[metadata.HardLink] > 1 {
+		return fmt.Errorf("set_reparse: multiply-linked files are unsupported")
+	}
+	metadata.ReparseTag = tag
+	metadata.ReparseData = &starfile.Bytes{Name: "reparse payload", Data: append([]byte(nil), data...)}
+	d.SetMetadata(cleaned, metadata)
+	return nil
 }
 
 func (d *Directory) setAttributesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

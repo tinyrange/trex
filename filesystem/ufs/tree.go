@@ -11,6 +11,10 @@ import (
 // Both on-disk UFS and BSD dump records use this directory layout.
 // lookup must return an immutable inode view; symlinks are not followed.
 func Walk(root Entry, order binary.ByteOrder, maximumEntries int, lookup func(uint32) (Entry, error)) ([]Entry, error) {
+	return walk(root, order, maximumEntries, lookup, false)
+}
+
+func walk(root Entry, order binary.ByteOrder, maximumEntries int, lookup func(uint32) (Entry, error), modern bool) ([]Entry, error) {
 	if maximumEntries < 1 || root.Inode != 2 || root.Data == nil {
 		return nil, fmt.Errorf("ufs: invalid tree root or limits")
 	}
@@ -27,7 +31,7 @@ func Walk(root Entry, order binary.ByteOrder, maximumEntries int, lookup func(ui
 	seenDirs := map[uint32]bool{2: true}
 	for next := 0; next < len(queue); next++ {
 		current := queue[next]
-		children, err := directoryEntries(current.entry, current.parent, order, maximumEntries-len(entries), lookup)
+		children, err := directoryEntries(current.entry, current.parent, order, maximumEntries-len(entries), lookup, modern)
 		if err != nil {
 			return nil, err
 		}
@@ -46,7 +50,7 @@ func Walk(root Entry, order binary.ByteOrder, maximumEntries int, lookup func(ui
 }
 
 // directoryEntries validates one directory without descending into children.
-func directoryEntries(directory Entry, parent uint32, order binary.ByteOrder, maximumEntries int, lookup func(uint32) (Entry, error)) ([]Entry, error) {
+func directoryEntries(directory Entry, parent uint32, order binary.ByteOrder, maximumEntries int, lookup func(uint32) (Entry, error), modern bool) ([]Entry, error) {
 	entries := []Entry{}
 	file := directory.Data
 	if file.Size()%512 != 0 {
@@ -66,6 +70,11 @@ func directoryEntries(directory Entry, parent uint32, order binary.ByteOrder, ma
 			inode := order.Uint32(block[pos:])
 			length := int(order.Uint16(block[pos+4:]))
 			namesize := int(order.Uint16(block[pos+6:]))
+			dirtype := byte(0)
+			if modern {
+				dirtype = block[pos+6]
+				namesize = int(block[pos+7])
+			}
 			if length < 8 || length%4 != 0 || length > 512-pos {
 				return nil, fmt.Errorf("ufs: invalid directory record length")
 			}
@@ -83,7 +92,7 @@ func directoryEntries(directory Entry, parent uint32, order binary.ByteOrder, ma
 					if name == ".." {
 						want = parent
 					}
-					if inode != want {
+					if inode != want || (dirtype != 0 && dirtype != 4) {
 						return nil, fmt.Errorf("ufs: invalid dot entry")
 					}
 					dots++
@@ -94,6 +103,9 @@ func directoryEntries(directory Entry, parent uint32, order binary.ByteOrder, ma
 					entry, err := lookup(inode)
 					if err != nil {
 						return nil, err
+					}
+					if dirtype != 0 && uint16(dirtype) != entry.Mode>>12 {
+						return nil, fmt.Errorf("ufs: directory type disagrees with inode")
 					}
 					entry.Path = strings.TrimSuffix(directory.Path, "/") + "/" + name
 					entries = append(entries, entry)

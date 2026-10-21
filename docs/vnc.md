@@ -1,5 +1,9 @@
 # Browser VM display
 
+For custom script-owned pages with dynamically registered consoles, see
+[authenticated scripted web applications](scripted-web-apps.md). The embedded
+viewer described below retains its existing UI and routes.
+
 The native `-serve` frontend accepts a script whose `main(args)` returns a VM
 with the portable `vmm.DisplaySource` capability. cc supplies owned RGBA frames
 and serialized keyboard/pointer input. A callable result still serves a regular

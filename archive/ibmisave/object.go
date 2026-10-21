@@ -79,12 +79,13 @@ func (v *objectMetadataView) inspect() {
 	o := v.object
 	sections := make([]map[string]any, len(o.Sections))
 	for i, s := range o.Sections {
-		sections[i] = map[string]any{"number": i + 1, "logical_size": s.LogicalSize, "stored_size": s.Data.Size(), "address_hex": fmt.Sprintf("%016x", s.Address)}
+		sections[i] = map[string]any{"number": i + 1, "logical_size": s.LogicalSize, "stored_size": s.Data.Size(), "address_hex": fmt.Sprintf("%016x", s.Address), "missing_bytes": int64(s.LogicalSize) - s.Data.Size(), "logical_complete": int64(s.LogicalSize) == s.Data.Size()}
 	}
 	v.metadata = map[string]any{
-		"object":          map[string]any{"name": o.Name, "raw_name_hex": fmt.Sprintf("%x", o.RawName), "internal_type_hex": fmt.Sprintf("%04x", o.Type), "external_type": externalTypes[o.Type]},
-		"save_descriptor": map[string]any{"offset": o.Offset, "group": o.Group, "release_hex": fmt.Sprintf("%04x", o.Release), "target_release_hex": fmt.Sprintf("%04x", o.TargetRelease), "declared_data_blocks": o.DeclaredDataBlocks, "stored_size": o.Data.Size(), "trailer_size": o.Trailer.Size(), "sections": sections},
-		"decoding":        map[string]any{"complete": false, "scope": "save descriptor; object-specific fields are included only where validated"},
+		"content_identity": map[string]any{"saved_ccsid": "unknown", "addresses": "opaque saved identities; not execution mappings", "assembly": "only explicitly adjacent stored address spans", "missing_bytes": "error, never zero-fill"},
+		"object":           map[string]any{"name": o.Name, "raw_name_hex": fmt.Sprintf("%x", o.RawName), "internal_type_hex": fmt.Sprintf("%04x", o.Type), "external_type": externalTypes[o.Type]},
+		"save_descriptor":  map[string]any{"offset_domain": "input stream coordinate, possibly expanded logical bytes", "offset": o.Offset, "group": o.Group, "release_hex": fmt.Sprintf("%04x", o.Release), "target_release_hex": fmt.Sprintf("%04x", o.TargetRelease), "declared_data_blocks": o.DeclaredDataBlocks, "stored_size": o.Data.Size(), "trailer_size": o.Trailer.Size(), "sections": sections},
+		"decoding":         map[string]any{"complete": false, "scope": "save descriptor; object-specific fields are included only where validated"},
 	}
 	if v.catalog != nil {
 		if _, _, err := v.catalog.Metadata(); err != nil {

@@ -202,10 +202,10 @@ func (v *gptVolume) Attr(name string) (starlark.Value, error) {
 		return v.files, nil
 	case "partitions":
 		items := make([]starlark.Value, 0, len(v.partitions))
-		for index, partition := range v.partitions {
+		for _, partition := range v.partitions {
 			item := starlark.NewDict(8)
 			values := map[string]starlark.Value{
-				"index": starlark.MakeInt(index + 1), "file": partition.file,
+				"index": starlark.MakeUint(uint(partition.index)), "file": partition.file,
 				"type_guid":      starlark.String(windowsguid.Format(partition.typeGUID)),
 				"partition_guid": starlark.String(windowsguid.Format(partition.uniqueGUID)),
 				"start_lba":      starlark.MakeInt64(partition.startLBA),

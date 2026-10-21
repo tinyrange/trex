@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/tinyrange/trex/archive/adcr"
+	"github.com/tinyrange/trex/archive/aea"
+	"github.com/tinyrange/trex/archive/applearchive"
 	ararchive "github.com/tinyrange/trex/archive/ar"
 	"github.com/tinyrange/trex/archive/arsenic"
 	"github.com/tinyrange/trex/archive/aws"
 	"github.com/tinyrange/trex/archive/bff"
+	"github.com/tinyrange/trex/archive/bom"
 	"github.com/tinyrange/trex/archive/bru"
 	"github.com/tinyrange/trex/archive/bsddump"
 	"github.com/tinyrange/trex/archive/bzip2"
@@ -25,13 +28,19 @@ import (
 	"github.com/tinyrange/trex/archive/cfb"
 	"github.com/tinyrange/trex/archive/compactpro"
 	"github.com/tinyrange/trex/archive/compressed"
+	"github.com/tinyrange/trex/archive/cpio"
+	"github.com/tinyrange/trex/archive/crx"
 	"github.com/tinyrange/trex/archive/gzip"
 	"github.com/tinyrange/trex/archive/hunk"
 	"github.com/tinyrange/trex/archive/ibmisave"
+	"github.com/tinyrange/trex/archive/im4p"
 	"github.com/tinyrange/trex/archive/irix"
 	"github.com/tinyrange/trex/archive/kwaj"
 	"github.com/tinyrange/trex/archive/lha"
+	"github.com/tinyrange/trex/archive/lzfse"
 	"github.com/tinyrange/trex/archive/macresource"
+	"github.com/tinyrange/trex/archive/pbze"
+	"github.com/tinyrange/trex/archive/pbzx"
 	"github.com/tinyrange/trex/archive/rar"
 	"github.com/tinyrange/trex/archive/rms"
 	"github.com/tinyrange/trex/archive/sevenzip"
@@ -39,22 +48,29 @@ import (
 	"github.com/tinyrange/trex/archive/stuffit"
 	"github.com/tinyrange/trex/archive/szdd"
 	"github.com/tinyrange/trex/archive/tome"
+	"github.com/tinyrange/trex/archive/udif"
 	"github.com/tinyrange/trex/archive/vmsbackup"
 	"github.com/tinyrange/trex/archive/wim"
+	"github.com/tinyrange/trex/archive/xar"
 	"github.com/tinyrange/trex/archive/xz"
 	ziparchive "github.com/tinyrange/trex/archive/zip"
 	"github.com/tinyrange/trex/archive/zstd"
 	autostar "github.com/tinyrange/trex/auto/star"
 	binaryapi "github.com/tinyrange/trex/binary"
 	binarystar "github.com/tinyrange/trex/binary/star"
+	channelnative "github.com/tinyrange/trex/channel/native"
 	channelstar "github.com/tinyrange/trex/channel/star"
 	databaseese "github.com/tinyrange/trex/database/ese"
 	databasesqlite "github.com/tinyrange/trex/database/sqlite"
 	debugapi "github.com/tinyrange/trex/debug"
 	emulatorapi "github.com/tinyrange/trex/emulator"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
+	"github.com/tinyrange/trex/filesystem/androidlp"
+	filesystemapfs "github.com/tinyrange/trex/filesystem/apfs"
 	filesystemapm "github.com/tinyrange/trex/filesystem/apm"
+	filesystemckd "github.com/tinyrange/trex/filesystem/ckd"
 	filesystemefs "github.com/tinyrange/trex/filesystem/efs"
+	filesystemext4 "github.com/tinyrange/trex/filesystem/ext4"
 	filesystemfat "github.com/tinyrange/trex/filesystem/fat"
 	filesystemfloppy "github.com/tinyrange/trex/filesystem/floppy"
 	filesystemgpt "github.com/tinyrange/trex/filesystem/gpt"
@@ -62,9 +78,11 @@ import (
 	filesystemiso9660 "github.com/tinyrange/trex/filesystem/iso9660"
 	filesystemmbr "github.com/tinyrange/trex/filesystem/mbr"
 	filesystemmds "github.com/tinyrange/trex/filesystem/mds"
+	filesystemmtree "github.com/tinyrange/trex/filesystem/mtree"
 	filesystemnative "github.com/tinyrange/trex/filesystem/native"
 	filesystemntfs "github.com/tinyrange/trex/filesystem/ntfs"
 	filesystemods2 "github.com/tinyrange/trex/filesystem/ods2"
+	filesystemopenbsd "github.com/tinyrange/trex/filesystem/openbsd"
 	filesystemrawcd "github.com/tinyrange/trex/filesystem/rawcd"
 	filesystemsgi "github.com/tinyrange/trex/filesystem/sgi"
 	filesystemudf "github.com/tinyrange/trex/filesystem/udf"
@@ -81,6 +99,8 @@ import (
 	"github.com/tinyrange/trex/renvostar"
 	starcrypto "github.com/tinyrange/trex/script/crypto"
 	starjson "github.com/tinyrange/trex/script/json"
+	scsnative "github.com/tinyrange/trex/scs/native"
+	scsstar "github.com/tinyrange/trex/scs/star"
 	storagenative "github.com/tinyrange/trex/storage/native"
 	ccapi "github.com/tinyrange/trex/vmm/cc"
 	qemuapi "github.com/tinyrange/trex/vmm/qemu"
@@ -95,6 +115,8 @@ import (
 func predeclared() starlark.StringDict {
 	nativeIO := storagenative.Builtins()
 	vmmstar.RegisterBackend("rfe.v1", (&rfeapi.Backend{}).Capabilities())
+	channelBuiltins := channelstar.Builtins()
+	channelBuiltins["expose_tcp"] = starlark.NewBuiltin("expose_tcp", channelnative.ExposeTCPBuiltin)
 	if ccapi.Available() {
 		vmmstar.RegisterBackend("cc.v1", ccapi.Capabilities())
 	}
@@ -104,11 +126,13 @@ func predeclared() starlark.StringDict {
 	windowsBuiltins := windowsapi.Builtins()
 	windowsBuiltins["kd"] = starlark.NewBuiltin("kd", kd.Builtin)
 	return starlark.StringDict{
+		"scs":       namespace{name: "scs", attrs: scsstar.Builtins(scsnative.CreateOptimized, scsnative.Open, scsnative.GitTransport)},
 		"auto":      starlark.NewBuiltin("auto", autostar.Builtin),
 		"auto_plan": starlark.NewBuiltin("auto_plan", autostar.PlanBuiltin),
 		"archive": namespace{
 			name: "archive",
 			attrs: starlark.StringDict{
+				"crx":              starlark.NewBuiltin("crx", crx.Builtin),
 				"ar":               starlark.NewBuiltin("ar", ararchive.Builtin),
 				"cab":              starlark.NewBuiltin("cab", cabarchive.Builtin),
 				"cfb":              starlark.NewBuiltin("cfb", cfb.Builtin),
@@ -138,9 +162,25 @@ func predeclared() starlark.StringDict {
 				"ibmi_save":        starlark.NewBuiltin("ibmi_save", ibmisave.Builtin),
 				"rms_variable":     starlark.NewBuiltin("rms_variable", rms.VariableBuiltin),
 				"gzip":             starlark.NewBuiltin("gzip", gzip.Builtin),
+				"gzip_members":     starlark.NewBuiltin("gzip_members", gzip.MembersBuiltin),
+				"pbzx":             starlark.NewBuiltin("pbzx", pbzx.Builtin),
+				"im4p":             starlark.NewBuiltin("im4p", im4p.Builtin),
+				"apple_archive":    starlark.NewBuiltin("apple_archive", applearchive.Builtin),
+				"pbze":             starlark.NewBuiltin("pbze", pbze.Builtin),
+				"img4":             starlark.NewBuiltin("img4", im4p.WrapBuiltin),
+				"aea_metadata":     starlark.NewBuiltin("aea_metadata", aea.MetadataBuiltin),
+				"aea":              starlark.NewBuiltin("aea", aea.Builtin),
+				"bom":              starlark.NewBuiltin("bom", bom.Builtin),
+				"lzfse":            starlark.NewBuiltin("lzfse", lzfse.Builtin),
+				"xar":              starlark.NewBuiltin("xar", xar.Builtin),
+				"udif":             starlark.NewBuiltin("udif", udif.Builtin),
+				"cpio":             starlark.NewBuiltin("cpio", cpio.Builtin),
+				"cpio_build":       starlark.NewBuiltin("cpio_build", cpio.BuildBuiltin),
 				"bzip2":            starlark.NewBuiltin("bzip2", bzip2.Builtin),
 				"compress":         starlark.NewBuiltin("compress", compressed.Builtin),
 				"pack":             starlark.NewBuiltin("pack", compressed.Builtin),
+				"irix_plan":        starlark.NewBuiltin("irix_plan", irix.PlanBuiltin),
+				"irix_product":     starlark.NewBuiltin("irix_product", irix.ProductBuiltin),
 				"irix_image":       starlark.NewBuiltin("irix_image", irix.ImageBuiltin),
 				"irix_idb":         starlark.NewBuiltin("irix_idb", irix.IDBBuiltin),
 				"irix_tape":        starlark.NewBuiltin("irix_tape", irix.TapeBuiltin),
@@ -169,40 +209,57 @@ func predeclared() starlark.StringDict {
 		"clock": namespace{
 			name: "clock",
 			attrs: starlark.StringDict{
-				"monotonic": starlark.NewBuiltin("monotonic", clockMonotonicBuiltin),
-				"profiler":  starlark.NewBuiltin("profiler", clockProfilerBuiltin),
-				"unix":      starlark.NewBuiltin("unix", clockUnixBuiltin),
-				"utc":       starlark.NewBuiltin("utc", clockUTCBuiltin),
+				"monotonic":     starlark.NewBuiltin("monotonic", clockMonotonicBuiltin),
+				"profiler":      starlark.NewBuiltin("profiler", clockProfilerBuiltin),
+				"read_profiler": starlark.NewBuiltin("read_profiler", clockReadProfilerBuiltin),
+				"unix":          starlark.NewBuiltin("unix", clockUnixBuiltin),
+				"utc":           starlark.NewBuiltin("utc", clockUTCBuiltin),
 			},
 		},
 		"filesystem": namespace{
 			name: "filesystem",
 			attrs: starlark.StringDict{
-				"fat":          starlark.NewBuiltin("fat", filesystemfat.FATBuiltin),
-				"efs":          starlark.NewBuiltin("efs", filesystemefs.Builtin),
-				"hfs":          starlark.NewBuiltin("hfs", filesystemhfs.Builtin),
-				"ufs":          starlark.NewBuiltin("ufs", filesystemufs.Builtin),
-				"ods2":         starlark.NewBuiltin("ods2", filesystemods2.Builtin),
-				"ultrix_label": starlark.NewBuiltin("ultrix_label", filesystemultrix.Builtin),
-				"xfs":          starlark.NewBuiltin("xfs", filesystemxfs.Builtin),
-				"sgi":          starlark.NewBuiltin("sgi", filesystemsgi.Builtin),
-				"apm":          starlark.NewBuiltin("apm", filesystemapm.Builtin),
-				"fat12":        starlark.NewBuiltin("fat12", filesystemfat.FAT12Builtin),
-				"fat16":        starlark.NewBuiltin("fat16", filesystemfat.FAT16Builtin),
-				"fat32":        starlark.NewBuiltin("fat32", filesystemfat.FAT32Builtin),
-				"gpt":          starlark.NewBuiltin("gpt", filesystemgpt.GPTBuiltin),
-				"host":         starlark.NewBuiltin("host", filesystemnative.HostBuiltin),
-				"raw_cd":       starlark.NewBuiltin("raw_cd", filesystemrawcd.Builtin),
-				"mds":          starlark.NewBuiltin("mds", filesystemmds.Builtin),
-				"diskdupe":     starlark.NewBuiltin("diskdupe", filesystemfloppy.Builtin),
-				"hdcopy":       starlark.NewBuiltin("hdcopy", filesystemfloppy.Builtin),
-				"duplicator":   starlark.NewBuiltin("duplicator", filesystemfloppy.Builtin),
-				"iso9660":      starlark.NewBuiltin("iso9660", filesystemiso9660.ISO9660Builtin),
-				"mbr":          starlark.NewBuiltin("mbr", filesystemmbr.MBRBuiltin),
-				"ntfs":         starlark.NewBuiltin("ntfs", filesystemntfs.NTFSBuiltin),
-				"ntfs_record":  starlark.NewBuiltin("ntfs_record", filesystemntfs.RecordBuiltin),
-				"udf":          starlark.NewBuiltin("udf", filesystemudf.UDFBuiltin),
-				"vhdx":         starlark.NewBuiltin("vhdx", filesystemvhdx.VHDXBuiltin),
+				"fat":                  starlark.NewBuiltin("fat", filesystemfat.FATBuiltin),
+				"efs":                  starlark.NewBuiltin("efs", filesystemefs.Builtin),
+				"ext4":                 starlark.NewBuiltin("ext4", filesystemext4.Builtin),
+				"ext4_build":           starlark.NewBuiltin("ext4_build", filesystemext4.BuildBuiltin),
+				"ffs_build":            starlark.NewBuiltin("ffs_build", filesystemufs.BuildBuiltin),
+				"hfs":                  starlark.NewBuiltin("hfs", filesystemhfs.Builtin),
+				"apfs":                 starlark.NewBuiltin("apfs", filesystemapfs.Builtin),
+				"apfs_sealed_tree":     starlark.NewBuiltin("apfs_sealed_tree", filesystemapfs.SealedTreeBuiltin),
+				"mtree":                starlark.NewBuiltin("mtree", filesystemmtree.Builtin),
+				"hfs_build":            starlark.NewBuiltin("hfs_build", filesystemhfs.BuildBuiltin),
+				"ufs":                  starlark.NewBuiltin("ufs", filesystemufs.Builtin),
+				"ods2":                 starlark.NewBuiltin("ods2", filesystemods2.Builtin),
+				"ultrix_label":         starlark.NewBuiltin("ultrix_label", filesystemultrix.Builtin),
+				"ckd_scan":             starlark.NewBuiltin("ckd_scan", filesystemckd.ScanBuiltin),
+				"ckd_vvr":              starlark.NewBuiltin("ckd_vvr", filesystemckd.VVRBuiltin),
+				"ckd_catalog_record":   starlark.NewBuiltin("ckd_catalog_record", filesystemckd.CatalogRecordBuiltin),
+				"ckd_vsam_records":     starlark.NewBuiltin("ckd_vsam_records", filesystemckd.VSAMRecordsBuiltin),
+				"ckd_control_interval": starlark.NewBuiltin("ckd_control_interval", filesystemckd.ControlIntervalBuiltin),
+				"ckd_igw_attributes":   starlark.NewBuiltin("ckd_igw_attributes", filesystemckd.IGWAttributesBuiltin),
+				"ckd_attribute_page":   starlark.NewBuiltin("ckd_attribute_page", filesystemckd.AttributePageBuiltin),
+				"openbsd_label":        starlark.NewBuiltin("openbsd_label", filesystemopenbsd.Builtin),
+				"xfs":                  starlark.NewBuiltin("xfs", filesystemxfs.Builtin),
+				"sgi":                  starlark.NewBuiltin("sgi", filesystemsgi.Builtin),
+				"apm":                  starlark.NewBuiltin("apm", filesystemapm.Builtin),
+				"fat12":                starlark.NewBuiltin("fat12", filesystemfat.FAT12Builtin),
+				"fat16":                starlark.NewBuiltin("fat16", filesystemfat.FAT16Builtin),
+				"fat32":                starlark.NewBuiltin("fat32", filesystemfat.FAT32Builtin),
+				"gpt":                  starlark.NewBuiltin("gpt", filesystemgpt.GPTBuiltin),
+				"host":                 starlark.NewBuiltin("host", filesystemnative.HostBuiltin),
+				"raw_cd":               starlark.NewBuiltin("raw_cd", filesystemrawcd.Builtin),
+				"mds":                  starlark.NewBuiltin("mds", filesystemmds.Builtin),
+				"diskdupe":             starlark.NewBuiltin("diskdupe", filesystemfloppy.Builtin),
+				"hdcopy":               starlark.NewBuiltin("hdcopy", filesystemfloppy.Builtin),
+				"duplicator":           starlark.NewBuiltin("duplicator", filesystemfloppy.Builtin),
+				"iso9660":              starlark.NewBuiltin("iso9660", filesystemiso9660.ISO9660Builtin),
+				"mbr":                  starlark.NewBuiltin("mbr", filesystemmbr.MBRBuiltin),
+				"ntfs":                 starlark.NewBuiltin("ntfs", filesystemntfs.NTFSBuiltin),
+				"ntfs_record":          starlark.NewBuiltin("ntfs_record", filesystemntfs.RecordBuiltin),
+				"udf":                  starlark.NewBuiltin("udf", filesystemudf.UDFBuiltin),
+				"vhdx":                 starlark.NewBuiltin("vhdx", filesystemvhdx.VHDXBuiltin),
+				"android_super":        starlark.NewBuiltin("android_super", androidlp.Builtin),
 			},
 		},
 		"firmware": namespace{name: "firmware", attrs: acpistar.Builtins()},
@@ -214,7 +271,7 @@ func predeclared() starlark.StringDict {
 		"vmm":      namespace{name: "vmm", attrs: vmmstar.Builtins()},
 		"crypto":   namespace{name: "crypto", attrs: starcrypto.Builtins()},
 		"debug":    namespace{name: "debug", attrs: debugapi.Builtins()},
-		"channel":  namespace{name: "channel", attrs: channelstar.Builtins()},
+		"channel":  namespace{name: "channel", attrs: channelBuiltins},
 		"emulator": namespace{name: "emulator", attrs: emulatorapi.Builtins()},
 		"json":     namespace{name: "json", attrs: starjson.Builtins()},
 		"html": namespace{
@@ -268,6 +325,7 @@ func predeclared() starlark.StringDict {
 		"hex":          starlark.NewBuiltin("hex", hexBuiltin),
 		"help":         starlark.NewBuiltin("help", helpBuiltin),
 		"http_file":    nativeIO["http_file"],
+		"http_get":     nativeIO["http_get"],
 		"mirror_file":  nativeIO["mirror_file"],
 		"open":         nativeIO["open"],
 		"repl":         starlark.NewBuiltin("repl", replBuiltin),

@@ -14,10 +14,23 @@ import (
 	"j5.nz/cc/hypervisor"
 )
 
+// Low RAM stops before PCI MMIO; additional RAM starts above the 32-bit
+// device window. Host backing remains compact across the physical hole.
+const pciMemoryBase = 0xc0000000
+const highRAMBase = 1 << 32
+
 type Backend struct {
+	// PrivateAppleISA opts into native HVF ISA level 3 and Apple PAC services.
+	PrivateAppleISA bool
+	// RunTimeout bounds a caller-constructed ARM64 firmware run. Zero uses 30 seconds.
+	RunTimeout               time.Duration
 	ACPI, PCIIDE, HPET, UEFI bool
+	// USB enables the UHCI keyboard and absolute pointer.
+	USB bool
 	// PIOOnly disables the PCI IDE disk's DMA capability.
 	PIOOnly bool
+	// IDEModel selects synthetic (default) or the native ich7-pata profile.
+	IDEModel string
 	// OverlayLimit bounds dirty snapshot memory; zero uses 256 MiB.
 	OverlayLimit int64
 	// CPUFactory selects a software execution engine while retaining identical
@@ -27,9 +40,17 @@ type Backend struct {
 	Name string
 }
 
-func Available() bool { return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" }
+func Available() bool {
+	return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" || runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
+}
 func Capabilities() []string {
-	return []string{"disk", "disk.bus.ide", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		return arm64Capabilities()
+	}
+	return pcCapabilities()
+}
+func pcCapabilities() []string {
+	return []string{"boot.darwin", "disk", "disk.bus.ide", "disk.bus.nvme", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
 }
 func (b *Backend) ID() string {
 	if b.Name != "" {
@@ -39,6 +60,9 @@ func (b *Backend) ID() string {
 }
 func (b *Backend) Capabilities() []string {
 	caps := Capabilities()
+	if b.CPUFactory != nil {
+		caps = pcCapabilities()
+	}
 	if b.ID() != "cc.v1" {
 		for j, c := range caps {
 			if c == "extension.cc.v1" {
@@ -49,9 +73,50 @@ func (b *Backend) Capabilities() []string {
 	return caps
 }
 func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
+	if m.Architecture == "arm64" {
+		if b.CPUFactory != nil {
+			return []vmm.ValidationIssue{{Code: "cc.unsupported", Field: "architecture", Message: "alternate x86 CPU engines require x86_64", Backend: b.ID()}}
+		}
+		return b.validateARM64(m)
+	}
 	var issues []vmm.ValidationIssue
 	add := func(field, message string) {
 		issues = append(issues, vmm.ValidationIssue{Code: "cc.unsupported", Field: field, Message: message, Backend: b.ID()})
+	}
+	if b.PrivateAppleISA {
+		add("private_apple_isa", "private Apple ISA requires the native ARM64 backend")
+	}
+	if b.CPUFactory == nil && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64") {
+		add("backend", "PC execution requires Linux/amd64 KVM")
+	}
+	if m.ARM64Platform != nil {
+		add("platform", "ARM64 platforms require ARM64 execution")
+	}
+	if m.ARM64Boot != nil {
+		add("boot", "ARM64 firmware requires arm64 architecture")
+	}
+	if b.IDEModel != "" && b.IDEModel != "synthetic" && b.IDEModel != "ich7-pata" {
+		add("ide_model", "IDE model must be synthetic or ich7-pata")
+	}
+	if b.IDEModel == "ich7-pata" && !b.PCIIDE && !b.UEFI {
+		add("ide_model", "ich7-pata requires PCI IDE")
+	}
+	if m.Boot != nil {
+		add("boot", "cc does not support Linux direct boot")
+	}
+	if m.DarwinBoot != nil {
+		if len(m.Networks) != 0 {
+			add("networks", "Darwin SMC and NE2000 require distinct I/O resources; networking is not supported in this profile")
+		}
+		if b.UEFI || m.Architecture != "x86_64" {
+			add("boot", "Darwin direct boot requires x86_64 without UEFI image execution")
+		}
+		if err := m.DarwinBoot.Validate(); err != nil {
+			add("boot", err.Error())
+		}
+	}
+	if b.USB && m.Architecture != "x86_64" {
+		add("usb", "cc USB input requires x86_64")
 	}
 	if b.UEFI && m.Architecture != "x86_64" {
 		add("architecture", "cc UEFI requires x86_64")
@@ -65,14 +130,27 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if m.Architecture != "i386" && m.Architecture != "x86_64" {
 		add("architecture", "cc PC supports i386 and x86_64")
 	}
-	if m.CPUs != 1 {
-		add("cpus", "cc PC requires one CPU")
+	if b.CPUFactory != nil && m.CPUs != 1 {
+		add("cpus", "alternate software CPU engines require one CPU")
 	}
-	if m.Memory < 16<<20 || m.Memory > 2<<30 || m.Memory%4096 != 0 {
-		add("memory", "memory must be page-aligned and between 16 MiB and 2 GiB")
+	if m.CPUs < 1 || m.CPUs > 4 {
+		add("cpus", "cc PC supports one to four CPUs")
+	}
+	if m.CPUs > 1 && (!b.UEFI || m.Architecture != "x86_64" || m.DarwinBoot != nil) {
+		add("cpus", "multiple CPUs require the x86_64 UEFI PC profile")
+	}
+	maxMemory := int64(pciMemoryBase)
+	if m.Architecture == "x86_64" {
+		maxMemory = 8 << 30
+		if b.UEFI {
+			maxMemory = 16 << 30
+		}
+	}
+	if m.Memory < 16<<20 || m.Memory > maxMemory || m.Memory%4096 != 0 {
+		add("memory", fmt.Sprintf("memory must be page-aligned and between 16 MiB and %d GiB", maxMemory>>30))
 	}
 	if len(m.Disks) != 1 {
-		add("disks", "cc PC requires one primary IDE disk")
+		add("disks", "cc PC requires one IDE or NVMe disk")
 	}
 	for i, d := range m.Disks {
 		field := fmt.Sprintf("disks[%d]", i)
@@ -80,8 +158,11 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 			add(field, "disk device is required")
 			continue
 		}
-		if d.Bus != "" && d.Bus != "auto" && d.Bus != "ide" || d.Unit != 0 || d.Media != "" && d.Media != "disk" {
-			add(field, "disk must be primary IDE master with disk media")
+		if d.Bus != "" && d.Bus != "auto" && d.Bus != "ide" && d.Bus != "nvme" || d.Unit != 0 || d.Media != "" && d.Media != "disk" {
+			add(field, "disk must use IDE or NVMe, unit zero and disk media")
+		}
+		if d.Bus == "nvme" && (!b.UEFI || m.Architecture != "x86_64" || b.PCIIDE || b.PIOOnly || b.IDEModel != "" && b.IDEModel != "synthetic" || d.CHS != nil) {
+			add(field, "NVMe requires x86_64 UEFI without IDE options or CHS geometry")
 		}
 		g := d.Device.Geometry()
 		if g.LogicalBlockSize != 512 || g.Size < 512 || g.Size%512 != 0 {
@@ -98,14 +179,14 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		}
 	}
 	if len(m.Networks) > 1 {
-		add("networks", "cc PC supports one ISA NE2000")
+		add("networks", "cc PC supports one Ethernet controller")
 	}
-	if len(m.Networks) != 0 && (b.ACPI || b.PCIIDE || m.Architecture == "x86_64") {
+	if len(m.Networks) != 0 && m.Architecture != "x86_64" && (b.ACPI || b.PCIIDE) {
 		add("networks", "ACPI SCI and ISA NE2000 currently require the same IRQ9")
 	}
 	for _, network := range m.Networks {
 		if network.Kind != "ethernet" || network.Switch == nil || network.MAC == [6]byte{} || network.MAC[0]&1 != 0 {
-			add("networks", "NE2000 requires an Ethernet switch and a unicast MAC")
+			add("networks", "Ethernet requires a switch and a unicast MAC")
 		}
 	}
 	if len(m.Channels) > 1 {
@@ -136,6 +217,23 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	if issues := b.Validate(m); len(issues) != 0 {
 		return nil, &vmm.Error{Code: vmm.ErrorInvalid, Message: "invalid cc machine", Detail: issues[0].Field + ": " + issues[0].Message}
 	}
+	if m.Architecture == "arm64" {
+		m.Disks = append([]vmm.Disk(nil), m.Disks...)
+		for i, disk := range m.Disks {
+			if disk.Snapshot {
+				limit := b.OverlayLimit
+				if limit == 0 {
+					limit = 256 << 20
+				}
+				overlay, err := blockstar.NewOverlayDevice(disk.Device, limit, blockstar.DefaultOverlayChunk)
+				if err != nil {
+					return nil, err
+				}
+				m.Disks[i].Device = overlay
+			}
+		}
+		return b.startARM64(ctx, m)
+	}
 	disk := m.Disks[0]
 	if disk.Snapshot {
 		limit := b.OverlayLimit
@@ -148,19 +246,52 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		}
 		disk.Device = overlay
 	}
-	factory := b.CPUFactory
-	if factory == nil {
-		factory = hypervisor.NewX86
-	}
-	cpu, err := factory(ctx)
+	platform, err := b.newPlatform(ctx, m, disk)
 	if err != nil {
 		return nil, err
 	}
-	if err = configureCPUArchitecture(cpu, m.Architecture == "x86_64"); err != nil {
+	// Capture immutable configuration and the already-selected writable disk.
+	// A reboot must not create a fresh snapshot overlay.
+	options := *b
+	rebuild := func() (*pc, error) { return options.newPlatform(ctx, m, disk) }
+	return newRestartableDriverFor(ctx, platform, m.StartPaused, rebuild, b), nil
+}
+
+func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk) (*pc, error) {
+	var cpus []hypervisor.X86
+	var err error
+	if b.CPUFactory != nil {
+		var cpu hypervisor.X86
+		cpu, err = b.CPUFactory(ctx)
+		if err == nil {
+			cpus = []hypervisor.X86{cpu}
+		}
+	} else {
+		cpus, err = hypervisor.NewX86WithCPUs(ctx, m.CPUs)
+	}
+	if err != nil {
+		return nil, err
+	}
+	cpu := cpus[0]
+	if m.DarwinBoot != nil {
+		err = configureDarwinCPU(cpu)
+	} else {
+		for id, core := range cpus {
+			if err = configureCPUTopology(core, m.Architecture == "x86_64", id, len(cpus)); err != nil {
+				break
+			}
+		}
+	}
+	if err != nil {
 		cpu.Close()
 		return nil, err
 	}
-	regions := []hypervisor.RAMRegion{{Address: 0, Offset: 0, Size: 0xa0000}, {Address: 0xc0000, Offset: 0xc0000, Size: uint64(m.Memory) - 0xc0000}, {Address: ramfb.Address, Offset: uint64(m.Memory), Size: ramfb.Size}}
+	lowMemory := min(uint64(m.Memory), uint64(pciMemoryBase))
+	regions := []hypervisor.RAMRegion{{Address: 0, Offset: 0, Size: 0xa0000}, {Address: 0xc0000, Offset: 0xc0000, Size: lowMemory - 0xc0000}}
+	if uint64(m.Memory) > lowMemory {
+		regions = append(regions, hypervisor.RAMRegion{Address: highRAMBase, Offset: lowMemory, Size: uint64(m.Memory) - lowMemory})
+	}
+	regions = append(regions, hypervisor.RAMRegion{Address: ramfb.Address, Offset: uint64(m.Memory), Size: ramfb.Size})
 	total := uint64(m.Memory) + ramfb.Size
 	if len(m.Channels) == 1 {
 		regions = append(regions, hypervisor.RAMRegion{Address: channelAddress, Offset: total, Size: channelSize})
@@ -171,24 +302,63 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		cpu.Close()
 		return nil, err
 	}
-	platform, err := newPC(cpu, ram[:m.Memory], disk, time.Now)
+	platform, err := newPCBoot(cpu, ram[:m.Memory], disk, time.Now, m.DarwinBoot == nil)
 	if err != nil {
 		cpu.Close()
 		return nil, err
 	}
+	platform.cpus = cpus
 	platform.framebuffer = ram[m.Memory : uint64(m.Memory)+ramfb.Size]
-	if b.PCIIDE || b.UEFI {
+	if disk.Bus == "nvme" {
+		platform.nvme = newPCINVMe(platform)
+	} else if b.PCIIDE || b.UEFI {
 		platform.pciIDE = newPCIIDE()
-		platform.ide.dmaEnabled = !b.PIOOnly
-		platform.ide.irq = func(irq uint32, level bool) error {
-			if level {
-				platform.pciIDE.bm[2] |= 4
-			}
-			return cpu.SetIRQ(irq, level && platform.pciIDE.config[4]&1 != 0)
+		if b.IDEModel == "ich7-pata" {
+			platform.pciIDE = newICH7PATA()
 		}
+		platform.ide.dmaEnabled = !b.PIOOnly
+		platform.ide.irq = platform.setIDEIRQ
 	}
 	if b.HPET {
 		platform.hpet = newHPET(platform.now(), cpu.SetIRQ)
+		if m.DarwinBoot != nil {
+			if legacy, ok := cpu.(interface{ SetLegacyTimerReplacement(bool) error }); ok {
+				platform.hpet.setLegacy = func(enabled bool) error {
+					if err := legacy.SetLegacyTimerReplacement(enabled); err != nil {
+						return err
+					}
+					if enabled && platform.rtcIRQ {
+						if err := cpu.SetIRQ(8, false); err != nil {
+							return err
+						}
+						platform.rtcIRQ = false
+					}
+					platform.rtcNext = time.Time{}
+					return nil
+				}
+			}
+		}
+	}
+	if m.DarwinBoot != nil {
+		platform.smc = newSMC(m.DarwinBoot.SMCOSK)
+		platform.pciDisplay = newPCIDisplay()
+	}
+	if b.USB || m.DarwinBoot != nil {
+		platform.uhci = newUHCI(platform.inputMemory, cpu.SetIRQ)
+	}
+	if len(m.Networks) == 1 {
+		network := m.Networks[0]
+		port := network.Switch.Connect()
+		defer func() {
+			if err != nil {
+				_ = port.Close()
+			}
+		}()
+		if m.Architecture == "x86_64" {
+			platform.pciNIC = newE1000(port, network.MAC, platform.inputMemory, func(level bool) error { return cpu.SetIRQ(18, level) })
+		} else {
+			platform.nic = newNE2000(port, network.MAC, func(level bool) error { return cpu.SetIRQ(9, level) })
+		}
 	}
 	if b.ACPI || b.PCIIDE || b.HPET || b.UEFI || m.Architecture == "x86_64" {
 		if err = platform.installACPI(); err != nil {
@@ -202,12 +372,14 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		copy(platform.channelMemory, []byte("TRCH\x01\x00\x00\x00"))
 	}
 	binary.LittleEndian.PutUint32(platform.framebuffer, ramfb.Magic)
-	if len(m.Networks) == 1 {
-		network := m.Networks[0]
-		platform.nic = newNE2000(network.Switch.Connect(), network.MAC, func(level bool) error { return cpu.SetIRQ(9, level) })
-	}
 	if b.UEFI {
 		if err = platform.installUEFI(); err != nil {
+			cpu.Close()
+			return nil, err
+		}
+	}
+	if m.DarwinBoot != nil {
+		if err = platform.installDarwin(m.DarwinBoot); err != nil {
 			cpu.Close()
 			return nil, err
 		}
@@ -216,7 +388,7 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	// direct BDA and mouse scratch updates have explicit barriers. UEFI retains
 	// conservative boundaries until its separate firmware path is audited.
 	if tracked, ok := cpu.(interface{ SetRAMWriteTracking(bool) }); ok {
-		tracked.SetRAMWriteTracking(!b.UEFI && len(m.Channels) == 0)
+		tracked.SetRAMWriteTracking(!b.UEFI && m.DarwinBoot == nil && len(m.Channels) == 0)
 	}
-	return newDriverFor(ctx, platform, m.StartPaused, b), nil
+	return platform, nil
 }

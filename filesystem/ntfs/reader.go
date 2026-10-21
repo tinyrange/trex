@@ -225,6 +225,8 @@ func (f *ntfsReadFile) AttrNames() []string {
 }
 
 type ntfsReadNode struct {
+	eaData             *ntfsReadFile
+	eaInfo             []byte
 	id                 uint64
 	sequence           uint16
 	baseSequence       uint16
@@ -513,6 +515,10 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 		var err error
 		for _, attribute := range attributes {
 			switch attribute.typ {
+			case ntfsAttrEAInformation:
+				node.eaInfo = attribute.value
+			case ntfsAttrEA:
+				node.eaData = &ntfsReadFile{name: "$EA", volume: v.file, clusterSize: v.clusterSize, size: attribute.size, firstVCN: attribute.firstVCN, resident: attribute.value, runs: attribute.runs}
 			case ntfsAttrSecurityDescriptor:
 				node.securityDescriptor = &ntfsReadFile{name: "$SECURITY_DESCRIPTOR", volume: v.file, clusterSize: v.clusterSize, size: attribute.size, firstVCN: attribute.firstVCN, resident: attribute.value, runs: attribute.runs}
 			case ntfsAttrStandardInformation:
@@ -867,6 +873,17 @@ func (v *ntfsVolume) Attr(name string) (starlark.Value, error) {
 			if node == nil {
 				return starlark.None, nil
 			}
+			eaValue := starlark.Value(starlark.None)
+			if node.eaData != nil {
+				if node.eaData.Size() > 65536 {
+					return nil, fmt.Errorf("ntfs: EA exceeds64 KiB")
+				}
+				raw, err := starfile.ReadAll(node.eaData)
+				if err != nil {
+					return nil, err
+				}
+				eaValue = starlark.Bytes(raw)
+			}
 			descriptor := starlark.Value(starlark.None)
 			if raw, ok := v.securityDescriptors[node.securityID]; ok {
 				descriptor = starlark.Bytes(raw)
@@ -884,6 +901,10 @@ func (v *ntfsVolume) Attr(name string) (starlark.Value, error) {
 				descriptor = starlark.Bytes(raw)
 			}
 			return starfile.NewRecord(starlark.StringDict{
+				"ea_data":             eaValue,
+				"ea_information":      starlark.Bytes(node.eaInfo),
+				"record_number":       starlark.MakeUint64(node.id),
+				"sequence":            starlark.MakeUint(uint(node.sequence)),
 				"directory":           starlark.Bool(node.dir),
 				"path":                starlark.String(node.path),
 				"security_descriptor": descriptor,

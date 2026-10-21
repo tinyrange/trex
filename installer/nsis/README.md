@@ -1,9 +1,12 @@
 # Native NSIS payloads and installation plans
 
-This package implements the NSIS 2 ANSI, non-solid stored/DEFLATE layout:
+This package implements NSIS 2 ANSI stored/DEFLATE blocks and solid LZMA streams:
 
 - `List(storage.Reader, Options)` / `archive.nsis_list` read metadata and member
-  length prefixes only. File bodies are never read by the listing API.
+  length prefixes only for non-solid containers. Solid LZMA requires decoding
+  the stream (including member bodies); `Options.MaxSolidBytes` bounds it to
+  512 MiB by default. `Open` also caps it by `maximum_bytes`. Solid entry offsets
+  address the decoded stream, not the original executable.
 - `Open` / `archive.nsis` decode readable members entirely within trex. Stable
   `/files/NNNNNN` names use instruction indices, not guessed destinations.
 - `archive.installer`, `archive.installer_probe` and `auto` recognize the same
@@ -50,8 +53,9 @@ no external extractor, guest installer execution, or host staging is used.
 - Native WriteUninstaller uses the original executable stub, bounded embedded
   icon patches and uninstall container, and computes the CRC excluding the
   initial 512 bytes and final checksum word. It does not execute the result.
-- Solid streams, other codecs, Unicode strings and customized opcode tables
-  are not supported. The format label does not authenticate a producer version.
+- Solid DEFLATE/bzip2, other codecs, Unicode strings and customized opcode
+  tables are not supported. Solid LZMA uses the existing native 7z LZMA engine;
+  its dictionary is capped at 64 MiB and it requires an end marker. The format label does not authenticate a producer version.
   Input signatures/CRCs are not generally verified; product policy should pin
   its installer digest. Generic parsing does not imply successful installation.
 

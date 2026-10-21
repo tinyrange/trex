@@ -62,6 +62,9 @@ func resolveHelpValue(thread *starlark.Thread, name string) (starlark.Value, err
 }
 
 func starlarkValueHelp(thread *starlark.Thread, value starlark.Value) string {
+	if documented, ok := value.(interface{ Documentation() string }); ok {
+		return documented.Documentation()
+	}
 	if value == starlark.None {
 		return "trex Starlark help\n\nUse help(namespace), help(value.method), or help(\"qualified.name\").\n"
 	}
@@ -85,7 +88,11 @@ func starlarkValueHelp(thread *starlark.Thread, value starlark.Value) string {
 		if !strings.ContainsRune(name, '.') {
 			name = qualifiedStarlarkValueName(thread, value, name)
 		}
-		return nativeStarlarkSignature(name) + "\n"
+		signature := nativeStarlarkSignature(name) + "\n"
+		if description, err := nativeStarlarkDescription(name); err == nil {
+			signature += "\n" + description + "\n"
+		}
+		return signature
 	}
 	if function, ok := value.(*starlark.Function); ok {
 		doc := strings.TrimSpace(function.Doc())
@@ -112,7 +119,7 @@ func starlarkValueHelp(thread *starlark.Thread, value starlark.Value) string {
 			}
 		}
 		sort.Strings(methods)
-		return fmt.Sprintf("%s value\n\n%s\n", value.Type(), strings.Join(methods, "\n"))
+		return fmt.Sprintf("%s value\n\n%s\n\n%s\n", value.Type(), nativeStarlarkValueDescriptions[value.Type()], strings.Join(methods, "\n"))
 	}
 	if attributes, ok := value.(starlark.HasAttrs); ok {
 		names := attributes.AttrNames()

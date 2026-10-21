@@ -28,7 +28,7 @@ type FirmwareOptions struct {
 
 type Firmware struct {
 	physical   cpu.Memory
-	virtualMap []runtimeRange
+	virtualMap runtimeMap
 	stall      func(time.Duration) error
 	graphics   *graphicsOutput
 	machine    *Machine
@@ -49,7 +49,9 @@ func NewFirmware(image storage.Reader, opts FirmwareOptions) (*Firmware, error) 
 	if o.ImagePath == "" {
 		o.ImagePath = "\\EFI\\Boot\\BootX64.efi"
 	}
-	if opts.Memory == nil || opts.Gate == nil || opts.Clock == nil || o.Memory < 16<<20 || o.Memory > 2<<30 || o.Memory%page != 0 || o.MemoryBase%page != 0 || o.MemoryBase > ^uint64(0)-o.Memory || o.StackSize%page != 0 || o.StackSize > o.Memory {
+	// External firmware owns no RAM allocation. Permit a sparse physical span
+	// (including PCI holes); the supplied memory validates every access.
+	if opts.Memory == nil || opts.Gate == nil || opts.Clock == nil || o.Memory < 16<<20 || o.Memory > 64<<30 || o.Memory%page != 0 || o.MemoryBase%page != 0 || o.MemoryBase > ^uint64(0)-o.Memory || o.StackSize%page != 0 || o.StackSize > o.Memory {
 		return nil, fmt.Errorf("uefi: invalid external firmware memory or callbacks")
 	}
 	if image.Size() < 0 || uint64(image.Size()) > o.Memory {
@@ -95,6 +97,14 @@ func (f *Firmware) Call(address uint64, args [10]uint64) (uint64, error) {
 	}
 	m.firmwarePC = address
 	m.emit(Event{Kind: "service", Name: name, PC: address, Args: [8]uint64(args[:8])})
+	if name == "ResetSystem" {
+		// ResetSystem is non-returning. The machine owner must stop all CPUs
+		// before replacing hardware; never return EFI_SUCCESS to the guest.
+		if uint32(args[0]) > 2 {
+			return 0, fmt.Errorf("uefi: unsupported platform reset type %d", uint32(args[0]))
+		}
+		return 0, &ResetRequest{Type: uint32(args[0])}
+	}
 	if name == "SetVirtualAddressMap" {
 		return f.setVirtualAddressMap(args)
 	}
@@ -139,11 +149,20 @@ func (f *Firmware) InstallConfigurationTable(identifier string, data []byte, mem
 // AttachBlockDevice shares the caller's device, including its snapshot policy,
 // with firmware and the eventual operating-system storage controller.
 func (f *Firmware) AttachBlockDevice(device block.Device, opts BlockOptions) (uint64, error) {
+	return f.machine.AttachDevice(device, opts)
+}
+
+// AttachDevice uses caller-owned backing directly, without another memory
+// overlay. The caller must keep it alive until firmware and native execution
+// stop. Such devices cannot participate in emulator checkpoints.
+func (m *Machine) AttachDevice(device block.Device, opts BlockOptions) (uint64, error) {
+	if device == nil {
+		return 0, fmt.Errorf("uefi: nil block device")
+	}
 	g := device.Geometry()
 	if g.Size <= 0 || g.LogicalBlockSize == 0 || g.Size%int64(g.LogicalBlockSize) != 0 {
 		return 0, fmt.Errorf("uefi: invalid block geometry")
 	}
-	m := f.machine
 	index := len(m.diskStores)
 	m.diskStores = append(m.diskStores, diskStore{device: device})
 	return m.attachEndpoint(blockEndpoint{Store: index, Size: g.Size, BlockSize: g.LogicalBlockSize, ReadOnly: opts.ReadOnly || !device.Capabilities().Writable}, opts.Handle, opts.DevicePath, false)

@@ -10,6 +10,8 @@ import (
 
 var ErrDeadlinesUnsupported = errors.New("channel does not support deadlines")
 
+var ErrWriteCapacityUnsupported = errors.New("channel does not expose write capacity")
+
 // ByteChannel is a caller-owned duplex byte stream.
 type ByteChannel interface {
 	io.Reader
@@ -29,9 +31,21 @@ type ReadDeadlineSetter interface {
 }
 
 // ReadNotifier is implemented by channels that expose read readiness without
-// consuming bytes.
+// consuming bytes. Capture the notification before reading to avoid missing a
+// transition. Notifications can be spurious; retry the read after waking. A nil
+// notification means readiness is unavailable.
 type ReadNotifier interface {
 	ReadReady() <-chan struct{}
+}
+
+// WriteCapacityNotifier exposes the number of bytes an atomic cooperative write
+// can currently accept, and a notification that closes when that capacity or
+// the stream's closed state changes. Capture both before attempting a write;
+// concurrent writes can still consume the observed capacity. A closed stream
+// returns its write error. Wrappers without this capability return
+// ErrWriteCapacityUnsupported.
+type WriteCapacityNotifier interface {
+	WriteCapacity() (available int, changed <-chan struct{}, err error)
 }
 
 func WriteAll(writer io.Writer, data []byte) error {

@@ -244,6 +244,28 @@ func TestVirtualDirectoryFATShortPathDerivesMissingLeaf(t *testing.T) {
 	}
 }
 
+func TestVirtualDirectoryFATShortPathMergesCaseVariants(t *testing.T) {
+	dir := New()
+	dir.Mkdir(`/PROGRAM FILES/Windows Media Player`)
+	dir.Mkdir(`/Program Files/Windows NT/Accessories`)
+	dir.Mkdir(`/Program Files/WS_FTP Pro`)
+	dir.files[`/PROGRAM FILES/WS_FTP Pro/WSFTPPRO.EXE`] = FileRecord{Data: []byte{1}, Size: 1}
+	dir.files[`/Program Files/WS_FTP Pro/wsftppro.exe`] = FileRecord{Data: []byte{2}, Size: 1}
+
+	for name, want := range map[string]string{
+		`C:\Program Files\WS_FTP Pro\wsftppro.exe`:            `C:\PROGRA~1\WS_FTP~1\WSFTPPRO.EXE`,
+		`C:\PROGRAM FILES\Windows NT\Accessories\wordpad.exe`: `C:\PROGRA~1\WINDOW~2\ACCESS~1\WORDPAD.EXE`,
+	} {
+		got, err := dir.fatShortPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("FAT short path for %q = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestVirtualDirectoryFATShortPathCachesAndInvalidatesIndex(t *testing.T) {
 	dir := New()
 	dir.Mkdir(`/Program Files`)

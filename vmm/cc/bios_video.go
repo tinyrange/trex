@@ -99,7 +99,13 @@ func (p *pc) videoIO(ex hypervisor.X86Exit) error {
 	return nil
 }
 
-func (p *pc) videoBIOS(r *x86state.Registers, es *uint16) (bool, error) {
+func (p *pc) videoBIOS(r *x86state.Registers, segments ...*uint16) (bool, error) {
+	var selector uint16
+	es := &selector
+	if len(segments) > 0 {
+		es = segments[0]
+	}
+	p.beforeRAMWrite(0x400, 0x100)
 	ah, al := byte(r.Rax>>8), byte(r.Rax)
 	carry := false
 	unsupported := func() {
@@ -151,9 +157,89 @@ func (p *pc) videoBIOS(r *x86state.Registers, es *uint16) (bool, error) {
 		setLow(&r.Rax, uint16(p.mode)|80<<8)
 		r.Rbx &^= 0xff00
 	case 0x10:
-		if al == 0x10 && uint16(r.Rbx) < 256 {
-			p.vga.dac[uint16(r.Rbx)] = [3]byte{byte(r.Rdx>>8) & 63, byte(r.Rcx>>8) & 63, byte(r.Rcx) & 63}
-		} else {
+		switch al {
+		case 0:
+			if byte(r.Rbx) < 16 {
+				p.vga.attr[byte(r.Rbx)] = byte(r.Rbx>>8) & 63
+			}
+		case 1:
+			p.vga.attr[0x11] = byte(r.Rbx>>8) & 63
+		case 2, 9:
+			s, err := p.cpu.SystemRegisters()
+			if err != nil {
+				return false, err
+			}
+			b, err := p.biosReadContext(s.Es.Base+uint64(uint16(r.Rdx)), 17, s)
+			if err != nil {
+				return false, err
+			}
+			if al == 2 {
+				for i := 0; i < 16; i++ {
+					p.vga.attr[i] = b[i] & 63
+				}
+				p.vga.attr[0x11] = b[16] & 63
+			} else {
+				copy(b[:16], p.vga.attr[:16])
+				b[16] = p.vga.attr[0x11]
+				if err := p.biosCopy(s.Es.Base+uint64(uint16(r.Rdx)), b, true, s); err != nil {
+					return false, err
+				}
+			}
+		case 3:
+			p.vga.attr[0x10] &^= 8
+			if byte(r.Rbx)&1 != 0 {
+				p.vga.attr[0x10] |= 8
+			}
+		case 0x10, 0x15:
+			index := uint16(r.Rbx)
+			if index >= 256 {
+				unsupported()
+				break
+			}
+			if al == 0x10 {
+				p.vga.dac[index] = [3]byte{byte(r.Rdx>>8) & 63, byte(r.Rcx>>8) & 63, byte(r.Rcx) & 63}
+			} else {
+				c := p.vga.dac[index]
+				setAH(&r.Rdx, c[0])
+				setLow(&r.Rcx, uint16(c[1])<<8|uint16(c[2]))
+			}
+		case 0x12, 0x17:
+			// VGA DAC blocks are RGB triples, not attribute-controller
+			// entries. Windows programs its UI grays through this service.
+			first, count := uint64(uint16(r.Rbx)), uint64(uint16(r.Rcx))
+			if first >= 256 || count > 256-first {
+				unsupported()
+				break
+			}
+			s, err := p.biosAccessSystem()
+			if err != nil {
+				return false, err
+			}
+			address := s.Es.Base + uint64(uint16(r.Rdx))
+			if al == 0x12 {
+				data, err := p.biosReadContext(address, count*3, s)
+				if err != nil {
+					return false, err
+				}
+				for i := uint64(0); i < count; i++ {
+					p.vga.dac[first+i] = [3]byte{data[i*3] & 63, data[i*3+1] & 63, data[i*3+2] & 63}
+				}
+			} else {
+				data := make([]byte, count*3)
+				for i := uint64(0); i < count; i++ {
+					copy(data[i*3:], p.vga.dac[first+i][:])
+				}
+				if err := p.biosCopy(address, data, true, s); err != nil {
+					return false, err
+				}
+			}
+		case 7:
+			if byte(r.Rbx) < 16 {
+				setAH(&r.Rbx, p.vga.attr[byte(r.Rbx)])
+			}
+		case 8:
+			setAH(&r.Rbx, p.vga.attr[0x11])
+		default:
 			unsupported()
 		}
 	case 0x11:

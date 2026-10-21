@@ -11,7 +11,7 @@ import (
 )
 
 func Builtins() starlark.StringDict {
-	return starlark.StringDict{"memory_pair": starlark.NewBuiltin("memory_pair", memoryPairBuiltin)}
+	return starlark.StringDict{"memory_pair": starlark.NewBuiltin("memory_pair", memoryPairBuiltin), "extension": starlark.NewBuiltin("channel.extension", extensionBuiltin), "extension_protocol": starlark.NewBuiltin("channel.extension_protocol", extensionProtocolBuiltin)}
 }
 
 func memoryPairBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

@@ -1,0 +1,102 @@
+definition 1
+unit native
+implements direct_emitter_v1
+
+@import "x86_32.rtg"
+
+abi win32 {
+    internal = renvo_x86_32
+    arguments = [stack]
+    result = [eax, edx]
+    stack_alignment = 4
+}
+
+go backend {
+    // x86_32's symbolic addresses use CALL/POP plus a relative ADD; native
+    // import calls instead contain absolute IAT operands. Keep these distinct.
+    func nt31Patch(out *RTGEmitter, dataRVA int, dataSize int, iat []int) {
+        for i := 0; i < out.AbsoluteRelocationCount(); i++ {
+            at := out.AbsoluteRelocationOffset(i)
+            addend := out.AbsoluteRelocationAddend(i)
+            kind := out.AbsoluteRelocationKind(i)
+            if kind == RTGRelocationImport {
+                if addend > 0 && addend < len(iat) {
+                    out.PatchUint32(at, 0x400000 + iat[addend])
+                }
+            } else {
+                target, ok := RTGResolveAbsoluteRelocation(out, kind, addend, dataRVA, dataRVA + dataSize)
+                if ok {
+                    // Saved PC precedes the immediate field by three bytes.
+                    out.PatchUint32(at, target - (0x1000 + at - 3))
+                }
+            }
+        }
+    }
+
+    func nt31Exit(out *RTGEmitter, status RTGRegister) {
+        out.AppendByte(0x50 + status.Code)
+        nt31Call(out, 8, 1)
+    }
+    func nt31StaticCall(out *RTGEmitter, importID int, wordCount int) {
+        // Prepared custom imports are zero-based; PE places them after the
+        // nine runtime imports and the reserved zero slot.
+        nt31Call(out, 10 + importID, wordCount)
+    }
+    func nt31Call(out *RTGEmitter, importID int, wordCount int) {
+        _ = wordCount
+        out.Bytes2(0xff, 0x15)
+        out.AbsoluteReloc(out.Len(), importID, RTGRelocationImport)
+        out.Int32(0)
+    }
+    // This endpoint has no argv/environment entry parameters. Avoid the newer
+    // runtime's command-line/environment initialization, not the Windows ABI.
+    func nt31Entry(out *RTGEmitter, parameterCount int, stateOffset int) bool {
+        _ = out
+        _ = stateOffset
+        return parameterCount == 0
+    }
+}
+runtime windows_nt31 {
+    emit_entry = go nt31Entry
+    emit_exit = go nt31Exit
+    emit_static_call = go nt31StaticCall
+    imports "kernel32.dll" = [
+        CreateFileA, CloseHandle, ReadFile, WriteFile, SetFilePointer,
+        GetStdHandle, GetCommandLineA, ExitProcess, GetEnvironmentStrings
+    ]
+}
+format pe32_nt31 {
+    byte_order = little
+    address_bits = 32
+    kind = pe
+    machine = 0x014c
+    code_offset = 0x1000
+    image = pe_executable
+    patch_image = go nt31Patch
+    image_base = 0x400000
+    file_alignment = 0x200
+    section_alignment = 0x1000
+    coff_characteristics = 0x0102
+    dll_characteristics = 0
+    os_version_major = 3
+    os_version_minor = 10
+    image_version_major = 0
+    image_version_minor = 0
+    subsystem_version_major = 3
+    subsystem_version_minor = 10
+    stack_reserve = 0x100000
+    stack_commit = 0x1000
+    heap_reserve = 0x100000
+    heap_commit = 0x1000
+}
+target windows/386 {
+    family = native_v1
+    os = windows
+    arch = x86_32
+    abi = win32
+    runtime = windows_nt31
+    executable = pe32_nt31
+    arena_default = 1048576
+    build_tags = [windows,386]
+    capabilities = [hosted,executable,heap]
+}

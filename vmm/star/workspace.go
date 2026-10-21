@@ -17,6 +17,7 @@ type workspaceValue struct {
 	vms      []vmm.DisplayVM
 	// Keep sessions alive alongside their display adapters.
 	sessions []starlark.Value
+	nextID   uint64
 }
 
 func (*workspaceValue) String() string                { return "<vmm.workspace>" }
@@ -49,7 +50,8 @@ func (w *workspaceValue) add(name string, value starlark.Value) (vmm.DisplayVM, 
 			return vmm.DisplayVM{}, fmt.Errorf("duplicate VM name %q", name)
 		}
 	}
-	vm := vmm.DisplayVM{ID: fmt.Sprint(len(w.vms) + 1), Name: name, Display: display}
+	w.nextID++
+	vm := vmm.DisplayVM{ID: fmt.Sprint(w.nextID), Name: name, Display: display}
 	w.vms = append(w.vms, vm)
 	w.sessions = append(w.sessions, value)
 	return vm, nil
@@ -121,8 +123,49 @@ func workspaceBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlar
 			return nil, err
 		}
 	}
-	if len(w.vms) == 0 {
-		return nil, fmt.Errorf("workspace needs at least one VM")
-	}
 	return w, nil
+}
+
+// VMMExecutionMutex serializes native factory calls with scripted HTTP handlers
+// sharing this workspace's Starlark runtime.
+func (w *workspaceValue) VMMExecutionMutex() *sync.Mutex { return &w.createMu }
+func (*workspaceValue) AttrNames() []string              { return []string{"add", "remove"} }
+func (w *workspaceValue) Attr(name string) (starlark.Value, error) {
+	switch name {
+	case "add":
+		return starlark.NewBuiltin("workspace.add", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var name string
+			var session starlark.Value
+			if err := starlark.UnpackArgs("add", args, kwargs, "name", &name, "vm", &session); err != nil {
+				return nil, err
+			}
+			vm, err := w.add(name, session)
+			if err != nil {
+				return nil, err
+			}
+			return starlark.String(vm.ID), nil
+		}), nil
+	case "remove":
+		return starlark.NewBuiltin("workspace.remove", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var id string
+			if err := starlark.UnpackArgs("remove", args, kwargs, "id", &id); err != nil {
+				return nil, err
+			}
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			for i, vm := range w.vms {
+				if vm.ID == id {
+					copy(w.vms[i:], w.vms[i+1:])
+					w.vms[len(w.vms)-1] = vmm.DisplayVM{}
+					w.vms = w.vms[:len(w.vms)-1]
+					copy(w.sessions[i:], w.sessions[i+1:])
+					w.sessions[len(w.sessions)-1] = nil
+					w.sessions = w.sessions[:len(w.sessions)-1]
+					return starlark.None, nil
+				}
+			}
+			return nil, fmt.Errorf("unknown VM ID %q", id)
+		}), nil
+	}
+	return nil, nil
 }

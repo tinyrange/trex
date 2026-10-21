@@ -263,3 +263,33 @@ func TestInstallerProbeRecognizesUnsupportedInstallShieldVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestNestedInstallShieldV5UsesExternalHeader(t *testing.T) {
+	for _, directory := range []string{"", "Disk1/"} {
+		t.Run(directory, func(t *testing.T) {
+			header, volumes, _ := installShieldV5Fixture(t)
+			// Real v5 data volumes retain the version marker even though their
+			// descriptor lives in data1.hdr. They are not combined cabinets.
+			binary.LittleEndian.PutUint32(volumes[1].(*starfile.Bytes).Data[4:], 0x0100500c)
+			files := starlark.NewDict(3)
+			_ = files.SetKey(starlark.String("/"+directory+"data1.hdr"), header)
+			_ = files.SetKey(starlark.String("/"+directory+"data1.cab"), volumes[1])
+			_ = files.SetKey(starlark.String("/"+directory+"data2.cab"), volumes[2])
+			payload, packages, format, err := installerNestedPayload(files)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if format != "installshield5" || len(packages) != 1 || packages[0].headerPath != "/"+directory+"data1.hdr" {
+				t.Fatalf("packages=%+v format=%s", packages, format)
+			}
+			value, found, err := payload.Get(starlark.String("split.bin"))
+			if err != nil || !found {
+				t.Fatalf("split payload: %v %v", found, err)
+			}
+			data, err := starfile.ReadAll(value.(starfile.File))
+			if err != nil || string(data) != "a compressed payload split across cabinet volumes" {
+				t.Fatalf("data=%q err=%v", data, err)
+			}
+		})
+	}
+}

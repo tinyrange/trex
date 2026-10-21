@@ -103,7 +103,7 @@ func TestUnknownHeaderPreserved(t *testing.T) {
 		t.Fatal(m)
 	}
 	entries, err := v.Entries()
-	if err != nil || len(entries) != 3 {
+	if err != nil || len(entries) != 4 {
 		t.Fatal(entries, err)
 	}
 }

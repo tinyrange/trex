@@ -74,15 +74,33 @@ func (p PCIRoot) AML() ([]byte, error) {
 	for _, v := range []uint16{0, uint16(p.FirstBus), uint16(p.LastBus), 0, uint16(p.LastBus) - uint16(p.FirstBus) + 1} {
 		bus = binary.LittleEndian.AppendUint16(bus, v)
 	}
-	resources := append(bus, 0x8a, 43, 0, 0, 0x0c, 1)
-	for _, v := range []uint64{0, p.MemoryBase, p.MemoryBase + p.MemorySize - 1, 0, p.MemorySize} {
-		resources = binary.LittleEndian.AppendUint64(resources, v)
+	resources := bus
+	end := p.MemoryBase + p.MemorySize - 1
+	// Prefer DWord descriptors for windows that fit below 4 GiB. Older
+	// ACPI PCI roots (including Lion's AppleACPIPlatform) ignore QWord
+	// memory windows while accepting the equivalent DWord producer range.
+	if end <= 0xffffffff && p.MemorySize <= 0xffffffff {
+		resources = append(resources, 0x87, 23, 0, 0, 0x0c, 1)
+		for _, v := range []uint32{0, uint32(p.MemoryBase), uint32(end), 0, uint32(p.MemorySize)} {
+			resources = binary.LittleEndian.AppendUint32(resources, v)
+		}
+	} else {
+		resources = append(resources, 0x8a, 43, 0, 0, 0x0c, 1)
+		for _, v := range []uint64{0, p.MemoryBase, end, 0, p.MemorySize} {
+			resources = binary.LittleEndian.AppendUint64(resources, v)
+		}
 	}
 	if p.Legacy {
-		// DWord I/O window; 65536 bytes cannot fit in a Word descriptor.
-		resources = append(resources, 0x87, 23, 0, 1, 0x0c, 3)
-		for _, v := range []uint32{0, 0, 0xffff, 0, 0x10000} {
-			resources = binary.LittleEndian.AppendUint32(resources, v)
+		// Use Word I/O producer descriptors for the 16-bit port aperture.
+		// Apple's legacy ACPI PCI roots ignore DWord I/O descriptors even
+		// though they accept DWord memory. Split around configuration
+		// mechanism 1's CF8-CFF ports, which are not PCI child resources.
+		// Both lengths fit in 16 bits (unlike the entire 64 KiB window).
+		for _, window := range [][2]uint16{{0, 0xcf7}, {0xd00, 0xffff}} {
+			resources = append(resources, 0x88, 13, 0, 1, 0x0c, 3)
+			for _, v := range []uint16{0, window[0], window[1], 0, window[1] - window[0] + 1} {
+				resources = binary.LittleEndian.AppendUint16(resources, v)
+			}
 		}
 	}
 	resources = append(resources, 0x79, 0)
@@ -90,7 +108,7 @@ func (p PCIRoot) AML() ([]byte, error) {
 	body = append(body, amlName("_CRS", amlPackage([]byte{0x11}, buffer))...)
 	routes := []byte{byte(len(p.Interrupts))}
 	for _, r := range p.Interrupts {
-		if r.Device > 31 || r.Pin > 3 || r.Interrupt < 32 {
+		if r.Device > 31 || r.Pin > 3 {
 			return nil, fmt.Errorf("invalid PCI interrupt route")
 		}
 		row := []byte{4}

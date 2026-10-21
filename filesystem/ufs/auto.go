@@ -12,7 +12,23 @@ import (
 
 func init() {
 	auto.Register("ufs", 30, func(p []byte, r storage.Reader, o auto.Options) (auto.View, error) {
-		if !(len(p) >= 9568 && (binary.BigEndian.Uint32(p[9564:]) == 0x11954 || binary.LittleEndian.Uint32(p[9564:]) == 0x11954)) {
+		matches := false
+		for _, offset := range []int64{8192, 65536} {
+			if r.Size() < offset+1376 {
+				continue
+			}
+			var raw [4]byte
+			if _, err := r.ReadAt(raw[:], offset+1372); err != nil {
+				continue
+			}
+			for _, order := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+				magic := order.Uint32(raw[:])
+				if magic == 0x11954 || magic == 0x19540119 || magic == 0x19012038 {
+					matches = true
+				}
+			}
+		}
+		if !matches {
 			return nil, auto.ErrNoMatch
 		}
 		return AutoView(r, o)
@@ -39,7 +55,7 @@ func AutoView(source storage.Reader, o auto.Options) (auto.View, error) {
 			once.Do(func() {
 				mu.Lock()
 				defer mu.Unlock()
-				children, err := directoryEntries(current, parent, r.order, remaining, r.inode)
+				children, err := directoryEntries(current, parent, r.order, remaining, r.inode, r.modern)
 				if err != nil {
 					resultErr = err
 					return

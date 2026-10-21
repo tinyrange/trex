@@ -233,8 +233,12 @@ func buildIDList(target, shortTarget string, targetSize uint32) []byte {
 		if part == "" {
 			continue
 		}
-		shortName := ""
-		if len(shortParts) == len(parts) {
+		// Without an explicit filesystem short path, retain the real name.
+		// Empty primary names resolve to the drive root in the Windows shell,
+		// even when LinkInfo contains the correct executable path. Do not guess
+		// an 8.3 alias: it may not exist (or may identify a different file).
+		shortName := part
+		if len(shortParts) == len(parts) && shortParts[i] != "" {
 			shortName = shortParts[i]
 		}
 		if i == len(parts)-1 {

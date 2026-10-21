@@ -8,4 +8,9 @@
 // size is the decoded target length, stored_size is the encoded length, and
 // Entries returns a nil File. Both embedded and extent-backed links are read
 // through the same storage abstraction as ordinary files.
+//
+// ECMA-167 BOOT2 recognition descriptors are exposed as raw metadata and bounded
+// boot extents in /$metadata/bootN.json, bootN.descriptor.bin and bootN.extent.bin.
+// Extents need not have directory names. Load/start addresses and flags are
+// declarations, not a portable execution recipe.
 package udf

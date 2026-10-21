@@ -299,6 +299,49 @@ Returns bounded raw registry state below selected roots in one hive.
 
 Returns sorted added, changed, and removed values from keyed snapshots.
 
+## `macos/softwareupdate.star`
+
+Discover macOS full installers from explicit Apple software-update catalogs.
+
+Discovery reads metadata only; cache_packages acquires complete original sources.
+Does not emulate softwareupdate's
+machine eligibility rules, execute Distribution scripts, or infer Intel support.
+
+### `cache_packages`
+
+Acquire every original package before parsing or guest execution.
+
+    Returns URL -> complete local file, using the native persistent mirror
+    cache by default. No decompression or installer execution occurs here.
+    Sizes, duplicate URLs and the aggregate budget are checked before fetching.
+    A failed acquisition returns no partial mapping; completed source objects
+    remain reusable and interrupted downloads remain resumable in the cache.
+
+    Size is verified; catalog Digest is an opaque cache-identity component,
+    not a claim of signature or cryptographic verification. Alternate backends
+    may supply fetch(package, cache), returning a complete random-access file
+    with no later network dependency. Cache configuration belongs to that
+    backend; paths never enter the returned file interface.
+
+### `installers`
+
+Fetch a catalog and one Distribution per installer, returning manifests.
+
+    catalog_url is explicit. languages is an ordered list of exact Distribution
+    keys; absence is an error, not a silent omission. fetch(url, maximum) can
+    supply an alternative byte transport or offline fixture. Results preserve
+    product IDs, versions/builds, package dictionaries (including sizes, URLs
+    and digests), all original product metadata, and parsed Distribution data.
+    No payload is downloaded, no version is deduplicated, and no host/model
+    eligibility filter is applied. Missing version/build metadata is an error.
+
+### `products`
+
+Return installer product dictionaries from a plain/gzip catalog file.
+
+    Results are ordered by product ID. Each has id and the complete original
+    metadata dictionary; ordinary updates are excluded. No network requests.
+
 ## `predeclared.star`
 
 Declares optional embedded extensions to predeclared Go namespaces.
@@ -346,6 +389,123 @@ ARM64 UEFI machine with inbox NVMe storage and USB input policy.
 
     Attach the system disk with bus="nvme". HVF uses the host ARM CPU;
     emulated runs may select accelerator="tcg", cpu="max".
+
+## `unix/alpine.star`
+
+Basic Alpine APK v2 handling. Policy stays in Starlark, formats in Go.
+
+Inputs are caller-pinned: read_package requires an independently trusted full
+APK SHA-256. Embedded signatures are retained for inspection, not interpreted
+as authentication. This is image construction, not an apk-tools replacement:
+install scripts/triggers are returned and never silently executed or discarded.
+
+### `install_plan`
+
+Return dependency-ordered payloads and explicit install-effect records.
+
+    Inspired by pkg2's declarative package plans, not its guest script runner.
+    No effect is executed. Each record retains its original script file and
+    trigger patterns; unknown control effects are retained as phase "other".
+    A consumer must implement or explicitly replace every relevant effect.
+    Dependency cycles and ambiguous virtual providers require caller policy.
+
+### `merge`
+
+Merge package payloads; conflicting files/effects require explicit policy.
+
+### `parse_index`
+
+Parse APKINDEX text, retaining dependency/provides/checksum fields.
+
+### `read_index`
+
+Read a trusted pinned APKINDEX.tar.gz; package signatures are not trust.
+
+### `read_package`
+
+Validate pinned APK v2 and return metadata, entries and install effects.
+
+### `select`
+
+Select exact name -> version pins, never whichever release is newest.
+
+    Dependency resolution is deliberately separate: pins must include the
+    desired closure; validate_dependencies checks it after reading packages.
+
+### `validate_dependencies`
+
+Check bare/exact dependencies, virtual provides and conflicts.
+
+    Range/tilde constraints fail explicitly: this basic pinned policy does not
+    implement apk version ordering or silently relax unsupported constraints.
+    External capabilities must be explicitly named by the caller.
+
+## `unix/build.star`
+
+In-memory Unix build policy. The engine supplies mechanisms, not a tool image.
+
+### `check`
+
+Require a successful command status and retain bounded failure output.
+
+### `install`
+
+Install a selected tool set; return its inspectable path -> action table.
+
+    No hidden marker interpretation: only this table binds executable paths to
+    native capabilities. Files remain in the caller-owned Unix namespace.
+
+### `mkdirs`
+
+Create parents once while constructing a fresh tree.
+
+### `run`
+
+Run a build step with an explicit Linux action and C-locale environment.
+
+### `unpack`
+
+Populate tar entries through portable files, preserving regular-file modes and times.
+
+## `unix/initramfs.star`
+
+Declarative Linux initramfs construction using native newc file views.
+
+### `build`
+
+Build an uncompressed initramfs; supplied /init must be executable.
+
+    Entries use Unix on-disk mode bits. Parent directories are supplied by
+    the native builder. No payload is extracted or mounted on the host.
+
+## `unix/kernel.star`
+
+Distribution kernel selection and initramfs module policy; no host modprobe.
+
+### `build_initramfs`
+
+Build a caller-defined initramfs with a validated module closure.
+
+    Firmware, decompression/insmod, and init policy remain explicit caller
+    inputs; resolving dependencies does not execute or autoload the modules.
+
+### `modules`
+
+Resolve modules.dep and softdep in dependency-before-dependent order.
+
+    Only selected softdeps are interpreted; malformed records for selected
+    modules fail. Repeated softdep records accumulate. Builtins need no payload.
+    Crypto/device aliases are not guessed: aliases pins alias -> module name
+    (e.g. crc32c -> crc32c_generic), avoiding hardware-dependent provider choice.
+    Unknown dependencies and cycles fail; this does not execute modprobe.
+
+### `select`
+
+Select one Alpine vmlinuz and its exact lib/modules release directory.
+
+### `x86_header`
+
+Inspect Linux x86 boot protocol 2.04+; return the borrowed kernel.
 
 ## `vmm/automation.star`
 
@@ -1867,7 +2027,7 @@ Applies one KD load/unload event to resolver state.
 
 `auto(source, name='', maximum=<default>, maximum_entries=100000, maximum_depth=32, tree=None, path='') -> auto`
 
-Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. By default eager decoding is limited to 512 MiB while bounded gzip, bzip2 and XZ streams have no total-length ceiling; an explicit positive maximum bounds both kinds. Container paths resolve recursively while file preserves the original bytes. Detectors receive containing-tree context for companion files across directories. For an isolated file, tree and its tree-relative path attach that context explicitly. Companion lookup reads raw entries within the supplied tree without following links or recursively detecting files; dot segments and host paths are not accepted.
+Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Native EROFS supports compact/extended inodes, flat/inline data and LZ4 full/compact indexes including 2-byte packs and big physical clusters. EROFS views verify superblock CRC32C and reject unsupported incompatible features; source bytes must remain unchanged while views are used. summary returns current entry metadata without detecting or reading its payload; metadata additionally detects the payload format. Use summary for directory inventories. By default eager decoding is limited to 512 MiB while bounded gzip, bzip2 and XZ streams have no total-length ceiling; an explicit positive maximum bounds both kinds. Container paths resolve recursively while file preserves the original bytes. Detectors receive containing-tree context for companion files across directories. For an isolated file, tree and its tree-relative path attach that context explicitly. Companion lookup reads raw entries within the supplied tree without following links or recursively detecting files; dot segments and host paths are not accepted.
 
 ### `auto_plan`
 
@@ -1891,11 +2051,13 @@ Hashes a file, string or bytes value and returns raw digest bytes, not hexadecim
 
 `directory() -> directory`
 
-A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
+A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
 `get_security(name)` returns the existing path's self-relative Windows security descriptor as immutable bytes, or `None` when no descriptor is assigned. Missing paths are errors. It does not synthesize inherited permissions or modify the tree.
 
 `set_security(name, descriptor)` updates the existing file or directory's security. For a hardlinked file, every alias receives the same descriptor; link-local metadata such as short names is preserved.
+
+`set_reparse(name, tag, data)` attaches an opaque Microsoft reparse payload to an existing file or directory for image construction. `tag` is an unsigned 32-bit Microsoft tag (bit 31 set; reserved low values 0 and 1 are rejected). `data` is immutable bytes, at most 16376 bytes, excluding the eight-byte REPARSE_DATA_BUFFER header. The payload is copied; existing metadata is preserved. No target is followed and no host filesystem object is created. Missing paths, non-Microsoft GUID buffers, and multiply-linked files are rejected. NTFS writes both the payload and its reparse index entry.
 
 ### `error`
 
@@ -1921,11 +2083,17 @@ Formats an integer as signed, 0x-prefixed hexadecimal text with optional digit p
 
 Creates a lazy random-access file over HTTP byte ranges with a bounded in-memory chunk cache. urls supplies alternative source locations; omitted size uses HEAD discovery. This does not extract or convert the remote content.
 
+### `http_get`
+
+`http_get(url, maximum=64MiB, timeout=60) -> file`
+
+Performs one sequential HTTP(S) GET into an in-memory file, with normal redirect handling and HTTP gzip decoding. No HEAD/range requests, retries, disk cache or host intermediate files. Requires status200 and bounds response bytes after HTTP decompression to maximum (1..128MiB); timeout is 1..3600 seconds and lifecycle cancellation is honored. This is for bounded metadata; use http_file for large lazy payloads. It does not validate package signatures or digests.
+
 ### `mirror_file`
 
-`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0) -> file`
+`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file`
 
-Opens a cached download or tries the supplied mirror URLs, checking the requested size and SHA-256 when supplied. The cache and key identify persistent native-backend storage; the result is a file, not extracted contents.
+Opens a cached download or tries the supplied mirror URLs, checking the requested size and SHA-256 when supplied. The cache and key identify persistent native-backend storage; cache='' uses the native user cache directory's trex folder. An optional validate(file) callback runs synchronously before publication and on cache hits: it must return None to accept or raise an error to reject. The borrowed read-only file is usable only during the callback; do not retain it or derived views. Failed validation prevents publication; invalid cached objects are downloaded again. The result is a file, not extracted contents.
 
 ### `open`
 
@@ -1957,6 +2125,24 @@ Writes a binary value to the named host output file, subject to max_bytes. This 
 
 Decodes Aladdin ADCR01 and ADCR03 resources to in-memory files. Both validate the header, 24-bit decoded size, copy ranges and complete compressed-byte consumption. Version1 validates its additional stored-length framing and decodes control words with a 4096-entry phrase table and rolling insertion counter. Its optional dictionary supplies the first 18 bytes as an initial seed phrase; unobserved framing flags are rejected. Version3 validates recursively encoded Huffman tables and uses the last 65535 dictionary bytes as preceding history. Missing referenced history is always an error, never zero-filled. maximum_decoded_bytes bounds output and stored payload bytes. These wrappers have no checksum; verify decoded structures or independent hashes. The decoder never locates or executes loader code or selects an installation variant. Other ADCR versions remain unsupported.
 
+### `archive.aea`
+
+`archive.aea(file, key=None, maximum_bytes=4GiB) -> record`
+
+Opens a symmetric profile-1 AEA1 archive natively. key is 32 raw bytes; None selects the explicit hex encryption_key metadata field. Returns a lazy plaintext file, encrypted_size, segment_size, segments_per_cluster, compression, checksum and verify(). Authenticates root/cluster/segment HMACs and optional padding; verifies plaintext SHA256 or Murmur checksums. Supports stored, LZFSE, LZVN and zlib segments with bounded allocations and a one-segment cache. maximum_bytes bounds declared decoded size. verify() reads the entire archive. Rejects other profiles/strengths and unavailable keys; never fetches keys, launches tools or writes intermediate files.
+
+### `archive.aea_metadata`
+
+`archive.aea_metadata(file) -> record`
+
+Reads bounded AEA1 header metadata without decrypting or authenticating it. Returns profile, scrypt_strength, borrowed auth_data and values (key to binary bytes). Rejects malformed or duplicate records. Metadata may contain encryption keys; inspect names before printing values. Never contacts a key service.
+
+### `archive.apple_archive`
+
+`archive.apple_archive(file, maximum_entries=100000) -> entries`
+
+Reads bounded AA01 Apple Archive records. Returns path, kind, borrowed data and fields keyed by the original three-letter names. Supports unsigned integer, path, timestamp and blob fields; timestamps contain seconds and nanoseconds. Rejects unknown encodings and malformed extents. Does not unpack to a host directory or infer archive authentication.
+
 ### `archive.ar`
 
 `archive.ar(file, maximum_entries=1M, maximum_metadata=64MiB) -> ar`
@@ -1981,6 +2167,12 @@ Reads an AWS tape image into logical records and tape marks, checking block fram
 
 Reads single-volume AIX by-name backup archives with extended name records (FS_NAME_X=11), checking every header checksum, record and security bounds, declared sizes and end framing. Stored payloads, raw headers and ACL/PCL bytes remain borrowed file views; packed Huffman bodies decode natively using the enclosing logical size and a cumulative decoded-byte limit. Entries preserve original names, paths, modes, inode/link identity, owners, device numbers and timestamps without applying them. The returned trailer retains final unused distribution-block bytes, which may be nonzero. This initial generation handles exact-end or 1KiB-rounded distribution archives; other record generations, continuation volumes and larger physical tails fail explicitly. It does not run scripts, plan installation, interpret XCOFF or validate uncompressed file contents with a nonexistent payload checksum.
 
+### `archive.bom`
+
+`archive.bom(file, maximum_entries=1M) -> list[record]`
+
+Returns every flat Apple BOMStore path-inventory record, including architecture variants sharing a path and trailing leaf-chain nodes missing from branch indexes. Records preserve kind, BOM ID, mode, uid/gid, mtime, declared size, architecture, checksum or link target/device number. BOM describes metadata only and has no file contents. maximum_entries bounds indexing. The auto tree preserves duplicate variants under %00bom-variants with bom_path metadata.
+
 ### `archive.bru`
 
 `archive.bru(file, maximum_entries=1M) -> record`
@@ -1995,9 +2187,9 @@ Reads full, single-volume historical BSD dumps with 1024-byte records, magic6001
 
 ### `archive.bzip2`
 
-`archive.bzip2(file, maximum_bytes=<unlimited>) -> file`
+`archive.bzip2(file, maximum_bytes=<unlimited>, cache=False) -> file`
 
-Opens concatenated bzip2 streams, including legacy randomized blocks, as a lazy read-only file with a bounded decoded block cache. Block and stream checksums are checked during reads; size scans the complete stream. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. Does not interpret an archive inside the stream.
+Opens concatenated bzip2 streams, including legacy randomized blocks, as a lazy read-only file with a bounded decoded block cache. Block and stream checksums are checked during reads; size scans the complete stream. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. cache=True requires explicit positive maximum_bytes, eagerly validates every member to EOF, and returns an immutable paged RAM snapshot supporting random access without replay or host files; integrity or overflow failures return no partial result. Does not interpret an archive inside the stream.
 
 ### `archive.cab`
 
@@ -2029,11 +2221,35 @@ Decodes a single-volume CompactPro archive, including self-extractors whose data
 
 Decodes a UNIX compress (.Z) stream with 9–16-bit LZW codes, legacy or block mode and packing realignment at width changes or resets. Enforces maximum_bytes; the format has no checksum, so enclosing size/checksum metadata should be validated separately. zero_padding=True explicitly accepts a final incomplete all-zero code after at least one decoded literal, for fixed-block media packages such as Ultrix setld subsets. It does not trim input bytes, suppress nonzero truncated codes or strip decoded zeroes. Use this option only with independent container and inventory validation; the default retains strict incomplete-code checks.
 
+### `archive.cpio`
+
+`archive.cpio(file, maximum_entries=100000, apple_double=False) -> list[dict]`
+
+Indexes ASCII CPIO directly into flat metadata dictionaries using bounded forward metadata reads, without following links or instantiating special files. Supports newc, CRC newc, odc and concatenated archives; maximum_entries bounds original records, with contextual limit errors. Regular data is borrowed. archive identifies the trailer-delimited hardlink namespace. apple_double=True explicitly folds ._ sidecars into finder_info, resource and named xattrs using bounded ATTR decoding; malformed metadata and missing targets fail rather than discarding data.
+
+### `archive.cpio_build`
+
+`archive.cpio_build(entries) -> file`
+
+Constructs a deterministic Linux-compatible newc archive from Unix entry dictionaries. Preserves modes, ownership, timestamps, symbolic links, hardlinks and device numbers. Synthesizes missing parent directories, rejects duplicate or unsafe paths, and borrows payload readers without extracting them.
+
+### `archive.crx`
+
+`archive.crx(file) -> record(id, version, files, entries)`
+
+Verifies a CRX3 envelope and returns its developer ID, format version and ZIP entries as portable files without extraction. Checks all RSA/SHA-256 and P-256 ECDSA/SHA-256 signatures and requires a matching developer key. Header decoding is bounded to 1MiB. Does not pin a Chrome Web Store publisher key or parse legacy CRX2 packages. The source must remain open while reading entries.
+
 ### `archive.gzip`
 
-`archive.gzip(file, maximum_bytes=<unlimited>) -> file`
+`archive.gzip(file, maximum_bytes=<unlimited>, cache=False) -> file`
 
-Opens concatenated gzip streams as a lazy read-only file with a 1 MiB decoded cache. Forward reads reuse the decoder; backward reads outside the cache replay it. Checksums are validated as data is consumed; size scans the complete stream without retaining it. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. Does not interpret an archive inside the stream.
+Opens concatenated gzip streams as a lazy read-only file with a 1 MiB decoded cache. Forward reads reuse the decoder; backward reads outside the cache replay it. Checksums are validated as data is consumed; size scans the complete stream without retaining it. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. cache=True requires explicit positive maximum_bytes, eagerly validates every member to EOF, and returns an immutable paged RAM snapshot supporting random access without replay or host files; integrity or overflow failures return no partial result. Does not interpret an archive inside the stream.
+
+### `archive.gzip_members`
+
+`archive.gzip_members(file, maximum_bytes=512MiB, maximum_members=1024) -> list[file]`
+
+Validates individual gzip members and returns exact compressed-member file views. CRC and size checks cover every member; maximum_bytes bounds total expanded data and maximum_members bounds indexing. No expanded payload is retained. Trailing junk is rejected.
 
 ### `archive.hunk_load`
 
@@ -2049,9 +2265,21 @@ Reads concatenated classic Amiga and EHF HUNK_UNIT object libraries, preserving 
 
 ### `archive.ibmi_save`
 
-`archive.ibmi_save(file, maximum_entries=100000) -> record`
+`archive.ibmi_save(file, maximum_entries=100000, profile="catalog") -> record`
 
-Reads IBM i 7.5 optical save streams: save groups, EBCDIC object names, descriptor types, raw headers and stored sections. Preserves logical sizes, opaque addresses and uninterpreted object trailers without inventing restored contents. Validates page framing and section bounds; standalone 528-byte SAVF transport and other release layouts are not supported. Auto browsing exposes named object directories and downloadable stored bytes; this is structural decoding, not object restoration.
+Reads qualified IBM i optical descriptors, catalogs and stored sections. Supported release/target pairs are 4705/4705, 4705/3905, 4600/4600 and older 3400/3400 font descriptors. The default catalog profile requires a save catalog; profile=boot750 permits only the qualified QGENESIST or QINTAPE catalog-free starts. Auto additionally expands codec-02 LD_TRS into lazy logical-prefix views while retaining unknown LD_LZ1 tails and physical/logical provenance. Logical section views fail on unstored bytes, never zero-fill. Explicit IBM037 text rendering is not detected saved CCSID. Standalone 528-byte SAVF, unqualified generations and full object restoration remain unsupported.
+
+### `archive.im4p`
+
+`archive.im4p(file) -> record`
+
+Parses an ASN.1 IM4P firmware envelope with bounded DER depth/node counts, including canonical high-tag-number private properties. Returns payload_type, description, borrowed payload, extras (original optional DER records) and expected_size (LZFSE metadata when present, otherwise zero). Does not decrypt, decompress, authenticate signatures or infer a filesystem; pass payload explicitly to archive.lzfse or the appropriate format reader.
+
+### `archive.img4`
+
+`archive.img4(payload, manifest=None) -> file`
+
+Constructs an IMG4 DER wrapper around a validated complete IM4P file and optional IM4M manifest. Borrows source records without changing payload or metadata; the manifest uses explicit context tag zero. Does not create a ticket, sign or authenticate the image. Omitting the manifest does not bypass firmware authentication.
 
 ### `archive.installer`
 
@@ -2095,6 +2323,18 @@ Parses an IRIX installation database into ordered items, preserving duplicates a
 
 Opens an IRIX inst software image with its IDB index and explicit image name, such as 4Dwm.sw. Returns files in physical record order, retaining duplicate paths, source names, IDB attributes, modes, owners and groups. Reads unwrap indexed .Z payloads and validate decoded sizes and BSD checksums. Supports headerless tape images and indexes without offsets, matching repeated names by IDB occurrence order; explicit offsets take precedence. Checks all tape padding is zero and block-aligned. Does not select subsystems or execute installation actions.
 
+### `archive.irix_plan`
+
+`archive.irix_plan(descriptors, selected, machine={}, installed={}, versions={}, indexes={}, images={}, existing={}, previous={}) -> record`
+
+Plans explicitly selected subsystem patterns (or declared defaults when selected is empty), choosing the newest supplied version unless versions pins an exact subsystem. Reports unsatisfied prerequisite alternatives, explicit machine facts, ambiguous destinations, missing payloads and unexecuted preop/postop/exitop hooks. indexes uses product@version keys; images uses product.image@version keys. installed maps subsystem names to versions. existing is the caller's complete current regular-file map, and previous maps paths to prior BSD checksums for config(update/suggest/noupdate) decisions. Returns ordered selections, declarative borrowed-file/node/link operations, removed subsystem names, hooks and issues. resolved only means no known planning issue: payload checksums are validated when read, and this is not installation or boot proof. Unknown policy remains an explicit issue; scripts are never executed.
+
+### `archive.irix_product`
+
+`archive.irix_product(file, maximum_entries=1M) -> record`
+
+Reads IRIX pd001 product descriptors into products, images and subsystems with versions, flags, build-selection expressions, replacement ranges and grouped prerequisites. Preserves alternate descriptions and extended attributes. Checks field bounds, entry limits and zero block padding; it neither executes expressions nor installs software.
+
 ### `archive.irix_tape`
 
 `archive.irix_tape(file) -> record`
@@ -2119,6 +2359,12 @@ Returns the decoded KWAJ file together with its original name, method and compre
 
 Reads level-0 LHA headers and stored lh0 or Huffman/LZSS lh5 payloads. Checks header byte sums, file CRC-16, declared sizes, terminal marker, path components and duplicate paths. Returns entries, files and find(path). Entries preserve raw name/header bytes, the packed DOS timestamp, DOS attributes, method, CRC, decoded data and a borrowed stored view. Backslashes become path separators; parent traversal and empty components are rejected. maximum_entries bounds records; maximum_decoded_bytes bounds total decoded bytes and each stored payload. Other header levels, directory records, compression methods and self-extractors are explicit gaps. Nested containers are not automatically decoded.
 
+### `archive.lzfse`
+
+`archive.lzfse(file, maximum_bytes=<unlimited>) -> file`
+
+Opens Apple LZFSE v1/v2, LZVN and stored-block streams as a read-only file. Bounds block size/count and retains a 64 MiB decoded cache plus 256 KiB match history. Backward reads outside cache replay preceding dependent blocks. Validates entropy states, source/output lengths, match distances and end marker; LZFSE has no content checksum. Explicit maximum_bytes bounds total decoded bytes. No host or C decoder is used.
+
 ### `archive.mac_resource`
 
 `archive.mac_resource(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
@@ -2142,6 +2388,18 @@ Lists File instructions from the NSIS 2 ANSI non-solid stored/NSIS-DEFLATE metad
 `archive.pack(file, maximum_bytes=2GiB) -> file`
 
 Decodes a UNIX pack (1f1e) Huffman stream, checking its symbol tree, end marker, padding and declared output size. Enforces maximum_bytes and returns a file; useful for compressed IRIX manual pages nested inside inst images.
+
+### `archive.pbze`
+
+`archive.pbze(file, maximum_bytes=<unlimited>) -> file`
+
+Opens a bounded Apple pbze chunk stream as a lazy read-only file using native LZFSE decoding. Validates chunk framing and decoded lengths; maximum_bytes bounds total decoded size. Uses a 64 MiB decoded cache and a 64 MiB per-chunk bound. No host decoder or intermediate files are used.
+
+### `archive.pbzx`
+
+`archive.pbzx(file, maximum_bytes=<unlimited>, replay_cache_bytes=0) -> file`
+
+Opens chunked Apple installer payloads as a lazy read-only concatenated file. Validates decoded/stored chunk lengths, XZ indexes and final short-chunk framing; stored chunks are borrowed. Uses a 64 MiB decoded cache and 64 MiB per-chunk bound. Optional nonnegative replay_cache_bytes adds a byte-bounded volatile indexed S2 cache of verified decoded chunks. Replay and decoded retention use independent 64 KiB blocks, avoiding whole-chunk work on small reads; first XZ verification still covers the complete original chunk. No eager reads or host intermediates. The returned file.stats dictionary separates cumulative successful xz_chunks/xz_bytes from replay_blocks/replay_bytes and includes decoded_cache/replay_cache counters; snapshots under concurrent reads are observational, not transactional. The budget charges exact retained encoded allocations; transient decode buffers are additional. Zero disables it. Omitted maximum_bytes has no total decoded ceiling; explicit positive limits are enforced. Read complete contents to force XZ checksums. Parse the resulting CPIO separately.
 
 ### `archive.rar`
 
@@ -2191,6 +2449,12 @@ With a directory, serializes its entries into tar bytes, optionally compressed. 
 
 Reads classic kc0001 Apple installer Tome catalogs and decodes both forks using chunked InstaCompOne in memory. Validates catalog counts, unique IDs, payload ranges, nonoverlap, exact fork sizes, both decoded-fork checksums and complete compressed-input consumption. Returns entries with ID, raw name bytes, reversible ID-qualified paths, file type/creator, Finder flags, version, Mac-epoch dates, decoded data/resource files and original stored views. maximum_decoded_bytes bounds total decoded output and each stored fork. Catalog checksum values are preserved as data_checksum and resource_checksum; checksums_verified is True after validation. Supports the observed 00010000 binary and 00000000 seven-bit-text chunk framing, plus stored chunks selected by a leading 01 byte, with retained 32KiB history and command-aligned 64KiB blocks; other encodings fail explicitly. Resource maps and nested archives require separate decoders. Installer code never runs. catalog_kind distinguishes file catalogs (1) from individual-resource catalogs (2). Kind2 exposes resource_type and signed resource_id, with the decoded resource payload in data and an empty resource fork; file-only metadata is omitted. Unknown catalog kinds are rejected.
 
+### `archive.udif`
+
+`archive.udif(file) -> record`
+
+Opens XML-backed, single-segment UDIF v4 disk images. Returns disk (complete logical disk), original xml and trailer, BLKX tables (name, offset, size, raw), and verify(). Raw, zero-fill, ignored, zlib and bzip2 chunks use bounded caches. verify() reads stored data and checks declared data-fork, table and master CRC32s; ignored sectors are excluded from table checksums. Rejects encryption, segmented images, unsupported codecs and overlapping/gapped maps. Does not authenticate signatures or infer filesystems.
+
 ### `archive.vmsbackup`
 
 `archive.vmsbackup(file, maximum_blocks=1M, maximum_records=1M, maximum_block_size=16MiB, maximum_files=1M, maximum_attributes=256) -> record`
@@ -2205,9 +2469,15 @@ Reads a complete single-volume VMS BACKUP block stream, validating header CRC-16
 
 ### `archive.wim`
 
-`archive.wim(file) -> wim`
+`archive.wim(file, references=[], cache_bytes=384MiB) -> wim`
 
-Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image.
+Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image. Nonnegative cache_bytes bounds retained decoded chunks shared with reference archives; zero disables retention. Large multi-chunk reads use bounded parallel decoding and join all workers before returning. Entry and file metadata expose tagged_items as ordered tag/data records, retaining unknown extensions. apply preserves Windows tag-2 extended attributes (names, flags and value bytes) for supporting filesystem builders; it does not synthesize trust verdicts or apply unknown tags.
+
+### `archive.xar`
+
+`archive.xar(file, maximum_entries=100000) -> record`
+
+Indexes XAR v1 without extraction. Returns entries, files, original decoded toc, raw heap and find(path). Entries preserve path, kind, ID, mode, uid/gid, link target, encoding, raw/data file views, size and verify(). Verifies declared compressed-TOC checksum on open; member verify() checks archived/extracted checksums and exact decoded lengths. Supports stored, zlib and bzip2 members. Safe paths, XML depth/size, heap extents and index sizes are bounded. Signature metadata remains in TOC/heap but signatures are not authenticated.
 
 ### `archive.xz`
 
@@ -2219,7 +2489,7 @@ Decodes an XZ stream into a file, rejecting decoder dictionaries above max_dicti
 
 `archive.zip(file) -> zip`
 
-Parses a ZIP archive and exposes member files through files or entries. Members expose name/path and entry_type; complete reads validate decoded size and CRC, including exact-sized reads. Call entry.verify() to force complete validation, including empty entries. Data stays in memory rather than being extracted into a host directory.
+Parses a ZIP archive and exposes member files through files or entries. Members expose name/path, entry_type, compressed_size and compression_method. Complete reads validate decoded size and CRC; entry.verify() forces complete validation, including empty entries. Each member retains a bounded 8 MiB decoded window; backward reads outside it restart decompression. No host extraction occurs.
 
 ### `archive.zstd`
 
@@ -2227,17 +2497,53 @@ Parses a ZIP archive and exposes member files through files or entries. Members 
 
 Opens a Zstandard stream as a portable file with a 64 MiB decoder window limit. Frame headers provide decoded sizes when available; streams without content sizes require a counting pass. Reads and seeks replay decompression without extracting host files.
 
+### `binary.android_boot`
+
+`binary.android_boot(file) -> record`
+
+Reads Android boot and vendor_boot v3/v4 headers, exposing bounded section files, command_line, version and page_size. Vendor v4 includes ramdisk fragments with type and board identifiers, plus a bootconfig section. Validates section/table bounds; does not decompress ramdisks or authenticate AVB signatures.
+
 ### `binary.annotate`
 
 `binary.annotate(file, attrs) -> file`
 
 Wraps a file with caller-supplied attributes while retaining its bytes. Use this to attach construction metadata without rebuilding the file's contents.
 
+### `binary.apple_device_tree`
+
+`binary.apple_device_tree(file) -> record`
+
+Decodes an Apple flattened device tree into recursive properties, property_flags and children records. Preserves template flag bits without resolving bindings. Bounds input to 1 MiB, depth to 32 and nodes to 4096; rejects malformed names, duplicate properties, truncation and trailing bytes.
+
+### `binary.appledouble`
+
+`binary.appledouble(file) -> dict[int,file]`
+
+Parses AppleDouble version 2 headers and returns an integer-entry-ID dictionary of borrowed files. Validates table bounds, duplicate IDs and non-overlapping extents. Preserves unknown entries without interpreting them. FinderInfo (9), resource fork (2) and any ATTR extension remain raw bytes; does not apply metadata or modify files.
+
+### `binary.appledouble_metadata`
+
+`binary.appledouble_metadata(file) -> dict(finder_info, resource, xattrs, other)`
+
+Decodes FinderInfo, resource forks and macOS ATTR named attributes as separate borrowed views. Absolute ATTR offsets, 64 KiB header/table bound, names, duplicate attributes and overlapping data extents are checked. Unknown entry IDs are retained in other. Does not apply metadata or follow links.
+
+### `binary.arm64_disassemble`
+
+`binary.arm64_disassemble(source, offset=0, address=0, count=32) -> list`
+
+Decodes 1 through 4096 ARM64 instructions from a portable file or byte view. Returns records with address, bytes, instruction and target for PC-relative operands. Unknown instructions retain their original bytes and report unknown. Offset and caller-supplied address are independent; no host disassembler is used.
+
 ### `binary.base64`
 
 `binary.base64(value, url=False, padding=True, maximum=512MiB)`
 
 Encodes binary input as a Base64 string. url selects the URL-safe alphabet, padding controls trailing equals signs, and maximum bounds encoded output.
+
+### `binary.berkeley_db`
+
+`binary.berkeley_db(file, maximum_entries=1000000) -> record`
+
+Reads BSD Berkeley DB version-3 B-trees with inline keys and values in either byte order. Returns page_size, little_endian and entries with borrowed key/value file views, preserving on-disk comparator order. Validates root traversal, page bounds, overlapping records, cycles and leaf sibling links. Rejects overflow records, recno databases and newer formats explicitly; does not execute or infer a database-specific comparator.
 
 ### `binary.bits`
 
@@ -2269,11 +2575,23 @@ Creates a sequential byte reader at the selected offset. Scalar reads and bytes(
 
 Decodes a hex, Base64 or unpadded URL-safe Base64 string into bytes. This is the inverse of binary.hex/base64, not a character-set decoder; use binary.text for text.
 
+### `binary.elf_symbols`
+
+`binary.elf_symbols(file, maximum_symbols=1000000, maximum_string_bytes=16MiB)`
+
+Reads bounded ELF64 static/dynamic symbols and load segments from a portable file, in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), and segments (address, offset, file_size, memory_size, flags). Addresses are ELF values, not runtime-relocated addresses; callers supply mapping/load bias. Zero-sized/undefined symbols are preserved, not assigned inferred extents. Rejects extended numbering, duplicate symbol-table kinds, compressed symbol/string metadata, malformed extents/names and resource-limit violations. Does not read host symbols or load code.
+
 ### `binary.encode`
 
 `binary.encode(value, encoding='utf8', nul=False) -> bytes`
 
-Encodes a string into bytes using the selected character encoding. nul appends an encoding-appropriate terminator; binary.text performs the reverse conversion.
+Encodes a string into bytes using the selected character encoding, including explicit IBM037/cp037. Unrepresentable characters fail. nul appends an encoding-appropriate terminator; binary.text performs the reverse conversion.
+
+### `binary.encode_apple_device_tree`
+
+`binary.encode_apple_device_tree(tree) -> file`
+
+Encodes an Apple flattened device tree from recursive records or dictionaries with properties (string-to-bytes), optional property_flags, and children lists. Uses the same bounded layout and validation as binary.apple_device_tree, preserves explicit flags, and creates a portable in-memory file. Template expressions require caller policy before kernel handoff.
 
 ### `binary.extents`
 
@@ -2353,11 +2671,47 @@ Encodes a 64-bit signed integer as 8 bytes in little-endian order. Returns new b
 
 Encodes a 8-bit signed integer as 1 bytes in single-byte order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
+### `binary.irix_executable`
+
+`binary.irix_executable(file) -> record`
+
+Inspects MIPS ELF32/ELF64 and ECOFF32 files natively, returning byte order, o32/n32/n64 ABI and ISA flags, entry/GP, borrowed sections and segments, symbols, relocations, dynamic tags and needed libraries. MIPS64 relocations preserve all three operation types and the special-symbol byte; MIPS option/ABI-flag records expose compiler metadata and the GP value. ECOFF symbolic tables retain local/external names and storage classes. Tables, counts, names, ranges and references are bounded and checked. It does not apply relocations, load executable code, interpret all debug records or emulate IRIX syscalls.
+
 ### `binary.layout`
 
 `binary.layout(format, names=None) -> binary.layout`
 
 Compiles a fixed-size binary layout from a format string and optional field names. The returned value encodes records or decodes a source at a byte offset.
+
+### `binary.macho`
+
+`binary.macho(file, architecture="x86_64", cpu_subtype=None) -> record`
+
+Inspects a bounded little-endian Mach-O64 image (architecture x86_64 or arm64), optionally selected from a big-endian fat32/fat64 universal container. cpu_subtype optionally selects an exact uint32 subtype (including arm64e capability bits) and validates the thin header; omitted selection rejects ambiguous CPU matches. Exposes the selected cpu_subtype, initial thread entry PC (zero when absent), borrowed file, segments (name, address, size, file_offset, file_size, flags), original symbols (name, address, type, section, description), dyld exports (name, address, flags, resolver, reexport_ordinal, import_name), indirect imports (name, kind stub/pointer, address, size), and fileset_entries (name, address, file_offset) for MH_FILESET kernel collections. fileset(name) opens an embedded Mach-O through the same reader, preserving collection-relative segment and linkedit offsets. Bound filesets with stripped symbol tables may contain zero indirect-symbol placeholders; these expose no named imports. Fileset offsets refer to the containing image; entries are not independent extracted binaries. at(address, size) returns borrowed file-backed virtual bytes; zero-fill, unmapped, ambiguous and overflowing ranges fail. Header, command, string, symbol and export-trie traversal bounds and aggregate name/prefix allocations are enforced. Export trie support includes ordinary, absolute, weak, thread-local, reexport and stub/resolver terminals; it does not resolve reexport dependencies. Does not relocate, link or execute the image.
+
+### `binary.perf`
+
+`binary.perf(file, maximum_records=1000000, maximum_samples=1000000, maximum_string_bytes=1MiB) -> record`
+
+Reads finalized little-endian Linux PERFILE2 perf.data directly from a file. Returns attributes, samples, mappings, comms, lost, total_lost, unknown_records (record type to count), records and little_endian. Samples expose ip, pid, tid, time, address, id, stream_id, cpu, period, identifier and a present bit mask; absent fields are None. Each record retains its file offset and raw misc bits, so streams can be ordered and CPU modes distinguished. MMAP/MMAP2 records expose address, length, page_offset, filename and available inode/build-ID/protection metadata. Mapping, COMM and loss records include a sample_id trailer record. Attributes retain sample_type, read_format, flags, IDs, sample_id_all, use_clock_id and clock_id (None unless explicitly selected). Times retain the recorded clock domain; no symbols, paths or clock conversion are inferred. Rejects pipe/unfinalized input, unsupported sample layouts, heterogeneous attribute layouts, compression and AUX streams. All limits must be positive. Records and samples are each capped at 10 million; maximum_string_bytes bounds aggregate decoded names and is capped at 64 MiB. Limits and malformed records fail explicitly rather than returning a truncated profile.
+
+### `binary.plist`
+
+`binary.plist(source) -> value`
+
+Decodes bounded XML 1.0 or bplist00 property lists into dict/list, bytes, string, bool, int64, float and opaque round-trippable plist_date values. Binary null becomes None; unsupported UID and 16-byte integers fail explicitly. Enforces 64MiB input/decoded data, 100000 visited values and depth128, validates reference/offset bounds, rejects cycles, duplicate keys and invalid Unicode. Does not follow XML external entities.
+
+### `binary.plist_encode`
+
+`binary.plist_encode(value) -> file`
+
+Encodes supported plist values as deterministic XML1.0 in an in-memory file. Preserves plist_date values from decoding. Enforces aggregate conversion/output byte, node and depth limits, including dictionary keys. Rejects None, non-finite floats, non-string keys, invalid XML characters and integers outside int64.
+
+### `binary.ppc_instructions`
+
+`binary.ppc_instructions(source, offset=0, size=256, address=0, byte_order="big", maximum=4096) -> list[record]`
+
+Inspects a four-byte-aligned POWER instruction range without execution. Accepts source, offset=0, size=256, address=0, byte_order=big and maximum=4096. Reads at most 64KiB, returns offset/address/length/word/opcode/GNU text/typed operands, resolved 64-bit branch target and explicit decode errors. Absolute branch labels are sign-extended for target; upstream GNU display uses 32-bit label spelling. Prefixed instructions consume eight bytes; unknown words consume four and are not proof of executable code. Maximum is at most 16384; source bounds, alignment, address overflow and instruction budget fail explicitly.
 
 ### `binary.read_f32be`
 
@@ -2473,17 +2827,29 @@ Reads a 8-bit unsigned integer from source at the byte offset, using single-byte
 
 Returns bytes with up to count non-overlapping occurrences of old replaced by new; count=-1 replaces all. old must be nonempty and maximum bounds the result.
 
+### `binary.software_update_catalog`
+
+`binary.software_update_catalog(source) -> list`
+
+Reads plain or gzip Apple software-update catalogs and returns installer products as id/metadata dictionaries in ID order. Selects OSInstall or SharedSupport InstallAssistant identifiers, preserving original package URLs, int64 sizes, digests, dates and Distribution locations. Does not fetch URLs or filter host compatibility. XML is decoded per product, bounded to 128MiB stored/expanded input, 8MiB per product, 4M XML tokens and depth128; each product retains plist value limits. Binary catalogs use the existing stricter plist limits. Rejects duplicate product/catalog keys, malformed XML/plists and corrupt gzip.
+
+### `binary.software_update_distribution`
+
+`binary.software_update_distribution(source) -> dict`
+
+Reads bounded installer-gui-script XML (8MiB, 4M tokens, depth128). Returns title, raw_title, version, build, auxinfo, options, scripts and localizations. Prefers macOSProductVersion/macOSProductBuildVersion to VERSION/BUILD. Resolves observed double-quoted localization title assignments; unsupported localization grammar remains in raw_title/localizations. Scripts are retained as text, never executed, and external entities are not followed. This is metadata, not an eligibility decision.
+
 ### `binary.strings`
 
 `binary.strings(value, encoding='ascii', minimum=4, maximum=64MiB) -> list[string]`
 
-Scans binary input for printable ASCII or UTF-16LE strings of at least minimum characters. Returns string values, not offsets or a decoded version of the entire file.
+Scans bounded binary input for printable ASCII, UTF-16LE or explicitly rendered IBM037 strings of at least minimum characters. IBM037 is a selected rendering, not saved-CCSID detection. Returns strings, not offsets or a decoded file.
 
 ### `binary.text`
 
 `binary.text(value, encoding='utf8', nul=False, maximum=16MiB) -> string`
 
-Decodes binary input into a string using the selected character encoding. nul requests terminator-aware decoding; maximum bounds input size.
+Decodes bounded binary input using the selected character encoding, including explicit IBM037/cp037 (not CCSID detection). nul requests terminator-aware decoding; maximum bounds input size.
 
 ### `binary.u16be`
 
@@ -2539,6 +2905,12 @@ Creates a bounded random-access byte view, optionally over a source slice. It su
 
 Parses XML into namespace-aware immutable document and node values. Size, depth and node-count limits bound parsing; with_root/with_children/with_text create edited values for serialization.
 
+### `binary.zlib`
+
+`binary.zlib(source, maximum=16MiB)`
+
+Decodes one complete RFC 1950 zlib stream from bytes or a file. Returns bytes; verifies the checksum and rejects truncation, trailing data and output beyond maximum (0..512MiB). No host extraction or intermediate files.
+
 ### `block.cache`
 
 `block.cache(base, max_bytes=32MiB, chunk_size=64KiB)`
@@ -2563,6 +2935,12 @@ Creates an NBD protocol server for a block device. serve(channel) processes requ
 
 Creates a bounded writable copy-on-write layer over a base block device. Writes affect the overlay, leaving the base unchanged; max_dirty_bytes bounds retained changes.
 
+### `block.temporary_overlay`
+
+`block.temporary_overlay(base, directory) -> disposable sparse block device`
+
+Creates disposable native sparse backing in the explicit host directory, with no changed-data quota or memory fallback. The immutable base remains unchanged. Create it before its VM; runtime cleanup closes users before removing the backing at script exit. Available host disk space bounds writes; backing I/O errors are terminal. It is not a snapshot or reusable disk image.
+
 ### `block.view`
 
 `block.view(device) -> live read-only file view`
@@ -2571,9 +2949,39 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 ### `cc.backend`
 
-`cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_dma=True, overlay_limit=268435456) -> vmm_backend`
+`cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
 
-Creates an in-process CrumbleCracker PC backend for Linux/amd64 KVM. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. RAM supports 16 MiB through 2 GiB. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. Native UEFI PCs accept cpus=1..4 as one package without SMT; other PC profiles remain single-CPU. All-core pause/stop/capture barriers precede inspection and teardown. cc.v1.cpus() returns per-core register summaries; state/read_virtual use CPU0, and breakpoint/step require one CPU. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 16 GiB with uefi=True. usb=True on x86_64 enables a UHCI keyboard and absolute pointer with wheel; PS/2 keyboard fallback remains until USB enumeration. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+
+### `cc.boot_bsd`
+
+`cc.boot_bsd(os, kernel, marker, root=None, memory_mb=1024, timeout=60, console=None, overlay_limit=64MiB) -> result`
+
+Directly boots an original amd64 OpenBSD, FreeBSD or NetBSD kernel in Linux/amd64 KVM with optional borrowed NVMe root backing. Stops at an explicit serial marker, timeout or failure and closes the VM. Returns success, serial, error and a read-only post-boot root snapshot (None without a root). The snapshot is available on failure too; FreeBSD timeout errors include bounded architectural observations. Output is capped at 1 MiB, kernel at 256 MiB, memory at 64..8192 MiB and timeout at 600 seconds. Console is at most 64 ordered (wait, send) string tuples; root writes use a bounded in-memory overlay, never alter the source. This is a bounded serial boot primitive, not a persistent desktop or managed-agent session.
+
+### `cc.kernel_symbol`
+
+`cc.kernel_symbol(kernel, address) -> symbol or None`
+
+Read-only nearest original executable-section ELF symbol lookup for a stopped kernel address. Returns name, address, size and offset, or None when no preceding symbol exists. A nonzero offset is a nearest-symbol observation, not an exact call-site assertion. Input is bounded to 256 MiB and symbol/string sections to 32 MiB. Does not relocate, execute or patch bytes.
+
+### `channel.expose_tcp`
+
+`channel.expose_tcp(channel, port=0) -> tcp_bridge`
+
+Native-only IPv4 loopback bridge for one trusted TCP client. Port zero selects a free port, returned as port. Takes exclusive ownership of the byte channel on success; do not read or write it elsewhere. The listener closes after the first connection; disconnect closes both streams without reconnect or replay. Uses bounded copy buffers. close() interrupts and joins workers; runtime teardown also closes it. The channel must unblock reads and writes on close. TCP is plaintext and has no authentication; other local processes can connect.
+
+### `channel.extension`
+
+`channel.extension(channel, timeout=5) -> extension`
+
+Discovers a synchronous v1 device over an exclusively owned byte channel with deadlines. Exposes manifest-declared methods with positional/keyword arguments and type checks. close() closes the channel. No host SDK, sockets, futures, retry or reconnect. Malformed replies, transport errors and timeout close it with outcome uncertain; ordinary device ERR leaves it usable. help(device) shows the manifest. For complete framing, discovery, value grammar, bounds and native input examples: print(channel.extension_protocol()).
+
+### `channel.extension_protocol`
+
+`channel.extension_protocol() -> string`
+
+Returns the complete offline synchronous v1 wire specification, including the Windows 1.01 native input payload. Print it in the REPL; no connection or I/O required.
 
 ### `channel.memory_pair`
 
@@ -2592,6 +3000,12 @@ Returns seconds from the runtime's monotonic clock. Subtract readings to time wo
 `clock.profiler() -> clock.profiler`
 
 Creates a profiler for named spans, counters and measured calls. Its snapshots and reports summarize work explicitly recorded through this profiler.
+
+### `clock.read_profiler`
+
+`clock.read_profiler(max_files=16384, max_events=1024, min_seconds=0.01) -> clock.read_profiler`
+
+Measures completed reads from labeled file views with bounded per-file aggregates and slowest-call samples. Uses the runtime monotonic clock without executing callbacks on I/O threads.
 
 ### `clock.unix`
 
@@ -2741,7 +3155,13 @@ Connects a GDB remote-protocol session over an existing byte channel. The return
 
 `debug.select(values, timeout=-1)`
 
-Waits until one of the supplied selectable values is ready, returning that value, or None on timeout. Read the event from the returned source separately; selection itself does not consume the event.
+Waits until one of the supplied selectable values is ready, returning that value, or None on timeout. Read the event from the returned source separately; selection itself does not consume the event. For byte channels, readiness includes data, stream closure, or a spurious change notification (such as checkpoint restoration): retry the read to distinguish them. A closed debugger/event session still reports EOF.
+
+### `emulator.linux`
+
+`emulator.linux(max_instructions=10000000) -> shell_command`
+
+Creates an ELF execution capability for shell.run(executable=...). Recognizes static Linux/amd64 ELF images, preserves argv[0] independently of the resolved guest path, and uses the same virtual filesystem and inherited streams. Non-ELF input falls back to the shell script loader.
 
 ### `emulator.machine`
 
@@ -2755,11 +3175,17 @@ Creates an in-process machine for the input's supported architecture, using nati
 
 Wraps explicit mutable plugin state and its installation callback for emulator use. Keep checkpointed callback state here rather than hiding it in closures.
 
+### `emulator.processor`
+
+`emulator.processor(architecture='arm64', memory=64MiB) -> processor`
+
+Creates a portable in-process ARM64 or AMD64 instruction context independently of executable formats and OS APIs. map(address,size,data=None,access=rw) copies bounded bytes/files into owned sparse memory; read/write, get_register/set_register and plugin expose explicit experiment state. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps and PC for breakpoint, halt, budget or fault. ARM64 uses the existing baseline ARMv8-A processor without optional PAuth. No code is implicitly loaded or executed. close() releases the context.
+
 ### `emulator.uefi`
 
 `emulator.uefi(image, memory=256MiB, memory_base=0x40000000, image_base=0, stack_size=1MiB, time_unix=0, image_path='\\EFI\\Boot\\BootAA64.efi', registers={}, observe=None, device_path=b'', event_kinds=None)`
 
-Loads an ARM64 EFI image into a configurable in-process interpreter. Runs stop at budgets, watches, explicit breakpoints, unsupported operations or validated ExitBootServices. CPU, RAM, firmware and disk overlays support checkpoints; digest-checked rewrites accelerate recognized routines. See the [UEFI inspection API](../../../emulator/uefi/README.md) for configuration and limitations. Native HVF continuation is not implemented.
+Loads an ARM64 EFI image into a configurable in-process interpreter. Runs stop at budgets, watches, explicit breakpoints, unsupported operations or validated ExitBootServices. CPU, RAM, firmware and disk overlays support checkpoints; digest-checked rewrites accelerate recognized routines. See the [UEFI inspection API](../../../emulator/uefi/README.md) for configuration and limitations. Native HVF can execute directly from the EFI entry point or continue suspended firmware state; see the [native UEFI API](../../../docs/uefi-native.md).
 
 ### `emulator.x86`
 
@@ -2767,11 +3193,71 @@ Loads an ARM64 EFI image into a configurable in-process interpreter. Runs stop a
 
 Creates a bounded 32-bit x86 execution context from a PE image or raw code. Exposes guest registers, memory, hooks and snapshots; unsupported behavior returns structured stops rather than executing host code.
 
+### `filesystem.android_super`
+
+`filesystem.android_super(file, slot=0, devices={}) -> record`
+
+Reads raw Android super-partition metadata versions 10.0–10.2 with geometry/header/table SHA256 validation and backup fallback. Exposes groups, physical devices and logical partition files composed from linear/zero extents. slot chooses a metadata slot; devices supplies additional physical files by name. Views borrow their inputs; sparse wrappers and EROFS traversal are separate formats.
+
+### `filesystem.apfs`
+
+`filesystem.apfs(file) -> record`
+
+Inspects a raw APFS container natively. Returns the selected container superblock byte view, block_size, blocks, transaction, allocation() and volumes with name, canonical UUID string, ID, role, flags, tree metadata, snapshot_count, snapshot_tree, snapshot_tree_type and browse(raw=False), plus the selected volume superblock byte view. snapshots() validates snapshot metadata and name records; snapshot(name) opens that immutable filesystem through its physical superblock and historical object-map versions, exposing the same read APIs. browse reconstructs entries, paths and exact find(path) from ordinary unencrypted filesystem trees; each entry exposes entry_type, ID/private_id, mode/uid/gid, target, size, data, raw_data, compression_type, xattrs and xattr_streams (nonresident attribute stream IDs). allocation() validates the selected checkpoint maps, space manager, chunk bitmaps and free counts, returning bounded free_ranges and metadata summaries; it does not allocate or modify blocks. Supports sparse files, regular hardlinks, embedded/streamed xattrs and shared decmpfs types 3/4/9. raw=True retains compression metadata and physical streams with data=None for compressed files. Checks object checksums, object-map versions, tree and extent bounds. Symlinks remain entries. Sealed volumes support headerless hashed metadata trees and separate file-extent trees. seal_info() returns integrity version/flags/hash type, advertised root hash and original root node. verify_seal(expected=None) validates all metadata node hashes, optionally against external trusted root bytes; it counts file-data hash records but does not read or verify file contents. records() copies bounded (key,value) metadata byte tuples in APFS traversal order. object(id) returns the selected virtual object mapping and borrowed bytes. canonical_records(time_ns, hashes) normalizes inode/directory/stream metadata, omits physical extents and merges APFS file-info hash tuples. seal_image(records, expected, snapshot_name='', snapshot_time_ns=0, companions=[]) constructs an immutable standalone single-checkpoint container with these records, a mandatory matching external SHA-256 root, preserved file data, updated maps and allocation accounting; it requires an unencrypted snapshot-free volume and a single-block internal-pool bitmap. A nonempty snapshot_name and explicit positive snapshot_time_ns additionally construct a named boot snapshot, its physical superblock, object-map snapshot index and extended metadata, while moving the extent-reference tree into the snapshot and starting an empty live extent-reference tree. companions accepts up to 16 dictionaries with name, role, created_ns, optional directories and optional entries. Entry dictionaries supply path, entry_type (directory/file/symlink), mode, optional uid/gid, file data and symlink target. Native construction copies plaintext into new blocks, builds bounded mutable virtual filesystem trees, physical extent references and data-stream refcounts, creates missing directory parents and synthetic root entries, expands the container volume slots, and assigns deterministic UUIDs. Data shares an existing system volume group; ungrouped sources remain ungrouped. Bounds include 128 directories, 1024 explicit entries, 8 MiB per file and 32 MiB aggregate data, with a single bounded extent-reference leaf. Existing source IDs, compression and xattrs are not copied. Native directory, mapping, allocation and seal checks run before returning. The result includes snapshot_name, snapshot_transaction and deterministic snapshot_uuid. It retires historical checkpoints and is not a live-disk journal operation. File-content hash verification remains the caller’s responsibility. Encrypted and fusion volumes and ephemeral filesystem trees are unsupported; no mounting, repair or execution is performed.
+
+### `filesystem.apfs_sealed_tree`
+
+`filesystem.apfs_sealed_tree(records, block_size=4096, hash_type=1) -> record`
+
+Constructs a packed headerless APFS filesystem metadata B-tree in memory from (key,value) byte tuples already in APFS traversal order. Returns file, root_hash, nodes and records. Supports power-of-two node sizes 4096 through 65536 and SHA256, SHA512/256, SHA384 or SHA512. Reproduces sequential node splitting, relative node identifiers, conservative index preflight, freed separator bytes and child hashes for the observed PCC generation. Bounds records and tree storage; does not install the tree into a container, create integrity metadata or snapshots, supply file extents, or claim authentication without a trusted matching root seal.
+
 ### `filesystem.apm`
 
 `filesystem.apm(file, block_size=512, maximum_entries=1M) -> record`
 
 Reads an Apple Partition Map as portable partition file views. block_size explicitly selects the 512-, 1024- or 2048-byte logical map; device_block_size and device_blocks retain independent driver-descriptor geometry. This distinction matters for CDs containing overlapping maps. Each partition exposes its effective block_size: a CDvr-tagged Apple_Driver43_CD record with a matching block-zero driver descriptor uses 2048-byte device units even in a 512-byte map; other records use the selected map units. Validates ER/PM signatures, consistent entry counts, allocated-partition bounds and nonoverlap. Returns partitions with index, raw name/type/processor bytes, start_block, blocks, logical data-range fields, status and boot metadata. data is the complete physical partition view; no inner filesystem is inferred. An out-of-image Apple_Free descriptor retains its declared geometry with data=None and complete=False; allocated partitions must fit fully. Boot metadata is not executed and boot checksums are not verified.
+
+### `filesystem.ckd_attribute_page`
+
+`filesystem.ckd_attribute_page(data) -> record`
+
+Parses one 4096-byte IGW AD page, returning level and cells with decompressed 20-byte key, uninterpreted flags and value bytes. Observed cell flags, including 0xc0, 0xd5, 0xe5 and 0xec, are preserved, not interpreted as liveness. Validates page framing, live-region bounds, group/cell lengths, anchored prefix compression, trailing zero suppression and leaf key ordering. Internal namespace separators may be shortened; full traversal validates actual leaf order. Does not resolve internal child identifiers, traverse a dataset, or decode PDSE members or HFS files.
+
+### `filesystem.ckd_catalog_record`
+
+`filesystem.ckd_catalog_record(data) -> record`
+
+Parses an observed BCS record into kind, name, raw key, ordered type-03 relationship references and nested cells. Data/index component cells expose their names and children; other attributes retain raw bytes. Validates record length, key header, component lengths and subtree bounds.
+
+### `filesystem.ckd_control_interval`
+
+`filesystem.ckd_control_interval(data) -> record`
+
+Decodes one explicitly selected VSAM data control interval (512 to 32768 bytes, multiple of 512). Returns eof, free_offset, free_length and records in data order. A zero CIDF is a software EOF marker; callers must establish the input is a VSAM data CI. Validates CIDF and backwards RDF boundaries, including repeated equal-length records. Rejects unsupported flags and spanning. Does not interpret indexes, RRDS slots, catalog relationships or high-used RBA; not a complete VSAM dataset reader.
+
+### `filesystem.ckd_igw_attributes`
+
+`filesystem.ckd_igw_attributes(data, max_cells=100000) -> list`
+
+Enumerates the bounded active IGW attribute tree of an allocated-page file through native map-chain and child-link validation. Returns exact 20-byte keys, flags and uninterpreted values. Does not carve inactive pages or decode file payloads.
+
+### `filesystem.ckd_scan`
+
+`filesystem.ckd_scan(file, max_tracks=16777216) -> record`
+
+Validates every physical CKD track and exact cylinder-aligned EOF through a portable file. Returns tracks, records, data_bytes, key_bytes and image_bytes; max_tracks bounds the scan. Reads free space and record zero too, and propagates source checksum errors. Does not claim logical dataset decoding.
+
+### `filesystem.ckd_vsam_records`
+
+`filesystem.ckd_vsam_records(data, organization, ci_bytes, used_bytes, cis_per_ca, key_offset=0, key_length=0, index=None, index_ci_bytes=4096, index_used_bytes=0, index_root_rba=0, max_records=100000, max_record_bytes=16777216, max_intervals=1000000, max_bytes=67108864) -> list`
+
+Reads a resolved immutable VSAM data component through portable files. ESDS preserves physical record order; fixed RRDS preserves record numbers across vacant slots; KSDS follows the supplied active index root and verifies strictly increasing keys. Assembles spanned records only within a control area and matching update generation. Returns record number, RBA and unconverted data bytes. Explicit high-used bounds, CI/CA geometry and key metadata are required; allocation size is not substituted for high-used RBA. The optional index is traversed natively using header/section/key compression and active child pointers, excluding free intervals. Enforces interval, record-count, per-record and total-byte budgets. Does not infer catalog metadata, index roots, variable RRDS or extended-address formats.
+
+### `filesystem.ckd_vvr`
+
+`filesystem.ckd_vvr(data) -> record`
+
+Parses an observed primary Z VVDS volume record, returning component, cluster and catalog names, index/data flags, index root RBA, CI size, high-used and allocated byte bounds, control-area geometry, maximum record length and key position/length. Reports ci_addressed and converts qualified extended data-component CI counts to 64-bit byte bounds. Rejects incompatible headers, cell bounds and geometry; extended index roots and multivolume layout remain unsupported.
 
 ### `filesystem.diskdupe`
 
@@ -2790,6 +3276,18 @@ Decodes version 1 The Duplicator images, including explicit cylinder filler. Cyl
 `filesystem.efs(file, maximum_entries=1M) -> record`
 
 Reads an IRIX EFS volume into entries and case-sensitive paths, resolving direct and indirect extents without mounting. find(path) returns an entry or None; entries expose data, entry_type, size, inode, mode, uid, gid and modified. Accepts a trimmed free tail only when the allocation bitmap proves the omitted region is free and all referenced extents fit the original input. Symlink data remains the link target and is never followed; device entries have no data.
+
+### `filesystem.ext4`
+
+`filesystem.ext4(file, maximum_entries=100000, maximum_depth=32) -> record`
+
+Reads a clean ext2/3/4 image without mounting. Returns flat entry records with Unix metadata and lazy file data; symbolic links and device nodes are metadata, never followed. Handles multi-level extents, sparse/unwritten ranges, indirect blocks, indexed directories, 64-bit descriptors and metadata checksums. Rejects unsupported incompatible features and images requiring journal replay. Positive entry/depth limits bound traversal.
+
+### `filesystem.ext4_build`
+
+`filesystem.ext4_build(entries, size, label='', uuid='', inode_count=0) -> file`
+
+Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. inode_count optionally sets minimum total inode capacity, including reserved inodes, rounded up to block-group geometry; zero sizes from input entries. Larger values reserve free inodes for later guest writes, subject to the metadata and disk-size bounds. Preserves ownership, permissions, links and devices. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes.
 
 ### `filesystem.fat`
 
@@ -2815,6 +3313,12 @@ Builds a FAT16 volume from a directory, preserving supported attributes and requ
 
 Builds a FAT32 volume from a directory and requested layout options. It produces a volume file for composition into a disk rather than writing or formatting a host device.
 
+### `filesystem.ffs_build`
+
+`filesystem.ffs_build(entries, size=0, extra=0, layout='raw', timestamp=1700000000) -> file`
+
+Builds a sparse FFS1 root from Unix entry dictionaries, preserving ownership, special permissions, symlinks, hardlinks and BSD device numbers. Payload readers are borrowed. Raw layout is for FreeBSD/NetBSD; openbsd adds an MBR and disklabel. Size is filesystem capacity excluding the OpenBSD prefix; zero estimates capacity. Capacity and total file payload are bounded to 32 GiB. No host extraction, mounting or mkfs.
+
 ### `filesystem.gpt`
 
 `filesystem.gpt(file) -> parsed GPT; filesystem.gpt(size, disk_guid=...) -> builder`
@@ -2829,9 +3333,15 @@ Decodes standard and extended HD-Copy images in memory with strict RLE validatio
 
 ### `filesystem.hfs`
 
-`filesystem.hfs(file, maximum_entries=1M) -> record`
+`filesystem.hfs(file, maximum_entries=1M, raw_forks=False) -> record`
 
-Reads a classic HFS volume's catalog and extent-overflow records without mounting. Returns raw volume name, entries, paths and exact find(path) lookup. Every regular entry exposes separate data and resource fork views, their sizes, raw name bytes, catalog/parent IDs, Finder information, flags and Mac-epoch timestamps. Path components percent-escape non-ASCII/control bytes, slash and percent, keeping legacy names reversible without assuming a script encoding. HFS Plus and fragmented extents-file bootstrap are not yet supported; compressed resources require a separate resource decoder. Aliases are not followed.
+Reads classic HFS, HFS+/HFSX and embedded HFS+ volumes without mounting. Returns raw volume name, entries, paths and exact find(path). Entries expose distinct data/resource forks, xattrs, reversible escaped paths, Finder/catalog metadata, Unix modes/uid/gid and link targets. Hardlink inode aliases share decoded inode contents while raw_data/raw_resource retain physical alias forks. Symlinks are not followed. Inline and fork-backed attributes have independent extent-overflow support. Shared decmpfs types 3/4 (inline/resource zlib with stored-block escape) and 9 (stored inline) decode lazily with exact logical lengths and checksums; resource zlib allocations may have unused trailing bytes. Other compression types fail unless raw_forks=True explicitly requests physical forensic forks. compression_type identifies decoded files. Does not mount, repair or execute filesystem contents.
+
+### `filesystem.hfs_build`
+
+`filesystem.hfs_build(entries, size, label="Untitled") -> file`
+
+Builds a bounded unjournaled case-sensitive HFSX version-5 volume natively in memory from UNIX entry dictionaries. size is the volume byte length; payloads are borrowed file/string/bytes values. Entries support path, mode, uid, gid, mtime, data, target, hardlink, major, minor, finder_info (32 bytes), resource, xattrs (name to file/bytes), owner_flags and admin_flags. Preserves regular-file hardlinks through native private inodes; directory hardlinks are unsupported. Paths use POSIX components (colon becomes catalog slash); names use HFS canonical decomposition. Allocation, catalog and attribute trees include free growth nodes with bounded metadata. Does not build partitions, journal, execute guest tools or write intermediate host files.
 
 ### `filesystem.host`
 
@@ -2843,7 +3353,7 @@ Exposes a host directory through the native filesystem backend. This is a host-p
 
 `filesystem.iso9660(file) -> ISO filesystem`
 
-Parses an ISO 9660 filesystem and exposes directory and file views. Validated Rock Ridge takes precedence over Joliet, preserving case-sensitive names, POSIX metadata and symbolic-link targets without following links. Joliet and basic ISO names remain available when Rock Ridge is absent. It does not mount or copy the image.
+Parses an ISO 9660 or High Sierra filesystem and exposes directory and lazy file views. High Sierra uses case-insensitive names and validates descriptor addresses, both-endian fields and extent bounds. Validated Rock Ridge takes precedence over Joliet, preserving case-sensitive names, POSIX metadata and symbolic-link targets without following links. Joliet and basic ISO names remain available when Rock Ridge is absent. It does not mount or copy the image.
 
 ### `filesystem.mbr`
 
@@ -2857,6 +3367,12 @@ With a file, parses the MBR and partitions; with a disk size, creates a builder 
 
 Reads Alcohol MDS v1 descriptor metadata, including sessions, track geometry, pregaps, TOC and companion filenames. Optional images maps declared names (including *.mdf) to portable files. Bound tracks expose raw sectors, logical data or audio, and interleaved P-W subchannels without conversion or copying. auto resolves MDF companions from its source tree. The sessions attribute contains tracks and their byte views.
 
+### `filesystem.mtree`
+
+`filesystem.mtree(file, maximum_entries=100000) -> list[record]`
+
+Reads a bounded BSD mtree metadata manifest natively, including /set and /unset defaults, directory descent and parent navigation, full ./ paths, line continuations, comments and octal or common escaped characters. Returns path/attributes records with metadata values preserved as strings, including Apple extensions. Bounds input, logical lines, records, expanded attributes and paths; rejects duplicates, malformed escapes and parent traversal. Does not read the described files, follow links or mutate a filesystem.
+
 ### `filesystem.ntfs`
 
 `filesystem.ntfs(source, size=None, boot_code=None, hidden_sectors=0, label='NO NAME', version='1.1', log_file=None, upcase=None, upcase_profile='default')`
@@ -2867,6 +3383,11 @@ Read-only mounts resolve extension attributes through the base record's
 `$ATTRIBUTE_LIST`, matching record sequences, stream names and starting VCNs.
 An extension backlink alone does not make its data current. Conflicting
 referenced extents remain errors; unreferenced stale records are not merged.
+
+Read-only `volume.metadata(path)` returns `path`, `directory`, `record_number`,
+`sequence`, `security_id` and `security_descriptor`. Use the record number with
+`filesystem.ntfs_record` to inspect the corresponding base FILE record. Metadata
+reads do not flush guest writes or make a paused live volume coherent.
 
 ### `filesystem.ntfs_record`
 
@@ -2890,11 +3411,17 @@ unrelated invalid attribute list prevents a complete namespace read.
 
 Reads Files-11 ODS-2 version1 home blocks, index headers and versioned directory trees. Verifies home/header checksums, primary and backup index maps, file identities, allocation bounds, EOF fields, directory records and traversal limits. Returns entries, files, exact-path find(path), raw home bytes and padded volume_name. Entries retain raw names, version, file_number, sequence, header, record_attributes, characteristics, data and size. Names include ;version, with unsafe bytes percent-escaped; the root self-reference is a directory_link and is not followed. Data is a borrowed read-only extent view; RMS records are not translated and allocation slack is excluded. Supports retrieval formats1/2/3. Extension chains, placement-control pointers, alternate-volume resolution and other ODS generations remain explicit gaps. Opening an ODS-2 view does not validate any enclosing CD-image trailer or decode nested backup savesets.
 
+### `filesystem.openbsd_label`
+
+`filesystem.openbsd_label(file, label_offset=512) -> record`
+
+Reads a version-1 OpenBSD or legacy version-0 BSD disklabel at label_offset, an explicit byte offset in the complete disk. The default 512 is the common standalone amd64 label location; for an MBR image pass the OpenBSD partition offset plus 512. Validates both magic values, XOR checksum, partition count, 48-bit sector addresses, declared disk/partition bounds and FFS geometry. Legacy labels use 32-bit sector addresses and explicit fragment geometry rather than the OpenBSD packed fields. Sector size is declared by the label, including 4096-byte sectors. Returns sector_size, total_sectors, bound_start, bound_end, uid, type_name, pack_name and partitions. Partitions preserve index, a-z/A-Z name, absolute start_sector, sectors, type, block_size, fragment_size, cylinders_per_group and borrowed read-only data. Empty slots have data=None; overlapping raw c remains present. Requires the complete declared disk; does not guess offsets, mount, repair, construct images or accept other disklabel versions.
+
 ### `filesystem.raw_cd`
 
 `filesystem.raw_cd(file) -> file`
 
-Views a single-track 2352-byte or 2448-byte raw CD as logical 2048-byte sectors. Supports Mode 1 and Mode 2 Form 1, preserving the source without conversion or mounting.
+Views a single-track 2352-byte or 2448-byte raw CD as logical 2048-byte sectors. Supports ISO9660 and High Sierra in Mode 1 and Mode 2 Form 1, preserving the source without conversion or mounting.
 
 ### `filesystem.sgi`
 
@@ -2912,7 +3439,7 @@ Parses a UDF filesystem into directory and file views. Symbolic links expose dec
 
 `filesystem.ufs(file, maximum_entries=1M, maximum_blocks=1M) -> record`
 
-Reads the historical UFS1 filesystem layout used by Ultrix, with a superblock at byte8192 and either byte order. Checks fragment/cylinder-group geometry, inode and data ranges, 512-byte directory records, dot entries, duplicate names and directory cycles. Returns entries, paths, find(path), block_size, fragment_size and groups. Entries preserve inode identity, mode, link count, old 16-bit uid/gid, timestamps, flags, device number and borrowed data views. Reads 12 direct blocks and single/double/triple indirect pointers; zero pointers remain sparse zeroes. maximum_blocks bounds total mapping work, including indirect pointers; maximum_entries bounds reachable paths. Hard-linked files share inode data, symlinks are exposed but not followed, and no device nodes are created. This is the old directory/inode layout, not UFS2 or modern UFS1 extensions; inline symlinks, extended attributes and journal replay are not implemented. Nested archives require separate decoders.
+Reads historical and 4.4BSD UFS1, UFS2 and NetBSD UFS2EA in either byte order, checking superblocks at byte8192 or byte65536. UFS2 uses 256-byte inodes and 64-bit pointers; UFS1 uses 128-byte inodes and 32-bit pointers. The declared inode format selects old 16-bit ownership/16-bit directory name lengths or modern 32-bit ownership/typed directories and inline symlinks. Checks fragment/cylinder-group geometry, inode and data ranges, 512-byte directory records, dot entries, directory type/inode agreement, duplicate names and directory cycles. Returns entries, paths, find(path), block_size, fragment_size, groups and inode_format. Entries preserve inode identity, mode, link count, ownership, timestamps, flags, device number and borrowed data views. Reads 12 direct blocks and single/double/triple indirect pointers; zero pointers remain sparse zeroes. maximum_blocks bounds mapping work; maximum_entries bounds reachable paths. Hard-linked files share data, symlinks are not followed and device nodes are metadata only. Unknown inode formats, extended-attribute enumeration and journal replay remain unsupported. filesystem.ffs_build separately constructs FFS1 roots. Nested archives require separate decoders.
 
 ### `filesystem.ultrix_label`
 
@@ -2928,9 +3455,9 @@ Parses a VHDX container and exposes its logical disk contents. This unwraps the 
 
 ### `filesystem.xfs`
 
-`filesystem.xfs(file, maximum_entries=1M) -> record`
+`filesystem.xfs(file, maximum_entries=1M, realtime_file=None) -> record`
 
-Reads a legacy version-4 XFS directory tree using borrowed file extents, without mounting or replaying the journal. Returns entries and paths; find(path) returns an entry or None. Entries expose data, entry_type, inode, mode, uid, gid, modified and size. Supports local forks and inode-resident extent lists, sparse and unwritten data, and version-1/version-2 directories (including version-1 directory btrees). Symlinks are not followed. Version-5 metadata, extent btrees, realtime data and file-type directory extensions are currently rejected explicitly.
+Reads version-4 and checksum-protected version-5 XFS directory trees using borrowed local, extent-list and multi-level bmap-btree views. Checks levels, key ranges, sibling links, cycles and extent counts; sparse and unwritten data reads as zeros. Version-5 superblocks, v3 inodes, BMA3 trees and directory blocks validate CRC32C, metadata UUID, owner and physical address. Supports directory formats 1/2/3 and file-type extensions. realtime_file explicitly supplies the separate realtime device. Returns entries, paths and find(path); symlinks are never followed. Does not mount, replay logs, repair or build filesystems, decode attribute forks, or accept unsupported incompatible features such as bigtime and large-extent-count layouts.
 
 ### `firmware.acpi_compatible_id`
 
@@ -3015,6 +3542,12 @@ Decodes image metadata and returns dimensions and format information within inpu
 `image.pixel(source, x, y, maximum=128MiB, max_pixels=16MiP) -> record`
 
 Returns the color of one decoded image pixel at x,y. Coordinates must be inside the image; input size and decoded pixel limits apply.
+
+### `image.sample`
+
+`image.sample(source, points, maximum=128MiB, max_pixels=16MiP) -> list[record]`
+
+Decodes the source once per call and returns r/g/b/a color records in point order, using the same 8-bit alpha-premultiplied channels as image.pixel. points must be a list or tuple of (x,y) lists or tuples with integer coordinates inside the image; duplicate points are preserved. maximum bounds encoded bytes; max_pixels bounds both decoded image pixels and point count. An empty selection returns an empty list after validating the image. No decoded image is cached between calls.
 
 ### `json.decode`
 
@@ -3118,17 +3651,41 @@ Creates a supported QEMU command-line option descriptor. The backend validates a
 
 Compiles a regular expression into a reusable matching object. Invalid patterns fail at compilation rather than at the first match.
 
+### `renvo.archiver`
+
+`renvo.archiver(index=False) -> shell_command`
+
+Creates an in-process archive command capability. index=True supplies ranlib-style arguments; index=False accepts ar-style arguments. Inputs and outputs remain in the invoking Unix filesystem.
+
 ### `renvo.cc`
 
 `renvo.cc(source, input, target, flags=[], arena_size=32MiB) -> compiledModule; input is a virtual source path or list of paths`
 
 Compiles virtual C/C++ sources with the in-process Renvo toolchain for the selected target. Returns a compiledModule containing success/diagnostic information and virtual output bytes.
 
+### `renvo.compiler`
+
+`renvo.compiler(target, arena_size=32MiB) -> shell_command`
+
+Creates an in-process C compiler command capability. The recipe installs and binds its guest path. Invocation arguments, working directory, input and output all use the shell-owned Unix filesystem and streams; no host compiler is invoked.
+
 ### `renvo.go`
 
 `renvo.go(source, input, target, arena_size=32MiB) -> compiledModule`
 
 Compiles a virtual Go source tree with Renvo for the selected target. Returns compilation status and outputs without invoking a host Go compiler.
+
+### `renvo.headers`
+
+`renvo.headers() -> directory`
+
+Exposes bundled libc headers as portable directory files. Requires renvo_bundle; does not install or overwrite files. The recipe chooses where and with which modes to provision them.
+
+### `renvo.linker`
+
+`renvo.linker(target, arena_size=32MiB) -> shell_command`
+
+Creates a portable Renvo linker command capability, without installing an executable or choosing its guest path. Writes outputs into the invoking shell filesystem.
 
 ### `renvo.make`
 
@@ -3147,6 +3704,24 @@ Creates an experimental in-process software x86 PC backend from Renvo x86.rfe. J
 `runtime.stats() -> record`
 
 Returns a snapshot of runtime resource statistics for diagnostics and benchmarking. Counters describe the running runtime, not just one image recipe.
+
+### `scs.create`
+
+`scs.create(path) -> scs.repository`
+
+Creates a new exclusively locked native SCSREPO3 repository file without overwriting existing data. File paths and durability are native backend authority; stored contents use the portable SCS engine. Repositories close at execution teardown or explicit close. See docs/scs.md for publication, Git cloning and limits.
+
+### `scs.memory`
+
+`scs.memory(file=None, max_bytes=512MiB) -> scs.repository`
+
+Creates a bounded volatile SCSREPO3 repository, or reopens an existing portable repository file into independent paged memory. Defaults to 512 MiB of addressable storage, not a total-process memory quota. Published roots can be preserved as a standalone file via repository.file(); Sync does not make memory survive process exit.
+
+### `scs.open`
+
+`scs.open(path) -> scs.repository`
+
+Opens a native SCSREPO2/3 repository with exclusive ownership. Paged indexes load lazily and are verified as accessed. Opening may repair an incomplete tail; it is not a forensic read-only operation. Complete corruption fails rather than being silently discarded.
 
 ### `testing.attempt`
 
@@ -3172,6 +3747,18 @@ Percent-encodes text for use as one URL path segment. It is not query-string enc
 
 Decodes percent escapes in URL path text. Malformed escape sequences produce an error.
 
+### `vmm.arm64_boot`
+
+`vmm.arm64_boot(image, address, memory_base, entry=None, registers=None, system=None) -> vmm_arm64_boot`
+
+Creates a board-independent ARM64 handoff with explicit physical RAM base, image address, entry point and optional X0-X30/system registers. It contains no devices, firmware commands, NVRAM or board selection. Generic validation checks load ranges and instruction alignment; native backends separately enforce host-page constraints. Compose hardware with vmm.arm64_platform and pass it independently to vmm.machine. Native cc currently provides one CPU and headless execution; stopped cc.v1 exposes bounded read_physical and read_virtual until VM close.
+
+### `vmm.arm64_platform`
+
+`vmm.arm64_platform(create, gic_distributor=0, gic_redistributor=0) -> vmm_arm64_platform`
+
+Composes ARM64 hardware independently of CPU/load state. create(ctx) runs once per VM and returns a dictionary with devices (ordered MMIO/native device values) and optional hvc(immediate,function)->bool. Each factory must create fresh mutable state. Earlier devices win overlapping address ranges; unknown MMIO and unhandled HVC remain unsupported exits. Optional GIC distributor/redistributor addresses are explicit and must be distinct 64 KiB-aligned values. Factory and MMIO/HVC callbacks run serially on one VM-owned Starlark thread, canceled when the VM stops. Runtime operations reject calls from any other Starlark thread. The runtime supplies bounded guest-memory access, permission-enforcing DMA, memory protection, registers, counter/epoch, IRQs, disk resources, events and native protocol construction. Native device instances cannot be shared across VMs; unused or failed-factory native devices are closed. No host paths, sockets or processes are exposed.
+
 ### `vmm.backends`
 
 `vmm.backends()`
@@ -3183,6 +3770,24 @@ Lists the VMM backends registered in this runtime and their advertised capabilit
 `vmm.channel(kind, name, required=True)`
 
 Describes a named VM byte channel of the requested kind. required determines whether lack of backend support is a validation failure.
+
+### `vmm.darwin_arm64_boot`
+
+`vmm.darwin_arm64_boot(kernel, device_tree, memory, memory_base, virtual_base, command_line='-v', entropy=None, payloads=None, nvram=None) -> vmm_arm64_boot`
+
+Constructs a board-independent unslid ARM64 executable/fileset handoff in memory from a decoded Mach-O kernel and flattened Apple device tree. Loads bounded nonoverlapping segments, zeroes BSS, appends ARM64 revision-2 bootargs, chosen DRAM ranges, a random-seed and device-tree memory-map ranges, and enters the original thread PC with X0 pointing to bootargs. Physical and virtual bases are required explicit arguments; RAM bases and size must be 32 MiB aligned. The machine memory must equal the encoded memory value. payloads maps memory-map names to immutable files loaded separately at 16 KiB aligned addresses and reserved through topOfKernelData. TrustCache is placed below the kernel inside its protected range; RAMDisk can contain an original APFS image. nvram optionally maps string variable names to string values in a fresh volatile CHRP bank; the bytes seed the chosen proxy and are returned as boot.nvram for explicit recipe-owned device backing. Unqualified names and the 7C436110-AB2A-4BBB-A880-FE41995C9F82: prefix select common; the 40A0DDD2-77F8-4392-B4A3-1E7304206516: prefix selects system and is needed for system variables such as boot-args. None preserves a supplied proxy with matching bank geometry or creates an empty bank. XNU performs its own fileset rebasing/signing. entropy=None generates 256 fresh cryptographic bytes for modern XNU; an explicit entropy value must be 64 bytes (earlier XNU) or 256 bytes with nonzero data. Returned read_only_address/read_only_size describe the immutable kernel prefix for optional platform protection configuration. No hardware platform is selected. Does not personalize IMG4 or imply a successful kernel boot. Public HVF rejects Apple PAC initialization; the native cc private_apple_isa option selects ISA level 3 with a separately entitled executable.
+
+### `vmm.darwin_boot`
+
+`vmm.darwin_boot(kernel, command_line='', smc_osk=b'') -> vmm_darwin_boot`
+
+Creates an unslid amd64 XNU v2 direct handoff from an immutable original kernelcache or Mach-O executable. Supports amd64 fat slices and Apple comp/lzss caches with checksum validation. Native cc requires Linux/amd64 KVM, x86_64 and no UEFI image execution; QEMU rejects this intent. No guest bootloader is executed or kernel instructions patched. RAM disks are not supported. Optional smc_osk must be empty or exactly 64 bytes; it is explicit caller-supplied SMC material, never bundled or logged. Native cc exposes SMC APP0001/IRQ6 and omits OSK0/OSK1 when no material is supplied. Verified scope is Lion HFS-root boot to launchd and a visible single-user shell, not keyboard input, a desktop or a complete installation.
+
+### `vmm.darwin_nvram`
+
+`vmm.darwin_nvram(values) -> bytes`
+
+Encodes string variable names/values into one volatile 8 KiB CHRP NVRAM bank. Unqualified names select Apple common; explicit Apple common/system GUID prefixes select their corresponding partitions. Returns immutable bytes for a caller-owned backing layout. This is format construction only and never accesses host firmware.
 
 ### `vmm.disk`
 
@@ -3196,11 +3801,23 @@ Describes a guest disk or optical medium backed by a file or block device, inclu
 
 Describes the requested guest display mode and whether support is mandatory. This is part of a portable machine specification.
 
+### `vmm.linux_boot`
+
+`vmm.linux_boot(kernel, initramfs=None, command_line='')`
+
+Creates portable direct Linux boot intent from borrowed immutable kernel and optional initramfs files plus a command line. Requires backend boot.linux capability; QEMU supports Linux hosts and x86 guests using anonymous inherited descriptors.
+
 ### `vmm.machine`
 
-`vmm.machine(architecture, memory, cpus=1, disks=[], networks=[], display=vmm.display('none'), channels=[], start_paused=False, required_capabilities=[])`
+`vmm.machine(architecture, memory, cpus=1, disks=[], networks=[], display=vmm.display('none'), channels=[], start_paused=False, required_capabilities=[], boot=None, platform=None)`
 
 Creates a portable machine specification from architecture, memory, CPUs, storage, networking and channels. It does not start a VM.
+
+### `vmm.mmio`
+
+`vmm.mmio(address, size, read=None, write=None, widths=[1,2,4,8]) -> vmm_arm64_device`
+
+Creates a guest MMIO region with explicit address/size, optional read(offset,size)->uint and write(offset,size,value)->None callbacks, and access widths (default 1,2,4,8). Reads/writes must be aligned to their width and fit entirely inside the region; read results must fit the requested width. Add the value to an ARM64 platform factory result. Mutable callback state should be created inside that factory. A missing callback fails explicitly. This primitive does not allocate RAM or select hardware.
 
 ### `vmm.network`
 
@@ -3218,7 +3835,7 @@ Validates a machine specification against a backend and starts a VM. Returns the
 
 `vmm.switch()`
 
-Creates an isolated in-memory Ethernet switch. Attach guests with vmm.network('ethernet', switch=lan, mac='02:00:00:00:00:01'), using a distinct unicast MAC for each NIC. Ports have bounded receive queues and disconnect when their VM closes.
+Creates an isolated in-memory Ethernet switch. internet=True explicitly requests a single-guest IPv4 TCP/DNS gateway and requires trex -allow-internet; mac defaults to 02:54:52:00:00:01 and must match the guest. Private/LAN destinations, IPv6 and general UDP are not forwarded. Attach guests with vmm.network('ethernet', switch=lan, mac='02:00:00:00:00:01'), using a distinct unicast MAC for each NIC. Ports have bounded receive queues and disconnect when their VM closes.
 
 ### `vmm.validate`
 
@@ -3230,13 +3847,19 @@ Checks whether a backend can implement a machine specification and its required 
 
 `vmm.workspace(vms, create=None)`
 
-Groups a name-to-VM dictionary for the browser frontend. The optional zero-argument create callback returns (name, vm); calls are serialized and successful creations appear as new tabs. Switching tabs leaves every VM running. Guest construction and provisioning remain recipe-owned.
+Groups a name-to-VM dictionary for the browser frontend; it may start empty. add(name, vm) registers a display and returns a never-reused ID; remove(id) unregisters without closing the VM. The optional zero-argument create callback returns (name, vm); calls are serialized and successful creations appear as new tabs. Switching tabs leaves every VM running. Guest construction and provisioning remain recipe-owned.
+
+### `web.application`
+
+`web.application(handler, consoles=None, public=[], origin='') -> application`
+
+Composes a scripted request handler with optional dynamically registered VM consoles and native session authentication. Public GET/HEAD asset paths are explicit; other requests require a token, and mutations require same-origin checks. The HTTP listener permits loopback or an exact IP assigned to the local Tailscale tunnel; wildcard and LAN binds are rejected. An explicit HTTPS origin supports a trusted reverse proxy without trusting forwarded headers.
 
 ### `web.browse`
 
-`web.browse(root, request) -> response`
+`web.browse(root, request, path='') -> response`
 
-Resolves a recursive path against an auto view. json=1 returns entry metadata and paginated children; raw responses use the existing file range handling. Returns structured HTTP errors for missing, malformed and bounded-out inputs.
+Resolves a recursive path against an auto view. Optional path mounts a tree under a script-owned route prefix. json=1 returns entry metadata and paginated children; raw responses use the existing file range handling. Returns structured HTTP errors for missing, malformed and bounded-out inputs.
 
 ### `web.file`
 
@@ -3372,6 +3995,12 @@ Reads a PKCS#7 catalog and returns its member digest byte strings. Extracting me
 `windows.certificate(value) -> certificate record`
 
 Parses one DER X.509 certificate and returns its DER bytes, subject, issuer, SHA-1 fingerprint and a subject/issuer-equality flag named self_signed. That flag is not cryptographic signature verification.
+
+### `windows.cli_inspect`
+
+`windows.cli_inspect(value, method='') -> record`
+
+Reads CLI metadata and selected managed method bodies without executing them. Accepts a portable file or bytes, at most 32 MiB. Returns entry_point (raw COR header entry field), rows (token, columns in ECMA-335 table order), strings (user-string token to text), and methods (token, name, instructions). String/blob columns are decoded; coded references and table indexes become tokens, except null remains zero; list-end sentinels are preserved as token-shaped indexes. Other columns retain their integer value, including GUID heap indexes. method is a case-sensitive method-name substring; empty selects all IL bodies. Each instruction has offset relative to IL code, numeric opcode, raw operand bytes and token (zero for non-token operands). Bounds tables/heaps/bodies, limits rows to 100000, decoded row heaps to 64 MiB and instructions to 1000000, and rejects unknown opcodes. Does not verify IL stack/control flow, resolve external assemblies, decode signatures or exception clauses, evaluate feature gates, or claim observed runtime effects.
 
 ### `windows.clone_file_entries`
 
@@ -3568,9 +4197,9 @@ Malformed segment counts and truncated segments are rejected.
 
 ### `windows.hive_from_patches`
 
-`windows.hive_from_patches(name, patches, keys=None, format=None) -> file`
+`windows.hive_from_patches(name, patches, keys=None, format=None, source=None, source_drive="", target_drive="", exclude_keys=None, exclude_values=None) -> file`
 
-Builds an NT registry hive from declarative value patches and optional key records. format controls the supported on-disk generation; security and key metadata remain caller-supplied policy.
+Builds an NT registry hive from declarative value patches and optional key records. With source, imports its raw value types/data, empty keys, security, class and flags natively before applying keys and patches; the source format is inherited unless format overrides it. Optional source_drive/target_drive (both ASCII drive letters with colons) relocate upper/lower drive spellings in key/value names and raw UTF-16 REG_SZ/REG_EXPAND_SZ/REG_MULTI_SZ data only. exclude_keys removes case-insensitive normalized subtrees from the relocated source; exclude_values contains exact key/name dictionaries. Additions are applied after exclusions and are never relocated or filtered. Source options require source. Without source, format controls the generation and metadata is caller-supplied.
 
 ### `windows.hive_keys`
 
@@ -3894,6 +4523,12 @@ nodes/entries during input conversion, 65534 UTF-16 key bytes, 1 MiB per
 string/nested-map payload, and 64 MiB per complete dictionary. Strings are
 terminated UTF-16LE; embedded NULs, invalid Unicode and cycles are rejected.
 
+### `windows.state_repository_dictionary_read`
+
+`windows.state_repository_dictionary_read(source) -> dict`
+
+Decodes a file or bytes containing a complete SRD1 dictionary into ordered Starlark dictionaries, booleans, strings and lists of dictionaries. Uses the strict native decoder; rejects unknown types, duplicate keys, truncated extents and excessive depth. Input is limited to 64 MiB before allocation. Property identifiers are preserved, not interpreted.
+
 ### `windows.state_repository_hash`
 
 `windows.state_repository_hash(values) -> string`
@@ -4048,9 +4683,9 @@ Methods and attributes: `binary`, `bytes`, `gid`, `hex`, `mode`, `mtime`, `name`
 
 ### `auto` value
 
-A lazy standardized file or directory node. metadata describes the selected source, files lists immediate children, and indexed paths or find recursively enter nested containers. file retains the original bytes; compressed containers expose their decoded children without an extra path component. page reads a bounded child listing. Nodes created by auto_plan expose directory-derived proposals through plans; follow a proposal's path to open its virtual filesystem. Plain auto returns no plans.
+A lazy standardized file or directory node. metadata describes the selected source and probes its contents; summary returns entry metadata without probing. files lists immediate children, and indexed paths or find recursively enter nested containers. file retains the original bytes; compressed containers expose their decoded children without an extra path component. page reads a bounded child listing. Nodes created by auto_plan expose directory-derived proposals through plans; follow a proposal's path to open its virtual filesystem. Plain auto returns no plans.
 
-Methods and attributes: `bytes(offset=0, size=remaining)`, `file`, `files`, `find(path)`, `metadata`, `name`, `page(offset=0, limit=100)`, `plans`, `slice(offset=0, size=remaining)`.
+Methods and attributes: `bytes(offset=0, size=remaining)`, `file`, `files`, `find(path)`, `metadata`, `name`, `page(offset=0, limit=100)`, `plans`, `slice(offset=0, size=remaining)`, `summary`.
 
 ### `binary.builder` value
 
@@ -4106,6 +4741,12 @@ An explicit instrumentation collector. span/end time a region, measure wraps a c
 
 Methods and attributes: `counter(name, amount=1)`, `measure(name, function, *args, **kwargs)`, `report(minimum_coverage=0.95)`, `snapshot()`, `span(name)`.
 
+### `clock.read_profiler` value
+
+Wraps borrowed sources with file(source, label). snapshot returns detached dictionaries of per-label latency, bytes, errors and bounded slowest reads; reset starts a new phase and excludes earlier in-flight calls. Reads are not serialized and source bytes/errors are preserved. Nested labels measure inclusive latency and must not be summed as exclusive work.
+
+Methods and attributes: `file(source, label)`, `reset()`, `snapshot(limit=100)`.
+
 ### `clock.span` value
 
 An open timed region belonging to a profiler. end() closes the region and returns its elapsed duration in seconds.
@@ -4132,9 +4773,9 @@ Methods and attributes: `index_entries(table, index, maximum=100000)`, `info`, `
 
 ### `directory` value
 
-A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
+A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
-Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_security(name)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_security(name, descriptor)`, `write(name, value)`.
+Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_security(name)`, `list_dir(path)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_reparse(name, tag, data)`, `set_security(name, descriptor)`, `write(name, value)`.
 
 ### `emulator.execution` value
 
@@ -4159,6 +4800,12 @@ Methods and attributes: `install(machine)`, `name`, `state`.
 A bounded 32-bit guest execution context. run/call/invoke execute modeled instructions; hooks and provided exports bind guest API calls to callbacks. Read/write and register methods inspect or change guest state. checkpoint/restore and snapshot support controlled variants; tracing, watches and profiles provide bounded observations. Acceleration/rewrite/transform operations require their documented code-identity checks; see [emulation](../emulation.md) for their contracts and checkpoint limitations.
 
 Methods and attributes: `accelerate_loop(address, pattern=None, size=0, digest=None, normalize_relative=False, maximum_instructions=1Mi)`, `accelerate_region(entry, start, size, digest, reenter=False, maximum_instructions=1Mi)`, `accelerate_runtime_region(anchor, size, digest, entry_offset=0, anchor_mask=None, name='runtime executable region', normalize_relative=True, reenter=False, maximum_instructions=1Mi)`, `allocate(size=0, value=None, address=None, alignment=16, name='plugin', readable=True, writable=True, executable=False)`, `call(address, args=[], registers={})`, `call_export(name, args=[], registers={})`, `call_trace(reset=False)`, `checkpoint()`, `code_trace(watch, reset=False)`, `configure_call_trace(enabled=True, limit=unchanged, start=0, size=0, reset=True)`, `configure_trace(enabled=True, limit=unchanged, reset=True)`, `entry`, `free(address)`, `get_register(name)`, `hook(...) and use(plugins)`, `imports`, `imports_named(names)`, `invoke(address, args=[], registers={})`, `load_module(image, name)`, `mappings`, `memory_writes(watch, reset=False)`, `modules`, `override(callback, module, name|ordinal, wrap=False)`, `profile(limit=256, reset=False)`, `protect(address, size, readable=True, writable=False, executable=False)`, `provide_export(callback=None, module, name|ordinal, argc=0, convention='stdcall', value=None, writable=True)`, `provide_exports(callback, module, signatures, convention='stdcall')`, `read_cbytes(address, maximum=32KiB, require_terminator=True, unit_width=1)`, `read_f32be(address)`, `read_f32le(address)`, `read_f64be(address)`, `read_f64le(address)`, `read_i16be(address)`, `read_i16le(address)`, `read_i32be(address)`, `read_i32le(address)`, `read_i64be(address)`, `read_i64le(address)`, `read_i8(address)`, `read_u16be(address)`, `read_u16le(address)`, `read_u32be(address)`, `read_u32le(address)`, `read_u64be(address)`, `read_u64le(address)`, `read_u8(address)`, `restore(checkpoint)`, `rewrite(address, pattern=None, size=0, digest=None, callback, name='inline rewrite', normalize_relative=False)`, `run()`, `set_register(name, value)`, `snapshot()`, `spawn(address, args=[], registers={})`, `stack`, `stop(reason, detail='')`, `transfer(address, esp=None, ebp=None, return_address=None)`, `transform(anchor, size, digest, callback, anchor_mask=None, name='runtime transformation', normalize_relative=True)`, `u32_multiply_accumulate(destination, source, count, scalar, carry=0, subtract=False)`, `watch_code(address, size, limit=4096, stack_bytes=0, captures={})`, `watch_memory(address, size, limit=4096)`, `write_f32be(address, value)`, `write_f32le(address, value)`, `write_f64be(address, value)`, `write_f64le(address, value)`, `write_i16be(address, value)`, `write_i16le(address, value)`, `write_i32be(address, value)`, `write_i32le(address, value)`, `write_i64be(address, value)`, `write_i64le(address, value)`, `write_i8(address, value)`, `write_u16be(address, value)`, `write_u16le(address, value)`, `write_u32be(address, value)`, `write_u32le(address, value)`, `write_u64be(address, value)`, `write_u64le(address, value)`, `write_u8(address, value)`.
+
+### `file` value
+
+Portable random-access byte value. Reader-backed SCS files and slices borrow their repository lifetime and are immutable versions. read/bytes explicitly materialize data; slice and splice compose borrowed ranges without eager payload reads. splice returns a new file, not an edit to its source; write it back explicitly. Existing file implementations may offer additional format-specific attributes.
+
+Methods and attributes: `binary(offset=0, size=remaining)`, `bytes(offset=0, size=remaining)`, `hex(offset=0, size=remaining)`, `read()`, `size`, `slice(offset=0, size=remaining)`, `splice(offset, remove, value)`.
 
 ### `gdb` value
 
@@ -4238,6 +4885,12 @@ A validated QEMU option descriptor with its value/properties. It is interpreted 
 
 Methods and attributes: `name`, `properties`.
 
+### `scs.repository` value
+
+Owns portable SCS storage and immutable objects. clone imports full advertised Git history natively, retaining no host checkout or pack spool; compressed transport stays in bounded paged memory. Git checkout is lazy. Native workspace publication is distinct from Git commits and does not push. file returns an immutable standalone repository artifact only for snapshot-capable backends (memory); publish live edits first. Opening/checkpointing can repair derived state. No GC, synchronization or format-stability promise.
+
+Methods and attributes: `checkout(name)`, `checkout_git(revision='HEAD', catalog='git')`, `checkpoint()`, `clone(url, catalog='git', max_pack_bytes=256MiB, max_native_bytes=512GiB)`, `close()`, `empty()`, `file()`, `git_refs(catalog='git')`, `refs()`.
+
 ### `sfp` value
 
 A parsed SFP package inventory. entries/files expose member metadata and content, find selects a path, and package_label/version identify the package. archive_size/data_offset describe the enclosing container.
@@ -4249,6 +4902,12 @@ Methods and attributes: `archive_size`, `data_offset`, `entries`, `files`, `find
 An SFP member with its logical path, entry type, timestamps and stored/unpacked lengths. Its read/bytes/slice operations expose decoded member content while payload_offset/record_offset locate its archive records.
 
 Methods and attributes: `binary`, `bytes`, `created_time`, `entry_type`, `file_length`, `flags`, `hex`, `modified_time`, `name`, `parent`, `path`, `payload_offset`, `read`, `record_offset`, `size`, `slice`, `stored_size`.
+
+### `shell_result` value
+
+Completed shell invocation. status is the ordinary numeric exit status, steps is the consumed statement budget, and stdout/stderr are independently bounded captured byte strings. Capability, parser and budget failures raise errors instead of becoming negative feature probes.
+
+Methods and attributes: `status`, `stderr`, `stdout`, `steps`.
 
 ### `tar` value
 
@@ -4262,11 +4921,47 @@ A tar member with path, type, ownership, permissions, timestamp and link target.
 
 Methods and attributes: `binary`, `bytes`, `entry_type`, `gid`, `gname`, `hex`, `link`, `mode`, `mtime`, `name`, `path`, `read`, `size`, `slice`, `stored_size`, `uid`, `uname`.
 
+### `tcp_bridge` value
+
+An owned native loopback listener forwarding one TCP connection to one byte channel. port is the assigned IPv4 loopback port; close interrupts and joins its workers and closes both transports. The listener is single-use and closes after acceptance. No authentication, protocol interpretation, automatic reconnect, or replay is provided.
+
+Methods and attributes: `close()`, `port`.
+
+### `unix_filesystem` value
+
+A bounded mutable Unix namespace shared directly by shell, compiler and ELF execution. write accepts ordinary portable file values; find returns an immutable file snapshot rather than a live descriptor. Modes and Unix-second timestamps are explicit. Missing paths and invalid canonical absolute guest paths raise errors; host paths are never accessed.
+
+Methods and attributes: `find(path)`, `mkdir(path, mode=0o755, mtime=None)`, `remove(path)`, `stat(path)`, `write(path, data, mode=0o644, mtime=None)`.
+
+### `unix_stat` value
+
+Unix file metadata: byte size, permission bits, directory flag and Unix-second modification time. Permission bits support virtual probes, not a host security boundary.
+
+Methods and attributes: `directory`, `mode`, `mtime`, `size`.
+
+### `video_recording` value
+
+Continuous wall-clock video capture, independent of script input. stop() finalizes and returns the MP4 file; repeated stop returns the same video. close() aborts/discards. stats contains frames, duplicated (missed sampling slots filled with the previous frame), elapsed seconds and done. Stop before stopping/closing the VM; VM teardown aborts owned recorders. QEMU requires FFmpeg with libx264; no audio or host display server. Captures into a fixed letterboxed canvas at a fixed rate. Upscaling uses integer factors; sources larger than the canvas downscale with nearest-neighbor. Default is 1440x900/30fps, libx264 CRF10/YUV420. lossless=True uses libx264rgb CRF0/RGB without color subsampling; the encoded canvas is pixel-exact, but browser playback is not guaranteed. Guest resolution changes are supported. duration auto-finalizes; output/capture/encoder failures are reported by stop, not silently accepted as success. Bounds: even dimensions 2..4096, at most 4096x2160 pixels, 1..60 fps, maximum 1KiB..512MiB, duration (0,3600] seconds. For boot capture: start_paused=True, recorder=vm.record(), vm.resume(), then video=recorder.stop().
+
+Methods and attributes: `close()`, `stats`, `stop() -> file`.
+
 ### `vm` value
 
 A live virtual machine. Input helpers send guest keys, text or pointer events; screenshot captures the display. pause/resume/reset/powerdown/shutdown/stop control lifecycle, wait observes completion and next_event consumes events. channel and debugger open declared guest endpoints; extensions expose backend-specific features. Check capabilities before using optional operations.
 
-Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `reset(timeout=30)`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
+Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `record(width=1440, height=900, fps=30, maximum=64MiB, duration=600, lossless=False)`, `reset(timeout=30)`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
+
+### `vmm_arm64_boot` value
+
+Portable raw ARM64 handoff containing an immutable firmware image, physical load/entry addresses, RAM base. Optional Darwin handoff metadata exposes encoded NVRAM and an immutable kernel-prefix range; hardware platform selection is separate. CPU register configuration belongs to the handoff; native execution belongs to the selected backend.
+
+Methods and attributes: `address`, `entry`, `image`, `memory_base`, `nvram`, `read_only_address`, `read_only_size`.
+
+### `vmm_arm64_runtime` value
+
+VM-owned guest resource access for an ARM64 platform factory. Exposes memory_base, memory_size, disks, epoch_microseconds, read_memory(address,size), write_memory(address,data), protect_memory(address,size,read=True,write=False,execute=True), counter(), irq(id,level), read_register(id), write_register(id,value), emit(kind,payload=None), and device(kind,options). Native device options and lifecycle are documented in docs/arm64-platforms.md. Runtime operations are revoked when the VM stops; no host paths or native handles are exposed.
+
+Methods and attributes: `counter`, `device`, `disks`, `emit`, `epoch_microseconds`, `irq`, `memory_base`, `memory_size`, `protect_memory`, `read_memory`, `read_register`, `write_memory`, `write_register`.
 
 ### `vmm_backend` value
 
@@ -4292,11 +4987,17 @@ A guest display requirement. mode selects the requested display arrangement and 
 
 Methods and attributes: `mode`, `required`.
 
+### `vmm_linux_boot` value
+
+Direct Linux boot intent containing borrowed immutable kernel and optional initramfs files and a command line. These inputs remain portable; a capable backend owns their transport and lifetime.
+
+Methods and attributes: `command_line`, `initramfs`, `kernel`.
+
 ### `vmm_machine` value
 
 A portable VM specification, not a live VM. It records architecture, resources, disks, networks, channels, display and required capabilities for backend validation and vmm.start.
 
-Methods and attributes: `architecture`, `channels`, `cpus`, `disks`, `display`, `memory`, `networks`, `required_capabilities`, `start_paused`.
+Methods and attributes: `architecture`, `boot`, `channels`, `cpus`, `disks`, `display`, `memory`, `networks`, `platform`, `required_capabilities`, `start_paused`.
 
 ### `vmm_network` value
 
@@ -4351,3 +5052,9 @@ Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, 
 Opaque RSA code-signing identity. certificate contains the public DER X.509 certificate; private-key material is not exposed by attributes or representations.
 
 Methods and attributes: `certificate (DER bytes; private key is not exposed)`.
+
+### `workspace` value
+
+An SCS capability over a live root. open_file returns a stable immutable trex file version; write_file accepts files, strings or bytes, reusing same-repository content without reading its payload. readonly shares live state, view captures an independent immutable root, and fork creates independent writable state after durable snapshot. Only publish changes named roots, with conflict detection; explicit publication survives later script errors. Paths cannot traverse parents and symlinks are never followed. Renvo source consumers capture a lazy stable tree view.
+
+Methods and attributes: `chmod(path, mode)`, `delete(path)`, `fork()`, `glob(pattern)`, `list_dir(path)`, `mkdir(path)`, `open_file(path)`, `publish(name)`, `read_file(path, line_start=None, line_end=None, output_limit=None)`, `readlink(path)`, `readonly()`, `rename(old, new)`, `replace(path, old, new)`, `search(pattern, ...)`, `snapshot()`, `stat(path)`, `symlink(path, target)`, `view()`, `write_file(path, content)`.

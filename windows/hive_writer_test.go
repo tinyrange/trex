@@ -15,6 +15,9 @@ import (
 
 func TestRegistryHiveRejectsShortLargeValueSegments(t *testing.T) {
 	data := make([]byte, hiveBaseBlockSize+0x80)
+	copy(data, "regf")
+	binary.LittleEndian.PutUint32(data[20:], 1)
+	binary.LittleEndian.PutUint32(data[24:], 5)
 	putCell := func(offset uint32, body []byte) {
 		start := hiveBaseBlockSize + int(offset)
 		binary.LittleEndian.PutUint32(data[start:start+4], uint32(-int32(len(body)+4)))
