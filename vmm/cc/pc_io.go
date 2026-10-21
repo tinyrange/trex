@@ -126,6 +126,11 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 	if handled, err := p.routeIDE(ex); handled {
 		return err
 	}
+	if ex.Port == biosMousePort && ex.Write && ex.Size == 1 && ex.Count == 1 {
+		p.biosMouseByte(ex.Data[0])
+		return nil
+	}
+
 	if ex.Port == biosPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		return p.bios()
 	}

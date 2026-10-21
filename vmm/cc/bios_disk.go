@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/tinyrange/trex/vmm"
+	"j5.nz/cc/hypervisor/x86state"
 )
 
 // BIOS CHS translation is independent of ATA's four-bit head register.
@@ -20,18 +21,23 @@ func translatedGeometry(sectors uint64) vmm.CHSGeometry {
 
 // extendedDiskTransfer implements the 16-byte EDD disk address packet. The
 // advertised fixed-disk subset uses segment:offset buffers, not flat addresses.
-func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte) byte {
-	packet, err := p.biosRead(address, 16)
+func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte, states ...x86state.SystemRegisters) byte {
+	state, stateErr := p.biosAccessSystem()
+	if len(states) > 0 {
+		state, stateErr = states[0], nil
+	}
+	if stateErr != nil {
+		return 9
+	}
+	packet, flushPacket, err := p.guestMemory(address, 16, state, true)
 	if err != nil || packet[0] < 16 || packet[1] != 0 {
 		return 1
 	}
+	defer flushPacket()
 	count := uint64(binary.LittleEndian.Uint16(packet[2:]))
 	lba := binary.LittleEndian.Uint64(packet[8:])
 	bufferAddress := uint64(binary.LittleEndian.Uint16(packet[6:]))*16 + uint64(binary.LittleEndian.Uint16(packet[4:]))
 	binary.LittleEndian.PutUint16(packet[2:], 0)
-	if err := p.biosWrite(address+2, packet[2:4]); err != nil {
-		return 9
-	}
 	if count == 0 || count > 127 || write && flags & ^byte(1) != 0 {
 		return 1
 	}
@@ -39,10 +45,11 @@ func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte) byte {
 	if lba >= capacity || count > capacity-lba {
 		return 4
 	}
-	buffer, err := p.biosRead(bufferAddress, count*512)
+	buffer, flushBuffer, err := p.guestMemory(bufferAddress, count*512, state, !write)
 	if err != nil {
 		return 9
 	}
+	defer flushBuffer()
 	var n int
 	if write {
 		writer, ok := p.disk.Device.(io.WriterAt)
@@ -52,16 +59,8 @@ func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte) byte {
 		n, err = writer.WriteAt(buffer, int64(lba)*512)
 	} else {
 		n, err = p.disk.Device.ReadAt(buffer, int64(lba)*512)
-		if n > 0 {
-			if e := p.biosWrite(bufferAddress, buffer[:n]); e != nil {
-				return 9
-			}
-		}
 	}
 	binary.LittleEndian.PutUint16(packet[2:], uint16(n/512))
-	if e := p.biosWrite(address+2, packet[2:4]); e != nil {
-		return 9
-	}
 	if err != nil || n != len(buffer) {
 		return 4
 	}
@@ -75,15 +74,23 @@ func (p *pc) extendedDiskTransfer(address uint64, write bool, flags byte) byte {
 	return 0
 }
 
-func (p *pc) extendedDiskParameters(address uint64) byte {
-	header, err := p.biosRead(address, 2)
+func (p *pc) extendedDiskParameters(address uint64, states ...x86state.SystemRegisters) byte {
+	state, stateErr := p.biosAccessSystem()
+	if len(states) > 0 {
+		state, stateErr = states[0], nil
+	}
+	if stateErr != nil {
+		return 9
+	}
+	header, _, err := p.guestMemory(address, 2, state, false)
 	if err != nil || binary.LittleEndian.Uint16(header) < 26 {
 		return 1
 	}
-	buffer, err := p.biosRead(address, 26)
+	buffer, flushBuffer, err := p.guestMemory(address, 26, state, true)
 	if err != nil {
 		return 9
 	}
+	defer flushBuffer()
 	clear(buffer)
 	binary.LittleEndian.PutUint16(buffer, 26)
 	// Geometry is the BIOS logical geometry. EDD sector count remains complete
@@ -93,19 +100,24 @@ func (p *pc) extendedDiskParameters(address uint64) byte {
 	binary.LittleEndian.PutUint32(buffer[12:], uint32(p.biosGeometry.Sectors))
 	binary.LittleEndian.PutUint64(buffer[16:], uint64(p.disk.Device.Geometry().Size/512))
 	binary.LittleEndian.PutUint16(buffer[24:], 512)
-	if err := p.biosWrite(address, buffer); err != nil {
-		return 9
-	}
 	return 0
 }
 
 // Verify and seek are part of the EDD fixed-disk subset. Neither transfers data
 // to the packet's buffer; seek only validates the destination on this device.
-func (p *pc) extendedDiskPosition(address uint64, verify bool) byte {
-	packet, err := p.biosRead(address, 16)
+func (p *pc) extendedDiskPosition(address uint64, verify bool, states ...x86state.SystemRegisters) byte {
+	state, stateErr := p.biosAccessSystem()
+	if len(states) > 0 {
+		state, stateErr = states[0], nil
+	}
+	if stateErr != nil {
+		return 9
+	}
+	packet, flushPacket, err := p.guestMemory(address, 16, state, true)
 	if err != nil || packet[0] < 16 || packet[1] != 0 {
 		return 1
 	}
+	defer flushPacket()
 	count := uint64(binary.LittleEndian.Uint16(packet[2:]))
 	lba := binary.LittleEndian.Uint64(packet[8:])
 	capacity := uint64(p.disk.Device.Geometry().Size / 512)
@@ -116,9 +128,6 @@ func (p *pc) extendedDiskPosition(address uint64, verify bool) byte {
 		return 0
 	}
 	binary.LittleEndian.PutUint16(packet[2:], 0)
-	if err := p.biosWrite(address+2, packet[2:4]); err != nil {
-		return 9
-	}
 	if count == 0 || count > 127 {
 		return 1
 	}
@@ -132,9 +141,6 @@ func (p *pc) extendedDiskPosition(address uint64, verify bool) byte {
 			return 4
 		}
 		binary.LittleEndian.PutUint16(packet[2:], uint16(i+1))
-		if err := p.biosWrite(address+2, packet[2:4]); err != nil {
-			return 9
-		}
 	}
 	return 0
 }

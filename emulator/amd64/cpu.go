@@ -852,24 +852,36 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			default:
 				err = fmt.Errorf("invalid scalar vector destination %v", destination)
 			}
-		case x86asm.MOVD:
+		case x86asm.MOVD, x86asm.MOVQ:
+			scalarWidth := 4
+			if inst.Op == x86asm.MOVQ {
+				scalarWidth = 8
+			}
 			if destination, ok := inst.Args[0].(x86asm.Reg); ok && destination >= x86asm.X0 && destination <= x86asm.X15 {
 				var value uint64
-				value, err = read(inst.Args[1], 4)
+				if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+					value = binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8])
+				} else {
+					value, err = read(inst.Args[1], scalarWidth)
+				}
 				if err == nil {
 					register := &c.xmm[destination-x86asm.X0]
 					*register = [16]byte{}
-					binary.LittleEndian.PutUint32(register[:4], uint32(value))
+					if scalarWidth == 8 {
+						binary.LittleEndian.PutUint64(register[:8], value)
+					} else {
+						binary.LittleEndian.PutUint32(register[:4], uint32(value))
+					}
 				}
 				break
 			}
 			source, ok := inst.Args[1].(x86asm.Reg)
 			if !ok || source < x86asm.X0 || source > x86asm.X15 {
-				err = fmt.Errorf("invalid MOVD vector source %v", inst.Args[1])
+				err = fmt.Errorf("invalid scalar vector source %v", inst.Args[1])
 				break
 			}
-			value := uint64(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]))
-			err = c.writeOperand(memory, inst.Args[0], inst, next, 4, value)
+			value := binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8])
+			err = c.writeOperand(memory, inst.Args[0], inst, next, scalarWidth, value)
 		case x86asm.PSRLDQ:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
