@@ -619,15 +619,7 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 				}
 			}
 		}
-		if err := applyAttributes(node, selected); err != nil {
-			return err
-		}
-		if id == 5 {
-			node.name, node.parent = "", 5
-			node.links = nil
-		} else if len(node.links) > 0 {
-			node.name, node.parent = node.links[0].name, node.links[0].parent
-		}
+		node.attributes = selected
 		v.nodes[uint64(id)] = node
 	}
 	for baseID, records := range extensions {
@@ -648,15 +640,30 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 			if !base.hasAttributeList {
 				continue
 			}
-			var selected []ntfsReadAttribute
 			for _, attribute := range extension.attributes {
 				if ntfsReadAttributeListed(base.attributeList, extension, attribute) {
-					selected = append(selected, attribute)
+					base.attributes = append(base.attributes, attribute)
 				}
 			}
-			if err := applyAttributes(base, selected); err != nil {
-				return fmt.Errorf("ntfs: base %d sequence %d extension %d sequence %d: %w", baseID, base.sequence, extension.id, extension.sequence, err)
-			}
+		}
+	}
+	for _, node := range v.nodes {
+		// MFT record order is not stream VCN order. Collect every authorized
+		// extent before merging: otherwise a high-VCN extension introduces a
+		// synthetic sparse gap that falsely overlaps a later middle extent.
+		// Stable ordering preserves the existing order of resident metadata.
+		sort.SliceStable(node.attributes, func(i, j int) bool {
+			return node.attributes[i].firstVCN < node.attributes[j].firstVCN
+		})
+		if err := applyAttributes(node, node.attributes); err != nil {
+			return err
+		}
+		node.attributes = nil
+		if node.id == 5 {
+			node.name, node.parent = "", 5
+			node.links = nil
+		} else if len(node.links) > 0 {
+			node.name, node.parent = node.links[0].name, node.links[0].parent
 		}
 	}
 	if secure := v.nodes[9]; secure != nil {
