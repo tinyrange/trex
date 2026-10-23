@@ -33,6 +33,11 @@ type Backend struct {
 	IDEModel string
 	// OverlayLimit bounds dirty snapshot memory; zero uses 256 MiB.
 	OverlayLimit int64
+	// CPUFactory selects a software execution engine while retaining identical
+	// firmware and PC device semantics. Nil selects CrumbleCracker/KVM.
+	CPUFactory func(context.Context) (hypervisor.X86, error)
+	// Name overrides the backend identity for an alternate CPU engine.
+	Name string
 }
 
 func Available() bool {
@@ -42,12 +47,36 @@ func Capabilities() []string {
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 		return arm64Capabilities()
 	}
+	return pcCapabilities()
+}
+func pcCapabilities() []string {
 	return []string{"boot.darwin", "disk", "disk.bus.ide", "disk.bus.nvme", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
 }
-func (*Backend) ID() string             { return "cc.v1" }
-func (*Backend) Capabilities() []string { return Capabilities() }
+func (b *Backend) ID() string {
+	if b.Name != "" {
+		return b.Name
+	}
+	return "cc.v1"
+}
+func (b *Backend) Capabilities() []string {
+	caps := Capabilities()
+	if b.CPUFactory != nil {
+		caps = pcCapabilities()
+	}
+	if b.ID() != "cc.v1" {
+		for j, c := range caps {
+			if c == "extension.cc.v1" {
+				caps[j] = "extension." + b.ID()
+			}
+		}
+	}
+	return caps
+}
 func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if m.Architecture == "arm64" {
+		if b.CPUFactory != nil {
+			return []vmm.ValidationIssue{{Code: "cc.unsupported", Field: "architecture", Message: "alternate x86 CPU engines require x86_64", Backend: b.ID()}}
+		}
 		return b.validateARM64(m)
 	}
 	var issues []vmm.ValidationIssue
@@ -57,7 +86,7 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if b.PrivateAppleISA {
 		add("private_apple_isa", "private Apple ISA requires the native ARM64 backend")
 	}
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+	if b.CPUFactory == nil && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64") {
 		add("backend", "PC execution requires Linux/amd64 KVM")
 	}
 	if m.ARM64Platform != nil {
@@ -95,11 +124,14 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if b.OverlayLimit < 0 {
 		add("overlay_limit", "snapshot overlay limit must be positive")
 	}
-	if !Available() {
+	if b.CPUFactory == nil && !Available() {
 		add("backend", "cc PC execution requires Linux/amd64 KVM")
 	}
 	if m.Architecture != "i386" && m.Architecture != "x86_64" {
 		add("architecture", "cc PC supports i386 and x86_64")
+	}
+	if b.CPUFactory != nil && m.CPUs != 1 {
+		add("cpus", "alternate software CPU engines require one CPU")
 	}
 	if m.CPUs < 1 || m.CPUs > 4 {
 		add("cpus", "cc PC supports one to four CPUs")
@@ -138,7 +170,7 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		}
 		if d.CHS != nil {
 			c := d.CHS
-			if c.Cylinders < 1 || c.Cylinders > 1024 || c.Heads < 1 || c.Heads > 16 || c.Sectors < 1 || c.Sectors > 63 || int64(c.Cylinders*c.Heads*c.Sectors)*512 > g.Size {
+			if c.Cylinders < 1 || c.Cylinders > 1024 || c.Heads < 1 || c.Heads > 16 || c.Sectors < 1 || c.Sectors > 63 || int64(c.Cylinders*c.Heads*c.Sectors)*512-g.Size >= int64(c.Heads*c.Sectors)*512 {
 				add(field+".chs", "invalid legacy ATA geometry")
 			}
 		}
@@ -170,7 +202,7 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	}
 	for _, required := range m.RequiredCapabilities {
 		found := false
-		for _, c := range Capabilities() {
+		for _, c := range b.Capabilities() {
 			if c == required {
 				found = true
 			}
@@ -222,11 +254,21 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 	// A reboot must not create a fresh snapshot overlay.
 	options := *b
 	rebuild := func() (*pc, error) { return options.newPlatform(ctx, m, disk) }
-	return newRestartableDriver(ctx, platform, m.StartPaused, rebuild), nil
+	return newRestartableDriverFor(ctx, platform, m.StartPaused, rebuild, b), nil
 }
 
 func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk) (*pc, error) {
-	cpus, err := hypervisor.NewX86WithCPUs(ctx, m.CPUs)
+	var cpus []hypervisor.X86
+	var err error
+	if b.CPUFactory != nil {
+		var cpu hypervisor.X86
+		cpu, err = b.CPUFactory(ctx)
+		if err == nil {
+			cpus = []hypervisor.X86{cpu}
+		}
+	} else {
+		cpus, err = hypervisor.NewX86WithCPUs(ctx, m.CPUs)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +383,12 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 			cpu.Close()
 			return nil, err
 		}
+	}
+	// Legacy firmware/DMA paths notify before lending mutable RAM spans;
+	// direct BDA and mouse scratch updates have explicit barriers. UEFI retains
+	// conservative boundaries until its separate firmware path is audited.
+	if tracked, ok := cpu.(interface{ SetRAMWriteTracking(bool) }); ok {
+		tracked.SetRAMWriteTracking(!b.UEFI && m.DarwinBoot == nil && len(m.Channels) == 0)
 	}
 	return platform, nil
 }

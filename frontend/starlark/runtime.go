@@ -104,6 +104,7 @@ import (
 	storagenative "github.com/tinyrange/trex/storage/native"
 	ccapi "github.com/tinyrange/trex/vmm/cc"
 	qemuapi "github.com/tinyrange/trex/vmm/qemu"
+	rfeapi "github.com/tinyrange/trex/vmm/rfe"
 	vmmstar "github.com/tinyrange/trex/vmm/star"
 	webstar "github.com/tinyrange/trex/web/star"
 	windowsapi "github.com/tinyrange/trex/windows"
@@ -113,6 +114,7 @@ import (
 
 func predeclared() starlark.StringDict {
 	nativeIO := storagenative.Builtins()
+	vmmstar.RegisterBackend("rfe.v1", (&rfeapi.Backend{}).Capabilities())
 	channelBuiltins := channelstar.Builtins()
 	channelBuiltins["expose_tcp"] = starlark.NewBuiltin("expose_tcp", channelnative.ExposeTCPBuiltin)
 	if ccapi.Available() {
@@ -263,6 +265,7 @@ func predeclared() starlark.StringDict {
 		"firmware": namespace{name: "firmware", attrs: acpistar.Builtins()},
 		"image":    namespace{name: "image", attrs: imagestar.Builtins()},
 		"cc":       namespace{name: "cc", attrs: ccapi.Builtins()},
+		"rfe":      namespace{name: "rfe", attrs: rfeapi.Builtins()},
 		"qemu":     namespace{name: "qemu", attrs: qemuapi.Builtins()},
 		"runtime":  runtimeNamespace(),
 		"vmm":      namespace{name: "vmm", attrs: vmmstar.Builtins()},

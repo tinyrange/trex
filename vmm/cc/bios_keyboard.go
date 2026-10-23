@@ -35,6 +35,7 @@ func nextKeyboardWord(offset uint16) uint16 {
 }
 func validKeyboardWord(offset uint16) bool { return offset >= 0x1e && offset < 0x3e && offset&1 == 0 }
 func (p *pc) storeKeyboardWord(word uint16) bool {
+	p.beforeRAMWrite(0x400, 0x100)
 	head, tail := p.keyboardBounds()
 	if !validKeyboardWord(head) || !validKeyboardWord(tail) || nextKeyboardWord(tail) == head {
 		return false
@@ -54,6 +55,7 @@ var biosKeyASCII = [128]byte{
 }
 
 func (p *pc) keyboardScan(scan byte) {
+	p.beforeRAMWrite(0x400, 0x100)
 	if scan == 0xe0 {
 		p.biosKeyExtended = true
 		return
@@ -164,6 +166,7 @@ func (p *pc) keyboardScan(scan byte) {
 }
 
 func (p *pc) keyboardBIOS(r *x86state.Registers, flags *uint16) bool {
+	p.beforeRAMWrite(0x400, 0x100)
 	ah := byte(r.Rax >> 8)
 	// The ROM's JNZ must return immediately for nonblocking calls even when
 	// the caller's saved ZF is set.

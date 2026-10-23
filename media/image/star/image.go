@@ -22,6 +22,7 @@ const (
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
 		"compare": starlark.NewBuiltin("image.compare", imageCompareBuiltin),
+		"decode":  starlark.NewBuiltin("image.decode", imageDecodeBuiltin),
 		"info":    starlark.NewBuiltin("image.info", imageInfoBuiltin),
 		"pixel":   starlark.NewBuiltin("image.pixel", imagePixelBuiltin),
 		"sample":  starlark.NewBuiltin("image.sample", imageSampleBuiltin),
@@ -109,6 +110,10 @@ func imagePixelBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if err != nil {
 		return nil, fmt.Errorf("image.pixel: %w", err)
 	}
+	return decodedPixel(decoded, x, y)
+}
+
+func decodedPixel(decoded image.Image, x, y int) (starlark.Value, error) {
 	bounds := decoded.Bounds()
 	if x < 0 || y < 0 || x >= bounds.Dx() || y >= bounds.Dy() {
 		return nil, fmt.Errorf("image.pixel: coordinate (%d,%d) is outside %dx%d image", x, y, bounds.Dx(), bounds.Dy())
@@ -239,4 +244,31 @@ func imageChannelDifference(left, right uint32) uint32 {
 		return left - right
 	}
 	return right - left
+}
+
+// image.decode returns one bounded immutable image snapshot. Pixel sampling on
+// the snapshot never reopens/redecodes its source and keeps no global cache of
+// caller-owned files. The decoded pixel storage is reachable only via reads.
+func imageDecodeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var source starlark.Value
+	maximum, maxPixels := int64(defaultImageInputLimit), int64(defaultImagePixelLimit)
+	if err := starlark.UnpackArgs("image.decode", args, kwargs, "source", &source, "maximum?", &maximum, "max_pixels?", &maxPixels); err != nil {
+		return nil, err
+	}
+	decoded, format, err := decodeBoundedImage(source, maximum, maxPixels)
+	if err != nil {
+		return nil, fmt.Errorf("image.decode: %w", err)
+	}
+	bounds := decoded.Bounds()
+	pixel := starlark.NewBuiltin("decoded_image.pixel", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var x, y int
+		if err := starlark.UnpackArgs("decoded_image.pixel", args, kwargs, "x", &x, "y", &y); err != nil {
+			return nil, err
+		}
+		return decodedPixel(decoded, x, y)
+	})
+	return starvalue.NewRecord(starlark.StringDict{
+		"format": starlark.String(format), "width": starlark.MakeInt(bounds.Dx()), "height": starlark.MakeInt(bounds.Dy()),
+		"pixels": starlark.MakeInt64(int64(bounds.Dx()) * int64(bounds.Dy())), "pixel": pixel,
+	}), nil
 }

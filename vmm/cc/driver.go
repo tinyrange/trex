@@ -32,6 +32,7 @@ func (r request) execute() {
 }
 
 type driver struct {
+	backend        *Backend
 	pc             *pc
 	cpuMu          sync.Mutex // protects cancellation targets across reconstruction
 	rebuild        func() (*pc, error)
@@ -54,11 +55,15 @@ type driver struct {
 func newDriver(ctx context.Context, p *pc, paused bool) *driver {
 	return newRestartableDriver(ctx, p, paused, nil)
 }
-
+func newDriverFor(ctx context.Context, p *pc, paused bool, backend *Backend) *driver {
+	return newRestartableDriverFor(ctx, p, paused, nil, backend)
+}
 func newRestartableDriver(ctx context.Context, p *pc, paused bool, rebuild func() (*pc, error)) *driver {
+	return newRestartableDriverFor(ctx, p, paused, rebuild, &Backend{})
+}
+func newRestartableDriverFor(ctx context.Context, p *pc, paused bool, rebuild func() (*pc, error), backend *Backend) *driver {
 	ctx, cancel := context.WithCancel(ctx)
-	d := &driver{
-		pc: p, ctx: ctx, cancel: cancel, rebuild: rebuild,
+	d := &driver{backend: backend, pc: p, ctx: ctx, cancel: cancel, rebuild: rebuild,
 		requests: make(chan request, 16),
 		events:   make(chan vmm.Event, 32),
 		ready:    make(chan struct{}, 1),
@@ -73,8 +78,8 @@ func newRestartableDriver(ctx context.Context, p *pc, paused bool, rebuild func(
 	go d.loop()
 	return d
 }
-func (d *driver) BackendID() string           { return "cc.v1" }
-func (d *driver) Capabilities() []string      { return Capabilities() }
+func (d *driver) BackendID() string           { return d.backend.ID() }
+func (d *driver) Capabilities() []string      { return d.backend.Capabilities() }
 func (d *driver) DebugReady() <-chan struct{} { return d.ready }
 func (d *driver) Status(context.Context) (vmm.State, error) {
 	d.mu.Lock()

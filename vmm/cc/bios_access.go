@@ -10,26 +10,15 @@ import (
 // different buffer. Walk every page: adjacent linear pages need not share
 // adjacent RAM backing. Disk DMA continues using physical memory separately.
 func (p *pc) biosCopy(address uint64, data []byte, write bool, s x86state.SystemRegisters) error {
-	if uint64(len(data)) > ^uint64(0)-address {
-		return fmt.Errorf("BIOS memory range overflows")
+	buffer, commit, err := p.guestMemory(address, uint64(len(data)), s, write)
+	if err != nil {
+		return err
 	}
-	for len(data) > 0 {
-		size := min(len(data), 4096-int(address&4095))
-		physical, err := p.physical(address, s)
-		if err != nil {
-			return err
-		}
-		memory, err := p.memory(p.cpuAddress(physical), uint64(size))
-		if err != nil {
-			return err
-		}
-		if write {
-			copy(memory, data[:size])
-		} else {
-			copy(data[:size], memory)
-		}
-		address += uint64(size)
-		data = data[size:]
+	if write {
+		copy(buffer, data)
+		commit()
+	} else {
+		copy(data, buffer)
 	}
 	return nil
 }

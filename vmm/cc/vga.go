@@ -64,7 +64,10 @@ func newVGA(text []byte) *vga {
 			v.dac[i][c] = level
 		}
 	}
-	v.loadFirmwareFont()
+	for i, index := range []byte{0, 1, 2, 3, 4, 5, 20, 7, 56, 57, 58, 59, 60, 61, 62, 63} {
+		v.attr[i] = index
+	}
+	v.installTextFont()
 	return v
 }
 
@@ -100,6 +103,7 @@ func (v *vga) setMode(mode byte) error {
 			clear(v.planes[i][:])
 		}
 	}
+	v.installTextFont()
 	if v.cgaMono {
 		v.seq = [8]byte{3, 0, 1, 0, 6}
 		v.gc = [16]byte{0, 0, 0, 0, 0, 0, 0x0d, 0, 255}

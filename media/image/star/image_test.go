@@ -232,3 +232,40 @@ func TestImageSampleBoundsAndEmptySelection(t *testing.T) {
 		t.Fatalf("invalid source: %v", err)
 	}
 }
+
+func TestDecodedImageSnapshotDoesNotReadSourceAgain(t *testing.T) {
+	data := []byte(encodedTestImage(t, false))
+	source := &starfile.Bytes{Data: data}
+	v, err := imageDecodeBuiltin(nil, nil, starlark.Tuple{source}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := v.(*starvalue.Record)
+	if width, _ := snapshot.Values["width"].(starlark.Int).Int64(); width != 20 {
+		t.Fatal(width)
+	}
+	// Destroy the mutable encoded input after snapshot construction. Sampling
+	// must remain valid: neither a hidden decode nor an alias into source RAM.
+	clear(data)
+	pixel := snapshot.Values["pixel"].(*starlark.Builtin)
+	for n := 0; n < 20; n++ {
+		v, err = starlark.Call(&starlark.Thread{Name: "snapshot"}, pixel, starlark.Tuple{starlark.MakeInt(n), starlark.MakeInt(0)}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r, _ := v.(*starvalue.Record).Values["r"].(starlark.Int).Int64(); r != 20 {
+			t.Fatal(r)
+		}
+	}
+	if _, err = starlark.Call(&starlark.Thread{}, pixel, starlark.Tuple{starlark.MakeInt(20), starlark.MakeInt(0)}, nil); err == nil {
+		t.Fatal("snapshot accepted out-of-bounds coordinates")
+	}
+}
+func TestDecodedImageSnapshotHonorsInputAndPixelLimits(t *testing.T) {
+	source := encodedTestImage(t, false)
+	for _, arg := range []starlark.Tuple{{starlark.String("maximum"), starlark.MakeInt(1)}, {starlark.String("max_pixels"), starlark.MakeInt(199)}} {
+		if _, err := imageDecodeBuiltin(nil, nil, starlark.Tuple{source}, []starlark.Tuple{arg}); err == nil {
+			t.Fatal("snapshot bypassed image resource limit", arg)
+		}
+	}
+}
