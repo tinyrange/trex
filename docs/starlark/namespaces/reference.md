@@ -800,6 +800,18 @@ Creates an isolated PE32 or raw-x86 conformance session.
 
 Returns an argument reference to a named call buffer's capacity.
 
+## `windows/emulation/iphlpapi.star`
+
+Explicit adapter inventory for a machine with no IPv4 network adapters.
+
+### `no_ipv4_adapters_plugin`
+
+Models GetAdaptersInfo for an explicitly empty IPv4 adapter inventory.
+
+    This API excludes loopback. It returns ERROR_NO_DATA, never a fabricated
+    adapter or successful empty linked list. It is not installed by default;
+    disconnected but configured adapters require a different inventory model.
+
 ## `windows/emulation/patterns.star`
 
 Compact, validated executable signatures and emulator transformations.
@@ -912,10 +924,75 @@ Runs one target export or executable using semantic system-DLL plugins.
     runtime plugins are constructed and receives a record containing `crt` and
     `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
+    `virtual_modules` explicitly adds semantic DLL names to LoadLibrary lookup;
+    callers must supply their exports through plugins. No native DLL is loaded. Keys
+    missing from those plugins still fail on resolution or invocation.
     `generated_entries` retains newly created or changed files and directories
     as path-keyed records with `directory`, file `data`, and optional DOS
     `attributes` and owned self-relative `security` bytes. `generated_files`
     is the content-only compatibility view; use entries to preserve metadata.
+
+## `windows/emulation/urlmon.star`
+
+Explicit disconnected URLMon policy for offline installer execution.
+
+### `offline_urlmon_plugin`
+
+Rejects HTTP(S) stream binding when the modeled machine has no network.
+
+    This must be selected explicitly by the image/probe, not installed as a
+    default fallback for a missing network implementation. No request is sent,
+    no completion callback is invented, and no content is returned.
+
+## `windows/emulation/wininet.star`
+
+Explicit disconnected WinINet session model; no network access.
+
+### `disconnected_wininet_plugin`
+
+Creates local Internet sessions, but never fabricates network content.
+
+    Only direct/preconfigured sessions and their owned lifetime are
+    currently modeled. Other operations remain missing rather than succeeding.
+
+## `windows/emulation/winrt.star`
+
+Bounded Windows Runtime string-reference semantics.
+
+### `disconnected_network_information_plugin`
+
+Exposes only the no-Internet-profile NetworkInformation static query.
+
+    This explicitly selected machine has no connected network. No activation
+    or networking fallback is installed for other classes or methods.
+
+### `string_reference_plugin`
+
+Provides caller-owned UTF-16 HSTRING references, not runtime activation.
+
+    Headers and source buffers remain caller-owned and immutable until their
+    last use. Deleting a reference never frees either. Owned/duplicated strings
+    and other Windows Runtime APIs are deliberately not supplied.
+
+## `windows/emulation/wintrust.star`
+
+Bounded Authenticode verification for an explicitly disconnected machine.
+
+### `offline_wintrust_plugin`
+
+Verify embedded signatures using explicit media roots, time and policy.
+
+    Models generic verify-v2 FILE/VERIFY/CLOSE, no UI, chain revocation and
+    cache-only retrieval (0x1440), with an empty revocation cache. The supported
+    Windows policy 0x23c00 permits offline revocation for individual/commercial
+    publishers and ignores timestamp revocation. Both chains still undergo
+    signature, time, purpose and explicit-root validation. No host trust/clock
+    or network is consulted. Disallowed certificates are never accepted.
+
+    Unsupported formats, policies and invalid cryptographic inputs stop
+    execution, rather than falsely reporting successful trust. Provider-state
+    inspection is limited to borrowed signer/chain/DER views (no CERT_INFO or
+    CMSG_SIGNER_INFO). This is not a general WinTrust provider.
 
 ## `windows/identity.star`
 
@@ -1784,6 +1861,9 @@ Runs one target export or executable using semantic system-DLL plugins.
     runtime plugins are constructed and receives a record containing `crt` and
     `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
+    `virtual_modules` explicitly adds semantic DLL names to LoadLibrary lookup;
+    callers must supply their exports through plugins. No native DLL is loaded. Keys
+    missing from those plugins still fail on resolution or invocation.
     `generated_entries` retains newly created or changed files and directories
     as path-keyed records with `directory`, file `data`, and optional DOS
     `attributes` and owned self-relative `security` bytes. `generated_files`
@@ -3984,6 +4064,12 @@ Parses the first 40 bytes of an uncompressed 24/32-bit RGB Windows BITMAPINFOHEA
 
 Computes the Windows catalog membership hash of a file. For PE inputs this uses the format's Authenticode hashing rules rather than a plain whole-file digest.
 
+### `windows.catalog_index`
+
+`windows.catalog_index(file) -> dict`
+
+Parses signed-catalog CTL lookup entries into `sha1` and `sha256` byte lists. Version 1 uses SPC indirect-data digests; version 2 uses subject identifiers. Unrelated certificate/attribute octet strings are not treated as entries. Input is bounded to 64 MiB and malformed catalogs fail. These are catalog lookup keys, not signature verification or trust decisions. No network access or Windows API is used.
+
 ### `windows.catalog_members`
 
 `windows.catalog_members(value)`
@@ -3994,7 +4080,13 @@ Reads a PKCS#7 catalog and returns its member digest byte strings. Extracting me
 
 `windows.certificate(value) -> certificate record`
 
-Parses one DER X.509 certificate and returns its DER bytes, subject, issuer, SHA-1 fingerprint and a subject/issuer-equality flag named self_signed. That flag is not cryptographic signature verification.
+Parses one DER X.509 certificate and returns its DER bytes, subject, issuer, SHA-1 and SHA-256 fingerprints and a subject/issuer-equality flag named self_signed. That flag is not cryptographic signature verification.
+
+### `windows.certificate_chain`
+
+`windows.certificate_chain(certificate, roots, intermediates, unix_time, purpose) -> list[list[bytes]]`
+
+Validates X.509 paths using only explicit roots (at most 64), intermediates (at most 32), unix_time and purpose (code_signing or timestamping). Timestamping additionally requires a critical, exclusive RFC3161 timestamping EKU on the leaf. Each DER/PEM input is bounded to 1 MiB. Returns lists of certificate DER from leaf through root; invalid time, usage or trust paths raise errors. This is not revocation checking, a trusted timestamp decision or Windows provider policy; it uses no host roots, clock or network.
 
 ### `windows.cli_inspect`
 
@@ -4163,6 +4255,81 @@ Returns the fixed native DMR trailer section as an in-memory file for container 
 `windows.empty_event_log(size=5MiB) -> file`
 
 Constructs a valid empty legacy Windows event-log file of the requested size. This creates an EVT-format starting state, not an EVTX log.
+
+### `windows.etl_profile`
+
+`windows.etl_profile(file) -> dict`
+
+Native 64-bit kernel sampled-IP analysis with the ETL reader's bounded input
+and event limits. Returns image identities, process lifetimes, aggregated
+`points` (process/module indices, RVA, interrupt flag, sample count), loss
+metadata and explicit unknown counts. Index -1 means unknown; an unmapped
+RVA retains the absolute IP. Counts are self samples, not elapsed time or
+inclusive stacks. End rundown is not treated as an earlier image load.
+No symbols or network requests are implicit.
+
+`windows.pe(file).symbolize(pdb, rvas, timestamp, image_size, checksum)` resolves
+an AMD64 RVA list against `windows.pdb(file)`. Requires matching PE identity
+and CodeView GUID/DBI age; returns name/RVA/displacement/match dictionaries
+or None. Nearest public symbols cannot extend past their runtime-function
+interval or explicit chained unwind owner; unnamed leaves/unlinked fragments remain unresolved.
+
+### `windows.etl_report`
+
+`windows.etl_report(file, max_events=4000000) -> dict`
+
+Native offline analysis of finalized sequential, uncompressed kernel ETW `.etl`
+files (not EVT/EVTX). Uses the portable file reader; no Windows API, external
+parser, guest conversion tool, symbols or network access. Input is limited to
+1 GiB, 1 MiB per buffer, 4096 schemas, one day of event timestamps, and the
+configured event count (1..4000000). Unsupported framing/clock modes and
+truncation are errors, not partial-success reports.
+
+Returns `header` (clock, CPU count, loss counters), observed tick/time range,
+scheduled/idle/unknown/uncovered CPU-seconds, switch discontinuities, per-process
+lifetimes, command lines, scheduled CPU, matched ready/block thread-seconds,
+wait reasons, disk bytes/counts/summed and maximum response times, DPC/ISR sums,
+one-second `timeline`, `schemas` (group/opcode/version/header/count/decoded), and
+`warnings`. Events are time-sorted before lifecycle attribution; PID/TID reuse
+is not collapsed into one final ID map. Unsupported payloads remain in the schema
+inventory rather than being guessed.
+
+Times are relative to the first observed event, not firmware entry. Process start
+is not a desktop-ready milestone. Scheduled CPU includes interruptions; DPC/ISR
+sums can overlap each other and scheduled time. Ready/block/I/O sums across
+concurrent work are **not** critical-path wall time. Boundary gaps, unknown
+threads and losses are explicit. Reports include sensitive process arguments.
+See `windows/etl/FORMAT.md` for format coverage and permissive reference licenses.
+
+### `windows.etl_scheduler`
+
+`windows.etl_scheduler(file, pid, max_events=4000000, max_records=200000) -> dict`
+
+Returns timestamp-sorted scheduler observations for one PID from a finalized
+kernel ETL file. Records contain `seconds` relative to `first_tick`, `kind`,
+`tid`, `peer_tid`, `peer_pid`, `cpu`, `state`, and `reason`. Kinds are
+`process_start`, `process_end`, `thread_start`, `thread_rundown`, `thread_end`,
+`in`, `out`, and `ready`. State/reason describe the outgoing thread on a
+context switch; they do not describe the incoming thread on an `in` record.
+
+Ownership follows observed thread lifetimes; process boundaries expose PID
+reuse, and end rundown never invents an earlier lifetime. A ready record's
+peer is the last observed running thread on that CPU, not a proven waker:
+interrupts/DPCs may be responsible. Zero peer IDs mean idle or unknown.
+
+Includes `header` loss counters, `first_tick`, `last_tick`,
+`switch_discontinuities`, and `unsupported_thread_events`. Unsupported process
+schemas are not counted by the latter; use `etl_report` for a schema inventory.
+Losses and incomplete ownership prevent reliable interval/causal conclusions.
+No wait durations or critical path are inferred. Input/event limits match
+`etl_report`; `max_records` must be 1..1000000. Limits and malformed framing
+fail rather than silently truncating. No symbols or network access is implicit.
+
+### `windows.etl_walk`
+
+`windows.etl_walk(file, visit, group=-1, opcode=-1, min_tick=0, max_tick=0, max_events=4000000) -> dict`
+
+Visits raw records from a finalized sequential uncompressed kernel ETL in file order, NOT timestamp order. Calls visit(record); callback return values are ignored and errors stop traversal. Records contain offset, tick, cpu, header_type, group, opcode, version, pid, tid and owned payload bytes. Unavailable PID/TID are 0xffffffff; non-kernel group is 255. Optional group/opcode (-1 or 0..255) and inclusive raw min_tick/max_tick filters select callbacks; max_tick=0 is unbounded. The entire file is still validated and all records count toward max_events (1..4000000); input is bounded to 1 GiB and buffers to 1 MiB. Returns logfile header and loss counters. Callers must check loss, interpret clocks and schemas, account for lifecycle reuse and sort selected records before scheduler attribution. A thread running on the ReadyThread CPU is not proof of the wake source: interrupts may intervene. No symbols, inferred dependency claims, guest execution or network access.
 
 ### `windows.event_log`
 
@@ -4382,6 +4549,12 @@ Links an in-memory ELF32/i386 cdecl object into a PE32 DLL, executable, or nativ
 
 Signs a PE32 or PE32+ file with RSA/SHA-256 Authenticode entirely in memory and returns new bytes with an aligned WIN_CERTIFICATE and updated checksum. Preserves sections and overlay data. Existing certificate tables require replace=True. Optional page_hashes=True embeds SHA-256 page hashes. No timestamp, nested signatures, or trust-store changes are generated. See docs/pe-signing.md.
 
+### `windows.pe_signature`
+
+`windows.pe_signature(file) -> record`
+
+Verifies embedded single-signer RSA/SHA-256 Authenticode image integrity using bounded native PE and PKCS#7 parsing. Returns signer DER, embedded certificate DER list, signature bytes, raw unsigned attributes, digest_algorithm and timestamp. A recognized Microsoft RFC3161 SHA-256 timestamp is checked for signature integrity and binding to the primary signature; timestamp contains unix seconds, signer DER and certificates, or None when absent. Input is limited to 256 MiB, certificate table to 4 MiB and certificates to 32. Rejects unsigned images, unsupported signature forms and mismatched image/content/signature digests. This is NOT certificate-chain, timestamp-authority trust, expiry, revocation, publisher or Windows trust-policy validation. Other unsigned attributes and CMS v1 attribute certificates are not authenticated or used as trust material. No host roots, clock or network are consulted.
+
 ### `windows.pkcs7_certificates`
 
 `windows.pkcs7_certificates(value) -> list[certificate record]`
@@ -4399,6 +4572,18 @@ Plans Microsoft Press SETUP.INI media trees and retains companion SETUP.CMD acti
 `windows.pri_resource_candidates(file, section_index, resource_indices, max_bytes=256MiB) -> list[dict]`
 
 Returns structural candidate counts and schema information for selected resource indexes in a PRI resource-map section. It does not choose candidates or decode their values.
+
+### `windows.pri_resource_values`
+
+`windows.pri_resource_values(file, section_index, resource_indices, max_bytes=256MiB) -> list[dict|None]`
+
+Returns a parallel list of sole neutral/default string candidates. Each decoded
+entry has `value` (text) and `path` (boolean). Multiple candidates, a sole
+non-default candidate, or binary data return `None`: retain the resource index
+rather than choosing a locale. Absent resources, unsupported external-file
+locators, invalid bounds and malformed encodings are errors. Supports bounded
+internal/data-item values in UTF-16, ASCII and UTF-8. Path values are not opened
+or trusted as filesystem paths; callers must validate package-relative paths.
 
 ### `windows.pri_schema`
 
@@ -4779,7 +4964,7 @@ Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_secu
 
 ### `emulator.execution` value
 
-A retained in-process execution that can be advanced with a bounded run. done distinguishes completed execution from a suspended one; close releases it and closed records that lifecycle state. It is not a QEMU snapshot.
+A retained in-process execution that can be advanced with a bounded run. done distinguishes completed execution from a suspended one; close releases it and closed records that lifecycle state. It is not a QEMU snapshot. AMD64 executions expose read-only stack.low and stack.high bounds, zero after stack release; running them temporarily selects their own machine stack bounds.
 
 Methods and attributes: `close()`, `closed`, `done`, `run(instruction_limit=0)`.
 

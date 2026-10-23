@@ -17,7 +17,7 @@ load("@stdlib//windows/selfreg:comcat.star", "component_categories_provider")
 load("@stdlib//windows/selfreg:wer.star", "wer_plugin")
 load("@stdlib//windows/selfreg:appmodel.star", "appmodel_plugin")
 
-def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, process_create_provider = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800, network_hosts = {}, network_connect = None, stack_size = 1 << 20):
+def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, process_create_provider = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800, network_hosts = {}, network_connect = None, stack_size = 1 << 20, virtual_modules = []):
     """Runs one target export or executable using semantic system-DLL plugins.
 
     `prepare(machine)` may allocate target memory and return the integer
@@ -38,6 +38,9 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     runtime plugins are constructed and receives a record containing `crt` and
     `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
+    `virtual_modules` explicitly adds semantic DLL names to LoadLibrary lookup;
+    callers must supply their exports through plugins. No native DLL is loaded. Keys
+    missing from those plugins still fail on resolution or invocation.
     `generated_entries` retains newly created or changed files and directories
     as path-keyed records with `directory`, file `data`, and optional DOS
     `attributes` and owned self-relative `security` bytes. `generated_files`
@@ -99,6 +102,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "api-ms-win-core-shlwapi-legacy-l1-1-0.dll", "api-ms-win-core-shlwapi-obsolete-l1-1-0.dll",
         "winmm.dll", "wintrust.dll", "ws2_32.dll",
     ]
+    virtual_system_modules.extend([canonical_module_name(name) for name in virtual_modules])
     module_images = dict(modules)
     module_images[module] = file
     module_sources = windows.module_sources(files, exclude = virtual_system_modules)
@@ -311,7 +315,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         kernel = kernel,
     )
     accounts = {}
-    security = security_plugin(user_name = user_name, user_sid = [int(part) for part in user_sid.split("-")[3:]], kernel = kernel, object_security = registry.set_security, accounts = accounts)
+    security = security_plugin(user_name = user_name, user_sid = [int(part) for part in user_sid.split("-")[3:]], kernel = kernel, object_security = registry.set_security, accounts = accounts, computer_name = environment.get("COMPUTERNAME", environment.get("ComputerName", "TREX")))
     network = netapi_plugin(
         user_name = user_name,
         user_sid = [int(part) for part in user_sid.split("-")[3:]],

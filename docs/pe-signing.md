@@ -121,3 +121,74 @@ runtime's saved arguments. Correcting the header permits loading, preserving
 LR restores return to the caller, and using x1 for length and x2 for offset
 restores console writes. Definitions, generated backend code, and the bundled
 compiler now agree on these fixes.
+
+## Embedded signature integrity inspection
+
+`windows.pe_signature(file)` accepts a PE file/bytes up to 256 MiB and verifies
+one embedded RSA/SHA-256 Authenticode signature. It checks image hashing,
+authenticated content attributes, signer issuer/serial binding and the RSA
+signature. Certificate tables are limited to 4 MiB and 32 certificate choices.
+It returns signer DER, embedded X.509 certificates, signature bytes, unsigned
+attribute DER, `digest_algorithm`, and an optional `timestamp` record.
+
+A recognized Microsoft RFC 3161 timestamp is verified cryptographically and
+bound to the primary signature; its record contains `unix`, `signer` and
+`certificates`. Missing timestamps return None. Duplicate timestamps, replay
+onto another signature and invalid signatures fail. Other unsigned attributes
+are not validated; auxiliary CMS v1 attribute certificates are not X.509 signer
+certificates or trust anchors and are excluded from returned certificate lists.
+
+**Integrity is not trust.** No chain roots, expiry, EKU policy, revocation,
+timestamp-authority trust or Windows provider policy is validated by this API.
+In particular, a cryptographically valid timestamp from an untrusted authority
+does not establish a trusted signing time. There is no host-root lookup, hidden
+clock or network access, and this result alone must not yield WinVerifyTrust
+success. The original Microsoft OneDrive 25.87.0506.0001 installer exercises
+both primary and timestamp integrity; that is not installation proof.
+
+## Explicit path validation and offline Windows policy
+
+`windows.certificate_chain(certificate, roots, intermediates, unix_time,
+purpose)` validates paths using only the supplied roots, intermediate
+certificates, verification time and purpose. `timestamping` requires the leaf's
+EKU extension to be critical and contain only timestamping, as required by RFC
+3161; `code_signing` checks code-signing usage. Neither purpose performs
+revocation checking. Combining a verified timestamp with a trusted TSA path
+still requires an explicit provider-policy decision.
+
+The opt-in `windows/emulation/wintrust.star` plugin models a bounded case:
+generic verify-v2 file verification, no UI, chain revocation with cache-only
+retrieval (`0x1440`), no revocation cache, and explicitly supplied Windows policy
+`0x23c00`. That policy permits unavailable offline revocation information for
+individual/commercial publishers and ignores timestamp revocation. The plugin
+checks actual image/signature integrity, timestamp binding, future timestamps,
+explicit-root/time/purpose paths and the supplied disallowed certificates. It
+records revocation as **unavailable**, never as successfully checked. Other
+policies, unsupported inputs and malformed cryptography stop execution rather
+than returning fictitious success. This is not a complete WinTrust provider or
+native-error mapping; provider-state inspection is not yet implemented.
+
+A native comparison on a fresh, networkless Windows 11 x64 build 26300.9457
+image used the original OneDrive setup file, generic verify-v2, `HWND=-1`,
+`dwUIChoice=2`, `fdwRevocationChecks=1`, `dwUnionChoice=1`, `dwStateAction=1`,
+`dwProvFlags=0x1440`, and otherwise zero optional fields. Windows returned zero.
+The unchanged effective policy was `0x23c00`; both the primary and timestamp
+chains reported `0x01000040` (offline and unknown revocation), while both signer
+policy errors were zero. Each path had three certificates and used signing
+time 2025-05-07 07:14:59.538 UTC. CLOSE returned zero and cleared the state handle.
+Thus missing revocation cache alone does not imply policy rejection under this
+Windows policy. This comparison does not justify accepting revoked, untrusted,
+tampered or incorrectly timestamped inputs, nor does it establish installation.
+
+The bounded provider view preserves the unavailable/offline revocation bits in
+its non-root chain elements. Microsoft-root policy 7 accepts only the explicitly
+validated path ending at Microsoft Root Certificate Authority 2010 (DER SHA-256
+`df545bf919a2439c36983b54cdfc903dfa4f37d3996d8d84b4c31eec6f3c163e`). This is an
+intentionally incomplete anchor set, not a subject-name or arbitrary-root test.
+A third fresh, networkless 26300.9457 guest confirmed that the installer's exact
+policy flags `0x10000` accept this chain despite its offline revocation status.
+Both a zero-initialized policy-status size and size 24 returned BOOL true, error
+zero, chain/element indexes zero, and preserved the supplied size. The emulator
+supports these observed status-size forms; unsupported policy options stop.
+Provider views have borrowed ownership until CLOSE; CERT_INFO, CMSG_SIGNER_INFO,
+message/store handles and other provider internals are not implemented.

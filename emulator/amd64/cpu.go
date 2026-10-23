@@ -408,6 +408,24 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 		}
 	} else {
 		switch inst.Op {
+		case x86asm.BSR, x86asm.BSF:
+			var value uint64
+			value, err = read(inst.Args[1], width)
+			if err == nil {
+				value &= mask(width)
+				if value != 0 {
+					index := bits.Len64(value) - 1
+					if inst.Op == x86asm.BSF {
+						index = bits.TrailingZeros64(value)
+					}
+					err = write(uint64(index))
+				}
+				if err == nil {
+					c.flag(flagZero, value == 0)
+				}
+				// The zero-input destination and other arithmetic flags are
+				// undefined; retaining them is a deterministic allowed choice.
+			}
 		case x86asm.STMXCSR:
 			err = c.writeOperand(memory, inst.Args[0], inst, next, 4, c.readMXCSR())
 		case x86asm.LDMXCSR:
@@ -772,17 +790,17 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			c.resultFlags(value, width)
 			err = write(value)
-		case x86asm.XORPS:
+		case x86asm.XORPS, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PUNPCKLQDQ, x86asm.PSHUFLW, x86asm.PSHUFD:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
-				err = fmt.Errorf("invalid XORPS destination %v", inst.Args[0])
+				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
 				break
 			}
 			var value [16]byte
 			switch source := inst.Args[1].(type) {
 			case x86asm.Reg:
 				if source < x86asm.X0 || source > x86asm.X15 {
-					err = fmt.Errorf("invalid XORPS source %s", source)
+					err = fmt.Errorf("invalid %s source %s", inst.Op, source)
 				} else {
 					value = c.xmm[source-x86asm.X0]
 				}
@@ -796,11 +814,157 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 					err = memory.ReadMemory(address, value[:], cpu.Read)
 				}
 			default:
-				err = fmt.Errorf("invalid XORPS source %v", source)
+				err = fmt.Errorf("invalid %s source %v", inst.Op, source)
 			}
 			if err == nil {
-				for i := range value {
-					c.xmm[destination-x86asm.X0][i] ^= value[i]
+				if inst.Op == x86asm.PSHUFLW || inst.Op == x86asm.PSHUFD {
+					immediate, ok := inst.Args[2].(x86asm.Imm)
+					if !ok {
+						err = fmt.Errorf("invalid %s immediate %v", inst.Op, inst.Args[2])
+						break
+					}
+					result := value
+					laneWidth := 2
+					if inst.Op == x86asm.PSHUFD {
+						laneWidth = 4
+					}
+					for i := 0; i < 4; i++ {
+						lane := int((uint8(immediate) >> uint(2*i)) & 3)
+						copy(result[laneWidth*i:laneWidth*(i+1)], value[laneWidth*lane:laneWidth*(lane+1)])
+					}
+					c.xmm[destination-x86asm.X0] = result
+				} else if inst.Op == x86asm.PUNPCKLQDQ {
+					copy(c.xmm[destination-x86asm.X0][8:], value[:8])
+				} else if inst.Op == x86asm.PCMPEQB {
+					register := &c.xmm[destination-x86asm.X0]
+					for i, b := range value {
+						if register[i] == b {
+							register[i] = 255
+						} else {
+							register[i] = 0
+						}
+					}
+				} else if inst.Op == x86asm.PCMPEQW {
+					register := &c.xmm[destination-x86asm.X0]
+					for i := 0; i < 16; i += 2 {
+						equal := register[i] == value[i] && register[i+1] == value[i+1]
+						register[i], register[i+1] = 0, 0
+						if equal {
+							register[i], register[i+1] = 255, 255
+						}
+					}
+				} else {
+					for i := range value {
+						if inst.Op == x86asm.ORPS {
+							c.xmm[destination-x86asm.X0][i] |= value[i]
+						} else {
+							c.xmm[destination-x86asm.X0][i] ^= value[i]
+						}
+					}
+				}
+			}
+		case x86asm.PMOVMSKB:
+			source, ok := inst.Args[1].(x86asm.Reg)
+			if !ok || source < x86asm.X0 || source > x86asm.X15 {
+				err = fmt.Errorf("unsupported PMOVMSKB source %v", inst.Args[1])
+				break
+			}
+			var value uint64
+			for i, b := range c.xmm[source-x86asm.X0] {
+				value |= uint64(b>>7) << uint(i)
+			}
+			err = write(value)
+		case x86asm.COMISS:
+			source, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || source < x86asm.X0 || source > x86asm.X15 {
+				err = fmt.Errorf("invalid COMISS source %v", inst.Args[0])
+				break
+			}
+			var value uint64
+			if second, ok := inst.Args[1].(x86asm.Reg); ok && second >= x86asm.X0 && second <= x86asm.X15 {
+				value = uint64(binary.LittleEndian.Uint32(c.xmm[second-x86asm.X0][:4]))
+			} else {
+				value, err = read(inst.Args[1], 4)
+			}
+			if err == nil {
+				err = c.compareSingles(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]), uint32(value))
+			}
+		case x86asm.DIVSS, x86asm.MULSS:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
+				break
+			}
+			var value uint64
+			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				value = uint64(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]))
+			} else {
+				value, err = read(inst.Args[1], 4)
+			}
+			if err == nil {
+				var result uint32
+				result, err = c.arithmeticSingle(binary.LittleEndian.Uint32(c.xmm[destination-x86asm.X0][:4]), uint32(value), inst.Op == x86asm.MULSS)
+				if err == nil {
+					binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
+				}
+			}
+		case x86asm.CVTTSS2SI:
+			var value uint64
+			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				value = uint64(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]))
+			} else {
+				value, err = read(inst.Args[1], 4)
+			}
+			if err == nil {
+				width := inst.DataSize / 8
+				value, err = c.truncateSingleToInteger(uint32(value), width)
+				if err == nil {
+					err = c.writeOperand(memory, inst.Args[0], inst, next, width, value)
+				}
+			}
+		case x86asm.CVTSI2SS:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
+				break
+			}
+			width := inst.DataSize / 8
+			var value uint64
+			value, err = read(inst.Args[1], width)
+			if err == nil {
+				signed := int64(value)
+				if width == 4 {
+					signed = int64(int32(value))
+				}
+				var result uint32
+				result, err = c.signedIntegerToSingle(signed)
+				if err == nil {
+					binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
+				}
+			}
+		case x86asm.CVTDQ2PD, x86asm.CVTPS2PD:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
+				break
+			}
+			var value uint64
+			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				value = binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8])
+			} else {
+				value, err = read(inst.Args[1], 8)
+			}
+			if err == nil {
+				var result [16]byte
+				if inst.Op == x86asm.CVTPS2PD {
+					result, err = c.packedSinglesToDoubles(value)
+				} else {
+					// Every signed dword is exactly representable as binary64.
+					binary.LittleEndian.PutUint64(result[:8], math.Float64bits(float64(int32(value))))
+					binary.LittleEndian.PutUint64(result[8:], math.Float64bits(float64(int32(value>>32))))
+				}
+				if err == nil {
+					c.xmm[destination-x86asm.X0] = result
 				}
 			}
 		case x86asm.MOVSD_XMM, x86asm.MOVSS:
@@ -853,35 +1017,32 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				err = fmt.Errorf("invalid scalar vector destination %v", destination)
 			}
 		case x86asm.MOVD, x86asm.MOVQ:
-			scalarWidth := 4
+			moveWidth := 4
 			if inst.Op == x86asm.MOVQ {
-				scalarWidth = 8
+				moveWidth = 8
+			}
+			var value uint64
+			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				value = binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8]) & mask(moveWidth)
+			} else {
+				value, err = read(inst.Args[1], moveWidth)
+			}
+			if err != nil {
+				break
 			}
 			if destination, ok := inst.Args[0].(x86asm.Reg); ok && destination >= x86asm.X0 && destination <= x86asm.X15 {
-				var value uint64
-				if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
-					value = binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8])
-				} else {
-					value, err = read(inst.Args[1], scalarWidth)
-				}
-				if err == nil {
-					register := &c.xmm[destination-x86asm.X0]
-					*register = [16]byte{}
-					if scalarWidth == 8 {
-						binary.LittleEndian.PutUint64(register[:8], value)
-					} else {
-						binary.LittleEndian.PutUint32(register[:4], uint32(value))
-					}
-				}
+				register := &c.xmm[destination-x86asm.X0]
+				// MOVD/MOVQ clear upper XMM lanes, including register moves.
+				*register = [16]byte{}
+				binary.LittleEndian.PutUint64(register[:8], value&mask(moveWidth))
 				break
 			}
 			source, ok := inst.Args[1].(x86asm.Reg)
 			if !ok || source < x86asm.X0 || source > x86asm.X15 {
-				err = fmt.Errorf("invalid scalar vector source %v", inst.Args[1])
+				err = fmt.Errorf("invalid %s vector source %v", inst.Op, inst.Args[1])
 				break
 			}
-			value := binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8])
-			err = c.writeOperand(memory, inst.Args[0], inst, next, scalarWidth, value)
+			err = c.writeOperand(memory, inst.Args[0], inst, next, moveWidth, value)
 		case x86asm.PSRLDQ:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {

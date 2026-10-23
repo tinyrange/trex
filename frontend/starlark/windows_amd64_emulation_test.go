@@ -672,6 +672,17 @@ def exercise(architecture):
     machine.use(security_plugin())
     authority = machine.allocate(value=b"\x00\x00\x00\x00\x00\x05")
     poison = 0x1234567800000000 if architecture == "amd64" else 0
+    for dll, name in [("advapi32.dll","GetSidLengthRequired"),("ntdll.dll","RtlLengthRequiredSid")]:
+        call = machine.resolve_export(dll,name=name)
+        result = machine.call(call,args=[poison|0xaabbcc02])
+        check(result.reason == "return" and result.value == 16)
+    for dll, name, expected in [("advapi32.dll","InitializeSid",1),("ntdll.dll","RtlInitializeSid",0)]:
+        address = machine.allocate(value=b"\xaa"*20)
+        call = machine.resolve_export(dll,name=name)
+        result = machine.call(call,args=[address,authority,poison|0xaabbcc02])
+        check(result.reason == "return" and result.value == expected)
+        check(machine.read(address,8) == b"\x01\x02\x00\x00\x00\x00\x00\x05")
+        check(machine.read(address+8,12) == b"\xaa"*12)
     for dll, name, expected in [("advapi32.dll","AllocateAndInitializeSid",1),("ntdll.dll","RtlAllocateAndInitializeSid",0)]:
         output = machine.allocate(value=b"\xaa"*(machine.pointer_size+4))
         call = machine.resolve_export(dll,name=name)

@@ -118,6 +118,16 @@ func verifyPageChecksum(data []byte, pageNumber uint32) error {
 		}
 		return nil
 	}
+	if len(data) <= 8192 {
+		actual, err := newBlockChecksum(data, pageNumber, true)
+		if err != nil {
+			return err
+		}
+		if expected := binary.LittleEndian.Uint64(data[:8]); actual != expected {
+			return fmt.Errorf("ese: page %d checksum %#x != %#x", pageNumber, actual, expected)
+		}
+		return nil
+	}
 	actual, err := pageChecksums(data, pageNumber)
 	if err != nil {
 		return err

@@ -13,13 +13,15 @@ type ResourceInfo struct {
 	FirstValue uint32
 }
 
-// ResourceMap retains validated standard and large map directories. Value
-// locators remain opaque here; this reader does not resolve candidate strings.
+// ResourceMap retains validated standard/large directories and bounded value
+// tables. SingleString optionally decodes sole neutral/default candidates.
 type ResourceMap struct {
 	SchemaSection, DecisionSection uint16
 	ValueCount                     uint32
 	directory, ranges              []mapPair
 	items                          []ResourceInfo
+	valueTypes, values, internal   []byte
+	valueWidth                     int
 }
 
 // ParseResourceMap parses the environment-free Windows 8.1+ map2 layout.
@@ -36,7 +38,7 @@ func ParseResourceMap(section Section) (*ResourceMap, error) {
 		return nil, fmt.Errorf("pri: invalid map2 header")
 	}
 	m := &ResourceMap{SchemaSection: le.Uint16(b[4:]), DecisionSection: le.Uint16(b[8:]), ValueCount: le.Uint32(b[20:])}
-	off := uint64(32) + uint64(le.Uint16(b[6:])) + 8*uint64(le.Uint16(b[10:]))
+	off := uint64(32) + uint64(le.Uint16(b[6:]))
 	take := func(count, width uint64) ([]byte, error) {
 		if off > uint64(len(b)) || count > (uint64(len(b))-off)/width {
 			return nil, fmt.Errorf("pri: truncated resource map array")
@@ -45,6 +47,9 @@ func ParseResourceMap(section Section) (*ResourceMap, error) {
 		data := b[off:end:end]
 		off = end
 		return data, nil
+	}
+	if m.valueTypes, err = take(uint64(le.Uint16(b[10:])), 8); err != nil {
+		return nil, err
 	}
 	readPairs := func(count uint64, large bool) ([]mapPair, error) {
 		width := uint64(4)
@@ -132,10 +137,11 @@ func ParseResourceMap(section Section) (*ResourceMap, error) {
 	if le.Uint16(b[18:])&1 != 0 {
 		width = 10
 	}
-	if _, err = take(uint64(m.ValueCount), width); err != nil {
+	m.valueWidth = int(width)
+	if m.values, err = take(uint64(m.ValueCount), width); err != nil {
 		return nil, err
 	}
-	if _, err = take(uint64(le.Uint32(b[24:])), 1); err != nil {
+	if m.internal, err = take(uint64(le.Uint32(b[24:])), 1); err != nil {
 		return nil, err
 	}
 	if uint64(len(b))-off > 7 {

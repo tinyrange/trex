@@ -117,10 +117,13 @@ func (e *Execution) runBuiltin(thread *starlark.Thread, _ *starlark.Builtin, arg
 	}
 
 	parentProcessor, parentSerial, parentLimit := e.machine.processor, e.machine.transferSerial, e.machine.limit
+	parentLow, parentHigh := e.machine.stackLow, e.machine.stackHigh
+	e.machine.stackLow, e.machine.stackHigh = e.stackBase, e.stackBase+e.stackSize
 	e.machine.processor, e.machine.transferSerial, e.machine.limit = e.processor, e.transferSerial, limit
 	result, err := e.machine.run(thread)
 	e.processor, e.transferSerial = e.machine.processor, e.machine.transferSerial
 	e.machine.processor, e.machine.transferSerial, e.machine.limit = parentProcessor, parentSerial, parentLimit
+	e.machine.stackLow, e.machine.stackHigh = parentLow, parentHigh
 	if err != nil {
 		return nil, err
 	}
@@ -161,10 +164,12 @@ func (e *Execution) Freeze()               { e.frozen = true }
 func (*Execution) Truth() starlark.Bool    { return starlark.True }
 func (e *Execution) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: emulator.execution") }
 func (*Execution) AttrNames() []string {
-	return []string{"close", "closed", "done", "instruction_limit", "run"}
+	return []string{"close", "closed", "done", "instruction_limit", "run", "stack"}
 }
 func (e *Execution) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "stack":
+		return record(starlark.StringDict{"low": starlark.MakeUint64(e.stackBase), "high": starlark.MakeUint64(e.stackBase + e.stackSize)}), nil
 	case "close":
 		return starlark.NewBuiltin("execution.close", e.closeBuiltin), nil
 	case "closed":

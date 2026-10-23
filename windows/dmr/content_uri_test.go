@@ -9,8 +9,8 @@ import (
 )
 
 func TestContentURIGolden(t *testing.T) {
-	// Independent vector: +x NUL, sa-y NUL, w+z NUL. No extra terminator.
-	want, err := hex.DecodeString("2b0078000000730061002d007900000077002b007a000000")
+	// Independent vector: +x NUL, sa-y NUL, w+z NUL, list NUL.
+	want, err := hex.DecodeString("2b0078000000730061002d007900000077002b007a0000000000")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,12 +45,12 @@ func TestContentURIValidation(t *testing.T) {
 			t.Fatalf("accepted %q", text)
 		}
 	}
-	for _, rules := range [][]ContentURIRule{{{RuntimeAccess: 3}}, {{URI: "a\x00b"}}, {{URI: "\xff"}}, {{URI: strings.Repeat("x", 32766)}}} {
+	for _, rules := range [][]ContentURIRule{{{RuntimeAccess: 3}}, {{URI: "a\x00b"}}, {{URI: "\xff"}}, {{URI: strings.Repeat("x", 32765)}}} {
 		if _, err := EncodeContentURIRules(rules); err == nil {
 			t.Fatal("accepted invalid rule")
 		}
 	}
-	for _, uri := range []string{"", "https://example.test/名前😀", strings.Repeat("x", 32765)} {
+	for _, uri := range []string{"", "https://example.test/名前😀", strings.Repeat("x", 32764)} {
 		rules := []ContentURIRule{{Include: true, URI: uri}}
 		b, err := EncodeContentURIRules(rules)
 		if err != nil {

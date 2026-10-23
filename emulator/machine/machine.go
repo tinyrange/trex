@@ -39,7 +39,7 @@ func (item module) record(primary bool) starlark.Value {
 	for i, address := range item.tls.Callbacks {
 		callbacks[i] = starlark.MakeUint64(address)
 	}
-	return record(starlark.StringDict{"name": starlark.String(item.name), "base": starlark.MakeUint64(item.image.Base), "entry": starlark.MakeUint64(item.image.Base + uint64(item.image.EntryRVA)), "primary": starlark.Bool(primary), "tls_index": starlark.MakeUint64(item.tls.IndexAddress), "tls_template": starlark.Bytes(item.tls.Template), "tls_zero_fill": starlark.MakeUint(uint(item.tls.ZeroFill)), "tls_callbacks": starlark.NewList(callbacks)})
+	return record(starlark.StringDict{"name": starlark.String(item.name), "base": starlark.MakeUint64(item.image.Base), "image_size": starlark.MakeInt(len(item.image.Data)), "entry": starlark.MakeUint64(item.image.Base + uint64(item.image.EntryRVA)), "primary": starlark.Bool(primary), "tls_index": starlark.MakeUint64(item.tls.IndexAddress), "tls_template": starlark.Bytes(item.tls.Template), "tls_zero_fill": starlark.MakeUint(uint(item.tls.ZeroFill)), "tls_callbacks": starlark.NewList(callbacks)})
 }
 
 type hook struct {

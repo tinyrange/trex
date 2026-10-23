@@ -47,6 +47,12 @@ func priSectionsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 // priResourceCandidatesBuiltin returns structural candidate counts for selected
 // schema indexes. It does not choose candidates or decode their values.
 func priResourceCandidatesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return priResourceBuiltin(args, kwargs, false)
+}
+func priResourceValuesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return priResourceBuiltin(args, kwargs, true)
+}
+func priResourceBuiltin(args starlark.Tuple, kwargs []starlark.Tuple, values bool) (starlark.Value, error) {
 	var value starlark.Value
 	var indices *starlark.List
 	var sectionIndex int
@@ -102,6 +108,19 @@ func priResourceCandidatesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args 
 			return nil, err
 		}
 		result[i] = starlark.MakeInt(count)
+		if values {
+			value, err := m.SingleString(index, d, c.Sections)
+			if err != nil {
+				return nil, err
+			}
+			result[i] = starlark.None
+			if value != nil {
+				item := starlark.NewDict(2)
+				_ = item.SetKey(starlark.String("value"), starlark.String(value.Value))
+				_ = item.SetKey(starlark.String("path"), starlark.Bool(value.Path))
+				result[i] = item
+			}
+		}
 	}
 	return starlark.NewList(result), nil
 }

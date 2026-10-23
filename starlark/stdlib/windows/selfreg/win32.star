@@ -68,6 +68,7 @@ _KERNEL_SIGNATURES = {
     "encodepointer": 1,
     "exitprocess": 1,
     "exitthread": 1,
+    "freelibraryandexitthread": 2,
     "formatmessagea": 7,
     "formatmessagew": 7,
     "flushfilebuffers": 1,
@@ -124,6 +125,9 @@ _KERNEL_SIGNATURES = {
     "postqueuedcompletionstatus": 4,
     "getoemcp": 0,
     "getcurrentprocessid": 0,
+    "createtoolhelp32snapshot": 2,
+    "process32firstw": 2,
+    "process32nextw": 2,
     "getcurrentthread": 0,
     "getcurrentthreadid": 0,
     "getthreadpriority": 1,
@@ -191,12 +195,15 @@ _KERNEL_SIGNATURES = {
     "getsystemdefaultlcid": 0,
     "getsystemdefaultuilanguage": 0,
     "gettickcount": 0,
+    "gettickcount64": 0,
     "getversionexa": 1,
     "getversionexw": 1,
     "getversion": 0,
     "rtlgetversion": 1,
+    "rtlpctofileheader": 2,
     "getvolumeinformationa": 8,
     "getvolumeinformationw": 8,
+    "getvolumepathnamew": 3,
     "getuserdefaultlangid": 0,
     "getuserdefaultlcid": 0,
     "getuserdefaultuilanguage": 0,
@@ -255,6 +262,7 @@ _KERNEL_SIGNATURES = {
     "initializecriticalsectionandspincount": 2,
     "initializecriticalsectionex": 3,
     "initializeconditionvariable": 1,
+    "sleepconditionvariablesrw": 4,
     "initializesrwlock": 1,
     "isdbcsleadbyte": 1,
     "isbadcodeptr": 1,
@@ -600,7 +608,7 @@ def _execution_thread_state(reason):
         return "terminated"
     if reason == "wait":
         return "waiting"
-    if reason == "budget":
+    if reason in ["budget", "instruction-limit"]:
         return "runnable"
     return "stopped"
 
@@ -1360,6 +1368,12 @@ def _kernel_provider_module(name):
     normalized = name.replace("/", "\\").split("\\")[-1].lower()
     return normalized in ["kernel32.dll", "ntdll.dll"] or normalized.startswith("api-ms-win-core-") or normalized.startswith("ext-ms-win-")
 
+def _heap_storage(machine, size, name, value = b""):
+    # Heap APIs expose logical byte lengths, but their storage is page-backed.
+    # Give each allocation independently owned pages so freeing it cannot
+    # revoke another block; SIMD reads may reach the containing page boundary.
+    return machine.allocate(size = (max(1, size) + 4095) & ~4095, value = value, alignment = 4096, name = name)
+
 def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, on_process_create = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800, tls_slots = 0, on_module_map = None):
     """Models deterministic allocation, strings, paths, files, and OS facts.
 
@@ -1738,6 +1752,10 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         return wait != None and wait.get("handles") == handles and wait.get("all", False) == wait_all
 
     def wait_ready(wait):
+        if "condition_variable" in wait:
+            lock = state["critical_sections"].get(wait["srw_lock"])
+            available = lock == None or lock["owner"] == None
+            return available and (wait.get("signaled", False) or wait_expired(wait))
         if "messages" in wait:
             for message in wait["messages"]:
                 window = wait.get("message_window", 0)
@@ -1848,13 +1866,22 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         previous = state["current_thread"]
         state["current_thread"] = thread
         thread["state"] = "running"
+        saved_tib = None
+        if machine.architecture == "amd64":
+            teb = machine.get_register("gs_base")
+            if teb:
+                saved_tib = machine.read(teb + 8, 16)
+                machine.write_pointer(teb + 8, execution.stack.high)
+                machine.write_pointer(teb + 16, execution.stack.low)
         result = execution.run(instruction_limit = min(thread_instruction_limit, execution.instruction_limit))
+        if saved_tib != None:
+            machine.write(teb + 8, saved_tib)
         thread["total_steps"] = thread.get("total_steps", 0) + result.steps
         thread["result"] = result
         thread["state"] = _execution_thread_state(result.reason)
         if result.reason == "return":
             thread.pop("wait", None)
-        elif result.reason == "budget":
+        elif result.reason in ["budget", "instruction-limit"]:
             # An instruction slice is a scheduling boundary, not a terminal
             # thread state. Preserve the execution for a later scheduler pass.
             thread.pop("wait", None)
@@ -2318,7 +2345,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if not args[0]:
                 return 0xc000000d
             output = binary.builder(capacity = 8)
-            output.u64le(system_time_ticks)
+            output.u64le(system_time_ticks + state["tick_count"] * 10000)
             machine.write(args[0], output.bytes())
             return 0
         if name == "ntallocatelocallyuniqueid":
@@ -2691,6 +2718,42 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write_pointer(args[1], 1)
             machine.write_pointer(args[2], 1)
             return 1
+        if name == "createtoolhelp32snapshot":
+            flags = args[0] & 0xffffffff
+            # Only the isolated modeled process is visible, never host processes.
+            # Other snapshot classes require their own records, not empty success.
+            if flags & ~0x80000000 != 2:
+                fail("unsupported Toolhelp snapshot flags: " + str(flags))
+            basename = module_path.replace("\\", "/").split("/")[-1]
+            if len(_encoded(basename, True)) > 520:
+                fail("Toolhelp executable name exceeds MAX_PATH")
+            threads = 1 + len([t for t in state["threads"] if t.get("state") in ["created", "suspended", "runnable", "running", "waiting"]])
+            return create_handle("process_snapshot", {"name": basename, "threads": threads, "next": 0})
+        if name in ["process32firstw", "process32nextw"]:
+            entry = state["handles"].get(args[0])
+            if type(entry) != "dict" or entry.get("kind") != "process_snapshot":
+                state["last_error"] = 6
+                return 0
+            size = 568 if machine.pointer_size == 8 else 556
+            output = args[1]
+            if not output or machine.read_u32le(output) < size:
+                state["last_error"] = 24  # ERROR_BAD_LENGTH
+                return 0
+            snapshot = entry["value"]
+            if name == "process32firstw":
+                snapshot["next"] = 0
+            if snapshot["next"]:
+                state["last_error"] = 18  # ERROR_NO_MORE_FILES
+                return 0
+            machine.write(output, b"\x00" * size)
+            machine.write_u32le(output, size)
+            machine.write_u32le(output + 8, 4)  # GetCurrentProcessId
+            threads_offset = 28 if machine.pointer_size == 8 else 20
+            machine.write_u32le(output + threads_offset, snapshot["threads"])
+            machine.write_u32le(output + threads_offset + 8, 8)  # normal base priority
+            machine.write(output + threads_offset + 16, _encoded(snapshot["name"], True))
+            snapshot["next"] = 1
+            return 1
         if name == "getcurrentprocess":
             return (1 << (machine.pointer_size * 8)) - 1
         if name == "getcurrentthreadid":
@@ -2777,6 +2840,12 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write(args[0], _system_power_status())
             state["last_error"] = 0
             return 1
+        if name == "gettickcount64":
+            ticks = state["tick_count"] & 0xffffffffffffffff
+            if machine.pointer_size == 4:
+                machine.set_register("edx", ticks >> 32)
+                return ticks & 0xffffffff
+            return ticks
         if name == "gettickcount":
             return state["tick_count"] & 0xffffffff
         if name == "sleepex" and args[0] and state["current_thread"] != None:
@@ -2847,7 +2916,14 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return terminate_process(machine, 0xffffffff, args[0])
         if name == "terminateprocess":
             return terminate_process(machine, args[0], args[1])
-        if name == "exitthread":
+        if name in ["exitthread", "freelibraryandexitthread"]:
+            if name == "freelibraryandexitthread" and args[0] and find_module(machine, handle = args[0]) == None:
+                fail("FreeLibraryAndExitThread requires a known module")
+            # Like FreeLibrary above, semantic modules remain mapped. The
+            # combined operation must nevertheless terminate this execution,
+            # not return into a caller that may no longer own its DLL.
+            exit_code = args[1] if name == "freelibraryandexitthread" else args[0]
+            machine.set_register("eax", exit_code & 0xffffffff)
             machine.transfer(address = 0)
             return None
         if name == "createthreadpooltimer":
@@ -3468,17 +3544,17 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1
         if name in ["createfilea", "createfilew"]:
             target = file_path(machine, args[0], name.endswith("w"))
-            disposition = args[4]
-            flags = args[5]
+            disposition = args[4] & 0xffffffff
+            flags = args[5] & 0xffffffff
             existing = state["paths"].get(target)
             state["file_queries"].append({"api": name, "path": target, "found": existing != None, "disposition": disposition, "flags": flags})
             if existing != None and existing.get("directory", False):
                 state["last_error"] = 5  # ERROR_ACCESS_DENIED
-                return 0xffffffff
+                return (1 << (machine.pointer_size * 8)) - 1
             if disposition == 1:  # CREATE_NEW
                 if existing != None:
                     state["last_error"] = 80  # ERROR_FILE_EXISTS
-                    return 0xffffffff
+                    return (1 << (machine.pointer_size * 8)) - 1
                 state["paths"][target] = {"directory": False, "data": b"", "dirty": True}
             elif disposition == 2:  # CREATE_ALWAYS
                 state["paths"][target] = {"directory": False, "data": b"", "dirty": True}
@@ -3486,7 +3562,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             elif disposition == 3:  # OPEN_EXISTING
                 if existing == None:
                     state["last_error"] = 2
-                    return 0xffffffff
+                    return (1 << (machine.pointer_size * 8)) - 1
             elif disposition == 4:  # OPEN_ALWAYS
                 if existing == None:
                     state["paths"][target] = {"directory": False, "data": b"", "dirty": True}
@@ -3496,13 +3572,13 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             elif disposition == 5:  # TRUNCATE_EXISTING
                 if existing == None:
                     state["last_error"] = 2
-                    return 0xffffffff
+                    return (1 << (machine.pointer_size * 8)) - 1
                 existing["data"] = b""
                 existing["size"] = 0
                 existing["dirty"] = True
             else:
                 state["last_error"] = 87  # ERROR_INVALID_PARAMETER
-                return 0xffffffff
+                return (1 << (machine.pointer_size * 8)) - 1
             return create_handle("file", {"path": target, "offset": 0, "overlapped": bool(flags & 0x40000000)})
         if name == "readfile":
             socket_entry = state["handles"].get(args[0])
@@ -4045,7 +4121,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return count
         if name == "getsystemtimeasfiletime":
             builder = binary.builder(capacity = 8)
-            builder.u64le(system_time_ticks)
+            builder.u64le(system_time_ticks + state["tick_count"] * 10000)
             machine.write(args[0], builder.bytes())
             return None
         if name == "getsystemtimeadjustment":
@@ -4210,8 +4286,9 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1
         if name in ["getlocaltime", "getsystemtime"]:
             builder = binary.builder(capacity = 16)
-            for value in system_time_structure:
-                builder.u16le(value)
+            now = clock.utc(system_time + state["tick_count"] // 1000)
+            for field in ["year", "month", "weekday", "day", "hour", "minute", "second", "millisecond"]:
+                builder.u16le(state["tick_count"] % 1000 if field == "millisecond" else now[field])
             machine.write(args[0], builder.bytes())
             return None
         if name == "gettimezoneinformation":
@@ -4299,6 +4376,29 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                     return 0
             state["last_error"] = 0
             return 1
+        if name == "getvolumepathnamew":
+            if not args[0] or not args[1] or not (args[2] & 0xffffffff):
+                state["last_error"] = 87
+                return 0
+            target = file_path(machine, args[0], True)
+            root = ""
+            if len(target) >= 3 and target[1:3] == ":\\":
+                root = target[0].upper() + ":\\"
+            elif target.startswith("\\\\"):
+                parts = target[2:].split("\\")
+                if len(parts) >= 2 and parts[0] and parts[1]:
+                    root = "\\\\" + parts[0] + "\\" + parts[1] + "\\"
+            state["volume_queries"].append({"api": name, "path": target, "root": root})
+            if not root:
+                state["last_error"] = 123
+                return 0
+            data = binary.encode(root, encoding = "utf16le", nul = True)
+            if (args[2] & 0xffffffff) < len(data) // 2:
+                state["last_error"] = 206  # ERROR_FILENAME_EXCED_RANGE
+                return 0
+            machine.write(args[1], data)
+            state["last_error"] = 0
+            return 1
         if name in ["getvolumeinformationa", "getvolumeinformationw"]:
             wide = name.endswith("w")
             if args[0]:
@@ -4379,7 +4479,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1
         if name in ["queryperformancecounter", "queryperformancefrequency"]:
             builder = binary.builder(capacity = 8)
-            builder.u64le(0 if name.endswith("counter") else 10000000)
+            builder.u64le(state["tick_count"] * 10000 if name.endswith("counter") else 10000000)
             machine.write(args[0], builder.bytes())
             return 1
         if name in ["writeprivateprofilesectiona", "writeprivateprofilesectionw", "writeprivateprofilestringa", "writeprivateprofilestringw", "writeprofilestringa", "writeprofilestringw"]:
@@ -4440,6 +4540,15 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return _write_string(machine, args[3], value, wide, args[4])
         if name in ["setfileattributesa", "setfileattributesw"]:
             return 1
+        if name == "rtlpctofileheader":
+            base = 0
+            for candidate in machine.modules:
+                if candidate.base <= args[0] and args[0] < candidate.base + candidate.image_size:
+                    base = candidate.base
+                    break
+            if args[1]:
+                machine.write_pointer(args[1], base)
+            return base
         if name in ["getmodulehandleexa", "getmodulehandleexw"]:
             flags, module, output = args
             if not output or (flags & 0x3) == 0x3:
@@ -4448,7 +4557,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             loaded = None
             if flags & 0x4:  # GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
                 for candidate in machine.modules:
-                    if candidate.base <= module and (loaded == None or candidate.base > loaded["handle"]):
+                    if candidate.base <= module and module < candidate.base + candidate.image_size:
                         loaded = {"name": candidate.name, "handle": candidate.base}
             elif module == 0:
                 loaded = find_module(machine, handle = state["main"])
@@ -4766,16 +4875,53 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             state["critical_sections"][args[0]] = {"owner": None, "depth": 0}
             return 0 if name.startswith("rtl") else 1
         if name == "initializeconditionvariable":
-            machine.write_u32le(args[0], 0)
+            machine.write_pointer(args[0], 0)
             state["condition_variables"][args[0]] = 0
             return None
         if name == "initializesrwlock":
-            machine.write_u32le(args[0], 0)
+            machine.write_pointer(args[0], 0)
             state["critical_sections"][args[0]] = {"owner": None, "depth": 0}
             return None
         if name in ["wakeconditionvariable", "wakeallconditionvariable"]:
             state["condition_variables"][args[0]] = state["condition_variables"].get(args[0], 0) + 1
+            for thread in state["threads"]:
+                wait = thread.get("wait")
+                if wait != None and wait.get("condition_variable") == args[0] and not wait.get("signaled", False):
+                    wait["signaled"] = True
+                    if name == "wakeconditionvariable":
+                        break
             return None
+        if name == "sleepconditionvariablesrw":
+            condition, address, timeout, flags = args
+            timeout &= 0xffffffff
+            flags &= 0xffffffff
+            if flags != 0:
+                fail("SleepConditionVariableSRW shared-mode waits are not modeled")
+            if not condition or not address:
+                state["last_error"] = 87
+                return 0
+            current = state["current_thread"]
+            if current == None:
+                fail("SleepConditionVariableSRW requires a resumable worker execution")
+            wait = current.get("wait")
+            if wait == None or wait.get("condition_variable") != condition or wait.get("srw_lock") != address:
+                lock = state["critical_sections"].get(address)
+                if lock == None or lock["owner"] != execution_owner(machine) or lock["depth"] != 1:
+                    fail("SleepConditionVariableSRW requires exclusive ownership of its lock")
+                # Register and release in this single cooperative callback, so
+                # a signal cannot be lost between release and suspension.
+                wait = {"condition_variable": condition, "srw_lock": address,
+                        "deadline": None if timeout == 0xffffffff else state["tick_count"] + timeout,
+                        "signaled": False}
+                current["wait"] = wait
+                leave_critical_section(machine, address)
+            if wait_ready(wait):
+                signaled = wait["signaled"]
+                enter_critical_section(machine, address, False)
+                state["last_error"] = 0 if signaled else 1460  # ERROR_TIMEOUT
+                return 1 if signaled else 0
+            machine.stop("wait", detail = "condition variable 0x%x" % condition)
+            return 0
         if name == "rtlinitializeresource":
             if args[0]:
                 # RTL_RESOURCE is opaque to callers. Keep deterministic bytes
@@ -5028,7 +5174,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if args[0] not in state["heaps"]:
                 state["last_error"] = 6
                 return 0
-            address = machine.allocate(size = max(1, args[2]), name = name)
+            address = _heap_storage(machine, args[2], name)
             state["allocations"][address] = {"heap": args[0], "size": args[2]}
             return address
         if name in ["heaprealloc", "rtlreallocateheap"]:
@@ -5039,7 +5185,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if previous == None or previous["heap"] != args[0]:
                 state["last_error"] = 87
                 return 0
-            address = machine.allocate(size = max(1, args[3]), name = name)
+            address = _heap_storage(machine, args[3], name)
             if previous["size"] and args[3]:
                 copied = min(previous["size"], args[3])
                 machine.write(address, machine.read(args[2], copied))
@@ -5066,17 +5212,21 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             state["last_error"] = 259  # ERROR_NO_MORE_ITEMS
             return 0
         if name == "globalalloc":
-            address = machine.allocate(size = max(1, args[1]), name = name)
+            address = _heap_storage(machine, args[1], name)
             state["global_allocations"][address] = {"size": args[1], "flags": args[0], "locks": 0}
             return address
+        # Local heap storage is page-backed. Keep the logical allocation size
+        # separately: SIMD string routines may read through the terminator up
+        # to the page boundary, but LocalSize/reallocation retain byte lengths.
+        # Dedicated pages also let LocalFree revoke precisely this allocation.
         if name == "localalloc":
-            address = machine.allocate(size = max(1, args[1]), name = name)
+            address = _heap_storage(machine, args[1], name)
             state["local_allocations"][address] = args[1]
             return address
         if name == "localrealloc":
             previous_size = state["local_allocations"].get(args[0])
             if not args[0]:
-                address = machine.allocate(size = max(1, args[1]), name = name)
+                address = _heap_storage(machine, args[1], name)
                 state["local_allocations"][address] = args[1]
                 return address
             if previous_size == None:
@@ -5084,7 +5234,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 return 0
             if args[2] & 0x80:  # LMEM_MODIFY changes attributes only.
                 return args[0]
-            address = machine.allocate(size = max(1, args[1]), name = name)
+            address = _heap_storage(machine, args[1], name)
             if previous_size and args[1]:
                 machine.write(address, machine.read(args[0], min(previous_size, args[1])))
             state["local_allocations"].pop(args[0])
@@ -5094,7 +5244,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         if name == "globalrealloc":
             previous = state["global_allocations"].get(args[0])
             if not args[0]:
-                address = machine.allocate(size = max(1, args[1]), name = name)
+                address = _heap_storage(machine, args[1], name)
                 state["global_allocations"][address] = {"size": args[1], "flags": args[2], "locks": 0}
                 return address
             if previous == None:
@@ -5103,7 +5253,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if args[2] & 0x80:  # GMEM_MODIFY
                 previous["flags"] = args[2]
                 return args[0]
-            address = machine.allocate(size = max(1, args[1]), name = name)
+            address = _heap_storage(machine, args[1], name)
             if previous["size"] and args[1]:
                 machine.write(address, machine.read(args[0], min(previous["size"], args[1])))
             state["global_allocations"].pop(args[0])
@@ -5197,11 +5347,12 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             state["virtual_protections"][args[0]] = args[2]
             return 1
         if name == "virtualquery":
-            if not args[0] or not args[1] or args[2] < 28:
+            info_size = 48 if machine.pointer_size == 8 else 28
+            if not args[1] or args[2] < info_size:
                 state["last_error"] = 87
                 return 0
             address = args[0]
-            base = address & 0xfffff000
+            base = address & ~0xfff
             allocation_base = 0
             allocation_protect = 0
             region_size = 0x1000
@@ -5237,11 +5388,20 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                         following = mapping.start
                 if not found_allocation and following != None:
                     region_size = following - base
-            info = binary.builder(capacity = 28)
-            for value in [base, allocation_base, allocation_protect, region_size, memory_state, protect, memory_type]:
-                info.u32le(value)
+            info = binary.builder(capacity = info_size)
+            if machine.pointer_size == 8:
+                info.u64le(base)
+                info.u64le(allocation_base)
+                info.u32le(allocation_protect)
+                info.u32le(0)  # PartitionId and alignment
+                info.u64le(region_size)
+                for value in [memory_state, protect, memory_type, 0]:
+                    info.u32le(value)
+            else:
+                for value in [base, allocation_base, allocation_protect, region_size, memory_state, protect, memory_type]:
+                    info.u32le(value)
             machine.write(args[1], info.bytes())
-            return 28
+            return info_size
         if name in ["getmodulefilenamea", "getmodulefilenamew"]:
             return _write_string(machine, args[1], module_path, name.endswith("w"), args[2])
         if name in _PSAPI_SIGNATURES:
@@ -5643,7 +5803,7 @@ def _invoke_target(machine, target, arguments, continuation_limit = 64, instruct
     execution = machine.spawn(target, args = arguments)
     result = execution.run(instruction_limit = instruction_limit) if instruction_limit else execution.run()
     continuations = 0
-    while result.reason == "budget" and continuations < continuation_limit:
+    while result.reason in ["budget", "instruction-limit"] and continuations < continuation_limit:
         if on_budget != None:
             on_budget(machine)
         result = execution.run(instruction_limit = instruction_limit) if instruction_limit else execution.run()
@@ -8979,7 +9139,7 @@ def _security_provider_module(name):
     normalized = name.replace("/", "\\").split("\\")[-1].lower()
     return normalized in ["advapi32.dll", "ntdll.dll", "api-ms-win-core-processthreads-l1-1-0.dll"] or normalized.startswith("api-ms-win-security-") or normalized.startswith("ext-ms-win-security-")
 
-def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], kernel = None, object_security = None, accounts = None):
+def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], kernel = None, object_security = None, accounts = None, computer_name = "TREX"):
     """Models an elevated interactive token for setup-time Win32 checks."""
     accounts = accounts if accounts != None else {}
     state = {"actions": [], "next_token": 2}
@@ -9027,6 +9187,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         "getkernelobjectsecurity": 5,
         "getusernamea": 2,
         "getusernamew": 2,
+        "getusernameexw": 3,
         "initializeacl": 3,
         "initializesid": 3,
         "initializesecuritydescriptor": 2,
@@ -9113,7 +9274,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         return sid(authority, subauthorities)
 
     def local_allocation(machine, value, name):
-        address = machine.allocate(value = value, name = name)
+        address = _heap_storage(machine, len(value), name, value = value)
         if kernel != None:
             kernel.state["local_allocations"][address] = len(value)
         return address
@@ -9665,7 +9826,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
                 set_last_error(1337)  # ERROR_INVALID_SID
                 return 0
             address = local_allocation(machine, parsed, "converted SID")
-            machine.write_u32le(args[1], address)
+            machine.write_pointer(args[1], address)
             set_last_error(0)
             return 1
         if name in ["convertsidtostringsida", "convertsidtostringsidw"]:
@@ -9675,7 +9836,7 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
             wide = name.endswith("w")
             value = binary.encode(sid_text(machine, args[0]), encoding = "utf16le" if wide else "ascii", nul = True)
             address = local_allocation(machine, value, "string SID")
-            machine.write_u32le(args[1], address)
+            machine.write_pointer(args[1], address)
             set_last_error(0)
             return 1
         if name in ["getfilesecuritya", "getfilesecurityw"]:
@@ -9801,18 +9962,19 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
                 return 0
             return sid_length(machine, args[0])
         if name == "getsidlengthrequired":
-            return 8 + args[0] * 4
+            return 8 + (args[0] & 0xff) * 4
         if name == "rtllengthrequiredsid":
-            return 8 + args[0] * 4
+            return 8 + (args[0] & 0xff) * 4
         if name in ["initializesid", "rtlinitializesid"]:
-            if not args[0] or not args[1] or args[2] > 15:
+            count = args[2] & 0xff
+            if not args[0] or not args[1] or count > 15:
                 if name == "initializesid":
                     set_last_error(87)
                     return 0
                 return 0xc000000d
             header = binary.builder(capacity = 8)
             header.u8(1)
-            header.u8(args[2])
+            header.u8(count)
             header.append(machine.read(args[1], 6))
             machine.write(args[0], header.bytes())
             return 1 if name == "initializesid" else 0
@@ -10197,6 +10359,30 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
                 output.append(part)
             machine.write(args[1], output.bytes())
             return 1
+        if name == "getusernameexw":
+            # This plugin models a local interactive account, not directory
+            # membership: only NameSamCompatible has a defined mapping.
+            if not args[2] or args[0] == 0:
+                set_last_error(87)
+                return 0
+            if args[0] != 2:
+                set_last_error(1332)  # ERROR_NONE_MAPPED
+                return 0
+            value = computer_name + "\\" + user_name
+            data = binary.encode(value, encoding = "utf16le", nul = True)
+            characters = len(data) // 2
+            capacity = machine.read_u32le(args[2])
+            if capacity < characters:
+                machine.write_u32le(args[2], characters)
+                set_last_error(234)  # ERROR_MORE_DATA, includes NUL
+                return 0
+            if not args[1]:
+                set_last_error(87)
+                return 0
+            machine.write(args[1], data)
+            machine.write_u32le(args[2], characters - 1)
+            set_last_error(0)
+            return 1
         if name in ["getusernamea", "getusernamew"]:
             if not args[1]:
                 set_last_error(87)
@@ -10264,6 +10450,8 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
         ]
         for function, argc in signatures.items():
             module = "ntdll.dll" if function.startswith("rtl") or function.startswith("nt") else "advapi32.dll"
+            if function == "getusernameexw":
+                module = "secur32.dll"
             machine.provide_export(callback, module = module, name = function, argc = argc)
             if function in ["openprocesstoken", "openthreadtoken"]:
                 machine.provide_export(callback, module = "api-ms-win-core-processthreads-l1-1-0.dll", name = function, argc = argc)
@@ -12183,9 +12371,9 @@ def shell32_plugin(module_path = "C:\\WINDOWS\\SYSTEM\\shell32.dll", environment
         0x10: profile + "\\Desktop",
         0x14: windows_directory + "\\Fonts",
         0x15: windows_directory + "\\ShellNew",
-        0x1a: profile + "\\Application Data",
+        0x1a: environment.get("APPDATA", profile + "\\Application Data"),
         0x1b: profile + "\\PrintHood",
-        0x1c: profile + "\\Application Data",
+        0x1c: environment.get("LOCALAPPDATA", profile + "\\Application Data"),
         0x1f: windows_directory + "\\All Users\\Favorites",
         0x23: environment.get("ProgramData", shared_profile + "\\Application Data"),
         0x24: windows_directory,
@@ -12752,9 +12940,21 @@ def user32_plugin(file, module_files = {}, kernel = None):
         return (minimum == 0 and maximum == 0) or message["message"] >= minimum and message["message"] <= maximum
 
     def write_message(machine, address, message):
-        output = binary.builder(capacity = 28)
-        for value in [message["window"], message["message"], message["wparam"], message["lparam"], message["time"], message["x"], message["y"]]:
+        wide_pointer = machine.pointer_size == 8
+        output = binary.builder(capacity = 48 if wide_pointer else 28)
+        if wide_pointer:
+            output.u64le(message["window"] & 0xffffffffffffffff)
+            output.u32le(message["message"] & 0xffffffff)
+            output.u32le(0)
+            output.u64le(message["wparam"] & 0xffffffffffffffff)
+            output.u64le(message["lparam"] & 0xffffffffffffffff)
+        else:
+            for value in [message["window"], message["message"], message["wparam"], message["lparam"]]:
+                output.u32le(value & 0xffffffff)
+        for value in [message["time"], message["x"], message["y"]]:
             output.u32le(value & 0xffffffff)
+        if wide_pointer:
+            output.u32le(0)
         machine.write(address, output.bytes())
 
     def string_resource(machine, instance, identifier):
@@ -13220,6 +13420,14 @@ def user32_plugin(file, module_files = {}, kernel = None):
             for index in range(len(state["messages"])):
                 if selected < 0 and message_matches(state["messages"][index], event.args[1], event.args[2], event.args[3]):
                     selected = index
+            if selected < 0 and name.startswith("getmessage") and kernel != None:
+                # A blocking UI wait must let already queued workers produce
+                # messages before suspending. Worker waits never recurse into
+                # the scheduler; pump_threads enforces that boundary.
+                kernel.state["pump_threads"](event.machine)
+                for index in range(len(state["messages"])):
+                    if selected < 0 and message_matches(state["messages"][index], event.args[1], event.args[2], event.args[3]):
+                        selected = index
             if selected < 0:
                 if name.startswith("getmessage"):
                     if kernel != None and kernel.state["current_thread"] != None:
@@ -13292,7 +13500,11 @@ def user32_plugin(file, module_files = {}, kernel = None):
             return 1
         if name in ["dispatchmessagea", "dispatchmessagew"]:
             machine = event.machine
-            message = [machine.read_u32le(event.args[0] + index * 4) for index in range(4)]
+            address = event.args[0]
+            message = ([machine.read_pointer(address), machine.read_u32le(address + 8),
+                        machine.read_pointer(address + 16), machine.read_pointer(address + 24)]
+                       if machine.pointer_size == 8 else
+                       [machine.read_u32le(address + index * 4) for index in range(4)])
             window = state["windows"].get(message[0])
             if window == None:
                 return 0

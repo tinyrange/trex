@@ -191,17 +191,23 @@ func TestNTFSHardLinksShareAFileRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	fileNames := 0
+	combined, unpaired := 0, 0
 	for _, attribute := range attributes {
 		if attribute.typ != ntfsAttrFileName {
 			continue
 		}
 		fileNames++
-		if got := attribute.value[65]; got != 3 {
-			t.Errorf("hard-link name namespace = %d, want combined Win32/DOS namespace 3", got)
+		switch attribute.value[65] {
+		case 3:
+			combined++
+		case 0:
+			unpaired++
+		default:
+			t.Errorf("unexpected hard-link name namespace %d", attribute.value[65])
 		}
 	}
-	if fileNames != 2 {
-		t.Fatalf("hard-linked file has %d file-name attributes, want one per link", fileNames)
+	if fileNames != 2 || combined != 1 || unpaired != 1 {
+		t.Fatalf("hard-linked names: total=%d combined=%d unpaired=%d; want one original and one unpaired link", fileNames, combined, unpaired)
 	}
 }
 

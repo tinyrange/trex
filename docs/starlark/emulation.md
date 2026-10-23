@@ -180,3 +180,87 @@ for its full signature and result fields, the
 [generated reference](namespaces/reference.md) for module contracts and native
 methods, and the [investigation workflow](../emulator-investigation-workflow.md)
 for checkpoints, bounded watches, stop conditions, and guest smoke boundaries.
+
+## Modeled process and thread boundaries
+
+Module records expose `image_size`: the mapped PE image extent (zero for virtual
+export-only modules). Address-to-module queries must check both bounds; an
+address above a module is not evidence that it belongs to that module.
+
+AMD64 retained executions expose read-only `stack.low` and `stack.high` bounds.
+These are zero after stack release. Running a retained execution temporarily
+selects its own machine stack bounds; the Win32 thread scheduler also switches
+TEB stack base/limit and restores the parent values after each slice, including
+faults. Instruction-limit stops remain runnable, not completed threads. This
+does not imply a complete per-thread TLS or Windows scheduler implementation.
+
+The Toolhelp process snapshot currently supports only the process class and
+contains the isolated modeled process, never host processes. Snapshot cursor,
+thread count, native PROCESSENTRY32W layout and handle lifetime are modeled;
+other snapshot classes stop explicitly rather than returning fabricated empty
+results.
+
+`@stdlib//windows/emulation:urlmon.star` provides an explicitly selected
+`offline_urlmon_plugin()`. Its HTTP(S) `URLOpenStreamW` reports connection failure
+and records the request without opening a connection, delivering bytes or
+claiming completion. It is not installed implicitly and is not a trust or
+signature-verification substitute.
+
+The added scalar DIVSS/MULSS execution supports finite normal operands/results
+and signed zeros. NaN, infinity, denormal, overflow and underflow paths stop
+explicitly; this is not complete SSE arithmetic support. Integer/single
+conversions model their implemented rounding and MXCSR exception behavior.
+
+### Explicit offline Authenticode policy
+
+`offline_wintrust_plugin(files, roots, disallowed, unix_time, policy_flags)` from
+`@stdlib//windows/emulation:wintrust.star` is opt-in and is not added to runner
+defaults. Supply actual file contents, original-media trust anchors and disallowed
+certificate DER, an explicit verification clock and the target Windows policy.
+The currently supported policy is `0x23c00`, with FILE/VERIFY/CLOSE and cache-only
+chain checking (`0x1440`). Cryptographic signature/timestamp and certificate-path
+checks run before the policy's offline allowance. `checks` records the result,
+validated paths and unavailable revocation; `handles` owns live verification
+states, released on CLOSE. Invalid cryptography and unsupported options stop
+safely. Borrowed provider/signer/chain and certificate-DER views support
+`WTHelperProvDataFromStateData` and `WTHelperGetProvSignerFromChain`; CLOSE frees
+the entire view. CERT_INFO, CMSG_SIGNER_INFO, message/store handles and other
+provider internals remain unmodeled. Microsoft-root chain policy is bounded to
+the SHA-256-pinned Microsoft Root Certificate Authority 2010; an arbitrary
+caller-trusted root never qualifies. Other anchors fail closed, including test
+roots, even when the caller enables them. Broader policies remain unsupported. See [PE signing](../pe-signing.md) for the native comparison and
+trust boundaries; a valid signature is not proof that an installer completed.
+
+### Worker waits and explicit disconnected WinRT queries
+
+A blocking `GetMessage` pumps queued workers before suspending; x86 and AMD64
+MSG buffers preserve their native pointer widths. Worker-exclusive
+`SleepConditionVariableSRW` atomically releases its lock and reacquires it after
+a selected wake or timeout. Wake-one and wake-all are distinct, and a wake is
+not retained for future waiters. Shared-mode waits and waits from the outer
+(non-resumable) execution stop explicitly. This is not a full SRW scheduler.
+
+API-level performance-counter, FILETIME and calendar clocks advance with the
+same virtual milliseconds used by scheduler deadlines, not host elapsed time.
+CPU execution alone does not advance that clock. `FreeLibraryAndExitThread`
+terminates the current execution with its exit code; like the existing semantic
+FreeLibrary model it does not physically unmap DLLs. `VirtualQuery` writes the
+native 28-byte x86 or 48-byte AMD64 information layout.
+
+`iphlpapi.star:no_ipv4_adapters_plugin()` explicitly selects an empty IPv4 adapter
+inventory and returns `ERROR_NO_DATA`. It is not the correct model for a
+configured but disconnected adapter. `winrt.star:string_reference_plugin()`
+models caller-owned UTF-16 HSTRING references, raw-buffer access and no-op
+reference deletion; it does not implement owned strings or arbitrary activation.
+`disconnected_network_information_plugin(strings)` supplies only the
+NetworkInformation static interface's no-Internet-profile query and basic COM
+reference ownership. Other classes/methods stop, never return fabricated network
+information. All these plugins are opt-in. The runner's `virtual_modules` option
+adds explicitly supplied semantic DLL names to loader lookup; callers still
+must provide their exports. It does not load DLL bytes or implement missing APIs.
+
+`wininet.star:disconnected_wininet_plugin()` currently models only local
+synchronous/asynchronous direct or preconfigured session creation and close.
+It retains the async flag but does not implement asynchronous requests or
+callbacks, and does not claim any network transfer succeeded. Unimplemented
+operations remain explicit stops.

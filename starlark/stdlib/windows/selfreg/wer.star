@@ -160,11 +160,11 @@ def wer_plugin():
     def install(machine):
         for name, argc in _SIGNATURES.items():
             machine.provide_export(callback, module = "wer.dll", name = name, argc = argc)
-            if name in ["werregistercustommetadata", "werunregistercustommetadata"]:
+            if name in ["werregistercustommetadata", "werunregistercustommetadata", "werregisterfile", "werunregisterfile"]:
                 machine.provide_export(callback, module = "kernel32.dll", name = name, argc = argc)
         for imported in machine.imports:
             name = imported.name.lower()
-            if imported.module.lower() == "wer.dll" and name in _SIGNATURES or imported.module.lower() == "kernel32.dll" and name in ["werregistercustommetadata", "werunregistercustommetadata"]:
+            if imported.module.lower() == "wer.dll" and name in _SIGNATURES or imported.module.lower() == "kernel32.dll" and name in ["werregistercustommetadata", "werunregistercustommetadata", "werregisterfile", "werunregisterfile"]:
                 machine.hook(callback, address = imported.address, argc = _SIGNATURES[name])
 
     return emulator.plugin(install, name = "windows.wer", state = state)

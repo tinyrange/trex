@@ -383,8 +383,17 @@ after the identity/index fields. The rule grammar, now implemented separately,
 is `[s][a|w](+|-)URI\0` in UTF-16. Bit 0 of Flags emits `s` (`258c8`, `25d51`);
 access enum 0 emits nothing, 1 emits `a`, 2 emits `w` (`258af..258c2`, `25dea`).
 Type zero emits `-`, nonzero emits `+` (`2589f..258a9`, `25b60`). The URI is
-appended, followed by one NUL (`25985`, `259d6`); rules are concatenated with
-no extra final NUL. The codec preserves that order, checks the separately
+appended, followed by one NUL (`25985`, `259d6`). A nonempty list also has a
+final UTF-16 NUL, included in both the application size and rule-byte count.
+The earlier inference that the loop terminator was the complete payload was
+incorrect: native 26300.9457 Client.CBS APPS records differ from that encoding
+only by +2 in these fields for each of its two rule-bearing applications.
+After correction, the complete prepared APPS section (header through declared
+section size, excluding the following section) matches the native regenerated
+Client.CBS section byte-for-byte on a fresh boot. This comparison does not
+claim whole-container identity: section ordering and native padding elsewhere
+can differ.
+The codec preserves that order, checks the separately
 declared count, rejects malformed UTF-16/embedded URI NULs, and bounds the
 combined payload to 65534 bytes. It neither normalizes URIs nor evaluates access
 policy. The semantic name of Flags bit 0 is not assumed.

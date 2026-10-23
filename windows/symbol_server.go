@@ -18,11 +18,12 @@ var symbolServerAtom = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 func windowsSymbolServerBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var baseURL, name, key string
 	var guidValue, ageValue starlark.Value = starlark.None, starlark.None
+	missingOK := false
 	maximum := int64(256 << 20)
 	timeout := starlarkNumber(45)
 	if err := starlark.UnpackArgs("symbol_server", args, kwargs,
 		"base_url", &baseURL, "name", &name, "key", &key,
-		"guid?", &guidValue, "age?", &ageValue, "maximum?", &maximum, "timeout?", &timeout,
+		"guid?", &guidValue, "age?", &ageValue, "maximum?", &maximum, "timeout?", &timeout, "missing_ok?", &missingOK,
 	); err != nil {
 		return nil, err
 	}
@@ -47,6 +48,9 @@ func windowsSymbolServerBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 		return nil, fmt.Errorf("symbol_server: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound && missingOK {
+		return starlark.None, nil
+	}
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("symbol_server: server returned %s", response.Status)
 	}
