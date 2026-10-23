@@ -70,7 +70,7 @@ func (b *builder) encodeTableRecord(table *buildTable, row Row) ([]byte, error) 
 
 func (b *builder) encodeRecord(columns []ColumnDefinition, row Row) ([]byte, error) {
 	if !b.legacy() {
-		return encodeRecord(columns, row)
+		return encodeRecordPage(columns, row, b.options.PageSize <= 8192)
 	}
 	var ordinary []ColumnDefinition
 	for _, column := range columns {

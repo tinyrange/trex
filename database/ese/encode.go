@@ -45,6 +45,10 @@ type ColumnDefinition struct {
 type Row map[string]any
 
 func encodeRecord(columns []ColumnDefinition, row Row) ([]byte, error) {
+	return encodeRecordPage(columns, row, false)
+}
+
+func encodeRecordPage(columns []ColumnDefinition, row Row, small bool) ([]byte, error) {
 	ordered := append([]ColumnDefinition(nil), columns...)
 	sort.SliceStable(ordered, func(left, right int) bool {
 		return ordered[left].Identifier < ordered[right].Identifier
@@ -72,7 +76,7 @@ func encodeRecord(columns []ColumnDefinition, row Row) ([]byte, error) {
 		}
 		value, present := row[column.Name]
 		if !present || value == nil {
-			fixed = append(fixed, make([]byte, fixedColumnSize(column.Type))...)
+			fixed = append(fixed, make([]byte, fixedStorageSize(column))...)
 			fixedNulls[(identifier-1)/8] |= 1 << ((identifier - 1) % 8)
 			continue
 		}
@@ -80,7 +84,10 @@ func encodeRecord(columns []ColumnDefinition, row Row) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(raw) != fixedColumnSize(column.Type) {
+		if column.Type == ColumnBinary && len(raw) < fixedStorageSize(column) {
+			raw = append(raw, make([]byte, fixedStorageSize(column)-len(raw))...)
+		}
+		if len(raw) != fixedStorageSize(column) {
 			return nil, fmt.Errorf("ese: fixed column %q encoded to %d bytes", column.Name, len(raw))
 		}
 		fixed = append(fixed, raw...)
@@ -111,6 +118,7 @@ func encodeRecord(columns []ColumnDefinition, row Row) ([]byte, error) {
 	type taggedField struct {
 		identifier uint16
 		data       []byte
+		long       bool
 	}
 	taggedFields := make([]taggedField, 0)
 	for _, column := range ordered {
@@ -125,20 +133,28 @@ func encodeRecord(columns []ColumnDefinition, row Row) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		taggedFields = append(taggedFields, taggedField{identifier: uint16(column.Identifier), data: raw})
+		taggedFields = append(taggedFields, taggedField{identifier: uint16(column.Identifier), data: raw, long: column.Type == ColumnLongBinary || column.Type == ColumnLongText})
 	}
 	taggedDirectorySize := len(taggedFields) * 4
 	tagged := make([]byte, taggedDirectorySize)
 	for index, field := range taggedFields {
 		start := len(tagged)
-		if start > 0x7fff {
+		if start > 0x7fff || small && start > 0x1fff {
 			return nil, fmt.Errorf("ese: tagged data exceeds 32767 bytes")
 		}
 		binary.LittleEndian.PutUint16(tagged[index*4:index*4+2], field.identifier)
-		binary.LittleEndian.PutUint16(tagged[index*4+2:index*4+4], uint16(start))
+		offset := uint16(start)
+		if small {
+			offset |= 0x4000
+		} // small pages explicitly mark the flag byte
+		binary.LittleEndian.PutUint16(tagged[index*4+2:index*4+4], offset)
 		// Large-page tagged values carry one explicit flag byte. Bit zero means
 		// the value is stored intrinsically in this record.
-		tagged = append(tagged, 0x01)
+		flag := byte(1)
+		if small && !field.long {
+			flag = 0
+		}
+		tagged = append(tagged, flag)
 		tagged = append(tagged, field.data...)
 	}
 
@@ -167,6 +183,13 @@ func columnByIdentifier(columns []ColumnDefinition, identifier uint32) (ColumnDe
 		}
 	}
 	return ColumnDefinition{}, false
+}
+
+func fixedStorageSize(column ColumnDefinition) int {
+	if column.Type == ColumnBinary {
+		return int(column.Maximum)
+	}
+	return fixedColumnSize(column.Type)
 }
 
 func fixedColumnSize(columnType uint32) int {
@@ -441,6 +464,10 @@ func encodeIndexKey(columns []ColumnDefinition, row Row, definition IndexDefinit
 		raw, err := encodeColumn(column, value)
 		if err != nil {
 			return nil, err
+		}
+		if column.Type == ColumnBinary && column.Identifier < 128 && len(raw) < fixedStorageSize(column) {
+			// The key must describe the padded value actually stored in the row.
+			raw = append(raw, make([]byte, fixedStorageSize(column)-len(raw))...)
 		}
 		if fixedColumnSize(column.Type) == 0 {
 			segment, err := normalizeVariable(column, raw, descending, definition, collation)

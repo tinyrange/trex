@@ -17,6 +17,7 @@ const (
 	amd64UnwindSetFPReg      = 3
 	amd64UnwindSaveNonvol    = 4
 	amd64UnwindSaveNonvolFar = 5
+	amd64UnwindEpilog        = 6
 	amd64UnwindSaveXMM128    = 8
 	amd64UnwindSaveXMM128Far = 9
 	amd64UnwindPushMachFrame = 10
@@ -222,7 +223,11 @@ func amd64ApplyUnwind(image *pe.File, data []byte, function amd64RuntimeFunction
 	if activeOffset > prologSize {
 		activeOffset = prologSize
 	}
-	for slot := 0; slot < codeCount; {
+	firstSlot, err := amd64BodyUnwindStart(version, codes, function, controlOffset)
+	if err != nil {
+		return err
+	}
+	for slot := firstSlot; slot < codeCount; {
 		codeOffset := uint32(codes[slot*2])
 		operation := int(codes[slot*2+1] & 15)
 		info := int(codes[slot*2+1] >> 4)
@@ -313,6 +318,58 @@ func amd64ApplyUnwind(image *pe.File, data []byte, function amd64RuntimeFunction
 		return amd64ApplyUnwind(image, data, chained, ^uint32(0), state, depth+1)
 	}
 	return nil
+}
+
+// Version 2 prefixes the normal unwind codes with epilog descriptors. The
+// first describes the common size and optionally an epilog at function end;
+// remaining descriptors encode 12-bit distances back from that end. A zero
+// distance pads the prefix. See LLVM MCWin64EH.cpp's EmitUnwindInfo and
+// MCUnwindV2EpilogTargetExpr. These are not stack-restoration operations.
+// This reader unwinds body/prolog PCs only; reject epilog PCs rather than
+// pretending their partially restored register state is a complete frame.
+func amd64BodyUnwindStart(version byte, codes []byte, function amd64RuntimeFunction, controlOffset uint32) (int, error) {
+	if len(codes)%2 != 0 {
+		return 0, fmt.Errorf("truncated unwind code")
+	}
+	if version != 2 || len(codes) < 2 || codes[1]&15 != amd64UnwindEpilog {
+		return 0, nil
+	}
+	if function.end <= function.begin || codes[0] == 0 || codes[1]>>4 > 1 {
+		return 0, fmt.Errorf("invalid version-2 epilog header")
+	}
+	size := uint32(codes[0])
+	length := function.end - function.begin
+	check := func(distance uint32) error {
+		if distance < size || distance > length {
+			return fmt.Errorf("version-2 epilog outside function")
+		}
+		begin := length - distance
+		if controlOffset >= begin && controlOffset-begin < size {
+			return fmt.Errorf("unwinding a version-2 epilog PC is not supported")
+		}
+		return nil
+	}
+	count := 0
+	if codes[1]>>4 == 1 {
+		if err := check(size); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	slot := 1
+	for ; slot < len(codes)/2 && codes[slot*2+1]&15 == amd64UnwindEpilog; slot++ {
+		distance := uint32(codes[slot*2]) | uint32(codes[slot*2+1]>>4)<<8
+		if distance != 0 {
+			if err := check(distance); err != nil {
+				return 0, err
+			}
+			count++
+		}
+	}
+	if count == 0 {
+		return 0, fmt.Errorf("version-2 epilog header has no epilog")
+	}
+	return slot, nil
 }
 
 func amd64RVABytes(image *pe.File, data []byte, rva, size uint32) ([]byte, error) {

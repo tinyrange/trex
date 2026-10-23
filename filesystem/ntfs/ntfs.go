@@ -840,17 +840,17 @@ func (b *ntfsBuild) assignFileNames() error {
 			if imported, valid := ntfsImportedDOSName(link.shortName); valid && !strings.EqualFold(imported, link.name) {
 				upper, exact = imported, false
 			}
-			if exact {
-				link.names = []ntfsName{newNTFSName(link.name, 3, parent)}
+			// Only the original link owns a DOS name, whether represented by
+			// a separate Win32/DOS pair or one combined (namespace 3) name.
+			// Additional links use unpaired names even when they fit in 8.3.
+			// Multiple DOS identities can break transactional link deletion.
+			if len(child.names) != 0 {
+				link.names = []ntfsName{newNTFSName(link.name, 0, parent)}
 				child.names = append(child.names, link.names...)
 				continue
 			}
-			// A separate DOS/Win32 pair belongs to the original name only.
-			// Windows paired-name updates search the file's DOS attributes;
-			// a second pair can select an alias from a different directory.
-			// Additional long-name hard links have no paired short name.
-			if len(child.names) != 0 {
-				link.names = []ntfsName{newNTFSName(link.name, 0, parent)}
+			if exact {
+				link.names = []ntfsName{newNTFSName(link.name, 3, parent)}
 				child.names = append(child.names, link.names...)
 				continue
 			}

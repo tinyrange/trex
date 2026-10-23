@@ -1,6 +1,8 @@
 # PRI2 envelope
 
-The current parser reads the file envelope, not resource maps or qualifiers.
+This document records the parser incrementally: envelope, schemas, resource
+maps, decisions and bounded sole neutral/default strings. The envelope-only
+observations below predate the later sections.
 Evidence: Windows 11 26100 MrmCoreR, matching PDB GUID
 61B29674-3E81-67A3-127B-98CCB074D3F3, DBI/image age 1,
 BaseFile::ValidateStructure at RVA 2f320..2f558. Fields are little endian.
@@ -175,3 +177,38 @@ All four fail the DMR reference builder's exactly-one-candidate prerequisite
 for reduction to a literal. This establishes the index-reference branch for
 these names, not arbitrary PRI resources or a successful image smoke. The new
 Go frontend still needs integration-time comparison against this actual input.
+
+## Sole neutral/default string values
+
+`ResourceMap.SingleString` and `windows.pri_resource_values` implement only the
+safe literal-reduction case: exactly one candidate and a neutral/default
+qualifier set. A set is neutral/default when empty or when every qualifier has
+a nonzero fallback score (bounded to 1000). This is not locale selection.
+Multiple candidates, a non-default sole candidate and binary values retain the
+resource index. Missing resources and malformed/unsupported locators are errors.
+
+Independent Go implementation, with layout corroborated by the MIT-licensed
+Microsoft WindowsAppSDK revision `6b178e79e59d28efb10ef5c8c68b051d2615c3e6`:
+`dev/MRTCore/mrt/mrm/include/mrm/common/file/{MrmFiles,FileBaseSections}.h`,
+`dev/MRTCore/mrt/mrm/include/mrm/MrmEnvironment.h`, and
+`dev/MRTCore/mrt/mrm/mrmmin/{ResourceMap,FileDataSection,DecisionInfo}.cpp`.
+No GPL source is used.
+
+Eight-byte value-type atoms contain pool/index words. Fixed MRT type indexes
+0/1 are UTF-16 string/path, 2 binary, 3 ASCII string, 4 UTF-8 string, 5 ASCII
+path, 6 UTF-8 path. Eight-/ten-byte locators support internal map data and
+same-file data-item sections; external PRI file indexes are rejected. Data-item
+sections validate small/large item tables and their extended large-item count
+before reading payloads. All offset/count arithmetic is widened and bounded.
+Strings must terminate correctly; embedded NULs, unpaired UTF-16 surrogates,
+invalid UTF-8 and non-ASCII bytes in ASCII values are rejected.
+
+The API returns `{value: text, path: bool}` or `None` per requested schema index.
+It never opens a path. Recipe policy validates package-relative paths and file
+existence before emitting DMR path literals. On Windows 11 26300.9457 media,
+Client.CBS map section 3 resource 1794 resolved to the sole default path
+`VisualAssist\Assets\DescribeImage44x44.png`. Fresh-image validation also
+covered FileExp/Photon manifest resource references and modern Explorer.
+Synthetic tests exercise encoding, bounds, qualifier fallback, locator widths,
+extended item counts and unsupported cases; a bounded fuzz target covers the
+map/decision/value combination.

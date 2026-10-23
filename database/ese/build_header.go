@@ -1,8 +1,10 @@
 package ese
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"sort"
 )
 
 func (b *builder) buildDatabaseSpace(databasePages, allocatedLast uint32) error {
@@ -24,11 +26,26 @@ func (b *builder) databaseHeader() ([]byte, error) {
 	binary.LittleEndian.PutUint32(header[4:8], 0x89abcdef)
 	binary.LittleEndian.PutUint32(header[8:12], b.options.Version)
 	binary.LittleEndian.PutUint64(header[16:24], b.dbtime)
-	// A deterministic, non-null database signature. No log signature is set;
-	// this is a clean standalone database and ESENT will establish a matching
-	// log generation when it first attaches read/write.
-	binary.LittleEndian.PutUint32(header[24:28], 1)
+	// Distinct databases must have distinct signatures to attach concurrently.
+	// Hash ordered page contents rather than using a constant identity. Keep
+	// builds reproducible; no log signature is set for this clean database.
+	h := sha256.New()
+	h.Write(header[4:24])
+	pages := make([]uint32, 0, len(b.pages))
+	for page := range b.pages {
+		pages = append(pages, page)
+	}
+	sort.Slice(pages, func(i, j int) bool { return pages[i] < pages[j] })
+	for _, page := range pages {
+		var number [4]byte
+		binary.LittleEndian.PutUint32(number[:], page)
+		h.Write(number[:])
+		h.Write(b.pages[page])
+	}
+	signature := h.Sum(nil)
+	copy(header[24:28], signature[:4])
 	header[28], header[29], header[30] = 1, 1, 1
+	copy(header[36:52], signature[4:20])
 	binary.LittleEndian.PutUint32(header[52:56], 3) // JET_dbstateCleanShutdown
 	binary.LittleEndian.PutUint32(header[104:108], 1)
 	binary.LittleEndian.PutUint32(header[212:216], b.objidLast)
@@ -46,7 +63,7 @@ func (b *builder) databaseHeader() ([]byte, error) {
 		binary.LittleEndian.PutUint32(header[340:344], b.options.Version)
 		binary.LittleEndian.PutUint32(header[344:348], b.options.Revision)
 		binary.LittleEndian.PutUint64(header[508:516], ^uint64(0))
-		binary.LittleEndian.PutUint32(header[667:671], 0)
+		binary.LittleEndian.PutUint32(header[667:671], 1) // JET_filetypeDatabase
 	}
 	checksum, err := oldChecksum(header)
 	if err != nil {

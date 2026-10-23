@@ -3,6 +3,7 @@ package windows
 import (
 	"bytes"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/x509"
 	"fmt"
 	starfile "github.com/tinyrange/trex/storage/star"
@@ -50,7 +51,9 @@ func certificateBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 }
 
 func certificateStarlarkValue(certificate *x509.Certificate, digest [sha1.Size]byte) starlark.Value {
+	sha256Digest := sha256.Sum256(certificate.Raw)
 	return starfile.NewRecord(starlark.StringDict{
+		"sha256":      starlark.String(fmt.Sprintf("%x", sha256Digest)),
 		"der":         starlark.Bytes(certificate.Raw),
 		"issuer":      starlark.String(certificate.Issuer.String()),
 		"self_signed": starlark.Bool(bytes.Equal(certificate.RawSubject, certificate.RawIssuer)),

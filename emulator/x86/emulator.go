@@ -135,6 +135,7 @@ type emulatorModuleExport struct {
 }
 
 type emulatorModule struct {
+	imageSize    uint32
 	name         string
 	base         uint32
 	entry        uint32
@@ -745,7 +746,7 @@ func (m *emulatorX86) mapPE(value starlark.Value, name string, primary bool) (*e
 		return nil, fmt.Errorf("PE TLS: %w", err)
 	}
 	module := &emulatorModule{
-		name: canonicalName, base: base, entry: base + optional.AddressOfEntryPoint, primary: primary,
+		name: canonicalName, base: base, imageSize: optional.SizeOfImage, entry: base + optional.AddressOfEntryPoint, primary: primary,
 		tlsTemplate: tlsTemplate, tlsZeroFill: tlsZeroFill, tlsIndex: tlsIndex, tlsCallbacks: tlsCallbacks,
 		exports: make(map[string]emulatorModuleExport), ordinals: make(map[uint32]emulatorModuleExport),
 	}
@@ -1795,6 +1796,7 @@ func emulatorModuleValue(module *emulatorModule) starlark.Value {
 	return newStarlarkRecord(map[string]starlark.Value{
 		"name":          starlark.String(module.name),
 		"base":          starlark.MakeUint64(uint64(module.base)),
+		"image_size":    starlark.MakeUint64(uint64(module.imageSize)),
 		"entry":         starlark.MakeUint64(uint64(module.entry)),
 		"primary":       starlark.Bool(module.primary),
 		"tls_template":  starlark.Bytes(module.tlsTemplate),

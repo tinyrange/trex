@@ -53,7 +53,7 @@ var systemObjidColumns = []ColumnDefinition{
 
 var systemLocaleColumns = []ColumnDefinition{
 	{Name: "Type", Identifier: 1, Type: ColumnUnsignedByte, Maximum: 1, Flags: 1},
-	{Name: "iValue", Identifier: 2, Type: ColumnSignedLong, Maximum: 4, Flags: 0x30},
+	{Name: "iValue", Identifier: 2, Type: ColumnSignedLong, Maximum: 4, Flags: 0x30, Default: []byte{0, 0, 0, 0}},
 	{Name: "Key", Identifier: 128, Type: ColumnBinary, Maximum: 255},
 }
 
@@ -71,7 +71,7 @@ func catalogTableRow(object catalogObject, initialPages int32) Row {
 	return Row{
 		"ObjidTable": int32(object.objid), "Type": int16(catalogTypeTable),
 		"Id": int32(object.objid), "ColtypOrPgnoFDP": int32(object.fdp),
-		"SpaceUsage": initialPages, "Flags": int32(object.flags),
+		"SpaceUsage": int32(80), "Flags": int32(object.flags), // density, not page count
 		"PagesOrLocale": int32(initialPages), "RootFlag": true, "Name": object.name,
 	}
 }
@@ -92,7 +92,7 @@ func catalogColumnRows(object catalogObject) []Row {
 		}
 		if column.Identifier < 128 {
 			row["RecordOffset"] = fixedOffset
-			fixedOffset += int16(fixedColumnSize(column.Type))
+			fixedOffset += int16(fixedStorageSize(column))
 		}
 		if column.Default != nil {
 			row["DefaultValue"] = column.Default

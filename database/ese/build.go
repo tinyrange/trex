@@ -47,7 +47,7 @@ type TableDefinition struct {
 }
 
 // BuildOptions selects the persisted ESE generation: Windows 2000 revision 2
-// with 8 KiB pages or Windows 8 revision 0x14 with 32 KiB pages. Their tagged
+// with 8 KiB pages or revision 0x14 with 4/32 KiB pages. Their tagged
 // records, index segments, page flags, and checksums have distinct encodings.
 type BuildOptions struct {
 	DatabasePages uint32
@@ -121,8 +121,8 @@ func Build(tables []TableDefinition, options BuildOptions) (*starfile.Bytes, err
 	if options.PageSize == 0 {
 		options.PageSize = 32768
 	}
-	if options.PageSize != 32768 && options.PageSize != 8192 {
-		return nil, fmt.Errorf("ese: writer supports 8192 or 32768-byte pages")
+	if options.PageSize != 32768 && options.PageSize != 8192 && options.PageSize != 4096 {
+		return nil, fmt.Errorf("ese: writer supports 4096, 8192 or 32768-byte pages")
 	}
 	if options.Version == 0 {
 		options.Version = 0x620
@@ -133,8 +133,8 @@ func Build(tables []TableDefinition, options BuildOptions) (*starfile.Bytes, err
 			options.Revision = 2
 		}
 	}
-	if options.Version != 0x620 || !(options.PageSize == 32768 && options.Revision == 0x14 || options.PageSize == 8192 && options.Revision == 2) {
-		return nil, fmt.Errorf("ese: writer supports format 0x620 revision 2 (8 KiB) or 0x14 (32 KiB)")
+	if options.Version != 0x620 || !((options.PageSize == 32768 || options.PageSize == 4096) && options.Revision == 0x14 || options.PageSize == 8192 && options.Revision == 2) {
+		return nil, fmt.Errorf("ese: writer supports format 0x620 revision 2 (8 KiB) or 0x14 (4 or 32 KiB)")
 	}
 	if len(tables) == 0 {
 		return nil, fmt.Errorf("ese: at least one user table is required")

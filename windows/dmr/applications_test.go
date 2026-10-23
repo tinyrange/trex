@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-// Independent layout vector: one 46-byte application plus two padding bytes.
+// Independent layout vector: one 48-byte application including the rule-list NUL.
 // Scalar values exercise wire preservation, not valid registration policy.
 const applicationsGolden = "41505053400000000000000001000000" +
-	"2e0000000000010204000300000000000000000001000000443322110000010006000000" +
+	"300000000000010204000300000000000000000001000000443322110000010008000000" +
 	"410000002b00780000000000"
 
 func applicationFixture(t testing.TB) []byte {

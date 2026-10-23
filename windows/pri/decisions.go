@@ -6,7 +6,10 @@ const DecisionsType = "[mrm_decn_info]\x00"
 
 // Decisions preserves decision cardinalities after checking the decision and
 // qualifier reference tables. It does not evaluate qualifiers or pick a value.
-type Decisions struct{ counts []uint16 }
+type Decisions struct {
+	counts   []uint16
+	defaults []bool // sole candidate is neutral or every qualifier has fallback
+}
 
 func ParseDecisions(section Section) (*Decisions, error) {
 	if string(section.Type[:]) != DecisionsType {
@@ -57,13 +60,25 @@ func ParseDecisions(section Section) (*Decisions, error) {
 	}
 	for i := 0; i < nq; i++ {
 		p := b[quals+8*i:]
-		if int(le.Uint16(p)) >= nb || le.Uint16(p[6:]) != 0 {
+		if int(le.Uint16(p)) >= nb || le.Uint16(p[4:]) > 1000 || le.Uint16(p[6:]) != 0 {
 			return nil, fmt.Errorf("pri: invalid qualifier record")
 		}
 	}
-	d := &Decisions{counts: make([]uint16, nd)}
+	d := &Decisions{counts: make([]uint16, nd), defaults: make([]bool, nd)}
 	for i := range d.counts {
 		d.counts[i] = le.Uint16(b[12+4*i+2:])
+		if d.counts[i] == 1 {
+			first := int(le.Uint16(b[12+4*i:]))
+			set := int(le.Uint16(b[refs+2*first:]))
+			qfirst, qcount := int(le.Uint16(b[sets+4*set:])), int(le.Uint16(b[sets+4*set+2:]))
+			d.defaults[i] = true
+			for j := 0; j < qcount; j++ {
+				q := int(le.Uint16(b[refs+2*(qfirst+j):]))
+				if le.Uint16(b[quals+8*q+4:]) == 0 {
+					d.defaults[i] = false
+				}
+			}
+		}
 	}
 	return d, nil
 }
