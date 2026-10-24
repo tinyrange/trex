@@ -1,16 +1,16 @@
 // Package rfb implements an RFB 3.8 display session over a portable byte channel.
-// Authentication belongs to the enclosing transport. Raw true-colour pixels,
-// DesktopSize, keyboard transitions and pointer events are supported.
+// Authentication belongs to the enclosing transport. Raw and zlib-compressed
+// true-colour pixels, DesktopSize, keyboard and pointer events are supported.
 package rfb
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"image"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/tinyrange/trex/channel"
@@ -32,6 +32,11 @@ func Serve(ctx context.Context, ch channel.ByteChannel, display vmm.DisplaySourc
 		}
 	}()
 	s := session{ctx: ctx, ch: ch, display: display, keys: make(map[string]bool), format: []byte{32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0}}
+	defer func() {
+		if s.compressor != nil {
+			_ = s.compressor.Close()
+		}
+	}()
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 		defer cancel()
@@ -59,6 +64,10 @@ type session struct {
 	px, py                                  int
 	pointer                                 bool
 	pointerTypes, pointerTypeSent, absolute bool
+	zlibEncoding                            bool
+	compressed                              bytes.Buffer
+	compressor                              *zlib.Writer
+	pixelRow                                []byte
 }
 
 func (s *session) read(n int) ([]byte, error) {
@@ -178,7 +187,11 @@ func (s *session) setEncodings() error {
 	}
 	s.resize = false
 	s.pointerTypes = false
+	s.zlibEncoding = false
 	for i := 0; i < n; i++ {
+		if int32(be.Uint32(b[i*4:])) == 6 {
+			s.zlibEncoding = true
+		}
 		if int32(be.Uint32(b[i*4:])) == -223 {
 			s.resize = true
 		}
@@ -281,10 +294,17 @@ func validFrame(f *image.RGBA) error {
 	if f == nil || f.Rect.Min != (image.Point{}) || f.Rect.Dx() < 1 || f.Rect.Dy() < 1 || f.Rect.Dx() > 4096 || f.Rect.Dy() > 4096 {
 		return fmt.Errorf("invalid framebuffer")
 	}
+	// Check storage independently from Rect so a malformed backend frame cannot
+	// cause slice panics. This also permits padded rows without requiring a full
+	// stride after the final row. Division avoids overflow for hostile strides.
+	row := f.Rect.Dx() * 4
+	if f.Stride < row || len(f.Pix) < row || f.Rect.Dy()-1 > (len(f.Pix)-row)/f.Stride {
+		return fmt.Errorf("invalid framebuffer storage")
+	}
 	return nil
 }
 func validFormat(p []byte) error {
-	if p[0] != 32 || p[1] != 24 || p[2] > 1 || p[3] != 1 || be.Uint16(p[4:]) != 255 || be.Uint16(p[6:]) != 255 || be.Uint16(p[8:]) != 255 {
+	if len(p) != 16 || p[0] != 32 || p[1] != 24 || p[2] > 1 || p[3] != 1 || be.Uint16(p[4:]) != 255 || be.Uint16(p[6:]) != 255 || be.Uint16(p[8:]) != 255 {
 		return fmt.Errorf("RFB requires 32-bit RGB888 true colour")
 	}
 	var used uint32
@@ -343,7 +363,7 @@ func (s *session) update(req []byte) error {
 		be.PutUint32(b[12:], 0xffffff21)
 		return s.write(b)
 	}
-	r := image.Rect(int(be.Uint16(req[1:])), int(be.Uint16(req[3:])), 0, 0)
+	r := image.Rectangle{Min: image.Pt(int(be.Uint16(req[1:])), int(be.Uint16(req[3:])))}
 	r.Max = image.Pt(r.Min.X+int(be.Uint16(req[5:])), r.Min.Y+int(be.Uint16(req[7:])))
 	r = r.Intersect(f.Rect)
 	full := r == f.Rect
@@ -351,46 +371,117 @@ func (s *session) update(req []byte) error {
 		dirty := image.Rectangle{}
 		for y := r.Min.Y; y < r.Max.Y; y++ {
 			a, z := f.PixOffset(r.Min.X, y), s.previous.PixOffset(r.Min.X, y)
-			if bytes.Equal(f.Pix[a:a+r.Dx()*4], s.previous.Pix[z:z+r.Dx()*4]) {
+			row, old := f.Pix[a:a+r.Dx()*4], s.previous.Pix[z:z+r.Dx()*4]
+			if bytes.Equal(row, old) {
 				continue
 			}
-			for x := r.Min.X; x < r.Max.X; x++ {
-				if f.RGBAAt(x, y) != s.previous.RGBAAt(x, y) {
-					dirty = dirty.Union(image.Rect(x, y, x+1, y+1))
-				}
+			// Only the first and last differing pixels determine a row's
+			// bounding rectangle. Avoid a union and RGBA conversion per pixel
+			// when video or scrolling changes most of a scanline.
+			left, right := 0, len(row)-1
+			for row[left] == old[left] {
+				left++
 			}
+			for row[right] == old[right] {
+				right--
+			}
+			dirty = dirty.Union(image.Rect(r.Min.X+left/4, y, r.Min.X+right/4+1, y+1))
 		}
 		r = dirty
 	}
 	if r.Empty() {
 		return s.write([]byte{0, 0, 0, 0})
 	}
-	b := make([]byte, 16+r.Dx()*r.Dy()*4)
+	var b [20]byte
 	b[3] = 1
 	be.PutUint16(b[4:], uint16(r.Min.X))
 	be.PutUint16(b[6:], uint16(r.Min.Y))
 	be.PutUint16(b[8:], uint16(r.Dx()))
 	be.PutUint16(b[10:], uint16(r.Dy()))
-	i := 16
-	for y := r.Min.Y; y < r.Max.Y; y++ {
-		for x := r.Min.X; x < r.Max.X; x++ {
-			c := f.RGBAAt(x, y)
-			v := uint32(c.R)<<s.format[10] | uint32(c.G)<<s.format[11] | uint32(c.B)<<s.format[12]
-			if s.format[2] == 1 {
-				be.PutUint32(b[i:], v)
-			} else {
-				binary.LittleEndian.PutUint32(b[i:], v)
-			}
-			i += 4
-		}
-	}
 	if full {
 		s.previous = f
 	} else {
 		s.previous = nil
 	}
-	return s.write(b)
+	if s.zlibEncoding {
+		// RFB encoding 6 uses one persistent zlib stream across rectangles,
+		// with a sync flush per update. Keep the dictionary between frames.
+		if s.compressor == nil {
+			s.compressor, err = zlib.NewWriterLevel(&s.compressed, zlib.BestSpeed)
+			if err != nil {
+				return err
+			}
+		}
+		s.compressed.Reset()
+		if err = s.writePixelRows(s.compressor, f, r); err != nil {
+			return err
+		}
+		if err = s.compressor.Flush(); err != nil {
+			return err
+		}
+		be.PutUint32(b[12:], 6)
+		be.PutUint32(b[16:], uint32(s.compressed.Len()))
+		if err = s.write(b[:]); err != nil {
+			return err
+		}
+		return s.write(s.compressed.Bytes())
+	}
+	// Preserve one complete update per transport write for raw clients.
+	// Native clients negotiate zlib and avoid this full-frame buffer.
+	var raw bytes.Buffer
+	raw.Grow(16 + r.Dx()*r.Dy()*4)
+	raw.Write(b[:16])
+	if err = s.writePixelRows(&raw, f, r); err != nil {
+		return err
+	}
+	return s.write(raw.Bytes())
 }
+
+func (s *session) writePixelRows(out io.Writer, f *image.RGBA, r image.Rectangle) error {
+	// In RGBX order Go's RGBA storage is already the negotiated wire format.
+	// The fourth byte carries no channel in a 24-bit true-colour pixel. Copying
+	// it is valid and avoids repacking every pixel for the Metal client.
+	native := s.format[2] == 0 && s.format[10] == 0 && s.format[11] == 8 && s.format[12] == 16 ||
+		s.format[2] == 1 && s.format[10] == 24 && s.format[11] == 16 && s.format[12] == 8
+	if !native && cap(s.pixelRow) < r.Dx()*4 {
+		s.pixelRow = make([]byte, r.Dx()*4)
+	}
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		start := f.PixOffset(r.Min.X, y)
+		row := f.Pix[start : start+r.Dx()*4]
+		if !native {
+			dst := s.pixelRow[:len(row)]
+			for x := 0; x < len(row); x += 4 {
+				v := uint32(row[x])<<s.format[10] | uint32(row[x+1])<<s.format[11] | uint32(row[x+2])<<s.format[12]
+				if s.format[2] == 1 {
+					be.PutUint32(dst[x:], v)
+				} else {
+					binary.LittleEndian.PutUint32(dst[x:], v)
+				}
+			}
+			row = dst
+		}
+		if err := channel.WriteAll(out, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var keyNames = map[uint32]string{
+	0xff08: "backspace", 0xff09: "tab", 0xff0d: "enter", 0xff1b: "esc", 0xffff: "delete",
+	0xff50: "home", 0xff51: "left", 0xff52: "up", 0xff53: "right", 0xff54: "down",
+	0xff55: "pgup", 0xff56: "pgdn", 0xff57: "end", 0xff63: "insert",
+	0xffe1: "shift", 0xffe2: "shift_r", 0xffe3: "ctrl", 0xffe4: "ctrl_r",
+	0xffe9: "alt", 0xffea: "alt_r", 0xffe5: "caps_lock",
+	// RFB clients may identify the GUI keys as either Meta or Super. Both
+	// map to the same physical Windows/Command key on each side.
+	0xffe7: "meta_l", 0xffe8: "meta_r", 0xffeb: "meta_l", 0xffec: "meta_r",
+	' ': "space", '-': "minus", '=': "equal", '[': "bracket_left", ']': "bracket_right",
+	';': "semicolon", '\'': "apostrophe", '`': "grave_accent", '\\': "backslash",
+	',': "comma", '.': "dot", '/': "slash",
+}
+
 func keyName(k uint32) string {
 	if k >= 'A' && k <= 'Z' {
 		k += 32
@@ -401,13 +492,5 @@ func keyName(k uint32) string {
 	if k >= 0xffbe && k <= 0xffc9 {
 		return fmt.Sprintf("f%d", k-0xffbd)
 	}
-	if name, ok := map[uint32]string{0xff08: "backspace", 0xff09: "tab", 0xff0d: "enter", 0xff1b: "esc", 0xffff: "delete", 0xff50: "home", 0xff51: "left", 0xff52: "up", 0xff53: "right", 0xff54: "down", 0xff55: "pgup", 0xff56: "pgdn", 0xff57: "end", 0xff63: "insert", 0xffe1: "shift", 0xffe2: "shift_r", 0xffe3: "ctrl", 0xffe4: "ctrl_r", 0xffe9: "alt", 0xffea: "alt_r", 0xffe5: "caps_lock", 32: "space"}[k]; ok {
-		return name
-	}
-	plain := "-=[];'`\\,./"
-	names := strings.Split("minus equal bracket_left bracket_right semicolon apostrophe grave_accent backslash comma dot slash", " ")
-	if i := strings.IndexRune(plain, rune(k)); i >= 0 {
-		return names[i]
-	}
-	return ""
+	return keyNames[k]
 }

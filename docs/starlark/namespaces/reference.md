@@ -2169,6 +2169,12 @@ Creates a lazy random-access file over HTTP byte ranges with a bounded in-memory
 
 Performs one sequential HTTP(S) GET into an in-memory file, with normal redirect handling and HTTP gzip decoding. No HEAD/range requests, retries, disk cache or host intermediate files. Requires status200 and bounds response bytes after HTTP decompression to maximum (1..128MiB); timeout is 1..3600 seconds and lifecycle cancellation is honored. This is for bounded metadata; use http_file for large lazy payloads. It does not validate package signatures or digests.
 
+### `http_post_json`
+
+`http_post_json(url, body, maximum=8MiB, timeout=60, tls_roots=None) -> file`
+
+Sends a UTF-8 JSON string (or empty body) as application/json, returning a bounded in-memory file. Request body is limited to 1MiB; response maximum is 1..128MiB after transfer decompression. Requires HTTP 200, never follows redirects or retries, honors lifecycle cancellation and a 1..3600 second deadline. Does not add authentication headers. tls_roots optionally supplies 1..16 DER/PEM CA files or bytes (up to 1MiB each); an isolated per-request root pool replaces system roots while preserving hostname, validity and chain verification. No global trust changes, implicit certificate fetching or insecure fallback. Intended for metadata; payloads should use file APIs.
+
 ### `mirror_file`
 
 `mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file`
@@ -2222,6 +2228,12 @@ Reads bounded AEA1 header metadata without decrypting or authenticating it. Retu
 `archive.apple_archive(file, maximum_entries=100000) -> entries`
 
 Reads bounded AA01 Apple Archive records. Returns path, kind, borrowed data and fields keyed by the original three-letter names. Supports unsigned integer, path, timestamp and blob fields; timestamps contain seconds and nanoseconds. Rejects unknown encodings and malformed extents. Does not unpack to a host directory or infer archive authentication.
+
+### `archive.appx`
+
+`archive.appx(file) -> {kind, identity, full_name, family_name, entries, files, packages}`
+
+Reads unencrypted APPX/MSIX packages and bundles through portable files. identity exposes name, publisher, version, architecture and resource_id. full_name and family_name use the Windows SHA-256/UTF-16LE publisher identity hash; these names do not authenticate the publisher. entries/files are lazy ZIP file views; complete reads or entry.verify() check CRC. Entry name/path is the once-decoded UTF-8 OPC path, archive_name is the original ZIP name; do not unescape paths again. Unsafe and colliding decoded paths are rejected. Bundle packages expose name, type, architecture, version, size, is_stub and file. Member names normalize Windows separators to slashes; full installations should skip stub alternatives; call archive.appx(member.file) to read a child. Rejects unsafe paths, duplicate/colliding names, oversized manifests and absent or size-mismatched embedded members. verify_block_map(maximum=8589934592) checks SHA256 decoded blocks, sizes and complete payload coverage under a decoded byte budget; bundle members require separate calls. This checks an unauthenticated map, not publisher trust or ZIP container signature digests. Does not authenticate signatures, decrypt packages, resolve flat bundles, or install/register software. Keep the source open while reading entries.
 
 ### `archive.ar`
 
@@ -4024,6 +4036,12 @@ Builds a SCHEDULE_INTERVAL record from 168 hourly bytes, starting Sunday at 00:0
 `windows.ad_stored_sid(sid) -> bytes`
 
 Converts a wire-format SID to AD's stored form by reversing only the final subauthority's byte order.
+
+### `windows.appx_package_acl`
+
+`windows.appx_package_acl(parent, family, kind='root', framework=False) -> bytes`
+
+Constructs identity-scoped WindowsApps package DACLs from a native parent DACL. family is a package family name; kind is root, directory or file. By default adds conditional Users execute access bound to WIN://SYSAPPID, the derived family capability SID and Users read access. framework=True instead adds native shared-framework read/execute grants for both AppContainer groups and Users. Both policies inherit parent grants. Unsupported inheritable ACE types/flags and missing inherited grants fail closed. Does not construct an owner/SACL or register packages. No host security APIs.
 
 ### `windows.assembly_manifest`
 

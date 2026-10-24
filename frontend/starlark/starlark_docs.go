@@ -150,6 +150,7 @@ var nativeStarlarkTypes = map[string][]string{
 }
 
 var nativeStarlarkSignatures = map[string]string{
+	"archive.appx":                        "archive.appx(file) -> {kind, identity, full_name, family_name, entries, files, packages}",
 	"archive.crx":                         "archive.crx(file) -> record(id, version, files, entries)",
 	"binary.software_update_catalog":      "binary.software_update_catalog(source) -> list",
 	"binary.software_update_distribution": "binary.software_update_distribution(source) -> dict",
@@ -176,6 +177,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"help":                              "help(value=None) -> None",
 	"json.decode":                       "json.decode(value, maximum=64MiB) -> value",
 	"hex":                               "hex(value, width=0) -> string",
+	"http_post_json":                    "http_post_json(url, body, maximum=8MiB, timeout=60, tls_roots=None) -> file",
 	"http_get":                          "http_get(url, maximum=64MiB, timeout=60) -> file",
 	"http_file":                         "http_file(urls, size=None, name='HTTP range file', chunk_bytes=4MiB, cache_bytes=256MiB) -> file; omitted size uses HEAD discovery",
 	"mirror_file":                       "mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file",

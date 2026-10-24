@@ -84,6 +84,7 @@ func Builtins() starlark.StringDict {
 		"etl_profile":                      etlProfileBuiltin,
 		"sid_string":                       sidStringBuiltin,
 		"acl_entries":                      aclEntriesBuiltin,
+		"appx_package_acl":                 appxPackageACLBuiltin,
 		"object_ace":                       objectACEBuiltin,
 		"sam_alias_members":                samAliasMembersBuiltin,
 		"sam_alias_with_members":           samAliasWithMembersBuiltin,
