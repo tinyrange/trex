@@ -52,13 +52,15 @@ func (z *Archive) AttrNames() []string {
 }
 
 type Entry struct {
-	entry    *zip.File
-	mu       sync.Mutex
-	reader   io.ReadCloser
-	data     []byte
-	base     int64
-	err      error
-	verified bool
+	entry         *zip.File
+	mu            sync.Mutex
+	reader        io.ReadCloser
+	data          []byte
+	base          int64
+	err           error
+	verified      bool
+	stored        io.ReaderAt
+	storedChecked bool
 }
 
 // Retain a bounded decoded window. Backward reads outside it restart the
@@ -85,6 +87,31 @@ func (f *Entry) ReadAt(p []byte, off int64) (int, error) {
 	}
 	if f.err != nil {
 		return 0, f.err
+	}
+	// Stored members (notably large MSIX files inside bundles) are already
+	// randomly addressable. Replaying their entire CRC stream on every
+	// backward window miss makes guest page faults needlessly O(member size).
+	// Validate once, then retain only the bounded raw view, not decoded bytes.
+	if err := f.openStored(); err != nil {
+		return 0, err
+	}
+	if f.stored != nil {
+		if err := f.verifyStored(); err != nil {
+			return 0, err
+		}
+		length := min(int64(len(p)), f.Size()-off)
+		n, err := f.stored.ReadAt(p[:length], off)
+		if n < int(length) {
+			if err == nil || err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			f.err = err
+			return n, err
+		}
+		if n < len(p) {
+			return n, io.EOF
+		}
+		return n, err
 	}
 	if off < f.base {
 		if f.reader != nil {
@@ -163,7 +190,60 @@ func (f *Entry) Verify() error {
 	if f.Size() < 0 {
 		return fmt.Errorf("zip: decoded size exceeds file addressing range")
 	}
+	if err := f.openStored(); err != nil {
+		return err
+	}
+	if f.stored != nil {
+		return f.verifyStored()
+	}
 	return f.cacheUntil(f.Size())
+}
+
+// Called with mu held. OpenRaw may expose ReaderAt; retain the streaming
+// fallback when it does not. No reliance on its concrete implementation type.
+func (f *Entry) openStored() error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.storedChecked || f.entry.Method != zip.Store {
+		return nil
+	}
+	f.storedChecked = true
+	if f.entry.CompressedSize64 != f.entry.UncompressedSize64 {
+		f.err = zip.ErrFormat
+		return f.err
+	}
+	r, err := f.entry.OpenRaw()
+	if err != nil {
+		f.err = err
+		return err
+	}
+	f.stored, _ = r.(io.ReaderAt)
+	return nil
+}
+
+// The checksum reader validates the complete payload, including the final EOF
+// and any data descriptor. A corrupt member never enters the random-read path.
+func (f *Entry) verifyStored() error {
+	if f.err != nil || f.verified {
+		return f.err
+	}
+	r, err := f.entry.Open()
+	if err != nil {
+		f.err = err
+		return err
+	}
+	n, err := io.CopyBuffer(io.Discard, r, make([]byte, 128*1024))
+	closeErr := r.Close()
+	if err == nil && n != f.Size() {
+		err = io.ErrUnexpectedEOF
+	}
+	if err == nil {
+		err = closeErr
+	}
+	f.err = err
+	f.verified = err == nil
+	return err
 }
 
 func (f *Entry) cacheUntil(end int64) error {
