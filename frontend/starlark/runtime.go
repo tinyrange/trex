@@ -16,6 +16,7 @@ import (
 	"github.com/tinyrange/trex/archive/adcr"
 	"github.com/tinyrange/trex/archive/aea"
 	"github.com/tinyrange/trex/archive/applearchive"
+	"github.com/tinyrange/trex/archive/appx"
 	ararchive "github.com/tinyrange/trex/archive/ar"
 	"github.com/tinyrange/trex/archive/arsenic"
 	"github.com/tinyrange/trex/archive/aws"
@@ -132,6 +133,7 @@ func predeclared() starlark.StringDict {
 		"archive": namespace{
 			name: "archive",
 			attrs: starlark.StringDict{
+				"appx":             starlark.NewBuiltin("appx", appx.Builtin),
 				"crx":              starlark.NewBuiltin("crx", crx.Builtin),
 				"ar":               starlark.NewBuiltin("ar", ararchive.Builtin),
 				"cab":              starlark.NewBuiltin("cab", cabarchive.Builtin),
@@ -318,19 +320,20 @@ func predeclared() starlark.StringDict {
 			name:  "windows",
 			attrs: windowsBuiltins,
 		},
-		"error":        starlark.NewBuiltin("error", errorBuiltin),
-		"directory":    starlark.NewBuiltin("directory", filesystemapi.DirectoryBuiltin),
-		"bytes_concat": starlark.NewBuiltin("bytes_concat", bytesConcatBuiltin),
-		"digest":       starlark.NewBuiltin("digest", digestBuiltin),
-		"hex":          starlark.NewBuiltin("hex", hexBuiltin),
-		"help":         starlark.NewBuiltin("help", helpBuiltin),
-		"http_file":    nativeIO["http_file"],
-		"http_get":     nativeIO["http_get"],
-		"mirror_file":  nativeIO["mirror_file"],
-		"open":         nativeIO["open"],
-		"repl":         starlark.NewBuiltin("repl", replBuiltin),
-		"stdout":       nativeIO["stdout"],
-		"write":        nativeIO["write"],
+		"error":          starlark.NewBuiltin("error", errorBuiltin),
+		"directory":      starlark.NewBuiltin("directory", filesystemapi.DirectoryBuiltin),
+		"bytes_concat":   starlark.NewBuiltin("bytes_concat", bytesConcatBuiltin),
+		"digest":         starlark.NewBuiltin("digest", digestBuiltin),
+		"hex":            starlark.NewBuiltin("hex", hexBuiltin),
+		"help":           starlark.NewBuiltin("help", helpBuiltin),
+		"http_file":      nativeIO["http_file"],
+		"http_post_json": nativeIO["http_post_json"],
+		"http_get":       nativeIO["http_get"],
+		"mirror_file":    nativeIO["mirror_file"],
+		"open":           nativeIO["open"],
+		"repl":           starlark.NewBuiltin("repl", replBuiltin),
+		"stdout":         nativeIO["stdout"],
+		"write":          nativeIO["write"],
 	}
 }
 

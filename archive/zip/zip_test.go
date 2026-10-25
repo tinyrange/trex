@@ -83,7 +83,7 @@ func TestVerifyEmptyAndTruncatedEntry(t *testing.T) {
 	if err := testEntry(t, nil, zip.Store, true).Verify(); err == nil {
 		t.Fatal("accepted empty entry with bad checksum")
 	}
-	f := NewEntry(&zip.File{FileHeader: zip.FileHeader{Name: "short", UncompressedSize64: 5}})
+	f := NewEntry(&zip.File{FileHeader: zip.FileHeader{Name: "short", Method: zip.Deflate, UncompressedSize64: 5}})
 	f.reader = io.NopCloser(bytes.NewReader([]byte("ab")))
 	if _, err := f.ReadAt(make([]byte, 5), 0); err != io.ErrUnexpectedEOF {
 		t.Fatalf("short reader: %v", err)
