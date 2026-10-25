@@ -36,3 +36,31 @@ func TestCaptureLayoutAndOwnership(t *testing.T) {
 		t.Fatal("inactive mode did not yield VGA fallback")
 	}
 }
+
+func TestMonochromeCaptureUsesBitOrderWidthAndPaddedRows(t *testing.T) {
+	m := make([]byte, Pixels+8)
+	for i, v := range []uint32{Magic, 1, 9, 2, 4, 2} {
+		binary.LittleEndian.PutUint32(m[i*4:], v)
+	}
+	copy(m[Pixels:], []byte{0x80, 0xff, 0xff, 0xff, 0x01, 0x00, 0xff, 0xff})
+	frame, err := Capture(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 9; x++ {
+			want := byte(0)
+			if y == 0 && (x == 0 || x == 8) || y == 1 && x == 7 {
+				want = 255
+			}
+			p := frame.RGBAAt(x, y)
+			if p.R != want || p.G != want || p.B != want || p.A != 255 {
+				t.Fatalf("pixel %d,%d=%v", x, y, p)
+			}
+		}
+	}
+	binary.LittleEndian.PutUint32(m[16:], 1)
+	if _, err := Capture(m); err == nil {
+		t.Fatal("short monochrome row accepted")
+	}
+}

@@ -439,7 +439,7 @@ func (d *driver) Screenshot(ctx context.Context, format string) (starfile.File, 
 }
 
 func (p *pc) capture() (*image.RGBA, error) {
-	frame, err := ramfb.Capture(p.framebuffer)
+	frame, err := ramfb.Capture(p.displayMemory())
 	if frame != nil || err != nil {
 		return frame, err
 	}

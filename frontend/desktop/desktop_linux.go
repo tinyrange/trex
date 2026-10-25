@@ -83,6 +83,15 @@ func Run(parent context.Context, opts Options) (err error) {
 	}()
 	inputs := make(chan vmm.Input, 256)
 	frames := make(chan capturedFrame, 1)
+	viewports := make(chan image.Point, 1)
+	resizeDone := make(chan struct{})
+	resizeRunning := false
+	defer func() {
+		cancel()
+		if resizeRunning {
+			<-resizeDone
+		}
+	}()
 	workerDone := make(chan error, 1)
 	workerRunning := false
 	defer func() {
@@ -106,6 +115,7 @@ func Run(parent context.Context, opts Options) (err error) {
 	render.upload(progressImage("Constructing a fresh Windows image..."))
 	fullscreen := false
 	lastTitle := ""
+	lastViewport := image.Point{}
 	ticker := time.NewTicker(time.Second / 60)
 	defer ticker.Stop()
 	for {
@@ -130,6 +140,13 @@ func Run(parent context.Context, opts Options) (err error) {
 			}
 			workerRunning = true
 			go func() { workerDone <- displayWorker(ctx, source, inputs, frames) }()
+			if resizer, ok := source.(vmm.ResizeDisplaySource); ok {
+				resizeRunning = true
+				go func() {
+					defer close(resizeDone)
+					resizeWorker(ctx, resizer, viewports)
+				}()
+			}
 		default:
 		}
 		select {
@@ -167,6 +184,17 @@ func Run(parent context.Context, opts Options) (err error) {
 		default:
 		}
 		w, h := win.BackingSize()
+		if resizeRunning && w > 0 && h > 0 {
+			size := image.Pt(w, h)
+			if size != lastViewport {
+				lastViewport = size
+				select {
+				case <-viewports:
+				default:
+				}
+				viewports <- size
+			}
+		}
 		rect := viewport(w, h, render.width, render.height)
 		for _, event := range win.DrainInputEvents() {
 			if event.Type == window.InputEventFocusLost {

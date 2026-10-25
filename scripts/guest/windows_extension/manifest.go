@@ -1,4 +1,4 @@
-//go:build !computer_use
+//go:build !computer_use && !display_agent && !configuration_agent
 
 package main
 

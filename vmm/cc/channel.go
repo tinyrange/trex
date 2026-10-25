@@ -102,7 +102,11 @@ func (c *memoryChannel) operation(data []byte, write bool) (int, error) {
 		n := 0
 		err := c.driver.call(ctx, func() error {
 			var err error
-			n, err = transfer(c.driver.pc.channelMemory, data, write)
+			if c.driver.pc.channelKind == "serial" {
+				n, err = c.driver.pc.serialTransfer(data, write)
+			} else {
+				n, err = transfer(c.driver.pc.channelMemory, data, write)
+			}
 			return err
 		})
 		cancel()
@@ -119,6 +123,27 @@ func (c *memoryChannel) operation(data []byte, write bool) (int, error) {
 	}
 }
 func (c *memoryChannel) Read(data []byte) (int, error) { return c.operation(data, false) }
+
+func (p *pc) serialTransfer(data []byte, write bool) (int, error) {
+	u := &p.serial
+	if write {
+		if u.mcr&0x10 != 0 {
+			return 0, nil
+		}
+		n := min(len(data), u.capacity()-u.rxCount)
+		for _, value := range data[:n] {
+			u.receive(value, p.now())
+		}
+		return n, u.syncIRQ()
+	}
+	n := copy(data, u.tx)
+	copy(u.tx, u.tx[n:])
+	u.tx = u.tx[:len(u.tx)-n]
+	if n != 0 {
+		u.thre = true
+	}
+	return n, u.syncIRQ()
+}
 func (c *memoryChannel) Write(data []byte) (int, error) {
 	written := 0
 	for written < len(data) {

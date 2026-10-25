@@ -12,6 +12,20 @@ func (p *pc) handleMMIO(ex hypervisor.X86Exit) error {
 		return fmt.Errorf("invalid MMIO range address=%#x size=%d", ex.Address, ex.Size)
 	}
 	ex.Address = p.cpuAddress(ex.Address)
+	if p.legacyDisplay && ex.Address >= legacyDisplayAddress && ex.Address+uint64(ex.Size) <= legacyDisplayAddress+legacyDisplaySize {
+		var value uint64
+		for index := uint8(0); index < ex.Size; index++ {
+			if ex.Write {
+				p.ram[ex.Address+uint64(index)] = ex.Data[index]
+			} else {
+				value |= uint64(p.ram[ex.Address+uint64(index)]) << (index * 8)
+			}
+		}
+		if !ex.Write {
+			p.cpu.CompleteMMIORead(value, uint32(ex.Size))
+		}
+		return nil
+	}
 	if p.pciNIC != nil && p.pciNIC.contains(ex.Address, ex.Size) {
 		return p.pciNIC.mmio(ex, p.cpu)
 	}

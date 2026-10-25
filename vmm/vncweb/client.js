@@ -3,7 +3,22 @@
 const VERSION = 'RFB 003.008\n';
 const MAX_BUFFER = 70 * 1024 * 1024;
 const DESKTOP_SIZE = -223;
+const EXTENDED_DESKTOP_SIZE = -308;
 const POINTER_TYPE = -257;
+
+// The current shared Windows framebuffer reserves 8 MiB. Keep viewport-driven
+// requests within its 1080p limit; wire-level requests remain exact dimensions.
+const MAX_VIEWPORT_WIDTH = 1920, MAX_VIEWPORT_HEIGHT = 1080;
+export function viewportSize(width, height) {
+  if (width > MAX_VIEWPORT_WIDTH && width * MAX_VIEWPORT_HEIGHT >= height * MAX_VIEWPORT_WIDTH) {
+    height = height * MAX_VIEWPORT_WIDTH / width;
+    width = MAX_VIEWPORT_WIDTH;
+  } else if (height > MAX_VIEWPORT_HEIGHT) {
+    width = width * MAX_VIEWPORT_HEIGHT / height;
+    height = MAX_VIEWPORT_HEIGHT;
+  }
+  return [Math.max(1, Math.floor(width)), Math.max(1, Math.floor(height))];
+}
 
 export class RFB {
   constructor(send, frame, resize, ready, pointerMode = () => {}) {
@@ -80,8 +95,8 @@ export class RFB {
     this.take(24 + nameLength);
     // SetPixelFormat: RGB888 in 32-bit little-endian words.
     this.send(Uint8Array.of(0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 0, 8, 16, 0, 0, 0));
-    // Raw pixels, DesktopSize, and QEMU Pointer Motion Change.
-    this.send(Uint8Array.of(2, 0, 0, 3, 0, 0, 0, 0, 255, 255, 255, 33, 255, 255, 254, 255));
+    // Raw pixels, DesktopSize, ExtendedDesktopSize, QEMU Pointer Motion Change.
+    this.send(Uint8Array.of(2, 0, 0, 4, 0, 0, 0, 0, 255, 255, 255, 33, 255, 255, 254, 204, 255, 255, 254, 255));
     this.state = 'message';
     this.ready();
     this.request(false);
@@ -114,6 +129,23 @@ export class RFB {
       this.relative = x === 0;
       this.pointerX = this.pointerY = undefined;
       this.pointerMode(x === 1);
+    } else if (encoding === EXTENDED_DESKTOP_SIZE) {
+      if (view.byteLength < 16) return false;
+      const count = view.getUint8(12), length = 16 + count * 16;
+      if (view.byteLength < length) return false;
+      if (x > 2) throw Error('Invalid desktop resize reason');
+      // A rejected request does not change the framebuffer or screen layout.
+      if (x !== 1 || y === 0) {
+        if (!count) throw Error('Invalid desktop screen layout');
+        this.canResize = count === 1 && view.getUint16(20) === 0 && view.getUint16(22) === 0 &&
+          view.getUint16(24) === width && view.getUint16(26) === height;
+        this.screenID = view.getUint32(16);
+        this.screenFlags = view.getUint32(28);
+        this.size(width, height);
+      }
+      if (x === 1) this.pendingResize = null;
+      this.take(length);
+      this.scheduleResize();
     } else if (encoding === DESKTOP_SIZE) {
       this.take(12);
       this.size(width, height);
@@ -152,6 +184,37 @@ export class RFB {
 
   close() {
     clearTimeout(this.timer);
+    clearTimeout(this.resizeTimer);
+    this.closed = true;
+  }
+
+  // Latest viewport wins. Requests wait for server capability advertisement,
+  // are debounced, and a rejected size is not retried until the viewport changes.
+  requestResize(width, height, delay = 200) {
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return;
+    this.desiredResize = viewportSize(width, height);
+    this.scheduleResize(delay);
+  }
+
+  scheduleResize(delay = 200) {
+    clearTimeout(this.resizeTimer);
+    if (this.closed || !this.canResize || this.pendingResize || !this.desiredResize) return;
+    this.resizeTimer = setTimeout(() => this.sendResize(), delay);
+  }
+
+  sendResize() {
+    if (this.closed || !this.canResize || this.pendingResize || !this.desiredResize) return;
+    const [width, height] = this.desiredResize;
+    const key = `${width}x${height}`;
+    if (key === this.lastResize || (width === this.width && height === this.height)) return;
+    const bytes = new Uint8Array(24), view = new DataView(bytes.buffer);
+    bytes[0] = 251;
+    view.setUint16(2, width); view.setUint16(4, height); bytes[6] = 1;
+    view.setUint32(8, this.screenID);
+    view.setUint16(16, width); view.setUint16(18, height);
+    view.setUint32(20, this.screenFlags);
+    this.lastResize = this.pendingResize = key;
+    this.send(bytes);
   }
 
   request(incremental) {

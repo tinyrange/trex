@@ -51,7 +51,14 @@ avoids confusing host/guest cursor alignment. Absolute
 pointer devices require additional guest/backend support.
 
 The Go RFB 3.8 implementation is in `vmm/rfb`, over `channel.ByteChannel`.
-It supports RGB888 raw rectangles, incremental requests and DesktopSize.
+It supports RGB888 raw rectangles, incremental requests, DesktopSize and
+negotiated ExtendedDesktopSize/SetDesktopSize. When the source implements
+`vmm.ResizeDisplaySource` and its guest endpoint is ready, resizing the browser
+viewport requests a live guest resolution change. Requests debounce for 200 ms
+and fit within 1920×1080 while preserving the viewport's aspect ratio. The wire
+protocol requests exact dimensions and reports success only after the guest
+applies them. A rejected size is retried only after another viewport change.
+Fixed displays retain their current resolution and browser scaling.
 `vmm/vncweb` implements RFC 6455 binary framing and embeds the original
 JavaScript client; there are no external client libraries or CDN resources.
 The client requests updates at up to 20 Hz; incremental updates send the bounding

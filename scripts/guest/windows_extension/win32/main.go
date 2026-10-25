@@ -72,6 +72,32 @@ func waitForInputIdle(handle uintptr, milliseconds uint32) uint32 { return 0 }
 // renvo:linkstatic kernel32.dll,TerminateProcess
 func terminateProcess(handle uintptr, code uint32) uint32 { return 0 }
 
+// renvo:linkstatic user32.dll,GetSystemMetrics
+func getSystemMetrics(index uint32) uint32 { return 0 }
+
+// renvo:linkstatic user32.dll,GetDC
+func getDC(window uintptr) uintptr { return 0 }
+
+// renvo:linkstatic user32.dll,ReleaseDC
+func releaseDC(window, dc uintptr) uint32 { return 0 }
+
+// renvo:linkstatic user32.dll,FindWindowA
+func findWindow(class, title uintptr) uintptr { return 0 }
+
+// renvo:linkstatic user32.dll,IsWindowVisible
+func isWindowVisible(window uintptr) uint32 { return 0 }
+
+// renvo:linkstatic user32.dll,GetForegroundWindow
+func getForegroundWindow() uintptr { return 0 }
+
+// renvo:linkstatic gdi32.dll,GetDeviceCaps
+func getDeviceCaps(dc uintptr, index uint32) uint32 { return 0 }
+
+// renvo:linkstatic kernel32.dll,GetPrivateProfileStringA
+func getProfile(section, key, fallback, output uintptr, maximum uint32, filename uintptr) uint32 {
+	return 0
+}
+
 type startupInfo struct {
 	Size                                            uint32
 	Reserved, Desktop, Title                        uintptr
@@ -450,7 +476,10 @@ func inputIdle() {
 }
 func dispatch() {
 	if fields == 1 && equalField(0, "?") {
-		send(manifest)
+		send(manifest[:len(manifest)-len("DONE\n")])
+		send(extraManifest)
+		send(registryManifest)
+		send("DONE\n")
 		return
 	}
 	if fields < 2 || !equalField(0, "CALL") {
@@ -459,6 +488,16 @@ func dispatch() {
 	}
 	if equalField(1, "ping") && fields == 2 {
 		send("OK\tsWindows Win32 extension v1\n")
+	} else if equalField(1, "display_geometry") && fields == 2 {
+		displayGeometry()
+	} else if equalField(1, "window_visible") {
+		windowVisible(false)
+	} else if equalField(1, "window_active") {
+		windowVisible(true)
+	} else if equalField(1, "read_ini") {
+		readINI()
+	} else if equalField(1, "read_registry") {
+		readRegistry()
 	} else if equalField(1, "open_file") {
 		openFile()
 	} else if equalField(1, "read_file") {
@@ -509,9 +548,71 @@ func dispatch() {
 		} else {
 			booleanResult(deleteFile(arg(2)))
 		}
+	} else if dispatchExtra() {
 	} else {
 		bad()
 	}
+}
+
+func windowVisible(foreground bool) {
+	if fields != 4 || !stringArg(2, 255, true) || !stringArg(3, 255, true) {
+		bad()
+		return
+	}
+	class, title := arg(2), arg(3)
+	if *(*byte)(unsafe.Pointer(class)) == 0 {
+		class = 0
+	}
+	if *(*byte)(unsafe.Pointer(title)) == 0 {
+		title = 0
+	}
+	if class == 0 && title == 0 {
+		bad()
+		return
+	}
+	window := findWindow(class, title)
+	if window != 0 && isWindowVisible(window) != 0 && (!foreground || getForegroundWindow() == window) {
+		send("OK\tb1\n")
+	} else {
+		send("OK\tb0\n")
+	}
+}
+
+func displayGeometry() {
+	dc := getDC(0)
+	if dc == 0 {
+		send("ERR\tsdisplay\tsCannot acquire desktop DC\n")
+		return
+	}
+	width, height := getSystemMetrics(0), getSystemMetrics(1)
+	deviceWidth, deviceHeight := getDeviceCaps(dc, 8), getDeviceCaps(dc, 10)
+	releaseDC(0, dc)
+	send("OK\tm4\tswidth\ti")
+	number(width)
+	send("\tsheight\ti")
+	number(height)
+	send("\tsdevice_width\ti")
+	number(deviceWidth)
+	send("\tsdevice_height\ti")
+	number(deviceHeight)
+	send("\n")
+}
+
+func readINI() {
+	if fields != 5 || !stringArg(2, 259, false) || !stringArg(3, 128, false) || !stringArg(4, 128, false) {
+		bad()
+		return
+	}
+	var output [257]byte
+	var empty [1]byte
+	count := getProfile(arg(3), arg(4), ptr(&empty[0]), ptr(&output[0]), 257, arg(2))
+	if count >= 256 {
+		send("ERR\tslimit\tsINI value exceeds 255 bytes\n")
+		return
+	}
+	send("OK\ts")
+	sendHex(output[:count])
+	send("\n")
 }
 func openSerial() uintptr {
 	// NT 3.5 starts Serial as an automatic service. Winlogon's Userinit can

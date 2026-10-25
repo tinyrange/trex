@@ -69,6 +69,9 @@ func (p *pc) runWithHandler(ctx context.Context, handle func(hypervisor.X86Exit)
 }
 
 func (p *pc) handleIO(ex hypervisor.X86Exit) error {
+	if ex.Port == legacyDisplayPort {
+		return p.legacyDisplayIO(ex)
+	}
 	if ex.Port >= 0x3f8 && ex.Port <= 0x3ff {
 		return p.serialIO(ex)
 	}
@@ -109,7 +112,15 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 		return p.nic.io(ex)
 	}
 	if (ex.Port == 0x60 || ex.Port == 0x64) && ex.Write {
-		p.inputTrace = append(p.inputTrace, fmt.Sprintf("%04x <- %x", ex.Port, ex.Data))
+		registers, err := p.cpu.Registers()
+		if err != nil {
+			return err
+		}
+		system, err := p.cpu.SystemRegisters()
+		if err != nil {
+			return err
+		}
+		p.inputTrace = append(p.inputTrace, fmt.Sprintf("%04x <- %x pc=%x", ex.Port, ex.Data, system.Cs.Base+registers.Rip))
 		if len(p.inputTrace) > 64 {
 			p.inputTrace = p.inputTrace[1:]
 		}
@@ -245,6 +256,9 @@ func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
 		return time.Time{}, nil, nil, err
 	}
 	now := p.now()
+	if err := p.serial.poll(now); err != nil {
+		return time.Time{}, nil, nil, err
+	}
 	if p.uhci != nil {
 		if err := p.uhci.poll(now); err != nil {
 			return time.Time{}, nil, nil, err
@@ -306,5 +320,10 @@ func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
 		}
 	}
 
+	if next := p.serial.deadline(); !next.IsZero() && (deadline.IsZero() || next.Before(deadline)) {
+		deadline = next
+		deliver = func() error { return p.cpu.SetIRQ(4, true) }
+		commit = func() { p.serial.timeout, p.serial.irq = true, true }
+	}
 	return deadline, deliver, commit, nil
 }

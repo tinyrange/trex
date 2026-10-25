@@ -28,7 +28,7 @@ type pc struct {
 	biosKeyPause    byte
 	darwin          map[string]any
 	darwinSymbols   map[string]uint64
-	serial          [8]byte
+	serial          uart16550
 	efiTrace        []any
 	efi             *uefi.Firmware
 	efiMemory       *efiMemory
@@ -38,9 +38,11 @@ type pc struct {
 	nic             *ne2000
 	pciNIC          *e1000
 	framebuffer     []byte
+	legacyDisplay   bool
 	input           *virtioInput
 	channelMemory   []byte
 	channelName     string
+	channelKind     string
 	cpus            []hypervisor.X86 // CPU0 owns the machine; cpu selects the serialized exit owner.
 	cpu             hypervisor.X86
 	ram             []byte
@@ -80,6 +82,7 @@ func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) 
 
 func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time, legacyBoot bool) (*pc, error) {
 	p := &pc{cpu: cpu, ram: ram, disk: disk, now: now, started: now(), mode: 3, ports: make(map[uint16]byte)}
+	p.serial.setIRQ, p.serial.modem = cpu.SetIRQ, 0xb0
 	p.cmos[0x0a], p.cmos[0x0b] = 0x26, 2
 	p.geometry = vmm.CHSGeometry{Cylinders: int(disk.Device.Geometry().Size / 512 / 16 / 63), Heads: 16, Sectors: 63}
 	if disk.CHS != nil {
@@ -126,6 +129,7 @@ func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Ti
 	p.installKeyboardFirmware()
 	p.installMouseFirmware()
 	p.installVideoFirmware()
+	p.installPCIFirmware()
 	// POST programs the real interrupt controllers and timer before entering
 	// the original MBR. These instructions execute against KVM's PC devices.
 	// IRQ2 must remain enabled for the slave PIC, including a BIOS PS/2
@@ -255,7 +259,7 @@ func (p *pc) physicalPage(address uint64, s x86state.SystemRegisters) (uint64, [
 		return address, nil, nil, nil
 	}
 	if s.Cr4&(1<<5) != 0 {
-		return 0, nil, nil, fmt.Errorf("PAE address translation is not implemented")
+		return p.physicalPAEPage(address, s.Cr3)
 	}
 	dir, err := p.memory((s.Cr3&0xfffff000)+(address>>22&1023)*4, 4)
 	if err != nil {
@@ -295,6 +299,24 @@ func (p *pc) bios() error {
 		return err
 	}
 	addr := s.Cs.Base + r.Rip
+	// PCI BIOS callers may map the ROM anywhere in their linear address
+	// space. Identify this far-call entry by its translated physical address;
+	// it has no real-mode interrupt frame to update on the stack.
+	if s.Cr0&1 != 0 && r.Rflags&(1<<17) == 0 {
+		physical, translateErr := p.physical(addr, s)
+		if translateErr == nil && physical == pciBIOSEntry+2 {
+			status, err := p.pciBIOS(&r)
+			if err != nil {
+				return err
+			}
+			setAH(&r.Rax, status)
+			r.Rflags &^= 1
+			if status != 0 {
+				r.Rflags |= 1
+			}
+			return p.cpu.SetRegisters(r)
+		}
+	}
 	if addr == 0xf2105 {
 		p.keyboardScan(byte(r.Rax))
 		return nil
@@ -446,8 +468,18 @@ func (p *pc) bios() error {
 			carry = true
 			setAH(&r.Rax, 1)
 		}
-	case 0x14, 0x17:
-		// No serial or parallel ports are advertised; return invalid service.
+	case 0x14:
+		status, supported, err := p.serialBIOS(ah, al, uint16(r.Rdx))
+		if err != nil {
+			return err
+		}
+		if supported {
+			setLow(&r.Rax, status)
+		} else {
+			unsupported()
+		}
+	case 0x17:
+		// No parallel ports are advertised.
 		unsupported()
 	case 0x15:
 		switch ah {
@@ -511,6 +543,13 @@ func (p *pc) bios() error {
 		t := p.now().UTC()
 		bcd := func(v int) uint16 { return uint16(v/10*16 + v%10) }
 		switch ah {
+		case 0xb1:
+			status, pciErr := p.pciBIOS(&r)
+			if pciErr != nil {
+				return pciErr
+			}
+			setAH(&r.Rax, status)
+			carry = status != 0
 		case 0:
 			ticks := binary.LittleEndian.Uint32(p.ram[0x46c:])
 			setLow(&r.Rcx, uint16(ticks>>16))

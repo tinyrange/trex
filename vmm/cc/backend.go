@@ -25,6 +25,8 @@ type Backend struct {
 	// RunTimeout bounds a caller-constructed ARM64 firmware run. Zero uses 30 seconds.
 	RunTimeout               time.Duration
 	ACPI, PCIIDE, HPET, UEFI bool
+	// PCIDisplay exposes the TRF1 aperture as the 1234:cc02 PCI display device.
+	PCIDisplay bool
 	// USB enables the UHCI keyboard and absolute pointer.
 	USB bool
 	// PIOOnly disables the PCI IDE disk's DMA capability.
@@ -50,7 +52,7 @@ func Capabilities() []string {
 	return pcCapabilities()
 }
 func pcCapabilities() []string {
-	return []string{"boot.darwin", "disk", "disk.bus.ide", "disk.bus.nvme", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory"}
+	return []string{"boot.darwin", "disk", "disk.bus.ide", "disk.bus.nvme", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory", "channel.serial"}
 }
 func (b *Backend) ID() string {
 	if b.Name != "" {
@@ -190,11 +192,11 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		}
 	}
 	if len(m.Channels) > 1 {
-		add("channels", "cc PC supports one shared-memory channel")
+		add("channels", "cc PC supports one shared-memory or COM1 serial channel")
 	}
 	for _, channel := range m.Channels {
-		if channel.Kind != "shared-memory" || channel.Name == "" {
-			add("channels", "cc PC requires a named shared-memory channel")
+		if channel.Kind != "shared-memory" && channel.Kind != "serial" || channel.Name == "" {
+			add("channels", "cc PC requires a named shared-memory or serial channel")
 		}
 	}
 	if m.Display.Mode != "" && m.Display.Mode != "none" && m.Display.Mode != "capturable" {
@@ -293,7 +295,7 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 	}
 	regions = append(regions, hypervisor.RAMRegion{Address: ramfb.Address, Offset: uint64(m.Memory), Size: ramfb.Size})
 	total := uint64(m.Memory) + ramfb.Size
-	if len(m.Channels) == 1 {
+	if len(m.Channels) == 1 && m.Channels[0].Kind == "shared-memory" {
 		regions = append(regions, hypervisor.RAMRegion{Address: channelAddress, Offset: total, Size: channelSize})
 		total += channelSize
 	}
@@ -341,6 +343,8 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 	}
 	if m.DarwinBoot != nil {
 		platform.smc = newSMC(m.DarwinBoot.SMCOSK)
+	}
+	if b.PCIDisplay || m.DarwinBoot != nil {
 		platform.pciDisplay = newPCIDisplay()
 	}
 	if b.USB || m.DarwinBoot != nil {
@@ -360,16 +364,24 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 			platform.nic = newNE2000(port, network.MAC, func(level bool) error { return cpu.SetIRQ(9, level) })
 		}
 	}
+	if len(m.Channels) == 1 {
+		platform.channelName = m.Channels[0].Name
+		platform.channelKind = m.Channels[0].Kind
+		if platform.channelKind == "serial" {
+			platform.serial.attached = true
+			binary.LittleEndian.PutUint16(platform.ram[0x400:], 0x3f8)
+			binary.LittleEndian.PutUint16(platform.ram[0x410:], binary.LittleEndian.Uint16(platform.ram[0x410:])|0x200)
+			platform.ram[0x47c] = 1
+		} else {
+			platform.channelMemory = ram[uint64(m.Memory)+ramfb.Size:]
+			copy(platform.channelMemory, []byte("TRCH\x01\x00\x00\x00"))
+		}
+	}
 	if b.ACPI || b.PCIIDE || b.HPET || b.UEFI || m.Architecture == "x86_64" {
 		if err = platform.installACPI(); err != nil {
 			cpu.Close()
 			return nil, err
 		}
-	}
-	if len(m.Channels) == 1 {
-		platform.channelMemory = ram[uint64(m.Memory)+ramfb.Size:]
-		platform.channelName = m.Channels[0].Name
-		copy(platform.channelMemory, []byte("TRCH\x01\x00\x00\x00"))
 	}
 	binary.LittleEndian.PutUint32(platform.framebuffer, ramfb.Magic)
 	if b.UEFI {

@@ -45,7 +45,9 @@ func (k *keyboard) updateIRQ() error {
 		if k.queue[0].mouse {
 			mouse = k.command&2 != 0
 		} else {
-			key = k.command&1 != 0
+			// A disabled keyboard interface may still return controller
+			// responses to polling, but must not raise keyboard interrupts.
+			key = k.command&0x11 == 1
 		}
 	}
 	if err := k.irq(1, key); err != nil {
@@ -115,8 +117,14 @@ func (k *keyboard) io(ex hypervisor.X86Exit) error {
 				}
 			case 0xad:
 				k.command |= 0x10
+				if err := k.updateIRQ(); err != nil {
+					return err
+				}
 			case 0xae:
 				k.command &^= 0x10
+				if err := k.updateIRQ(); err != nil {
+					return err
+				}
 			case 0xa7:
 				k.command |= 0x20
 			case 0xa8:
