@@ -2277,6 +2277,12 @@ Reads classic uncompressed BRU backups, validating each 2 KiB record's signed-by
 
 Reads full, single-volume historical BSD dumps with 1024-byte records, magic60012 and old 128-byte UFS inodes, in either byte order. Validates header checksums, tape positions, record identity, address flags, complete inode payloads and directory structure. Returns entries, paths in files, find(path), dump date and raw allocated_map/dumped_map file views. Entries expose the same inode metadata and data views as filesystem.ufs; holes read as zeroes, hard links share data, symlinks are not followed and device nodes are metadata only. maximum_entries bounds both inode records and reachable paths; maximum_decoded_bytes bounds input size and cumulative logical inode bytes. Incremental dumps require a base image and are rejected, as are other dump generations and multi-volume streams. Dumped inode bitmap membership is checked against recovered records and the allocation map. Nested payloads require separate decoders.
 
+### `archive.burn_containers`
+
+`archive.burn_containers(file) -> list[file]`
+
+Reads WiX v3 Burn attached CAB container boundaries from PE metadata, returning portable file slices in UX-first order. Rejects unsupported, detached, or truncated layouts without executing the bootstrapper.
+
 ### `archive.bzip2`
 
 `archive.bzip2(file, maximum_bytes=<unlimited>, cache=False) -> file`

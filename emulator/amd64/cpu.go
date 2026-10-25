@@ -790,7 +790,7 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			c.resultFlags(value, width)
 			err = write(value)
-		case x86asm.XORPS, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PUNPCKLQDQ, x86asm.PSHUFLW, x86asm.PSHUFD:
+		case x86asm.XORPS, x86asm.PXOR, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PUNPCKLQDQ, x86asm.PSHUFLW, x86asm.PSHUFD:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
 				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
@@ -908,6 +908,44 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 					binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
 				}
 			}
+		case x86asm.CVTSS2SD:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid CVTSS2SD destination")
+				break
+			}
+			var value uint64
+			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				value = uint64(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]))
+			} else {
+				value, err = read(inst.Args[1], 4)
+			}
+			if err == nil {
+				var result [16]byte
+				result, err = c.packedSinglesToDoubles(value)
+				if err == nil {
+					copy(c.xmm[destination-x86asm.X0][:8], result[:8])
+				}
+			}
+		case x86asm.CVTSD2SS:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid CVTSD2SS destination")
+				break
+			}
+			var value uint64
+			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				value = binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8])
+			} else {
+				value, err = read(inst.Args[1], 8)
+			}
+			if err == nil {
+				var result uint32
+				result, err = c.doubleToSingle(value)
+				if err == nil {
+					binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
+				}
+			}
 		case x86asm.CVTTSS2SI:
 			var value uint64
 			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
@@ -966,6 +1004,26 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				if err == nil {
 					c.xmm[destination-x86asm.X0] = result
 				}
+			}
+		case x86asm.MOVHPS:
+			if destination, ok := inst.Args[0].(x86asm.Reg); ok && destination >= x86asm.X0 && destination <= x86asm.X15 {
+				if _, ok := inst.Args[1].(x86asm.Mem); !ok {
+					err = fmt.Errorf("MOVHPS requires memory source")
+					break
+				}
+				var value uint64
+				value, err = read(inst.Args[1], 8)
+				if err == nil {
+					binary.LittleEndian.PutUint64(c.xmm[destination-x86asm.X0][8:], value)
+				}
+			} else if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				if _, ok := inst.Args[0].(x86asm.Mem); !ok {
+					err = fmt.Errorf("MOVHPS requires memory destination")
+					break
+				}
+				err = c.writeOperand(memory, inst.Args[0], inst, next, 8, binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][8:]))
+			} else {
+				err = fmt.Errorf("invalid MOVHPS operands")
 			}
 		case x86asm.MOVSD_XMM, x86asm.MOVSS:
 			scalarWidth := 8
@@ -1062,12 +1120,12 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				copy(register[:], register[shift:])
 				clear(register[len(register)-shift:])
 			}
-		case x86asm.LFENCE:
-			// Guest memory operations are completed synchronously by the
-			// portable address space, so there is no older load to order here.
-		case x86asm.MOVDQA, x86asm.MOVDQU, x86asm.MOVAPS, x86asm.MOVUPS:
+		case x86asm.LFENCE, x86asm.MFENCE:
+			// Guest loads and stores complete synchronously in the portable
+			// address space; there are no buffered accesses to order here.
+		case x86asm.MOVDQA, x86asm.MOVDQU, x86asm.MOVAPS, x86asm.MOVUPS, x86asm.MOVAPD:
 			var value [16]byte
-			aligned := inst.Op == x86asm.MOVDQA || inst.Op == x86asm.MOVAPS
+			aligned := inst.Op == x86asm.MOVDQA || inst.Op == x86asm.MOVAPS || inst.Op == x86asm.MOVAPD
 			switch source := inst.Args[1].(type) {
 			case x86asm.Reg:
 				if source < x86asm.X0 || source > x86asm.X15 {

@@ -21,6 +21,8 @@ func shortcutBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 	var iconIndex int
 	var targetSize int
 	var systemRoot string
+	var appUserModelID string
+	var darwinID string
 	if err := starlark.UnpackArgs(
 		"shortcut", args, kwargs,
 		"target", &target,
@@ -32,6 +34,8 @@ func shortcutBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 		"icon_index?", &iconIndex,
 		"target_size?", &targetSize,
 		"system_root?", &systemRoot,
+		"app_user_model_id?", &appUserModelID,
+		"darwin_id?", &darwinID,
 	); err != nil {
 		return nil, err
 	}
@@ -39,15 +43,17 @@ func shortcutBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 		return nil, fmt.Errorf("shortcut: target is empty")
 	}
 	data, err := buildShellLink(shellLinkOptions{
-		Target:       target,
-		ShortTarget:  shortTarget,
-		Description:  description,
-		Arguments:    arguments,
-		WorkingDir:   workingDir,
-		IconLocation: iconLocation,
-		IconIndex:    int32(iconIndex),
-		TargetSize:   uint32(targetSize),
-		SystemRoot:   systemRoot,
+		Target:         target,
+		ShortTarget:    shortTarget,
+		Description:    description,
+		Arguments:      arguments,
+		WorkingDir:     workingDir,
+		IconLocation:   iconLocation,
+		IconIndex:      int32(iconIndex),
+		TargetSize:     uint32(targetSize),
+		SystemRoot:     systemRoot,
+		AppUserModelID: appUserModelID,
+		DarwinID:       darwinID,
 	})
 	if err != nil {
 		return nil, err
@@ -99,19 +105,25 @@ func buildInternetShortcut(url, iconLocation string, iconIndex int) ([]byte, err
 }
 
 type shellLinkOptions struct {
-	Target       string
-	ShortTarget  string
-	Description  string
-	Arguments    string
-	WorkingDir   string
-	IconLocation string
-	IconIndex    int32
-	TargetSize   uint32
-	SystemRoot   string
+	Target         string
+	ShortTarget    string
+	Description    string
+	Arguments      string
+	WorkingDir     string
+	IconLocation   string
+	IconIndex      int32
+	TargetSize     uint32
+	SystemRoot     string
+	AppUserModelID string
+	DarwinID       string
 }
 
 func buildShellLink(opts shellLinkOptions) ([]byte, error) {
 	target := strings.ReplaceAll(opts.Target, "/", `\`)
+	isURL := strings.HasPrefix(opts.Target, "https://") || strings.HasPrefix(opts.Target, "http://")
+	if isURL {
+		target = opts.Target
+	}
 	shortTarget := strings.ReplaceAll(opts.ShortTarget, "/", `\`)
 	workingDir := strings.ReplaceAll(opts.WorkingDir, "/", `\`)
 	iconLocation := strings.ReplaceAll(opts.IconLocation, "/", `\`)
@@ -119,19 +131,28 @@ func buildShellLink(opts shellLinkOptions) ([]byte, error) {
 		return nil, fmt.Errorf("target is empty")
 	}
 
-	if workingDir == "" {
+	if workingDir == "" && !isURL {
 		workingDir = windowsDirname(target)
 	}
 	envTarget := shellLinkEnvironmentTarget(target, opts.SystemRoot)
+	if isURL {
+		envTarget = target
+	}
 	defaultIconLocation := iconLocation == "" || strings.EqualFold(iconLocation, target)
-	if iconLocation == "" {
+	if iconLocation == "" && !isURL {
 		iconLocation = target
 	}
-	if envTarget != "" && defaultIconLocation {
+	if envTarget != "" && defaultIconLocation && !isURL {
 		iconLocation = envTarget
 	}
 
 	flags := uint32(0x00000001 | 0x00000002 | 0x00000080) // HasLinkTargetIDList | HasLinkInfo | IsUnicode
+	if isURL {
+		flags = 0x00000080 | 0x02000000
+	} // IsUnicode | PreferEnvironmentPath
+	if opts.DarwinID != "" {
+		flags |= 0x00001000
+	} // HasDarwinID
 	if opts.Description != "" {
 		flags |= 0x00000004 // HasName
 	}
@@ -164,16 +185,18 @@ func buildShellLink(opts shellLinkOptions) ([]byte, error) {
 	writeLE(&out, uint32(0))
 	writeLE(&out, uint32(0))
 
-	idList := buildIDList(target, shortTarget, opts.TargetSize)
-	writeLE(&out, uint16(len(idList)))
-	out.Write(idList)
+	if !isURL {
+		idList := buildIDList(target, shortTarget, opts.TargetSize)
+		writeLE(&out, uint16(len(idList)))
+		out.Write(idList)
 
-	linkInfoTarget := target
-	if shortTarget != "" {
-		linkInfoTarget = shortTarget
+		linkInfoTarget := target
+		if shortTarget != "" {
+			linkInfoTarget = shortTarget
+		}
+		linkInfo := buildLinkInfo(linkInfoTarget)
+		out.Write(linkInfo)
 	}
-	linkInfo := buildLinkInfo(linkInfoTarget)
-	out.Write(linkInfo)
 	if opts.Description != "" {
 		writeShellLinkString(&out, opts.Description)
 	}
@@ -188,6 +211,17 @@ func buildShellLink(opts shellLinkOptions) ([]byte, error) {
 	}
 	if envTarget != "" {
 		writeEnvironmentVariableDataBlock(&out, envTarget)
+	}
+	if opts.AppUserModelID != "" {
+		if strings.ContainsRune(opts.AppUserModelID, 0) || len(utf16.Encode([]rune(opts.AppUserModelID))) > 128 {
+			return nil, fmt.Errorf("shortcut: invalid AppUserModelID")
+		}
+		writeAppUserModelID(&out, opts.AppUserModelID)
+	}
+	if opts.DarwinID != "" {
+		if err := writeDarwinDataBlock(&out, opts.DarwinID); err != nil {
+			return nil, err
+		}
 	}
 	writeLE(&out, uint32(0)) // TerminalBlock
 	return out.Bytes(), nil

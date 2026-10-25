@@ -995,6 +995,8 @@ def environment_plugin(values = {}, system_time = 946684800):
     state = {"values": {}, "peb": 0, "parameters": 0}
     for name, value in values.items():
         state["values"][name.lower()] = (name, str(value))
+    state["crt_values"] = dict(state["values"])
+    state["crt_strings"] = {}
     fields = clock.utc(system_time)
     system_time_ticks = _filetime_ticks(
         fields["year"], fields["month"], fields["day"],
@@ -1046,6 +1048,16 @@ def environment_plugin(values = {}, system_time = 946684800):
         machine = event.machine
         wide = name.endswith("w")
         encoding = "utf16le" if wide else "ascii"
+        if name == "getenv":
+            if not args[0]:
+                return 0
+            variable = machine.read_cstring(args[0]).lower()
+            entry = state["crt_values"].get(variable)
+            if entry == None:
+                return 0
+            if variable not in state["crt_strings"]:
+                state["crt_strings"][variable] = machine.allocate(value = binary.encode(entry[1] + "\x00", encoding = "ascii"), name = "crt.environment." + variable)
+            return state["crt_strings"][variable]
         if name in ["getenvironmentvariablea", "getenvironmentvariablew"]:
             variable = machine.read_cstring(args[0], encoding = encoding)
             value = get(variable)
@@ -1146,6 +1158,12 @@ def environment_plugin(values = {}, system_time = 946684800):
             name = imported.name.lower()
             if name in signatures and _kernel_provider_module(imported.module):
                 machine.hook(callback, address = imported.address, argc = signatures[name])
+        # CRT keeps its own copy of the initial process environment. Win32
+        # SetEnvironmentVariable alone must not silently mutate that copy.
+        machine.provide_export(callback, module = "msvcrt.dll", name = "getenv", argc = 1, convention = "cdecl")
+        for imported in machine.imports_named(["getenv"]):
+            if imported.module.lower() == "msvcrt.dll":
+                machine.hook(callback, address = imported.address, argc = 1, convention = "cdecl")
     return emulator.plugin(install, name = "windows.environment", state = state)
 
 def _normalize_virtual_path(path):
@@ -1819,7 +1837,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 lock["depth"] = 0
 
     def thread_id_for_handle(handle):
-        if handle == 0xfffffffe:
+        if handle in [0xfffffffe, 0xfffffffffffffffe]:
             return state["current_thread"]["id"] if state["current_thread"] != None else 8
         entry = state["handles"].get(handle)
         if type(entry) != "dict" or entry.get("kind") not in ["thread", "thread_reference"]:
@@ -2759,16 +2777,17 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         if name == "getcurrentthreadid":
             return state["current_thread"]["id"] if state["current_thread"] != None else 8
         if name == "getcurrentthread":
-            return 0xfffffffe
+            return (1 << (machine.pointer_size * 8)) - 2
         if name == "duplicatehandle":
             source_process, source_handle, target_process, output, desired_access, inherit, options = args
-            if source_process != 0xffffffff or target_process != 0xffffffff or not output:
-                state["last_error"] = 6 if source_process != 0xffffffff or target_process != 0xffffffff else 87
+            mask = (1 << (machine.pointer_size * 8)) - 1
+            if source_process != mask or target_process != mask or not output:
+                state["last_error"] = 6 if source_process != mask or target_process != mask else 87
                 return 0
-            if source_handle == 0xfffffffe:
+            if source_handle == mask - 1:
                 thread_id = state["current_thread"]["id"] if state["current_thread"] != None else 8
                 duplicate = create_handle("thread_reference", {"id": thread_id})
-            elif source_handle == 0xffffffff:
+            elif source_handle == mask:
                 duplicate = create_handle("process_reference", {"id": 4})
             else:
                 source = state["handles"].get(source_handle)
@@ -2776,8 +2795,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                     state["last_error"] = 6
                     return 0
                 duplicate = create_handle(source["kind"], source["value"])
-            machine.write_u32le(output, duplicate)
-            if options & 1 and source_handle not in [0xffffffff, 0xfffffffe]:
+            machine.write_pointer(output, duplicate)
+            if options & 1 and source_handle not in [mask, mask - 1]:
                 state["handles"].pop(source_handle, None)
             state["last_error"] = 0
             return 1
@@ -2805,7 +2824,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         if name in ["getthreadpriority", "setthreadpriority"]:
             handle = args[0]
             thread_id = state["current_thread"]["id"] if state["current_thread"] != None else 8
-            if handle != 0xfffffffe:
+            if handle not in [0xfffffffe, 0xfffffffffffffffe]:
                 entry = state["handles"].get(handle)
                 if type(entry) != "dict" or entry.get("kind") not in ["thread", "thread_reference"]:
                     state["last_error"] = 6
@@ -3197,7 +3216,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             size = existing.get("size", 0)
             data = binary.builder(capacity = 36)
             data.u32le(0x10 if existing["directory"] else 0x80)
-            data.reserve(24)  # creation, access, and write FILETIMEs
+            for timestamp in ["creation_time", "access_time", "write_time"]:
+                data.u64le(existing.get(timestamp, 0))
             data.u32le((size >> 32) & 0xffffffff)
             data.u32le(size & 0xffffffff)
             machine.write(args[2], data.bytes())
@@ -3274,7 +3294,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             wide = name.endswith("w")
             if not args[0] or not args[1]:
                 state["last_error"] = 87
-                return 0xffffffff
+                return (1 << (machine.pointer_size * 8)) - 1
             pattern = file_path(machine, args[0], wide)
             parent, leaf = pattern.rsplit("\\", 1) if "\\" in pattern else ("", pattern)
             matches = []
@@ -3287,7 +3307,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if not matches:
                 parent_entry = state["paths"].get(parent)
                 state["last_error"] = 2 if parent_entry != None and parent_entry.get("directory", False) else 3
-                return 0xffffffff
+                return (1 << (machine.pointer_size * 8)) - 1
             handle = create_handle("find", {"matches": matches, "index": 0, "wide": wide})
             write_find_data(machine, args[1], matches[0], wide)
             state["last_error"] = 0
@@ -7144,6 +7164,7 @@ _MSVCRT_LOCALE_POINTERS = {
 _MSVCRT_LOCALE_VALUES = {
     "___lc_codepage_func": 1252,
     "___lc_collate_cp_func": 1252,
+    "___mb_cur_max_func": 1,
 }
 
 _MSVCRT_CXX_CONSTRUCTORS = {
@@ -7330,10 +7351,17 @@ def msvcrt_plugin(kernel = None):
             "_o__register_onexit_function": 2,
         },
         "api-ms-win-crt-runtime-l1-1-0.dll": {
+            "_initialize_onexit_table": 1,
+            "_register_onexit_function": 2,
+            "_execute_onexit_table": 1,
             "_initterm": 2,
             "_initterm_e": 2,
         },
+        "api-ms-win-crt-stdio-l1-1-0.dll": {
+            "__stdio_common_vswprintf": 6,
+        },
         "api-ms-win-crt-string-l1-1-0.dll": {
+            "wcslen": 1,
             "memset": 3,
             "strcmp": 2,
             "strncmp": 3,
@@ -7353,8 +7381,18 @@ def msvcrt_plugin(kernel = None):
         "_close": 1,
         "_access": 2,
         "_waccess": 2,
+        "_wfullpath": 3,
+        "_wstat64": 2,
+        "_getpid": 0,
+        "_wfindfirst": 2,
+        "_wfindnext": 2,
+        "_findclose": 1,
         "_lseek": 3,
         "_open": 3,
+        "_open_osfhandle": 2,
+        "_get_osfhandle": 1,
+        "_fdopen": 2,
+        "__iob_func": 0,
         "_read": 3,
         "_write": 3,
         "fclose": 1,
@@ -7375,6 +7413,7 @@ def msvcrt_plugin(kernel = None):
         "fsetpos": 2,
         "ftell": 1,
         "fwrite": 4,
+        "fputs": 2,
         "setvbuf": 4,
         "ungetc": 2,
         "ungetwc": 2,
@@ -7413,6 +7452,7 @@ def msvcrt_plugin(kernel = None):
         "_eh_prolog": 0,
         "_purecall": 0,
         "setlocale": 2,
+        "localeconv": 0,
         "wcslen": 1,
         "wcstombs": 3,
         "wcscpy": 2,
@@ -7458,6 +7498,8 @@ def msvcrt_plugin(kernel = None):
         "_splitpath": 5,
         "_memicmp": 3,
         "strchr": 2,
+        "strcspn": 2,
+        "strspn": 2,
         "strrchr": 2,
         "wcschr": 2,
         "wcsrchr": 2,
@@ -7494,6 +7536,9 @@ def msvcrt_plugin(kernel = None):
         "_wtoi64": 1,
         "_wtof": 1,
         "strtoul": 3,
+        "strtol": 3,
+        "_wunlink": 1,
+        "_wrename": 2,
         "localtime": 1,
         "rand": 0,
         "printf": 16,
@@ -7560,16 +7605,14 @@ def msvcrt_plugin(kernel = None):
             return 0
         data = kernel.state["file_data"](normalized)
         base = machine.allocate(size = max(1, len(data)), value = data, name = "msvcrt.FILE buffer")
-        file_data = binary.builder(capacity = 32)
-        file_data.u32le(base)
-        file_data.u32le(len(data))
-        file_data.u32le(base)
-        file_data.u32le(1 if operation == "r" else 2)
-        file_data.u32le(len(state["streams"]) + 3)
-        file_data.u32le(0)
-        file_data.u32le(len(data))
-        file_data.u32le(0)
-        pointer = machine.allocate(value = file_data.bytes(), name = "msvcrt.FILE")
+        pointer = machine.allocate(size = 48 if machine.pointer_size == 8 else 32, name = "msvcrt.FILE")
+        width = machine.pointer_size
+        machine.write_pointer(pointer, base)
+        machine.write_u32le(pointer + width, len(data))
+        machine.write_pointer(pointer + width * 2, base)
+        machine.write_u32le(pointer + width * 3, 1 if operation == "r" else 2)
+        machine.write_u32le(pointer + width * 3 + 4, len(state["streams"]) + 3)
+        machine.write_u32le(pointer + width * 3 + 12, len(data))
         state["streams"][pointer] = {
             "path": normalized,
             "offset": len(data) if operation == "a" else 0,
@@ -7583,22 +7626,103 @@ def msvcrt_plugin(kernel = None):
         return pointer
 
     def sync_stream_position(machine, current):
-        pointer = machine.read_u32le(current["pointer"])
+        if "handle" in current:
+            current["offset"] = kernel_call(machine, "SetFilePointer", [current["handle"], 0, 0, 1])
+            opened = kernel.state["handles"].get(current["handle"])
+            if opened != None and opened.get("kind") == "file":
+                current["path"] = opened["value"]["path"]
+            return
+        pointer = machine.read_pointer(current["pointer"])
         data = kernel.state["file_data"](current["path"]) if kernel != None else b""
         if pointer >= current["base"] and pointer <= current["base"] + len(data):
             current["offset"] = pointer - current["base"]
 
     def set_stream_position(machine, current, position):
+        if "handle" in current:
+            current["offset"] = kernel_call(machine, "SetFilePointer", [current["handle"], position, 0, 0])
+            return
         current["offset"] = position
         data = kernel.state["file_data"](current["path"]) if kernel != None else b""
         available = max(0, len(data) - position)
-        machine.write_u32le(current["pointer"], current["base"] + min(position, len(data)))
-        machine.write_u32le(current["pointer"] + 4, available)
+        machine.write_pointer(current["pointer"], current["base"] + min(position, len(data)))
+        machine.write_u32le(current["pointer"] + machine.pointer_size, available)
+
+    def kernel_call(machine, name, args):
+        result = machine.invoke(machine.resolve_export("kernel32.dll", name = name), args = args)
+        if result.reason != "return":
+            fail("CRT handle operation " + name + " stopped: " + result.detail)
+        return result.value
+
+    def handle_stream(machine, handle, flags, descriptor = None, pointer = None):
+        if descriptor == None:
+            descriptor = state["next_descriptor"]
+            state["next_descriptor"] += 1
+        if pointer == None:
+            pointer = machine.allocate(size = 48 if machine.pointer_size == 8 else 32, name = "msvcrt.FILE handle")
+        # Unbuffered legacy FILE: inline getc/putc must call the CRT slow path.
+        machine.write_u32le(pointer + machine.pointer_size * 3, 4 | (1 if flags & 3 == 0 else 2))
+        machine.write_u32le(pointer + machine.pointer_size * 3 + 4, descriptor)
+        state["streams"][pointer] = {"handle": handle, "flags": flags, "error": False, "eof": False, "wide_encoding": None}
+        state["descriptors"][descriptor] = pointer
+        return descriptor
+
+    def close_stream(machine, pointer):
+        current = state["streams"].pop(pointer, None)
+        if current == None:
+            return 0xffffffff
+        for descriptor in list(state["descriptors"]):
+            if state["descriptors"][descriptor] == pointer:
+                state["descriptors"].pop(descriptor)
+        if "handle" in current:
+            return 0 if kernel_call(machine, "CloseHandle", [current["handle"]]) else 0xffffffff
+        return 0
+
+    def handle_io(machine, current, size, value = None):
+        handle = current["handle"]
+        opened = kernel.state["handles"].get(handle) if kernel != None else None
+        if opened == None:
+            current["error"] = True
+            return None
+        if opened.get("kind") == "standard":
+            selector = opened["value"]["selector"] & 0xffffffff
+            if value == None and selector == 0xfffffff6:
+                current["eof"] = True
+                return b""
+            if value != None and selector in [0xfffffff5, 0xfffffff4]:
+                chunks = state.setdefault("standard_output", [])
+                if state.get("standard_output_bytes", 0) + len(value) > 1048576:
+                    fail("CRT standard output exceeds 1 MiB")
+                state["standard_output_bytes"] = state.get("standard_output_bytes", 0) + len(value)
+                chunks.append((selector, value))
+                return value
+            current["error"] = True
+            return None
+        if size > 64 << 20:
+            fail("CRT IO exceeds 64 MiB")
+        if current["flags"] & 0x4000:
+            fail("CRT OS handle text translation is not modeled")
+        if value != None and current["flags"] & 8:
+            if kernel_call(machine, "SetFilePointer", [handle, 0, 0, 2]) == 0xffffffff:
+                current["error"] = True
+                return None
+        buffer = machine.allocate(size = max(1, size), value = value if value != None else b"")
+        count = machine.allocate(size = 4)
+        ok = kernel_call(machine, "ReadFile" if value == None else "WriteFile", [handle, buffer, size, count, 0])
+        transferred = machine.read_u32le(count) if ok else 0
+        output = machine.read(buffer, transferred) if ok else None
+        machine.free(count)
+        machine.free(buffer)
+        current["error"] = not bool(ok)
+        if value == None:
+            current["eof"] = bool(ok) and transferred < size
+        return output
 
     def stream_read(machine, pointer, size):
         current = stream(pointer)
         if current == None or kernel == None or size < 0:
             return None
+        if "handle" in current:
+            return handle_io(machine, current, size)
         sync_stream_position(machine, current)
         data = kernel.state["file_data"](current["path"])
         start = current["offset"]
@@ -7611,6 +7735,8 @@ def msvcrt_plugin(kernel = None):
         current = stream(pointer)
         if current == None or kernel == None:
             return False
+        if "handle" in current:
+            return handle_io(machine, current, len(value), value) != None
         sync_stream_position(machine, current)
         if not kernel.state["write_file_data"](current["path"], current["offset"], value, machine = machine):
             current["error"] = True
@@ -7622,7 +7748,7 @@ def msvcrt_plugin(kernel = None):
         name = event.name.lower()
         args = event.args
         state["calls"][name] = state["calls"].get(name, 0) + 1
-        if name == "_o__initialize_onexit_table":
+        if name in ["_o__initialize_onexit_table", "_initialize_onexit_table"]:
             table = args[0]
             if not table:
                 return -1
@@ -7633,7 +7759,7 @@ def msvcrt_plugin(kernel = None):
                     event.machine.write_pointer(table + index * width, encoded_null)
                 state["onexit_tables"][table] = {"callbacks": [], "storage": 0, "capacity": 0}
             return 0
-        if name == "_o__register_onexit_function":
+        if name in ["_o__register_onexit_function", "_register_onexit_function"]:
             table, function = args[:2]
             current = state["onexit_tables"].get(table)
             if not table or not function or current == None:
@@ -7654,7 +7780,7 @@ def msvcrt_plugin(kernel = None):
             event.machine.write_pointer(table + event.machine.pointer_size, current["storage"] + len(callbacks) * event.machine.pointer_size)
             event.machine.write_pointer(table + 2 * event.machine.pointer_size, current["storage"] + current["capacity"] * event.machine.pointer_size)
             return 0
-        if name == "_o__execute_onexit_table":
+        if name in ["_o__execute_onexit_table", "_execute_onexit_table"]:
             table = args[0]
             current = state["onexit_tables"].get(table)
             if not table or current == None:
@@ -7754,6 +7880,19 @@ def msvcrt_plugin(kernel = None):
             return previous
         if name in ["_xcptfilter", "_purecall"]:
             return 0
+        if name == "localeconv":
+            if state.get("locale", "C") not in ["C", ""]:
+                fail("localeconv only models the C locale")
+            if "lconv" not in state:
+                width = event.machine.pointer_size
+                address = event.machine.allocate(size = width * 10 + 8, name = "msvcrt.lconv")
+                empty = event.machine.allocate(value = b"\x00")
+                decimal = event.machine.allocate(value = b".\x00")
+                for index in range(10):
+                    event.machine.write_pointer(address + index * width, decimal if index == 0 else empty)
+                event.machine.write(address + width * 10, b"\x7f" * 8)
+                state["lconv"] = address
+            return state["lconv"]
         if name == "setlocale":
             if args[1]:
                 state["locale"] = event.machine.read_cstring(args[1], encoding = "ascii")
@@ -7773,6 +7912,38 @@ def msvcrt_plugin(kernel = None):
             if len(state["actions"]) < 256:
                 state["actions"].append({"api": name, "path": path, "mode": mode, "result": result})
             return result
+        if name == "__iob_func":
+            if "iob" not in state:
+                if kernel == None:
+                    fail("standard streams require a kernel")
+                stride = 48 if event.machine.pointer_size == 8 else 32
+                state["iob"] = event.machine.allocate(size = stride * 3, name = "msvcrt.iob")
+                for index in range(3):
+                    handle = kernel_call(event.machine, "GetStdHandle", [0xfffffff6 - index])
+                    handle_stream(event.machine, handle, 0 if index == 0 else 1, index, state["iob"] + index * stride)
+            return state["iob"]
+        if name == "_open_osfhandle":
+            handle, flags = args
+            opened = kernel.state["handles"].get(handle) if kernel != None else None
+            if opened == None or opened.get("kind") not in ["file", "standard"]:
+                event.machine.write_u32le(errno_address(event.machine), 9)
+                return 0xffffffff
+            return handle_stream(event.machine, handle, flags)
+        if name in ["_fdopen", "_get_osfhandle"]:
+            pointer = state["descriptors"].get(args[0])
+            current = stream(pointer) if pointer != None else None
+            if current == None:
+                event.machine.write_u32le(errno_address(event.machine), 9)
+                return 0 if name == "_fdopen" else (1 << (event.machine.pointer_size * 8)) - 1
+            if name == "_get_osfhandle":
+                if "handle" not in current:
+                    fail("CRT path-only stream has no OS handle")
+                return current["handle"]
+            mode = event.machine.read_cstring(args[1], encoding = "ascii")
+            if mode not in ["r", "rb", "w", "wb", "a", "ab", "r+", "rb+", "r+b", "w+", "wb+", "w+b"]:
+                event.machine.write_u32le(errno_address(event.machine), 22)
+                return 0
+            return pointer
         if name == "_open":
             path = event.machine.read_cstring(args[0], encoding = "ascii")
             flags = args[1]
@@ -7790,11 +7961,8 @@ def msvcrt_plugin(kernel = None):
                 state["actions"].append({"api": name, "path": path, "flags": flags, "descriptor": descriptor})
             return descriptor
         if name == "_close":
-            pointer = state["descriptors"].pop(args[0], None)
-            if pointer == None:
-                return 0xffffffff
-            state["streams"].pop(pointer, None)
-            return 0
+            pointer = state["descriptors"].get(args[0])
+            return close_stream(event.machine, pointer) if pointer != None else 0xffffffff
         if name in ["_access", "_waccess"]:
             wide = name == "_waccess"
             path = event.machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
@@ -7802,6 +7970,117 @@ def msvcrt_plugin(kernel = None):
             if len(state["actions"]) < 256:
                 state["actions"].append({"api": name, "path": path, "mode": args[1], "allowed": allowed})
             return 0 if allowed else 0xffffffff
+        if name in ["_wfindfirst", "_wfindnext", "_findclose"]:
+            if kernel == None:
+                fail("CRT directory enumeration requires virtual filesystem")
+            if name == "_findclose":
+                result = event.machine.invoke(event.machine.resolve_export("kernel32.dll", name = "FindClose"), args = [args[0]])
+                if result.reason != "return":
+                    fail("FindClose stopped: " + result.detail)
+                if not result.value:
+                    event.machine.write_u32le(errno_address(event.machine), 22)
+                return 0 if result.value else 0xffffffff
+            if not args[1] or (name == "_wfindfirst" and not args[0]):
+                event.machine.write_u32le(errno_address(event.machine), 22)
+                return (1 << (event.machine.pointer_size * 8)) - 1 if name == "_wfindfirst" else 0xffffffff
+            temporary = event.machine.allocate(size = 592)
+            api = "FindFirstFileW" if name == "_wfindfirst" else "FindNextFileW"
+            result = event.machine.invoke(event.machine.resolve_export("kernel32.dll", name = api), args = [args[0], temporary])
+            if result.reason != "return":
+                event.machine.free(temporary)
+                fail(api + " stopped: " + result.detail)
+            invalid = (1 << (event.machine.pointer_size * 8)) - 1
+            ok = result.value != invalid if name == "_wfindfirst" else result.value != 0
+            if ok:
+                # The legacy export follows the platform time_t ABI: x64
+                # has 64-bit times, but its _fsize_t remains a DWORD.
+                output = args[1]
+                wide_time = event.machine.pointer_size == 8
+                event.machine.write(output, b"\x00" * (560 if wide_time else 540))
+                event.machine.write_u32le(output, event.machine.read_u32le(temporary) & 0x37)
+                for index in range(3):
+                    stamp = event.machine.read_u64le(temporary + 4 + index * 8)
+                    seconds = stamp // 10000000 - 11644473600 if stamp else -1
+                    if wide_time:
+                        event.machine.write_u64le(output + 8 + index * 8, seconds & 0xffffffffffffffff)
+                    else:
+                        event.machine.write_u32le(output + 4 + index * 4, seconds & 0xffffffff if seconds >= 0 and seconds <= 0x7fffffff else 0xffffffff)
+                event.machine.write_u32le(output + (32 if wide_time else 16), event.machine.read_u32le(temporary + 32))
+                event.machine.write(output + (36 if wide_time else 20), event.machine.read(temporary + 44, 520))
+            else:
+                event.machine.write_u32le(errno_address(event.machine), 2)
+            event.machine.free(temporary)
+            return result.value if name == "_wfindfirst" else (0 if ok else 0xffffffff)
+        if name in ["_wunlink", "_wrename"]:
+            if kernel == None:
+                fail("CRT file mutation requires virtual filesystem")
+            ok = kernel_call(event.machine, "DeleteFileW" if name == "_wunlink" else "MoveFileW", list(args))
+            if not ok:
+                error = kernel.state["last_error"]
+                event.machine.write_u32le(errno_address(event.machine), 2 if error in [2, 3] else 13)
+            return 0 if ok else 0xffffffff
+        if name == "_getpid":
+            if kernel == None:
+                fail("_getpid requires emulated process identity")
+            result = event.machine.invoke(event.machine.resolve_export("kernel32.dll", name = "GetCurrentProcessId"))
+            if result.reason != "return":
+                fail("process identity query stopped: " + result.detail)
+            return result.value
+        if name == "_wstat64":
+            source, output = args
+            if not source or not output or kernel == None:
+                event.machine.write_u32le(errno_address(event.machine), 22)
+                return 0xffffffff
+            path = event.machine.read_cstring(source, encoding = "utf16le")
+            temporary = event.machine.allocate(size = 36)
+            result = event.machine.invoke(event.machine.resolve_export("kernel32.dll", name = "GetFileAttributesExW"), args = [source, 0, temporary])
+            if result.reason != "return":
+                event.machine.free(temporary)
+                fail("stat metadata query stopped: " + result.detail)
+            if not result.value:
+                event.machine.free(temporary)
+                event.machine.write_u32le(errno_address(event.machine), 2)
+                return 0xffffffff
+            attributes = event.machine.read_u32le(temporary)
+            directory = bool(attributes & 0x10)
+            mode = (0x4000 if directory else 0x8000) | 0x100
+            if not (attributes & 1):
+                mode |= 0x80
+            if directory or path.lower().endswith((".exe", ".com", ".bat", ".cmd")):
+                mode |= 0x40
+            mode |= (mode & 0x1c0) >> 3 | (mode & 0x1c0) >> 6
+            absolute = _dos_nt_path(path, kernel.state["current_directory"])
+            drive = "abcdefghijklmnopqrstuvwxyz".find(absolute[4:5].lower()) if absolute != None and absolute[5:6] == ":" else 0
+            event.machine.write(output, b"\x00" * 56)
+            event.machine.write_u32le(output, max(0, drive))
+            event.machine.write_u32le(output + 16, max(0, drive))
+            event.machine.write_u16le(output + 6, mode)
+            event.machine.write_u16le(output + 8, 1)
+            size = event.machine.read_u32le(temporary + 32) | event.machine.read_u32le(temporary + 28) << 32
+            event.machine.write_u64le(output + 24, 0 if directory else size)
+            for destination, offset in [(32, 12), (40, 20), (48, 4)]:
+                ticks = event.machine.read_u64le(temporary + offset)
+                seconds = ticks // 10000000 - 11644473600 if ticks else 0
+                event.machine.write_u64le(output + destination, seconds & 0xffffffffffffffff)
+            event.machine.free(temporary)
+            return 0
+        if name == "_wfullpath":
+            output, source, capacity = args
+            current = kernel.state["current_directory"] if kernel != None else "C:\\"
+            value = event.machine.read_cstring(source, encoding = "utf16le") if source else ""
+            path = _dos_nt_path(value or current, current)
+            if path == None:
+                event.machine.write_u32le(errno_address(event.machine), 22)
+                return 0
+            path = "\\\\" + path[8:] if path.startswith("\\??\\UNC\\") else path[4:]
+            encoded = binary.encode(path, encoding = "utf16le", nul = True)
+            if output and capacity < len(encoded) // 2:
+                event.machine.write_u32le(errno_address(event.machine), 34)
+                return 0
+            if not output:
+                output = _tracked_allocate(event.machine, state["allocations"], len(encoded), "msvcrt.fullpath")
+            event.machine.write(output, encoded)
+            return output
         if name == "_splitpath":
             path = event.machine.read_cstring(args[0], encoding = "ascii").replace("/", "\\")
             drive = path[:2] if len(path) >= 2 and path[1:2] == ":" else ""
@@ -7852,7 +8131,7 @@ def msvcrt_plugin(kernel = None):
             set_stream_position(event.machine, current, position)
             return position
         if name == "fclose":
-            return 0 if state["streams"].pop(args[0], None) != None else 0xffffffff
+            return close_stream(event.machine, args[0])
         if name == "_filbuf":
             value = stream_read(event.machine, args[0], 1)
             return binary.read_u8(value) if value != None and len(value) == 1 else 0xffffffff
@@ -7914,9 +8193,19 @@ def msvcrt_plugin(kernel = None):
             event.machine.write(args[0], value)
             result = len(value) // args[1]
             if len(state["actions"]) < 256:
-                return_address = event.machine.get_register("eip")
+                return_address = event.return_address
                 state["actions"].append({"api": name, "stream": args[3], "size": args[1], "count": args[2], "bytes": len(value), "result": result, "preview": hex(value[:32]), "return": return_address})
             return result
+        if name in ["strcspn", "strspn"]:
+            source = event.machine.read_cbytes(args[0])
+            rejected = event.machine.read_cbytes(args[1])
+            for index in range(len(source)):
+                if (source[index:index + 1] in rejected) == (name == "strcspn"):
+                    return index
+            return len(source)
+        if name == "fputs":
+            value = event.machine.read_cbytes(args[0])
+            return 0 if stream_write(event.machine, args[1], value) else 0xffffffff
         if name == "fwrite":
             total = args[1] * args[2]
             if args[1] == 0:
@@ -8110,7 +8399,9 @@ def msvcrt_plugin(kernel = None):
             return min(len(value), args[2])
         if name == "wcslen":
             return len(event.machine.read_cstring(args[0], encoding = "utf16le"))
-        if name in ["strlen", "_mbslen"]:
+        if name == "strlen":
+            return len(event.machine.read_cbytes(args[0]))
+        if name == "_mbslen":
             return len(event.machine.read_cstring(args[0], encoding = "ascii"))
         if name in ["strcpy", "strcat", "strncat", "_mbsnbcpy"]:
             value = event.machine.read_cstring(args[1], encoding = "ascii")
@@ -8316,14 +8607,18 @@ def msvcrt_plugin(kernel = None):
                 machine.set_register("edx", value >> 32)
                 return value & 0xffffffff
             return value
-        if name in ["atol", "_wtol", "_wtoi", "strtoul", "wcstol", "wcstoul"]:
+        if name in ["atol", "_wtol", "_wtoi", "strtol", "strtoul", "wcstol", "wcstoul"]:
             wide = name in ["_wtol", "_wtoi", "wcstol", "wcstoul"]
             value = event.machine.read_cstring(args[0], encoding = "utf16le" if wide else "ascii")
-            base = args[2] if name in ["strtoul", "wcstol", "wcstoul"] else 10
+            base = args[2] if name in ["strtol", "strtoul", "wcstol", "wcstoul"] else 10
             parsed = _parse_c_integer(value, base)
-            if name in ["strtoul", "wcstol", "wcstoul"] and args[1]:
-                event.machine.write_u32le(args[1], args[0] + parsed["consumed"] * (2 if wide else 1))
-            return parsed["value"]
+            if name in ["strtol", "strtoul", "wcstol", "wcstoul"] and args[1]:
+                event.machine.write_pointer(args[1], args[0] + parsed["consumed"] * (2 if wide else 1))
+            number = parsed["value"]
+            if name in ["strtol", "wcstol"] and (number < -0x80000000 or number > 0x7fffffff):
+                event.machine.write_u32le(errno_address(event.machine), 34)
+                number = max(-0x80000000, min(0x7fffffff, number))
+            return number & 0xffffffff
         if name == "_wtof":
             value = event.machine.read_cstring(args[0], encoding = "utf16le")
             parsed = _scan_float(value, "%lf")
@@ -8383,6 +8678,26 @@ def msvcrt_plugin(kernel = None):
                 if len(value) < args[1]:
                     event.machine.write(args[0] + len(written), b"\x00")
             return len(value) if len(value) <= args[1] else 0xffffffff
+        if name == "__stdio_common_vswprintf":
+            shift = 2 if event.machine.pointer_size == 4 else 1
+            options = args[0] | (args[1] << 32 if shift == 2 else 0)
+            buffer, capacity, format_ptr, locale, values_ptr = args[shift:shift + 5]
+            # Legacy wide %s/%c semantics, with optional standard rounding.
+            # Locale-specific and C99/legacy unterminated output modes are not
+            # interchangeable and remain unsupported rather than guessed.
+            if options & ~0x24 or not (options & 4) or locale or capacity > 1048576:
+                fail("unsupported UCRT wide formatting mode")
+            format = event.machine.read_cstring(format_ptr, encoding = "utf16le")
+            values = _va_format_arguments(event.machine, values_ptr, format)
+            text = _format_win32(event.machine, format, values, True, strict = True)
+            encoded = binary.encode(text, encoding = "utf16le")
+            count = len(encoded) // 2
+            if not buffer or not capacity:
+                return 0xffffffff
+            written = min(count, capacity - 1)
+            event.machine.write(buffer, encoded[:written * 2])
+            event.machine.write_u16le(buffer + written * 2, 0)
+            return count if count < capacity else 0xffffffff
         if name in ["vswprintf", "_vsnwprintf"]:
             if len(state["actions"]) < 256:
                 state["actions"].append({"api": name, "args": list(args), "return": event.return_address})
@@ -8448,7 +8763,39 @@ def msvcrt_plugin(kernel = None):
                     base = element + width
                     count -= middle + 1
             return 0
-        if name in ["qsort", "_except_handler3"]:
+        if name == "qsort":
+            base, count, width, comparator = args[:4]
+            if count < 2:
+                return None
+            if not base or not comparator or width < 1 or count > 1048576 or count * width > 64 << 20:
+                fail("qsort invalid or excessive array")
+            def greater(a, b):
+                result = event.machine.invoke(comparator, args = [base + a * width, base + b * width])
+                if result.reason != "return":
+                    fail("qsort comparator stopped: " + result.reason + " " + result.detail)
+                value = result.value & 0xffffffff
+                return value != 0 and not (value & 0x80000000)
+            def swap(a, b):
+                left = event.machine.read(base + a * width, width)
+                right = event.machine.read(base + b * width, width)
+                event.machine.write(base + a * width, right)
+                event.machine.write(base + b * width, left)
+            def sift(root, end):
+                while root * 2 + 1 < end:
+                    child = root * 2 + 1
+                    if child + 1 < end and greater(child + 1, child):
+                        child += 1
+                    if not greater(child, root):
+                        break
+                    swap(root, child)
+                    root = child
+            for root in range(count // 2 - 1, -1, -1):
+                sift(root, count)
+            for end in range(count - 1, 0, -1):
+                swap(0, end)
+                sift(0, end)
+            return None
+        if name == "_except_handler3":
             return 0
         return 0
 
@@ -8492,6 +8839,8 @@ def msvcrt_plugin(kernel = None):
                 )
         for module, module_signatures in contract_signatures.items():
             for name, argc in module_signatures.items():
+                if name == "__stdio_common_vswprintf" and machine.pointer_size == 4:
+                    argc += 1
                 machine.provide_export(
                     callback,
                     module = module,
@@ -8506,7 +8855,7 @@ def msvcrt_plugin(kernel = None):
             name = imported.name.lower()
             module = imported.module.lower()
             if module in contract_signatures and name in contract_signatures[module]:
-                machine.hook(callback, address = imported.address, argc = contract_signatures[module][name], convention = "cdecl")
+                machine.hook(callback, address = imported.address, argc = contract_signatures[module][name] + (1 if name == "__stdio_common_vswprintf" and machine.pointer_size == 4 else 0), convention = "cdecl")
                 continue
             if module not in ["msvcrt.dll", "crtdll.dll", "ntdll.dll"]:
                 continue
@@ -8822,7 +9171,7 @@ def winsock_plugin(hosts = {}, user_interface = None, kernel = None, connect = N
     connection. The provider receives the server end of a memory pair; there
     is no native networking fallback. Retain mutable server state in a plugin.
     """
-    state = {"last_error": 0, "started": False, "next_request": 1, "queries": [], "sockets": {}, "next_socket": 0x90000}
+    state = {"last_error": 0, "started": False, "startup_count": 0, "next_request": 1, "queries": [], "sockets": {}, "next_socket": 0x90000}
 
     def dispatch(event):
         if event.name == "#19":
@@ -9073,30 +9422,41 @@ def winsock_plugin(hosts = {}, user_interface = None, kernel = None, connect = N
                 machine.write(output + name_offset, encoded_name)
             user_interface.state["messages"].append({"thread": 0, "window": window, "message": message, "wparam": request, "lparam": (error << 16) | required, "time": 0, "x": 0, "y": 0})
             return request
-        if event.name == "#111":
+        if event.name in ["#111", "WSAGetLastError"]:
             return state["last_error"]
-        if event.name == "#112":
+        if event.name in ["#112", "WSASetLastError"]:
             state["last_error"] = event.args[0]
             return 0
         if event.name == "#114":
             return 0
-        if event.name == "#115":
-            requested = event.args[0]
-            if not event.args[1]:
-                state["last_error"] = 10014  # WSAEFAULT
-                return 10014
-            # WSADATA begins with negotiated/requested WORD versions followed
-            # by the implementation description fields. The legacy clients in
-            # scope inspect this fixed WinSock 1.1 prefix only.
-            event.machine.write_u16le(event.args[1], requested)
-            event.machine.write_u16le(event.args[1] + 2, 0x0101)
-            event.machine.write(event.args[1] + 4, b"trex WinSock 1.1\x00")
+        if event.name in ["#115", "WSAStartup"]:
+            requested, output = event.args
+            if not output:
+                return 10014  # WSAEFAULT is returned directly, not GetLastError.
+            major, minor = requested & 255, (requested >> 8) & 255
+            if major < 1:
+                return 10092  # WSAVERNOTSUPPORTED
+            version = (0x0001 if minor == 0 else 0x0101) if major == 1 else (0x0202 if major > 2 else (min(minor, 2) << 8) | 2)
+            # Win64 moves the legacy fields/pointer before the two strings.
+            wide = event.machine.pointer_size == 8
+            event.machine.write(output, b"\x00" * (408 if wide else 400))
+            event.machine.write_u16le(output, version)
+            event.machine.write_u16le(output + 2, 0x0202)
+            description = 16 if wide else 4
+            event.machine.write(output + description, b"trex WinSock 2.2\x00")
+            event.machine.write(output + description + 257, b"Running\x00")
+            if major == 1:
+                event.machine.write_u16le(output + (4 if wide else 390), 32767)
+                event.machine.write_u16le(output + (6 if wide else 392), 65467)
+            state["startup_count"] += 1
             state["started"] = True
-            state["last_error"] = 0
             return 0
-        if event.name == "#116":
-            state["started"] = False
-            state["last_error"] = 0
+        if event.name in ["#116", "WSACleanup"]:
+            if state["startup_count"] == 0:
+                state["last_error"] = 10093  # WSANOTINITIALISED
+                return 0xffffffff
+            state["startup_count"] -= 1
+            state["started"] = state["startup_count"] != 0
             return 0
         value = event.args[0]
         if event.name in ["#8", "#14"]:
@@ -9119,6 +9479,9 @@ def winsock_plugin(hosts = {}, user_interface = None, kernel = None, connect = N
         return value
 
     def install(machine):
+        for module in ["wsock32.dll", "ws2_32.dll"]:
+            for name, argc in [("WSAStartup", 2), ("WSACleanup", 0), ("WSAGetLastError", 0), ("WSASetLastError", 1)]:
+                machine.provide_export(callback, module = module, name = name, argc = argc)
         machine.provide_export(callback, module = "ws2_32.dll", name = "WSAIoctl", argc = 9)
         machine.provide_export(callback, module = "mswsock.dll", name = "ConnectEx", argc = 7)
         for ordinal, argc in _WINSOCK_ORDINAL_SIGNATURES.items():
@@ -12780,7 +13143,7 @@ def _stack_format_arguments(event, fixed, format):
         for index in range(_format_argument_word_count(format))
     ]
 
-def _format_win32(machine, format, args, wide):
+def _format_win32(machine, format, args, wide, strict = False):
     output = ""
     offset = 0
     argument = 0
@@ -12851,6 +13214,8 @@ def _format_win32(machine, format, args, wide):
             break
 
         kind = format[offset]
+        if strict and (width > 1048576 or precision > 1048576):
+            fail("UCRT format field exceeds limit")
         offset += 1
         value = args[argument]
         argument += 1
@@ -12888,6 +13253,8 @@ def _format_win32(machine, format, args, wide):
                 builder.u8(value & 0xff)
             text = binary.text(builder.bytes(), encoding = "utf16le" if character_wide else "ascii")
         else:
+            if strict:
+                fail("unsupported UCRT format conversion: " + kind)
             text = "%" + kind
             argument -= 1
         output += _padded(text, width, left, zero and not left)

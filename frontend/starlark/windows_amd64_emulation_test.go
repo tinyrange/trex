@@ -763,6 +763,17 @@ def exercise(architecture):
     environment = environment_plugin({"SystemRoot": "C:\\WINDOWS"})
     crt = msvcrt_plugin(kernel=kernel)
     machine.use([kernel, environment, crt])
+    getenv = machine.resolve_export("msvcrt.dll",name="getenv")
+    varname = machine.allocate(value=b"systemroot\x00")
+    got = machine.call(getenv,args=[varname])
+    check(got.reason == "return" and machine.read_cstring(got.value) == "C:\\WINDOWS")
+    check(machine.call(getenv,args=[varname]).value == got.value)
+    missing = machine.allocate(value=b"MISSING_ENVIRONMENT_VARIABLE\x00")
+    check(machine.call(getenv,args=[missing]).value == 0)
+    setter = machine.resolve_export("kernel32.dll",name="SetEnvironmentVariableA")
+    newvalue = machine.allocate(value=b"C:\\Other\x00")
+    check(machine.call(setter,args=[varname,newvalue]).value == 1)
+    check(machine.read_cstring(machine.call(getenv,args=[varname]).value) == "C:\\WINDOWS")
     layout = teb_layout(machine.pointer_size)
     fields = layout["fields"]
     teb = machine.segment_base(layout["segment"])
@@ -1135,6 +1146,259 @@ def exercise(architecture):
             check(machine.read(output,20) == crypto.hash("sha1",message))
             check(machine.read(current,64) == b"\x00"*64)
             check(machine.read_u32le(current+84) == 0 and machine.read_u32le(current+88) == 0)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestWinsockStartupAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "winsock_plugin")
+def check(c):
+    if not c: fail("WSA startup ABI check failed")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    plugin=winsock_plugin()
+    machine.use([plugin])
+    start=machine.resolve_export("ws2_32.dll",name="WSAStartup")
+    stop=machine.resolve_export("ws2_32.dll",name="WSACleanup")
+    output=machine.allocate(value=b"\xaa"*420)
+    result=machine.call(start,args=[0x0202,output])
+    check(result.reason=="return" and result.value==0)
+    check(machine.read_u16le(output)==0x0202 and machine.read_u16le(output+2)==0x0202)
+    description=16 if architecture=="amd64" else 4
+    size=408 if architecture=="amd64" else 400
+    check(machine.read_cstring(output+description)=="trex WinSock 2.2")
+    check(machine.read_cstring(output+description+257)=="Running")
+    check(machine.read(output+size,420-size)==b"\xaa"*(420-size))
+    check(machine.call(start,args=[0,output]).value==10092)
+    check(machine.call(start,args=[0x0202,0]).value==10014)
+    check(machine.call(start,args=[0x0101,output]).value==0)
+    check(machine.read_u16le(output)==0x0101)
+    check(machine.call(stop).value==0 and plugin.state["started"])
+    check(machine.call(stop).value==0 and not plugin.state["started"])
+    check(machine.call(stop).value==0xffffffff and plugin.state["last_error"]==10093)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestCRTStrlenCountsBytesAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "msvcrt_plugin")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    machine.use([msvcrt_plugin()])
+    value=machine.allocate(value=b"Copyright \xc2\xa9\xff\x00tail")
+    result=machine.call(machine.resolve_export("msvcrt.dll",name="strlen"),args=[value])
+    if result.reason!="return" or result.value!=13:
+        fail("strlen decoded bytes instead of counting them")
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestCRTQsortAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "msvcrt_plugin")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    machine.use([msvcrt_plugin()])
+    def compare(event):
+        a=event.machine.read_u32le(event.args[0])
+        b=event.machine.read_u32le(event.args[1])
+        return 0 if a==b else (1 if a>b else 0xffffffff)
+    cmp=machine.provide_export(compare,module="test.dll",name="compare",argc=2,convention="cdecl")
+    values=[12,3,9,3,0,0xffffffff,17,1,2]
+    data=binary.builder()
+    for n in values:data.u32le(n)
+    data.append(b"guard")
+    array=machine.allocate(value=data.bytes())
+    result=machine.call(machine.resolve_export("msvcrt.dll",name="qsort"),args=[array,len(values),4,cmp])
+    if result.reason!="return":fail(result.detail)
+    if [machine.read_u32le(array+i*4) for i in range(len(values))]!=sorted(values):fail("qsort did not sort")
+    if machine.read(array+len(values)*4,5)!=b"guard":fail("qsort wrote past array")
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestCRTFullPathAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "msvcrt_plugin")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    kernel=kernel32_plugin()
+    crt=msvcrt_plugin(kernel=kernel)
+    machine.use([kernel,crt])
+    fn=machine.resolve_export("msvcrt.dll",name="_wfullpath")
+    source=machine.allocate(value=binary.encode("C:\\alpha\\..\\β\\x",encoding="utf16le",nul=True))
+    result=machine.call(fn,args=[0,source,0])
+    if result.reason!="return" or machine.read_cstring(result.value,encoding="utf16le")!="C:\\β\\x":fail("full path resolution")
+    output=machine.allocate(value=b"guard")
+    if machine.call(fn,args=[output,source,2]).value!=0:fail("short buffer accepted")
+    if machine.read(output,5)!=b"guard":fail("short buffer overwritten")
+    unc=machine.allocate(value=binary.encode("\\\\server\\share\\a\\..\\b",encoding="utf16le",nul=True))
+    result=machine.call(fn,args=[0,unc,0])
+    if machine.read_cstring(result.value,encoding="utf16le")!="\\\\server\\share\\b":fail("UNC changed")
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestCRTWideFindAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "msvcrt_plugin")
+def check(c):
+    if not c:fail("wide find ABI check failed")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    kernel=kernel32_plugin(files={"C:\\plugins\\a.dll":b"abc","C:\\plugins\\b.dll":b"12345"})
+    machine.use([kernel,msvcrt_plugin(kernel=kernel)])
+    first=machine.resolve_export("msvcrt.dll",name="_wfindfirst")
+    next=machine.resolve_export("msvcrt.dll",name="_wfindnext")
+    close=machine.resolve_export("msvcrt.dll",name="_findclose")
+    pattern=machine.allocate(value=binary.encode("C:\\plugins\\*.dll",encoding="utf16le",nul=True))
+    size=560 if architecture=="amd64" else 540
+    name_offset=36 if architecture=="amd64" else 20
+    size_offset=32 if architecture=="amd64" else 16
+    output=machine.allocate(value=b"\xaa"*(size+8))
+    result=machine.call(first,args=[pattern,output])
+    check(result.reason=="return" and result.value not in [0xffffffff,0xffffffffffffffff])
+    check(machine.read_cstring(output+name_offset,encoding="utf16le")=="a.dll" and machine.read_u32le(output+size_offset)==3)
+    check(machine.read(output+size,8)==b"\xaa"*8)
+    handle=result.value
+    check(machine.call(next,args=[handle,output]).value==0)
+    check(machine.read_cstring(output+name_offset,encoding="utf16le")=="b.dll" and machine.read_u32le(output+size_offset)==5)
+    check(machine.call(next,args=[handle,output]).value==0xffffffff)
+    check(machine.call(close,args=[handle]).value==0)
+    missing=machine.allocate(value=binary.encode("C:\\absent\\*",encoding="utf16le",nul=True))
+    check(machine.call(first,args=[missing,output]).value==(1<<(machine.pointer_size*8))-1)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestCRTStat64AcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "msvcrt_plugin")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    kernel=kernel32_plugin(files={"C:\\plugins\\a.dll":b"abc"})
+    machine.use([kernel,msvcrt_plugin(kernel=kernel)])
+    stat=machine.resolve_export("msvcrt.dll",name="_wstat64")
+    output=machine.allocate(value=b"\xaa"*64)
+    for path,size,directory in [("C:\\plugins\\a.dll",3,False),("C:\\plugins",0,True)]:
+        source=machine.allocate(value=binary.encode(path,encoding="utf16le",nul=True))
+        result=machine.call(stat,args=[source,output])
+        if result.reason!="return" or result.value!=0:fail(result.detail)
+        if machine.read_u64le(output+24)!=size or bool(machine.read_u16le(output+6)&0x4000)!=directory:fail("stat layout/type")
+        if machine.read_u16le(output+8)!=1 or machine.read(output+56,8)!=b"\xaa"*8:fail("stat bounds")
+    missing=machine.allocate(value=binary.encode("C:\\absent",encoding="utf16le",nul=True))
+    if machine.call(stat,args=[missing,output]).value!=0xffffffff:fail("missing file accepted")
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestCRTOSHandleStreamsAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "msvcrt_plugin")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture, code=b"\xc3")
+    kernel = kernel32_plugin(files={"C:\\data.bin": b"abcdef"})
+    crt = msvcrt_plugin(kernel=kernel)
+    machine.use(kernel)
+    machine.use(crt)
+    def call(module, name, args=[]):
+        result = machine.call(machine.resolve_export(module, name=name), args=args)
+        if result.reason != "return":
+            fail(name + ": " + result.reason + " " + result.detail)
+        return result.value
+    def check(ok):
+        if not ok:
+            fail("CRT OS handle stream check failed")
+    name = machine.allocate(value=b"C:\\data.bin\x00")
+    handle = call("kernel32.dll", "CreateFileA", [name, 0xc0000000, 3, 0, 3, 0, 0])
+    check(call("kernel32.dll", "SetFilePointer", [handle, 2, 0, 0]) == 2)
+    fd = call("msvcrt.dll", "_open_osfhandle", [handle, 0x8002])
+    check(fd >= 3 and call("msvcrt.dll", "_get_osfhandle", [fd]) == handle)
+    mode = machine.allocate(value=b"rb+\x00")
+    stream = call("msvcrt.dll", "_fdopen", [fd, mode])
+    check(machine.read_u32le(stream + machine.pointer_size*3 + 4) == fd)
+    data = machine.allocate(size=8)
+    check(call("msvcrt.dll", "fread", [data, 1, 2, stream]) == 2)
+    check(machine.read(data, 2) == b"cd")
+    # CRT and raw handle share the current offset; wrapping did not truncate.
+    count = machine.allocate(size=4)
+    check(call("kernel32.dll", "ReadFile", [handle, data, 1, count, 0]) == 1)
+    check(machine.read(data, 1) == b"e")
+    machine.write(data, b"XY")
+    check(call("msvcrt.dll", "fwrite", [data, 1, 2, stream]) == 2)
+    check(kernel.state["file_data"]("c:\\data.bin") == b"abcdeXY")
+    check(call("msvcrt.dll", "ftell", [stream]) == 7)
+    check(call("msvcrt.dll", "fseek", [stream, 0, 0]) == 0)
+    check(call("msvcrt.dll", "fread", [data, 1, 2, stream]) == 2 and machine.read(data,2) == b"ab")
+    check(call("msvcrt.dll", "fclose", [stream]) == 0)
+    check(handle not in kernel.state["handles"] and fd not in crt.state["descriptors"])
+    check(call("msvcrt.dll", "_close", [fd]) == 0xffffffff)
+    check(call("msvcrt.dll", "_open_osfhandle", [handle, 0]) == 0xffffffff)
+    iob = call("msvcrt.dll", "__iob_func")
+    check(call("msvcrt.dll", "__iob_func") == iob)
+    stride = 48 if machine.pointer_size == 8 else 32
+    check(machine.read_u32le(iob + stride + machine.pointer_size*3 + 4) == 1)
+    machine.write(data,b"XY")
+    check(call("msvcrt.dll", "fwrite", [data, 1, 2, iob+stride]) == 2)
+    check(crt.state["standard_output"] == [(0xfffffff5, b"XY")])
+    check(call("msvcrt.dll", "fread", [data, 1, 1, iob]) == 0)
+    # Existing fopen buffers also use pointer-width fields.
+    rb = machine.allocate(value=b"rb\x00")
+    ordinary = call("msvcrt.dll", "fopen", [name, rb])
+    check(machine.read_pointer(ordinary) == machine.read_pointer(ordinary + machine.pointer_size*2))
+    check(call("msvcrt.dll", "fread", [data, 1, 7, ordinary]) == 7)
+    check(machine.read(data, 7) == b"abcdeXY")
+    text=machine.allocate(value=b"  -123x\x00")
+    end=machine.allocate(value=b"\xaa"*16)
+    check(call("msvcrt.dll","strtol",[text,end,10]) == 0xffffff85)
+    check(machine.read_pointer(end) == text+6)
+    check(machine.read(end+machine.pointer_size,8) == b"\xaa"*8)
+    chars=machine.allocate(value=b" x\x00")
+    check(call("msvcrt.dll","strspn",[text,chars]) == 2)
+    check(call("msvcrt.dll","strcspn",[text+2,chars]) == 4)
+    locale=call("msvcrt.dll","localeconv")
+    check(machine.read_cbytes(machine.read_pointer(locale)) == b".")
+    check(machine.read(locale+10*machine.pointer_size,8) == b"\x7f"*8)
+    renamed=machine.allocate(value=binary.encode("C:\\renamed.bin",encoding="utf16le",nul=True))
+    original=machine.allocate(value=binary.encode("C:\\data.bin",encoding="utf16le",nul=True))
+    check(call("msvcrt.dll","_wrename",[original,renamed]) == 0)
+    check(call("msvcrt.dll","_wunlink",[renamed]) == 0)
+    check(call("msvcrt.dll","_wunlink",[renamed]) == 0xffffffff)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestKernelDuplicatePseudoHandlesAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    kernel=kernel32_plugin()
+    machine.use(kernel)
+    def call(name,args=[]):
+        r=machine.call(machine.resolve_export("kernel32.dll",name=name),args=args)
+        if r.reason!="return":fail(r.detail)
+        return r.value
+    process=call("GetCurrentProcess")
+    thread=call("GetCurrentThread")
+    mask=(1 << (machine.pointer_size*8))-1
+    if process!=mask or thread!=mask-1:fail("pseudo-handle width")
+    output=machine.allocate(value=b"\xaa"*16)
+    if call("DuplicateHandle",[process,thread,process,output,0,0,2])!=1:fail("duplicate failed")
+    reference=machine.read_pointer(output)
+    if kernel.state["handles"][reference]["value"]["id"]!=8:fail("wrong thread")
+    if machine.read(output+machine.pointer_size,8)!=b"\xaa"*8:fail("output overwrite")
+    if call("DuplicateHandle",[123,thread,process,output,0,0,2])!=0:fail("invalid process accepted")
 exercise("x86")
 exercise("amd64")
 `)

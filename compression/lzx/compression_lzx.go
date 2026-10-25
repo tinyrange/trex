@@ -60,7 +60,7 @@ func Decompress(data []byte, windowBits int, outSize int) ([]byte, error) {
 	// Keep history in its original, pre-E8 form until all matches are decoded.
 	// The API already retains the whole output, so a second window is needless.
 	for frameStart := 0; frameStart < len(out); frameStart += lzxFrameSize {
-		dec.undoE8(out[frameStart:min(frameStart+lzxFrameSize, len(out))], frameStart)
+		dec.undoCABFrame(out[frameStart:min(frameStart+lzxFrameSize, len(out))], frameStart)
 	}
 	return out[:outSize], nil
 }
@@ -463,6 +463,15 @@ func (d *lzxDecoder) putMatch(out *[]byte, offset, length int) {
 	for len(dst) > 0 {
 		n := copy(dst, (*out)[src:len(*out)-len(dst)])
 		dst = dst[n:]
+	}
+}
+
+// CAB's Intel transform applies only to the first 32768 32-KiB frames.
+// Later bytes are already final, even when they contain an E8-shaped sequence.
+// WIM uses independent chunks and invokes undoE8 directly.
+func (d *lzxDecoder) undoCABFrame(frame []byte, absoluteStart int) {
+	if absoluteStart/lzxFrameSize < 32768 {
+		d.undoE8(frame, absoluteStart)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/tinyrange/trex/archive/cab"
+	bytecache "github.com/tinyrange/trex/storage/cache"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
@@ -18,7 +19,11 @@ import (
 type PlanOptions struct {
 	Properties map[string]string
 	Features   []string
-	Media      map[string]starfile.File
+	// FeatureStates are post-costing INSTALLSTATE_ABSENT (2) or LOCAL (3)
+	// overrides produced by caller-modeled custom actions.
+	FeatureStates     map[string]int
+	CabinetCacheBytes int64
+	Media             map[string]starfile.File
 }
 type planContext struct {
 	db                                                *Database
@@ -106,6 +111,10 @@ func (p *planContext) condition(value, where string) bool {
 	return yes
 }
 func (p *planContext) format(value string) string {
+	// WiX uses the empty Formatted group to clear a property (Type 51).
+	if value == "{}" {
+		return ""
+	}
 	var out strings.Builder
 	for len(value) > 0 {
 		start := strings.IndexByte(value, '[')
@@ -207,7 +216,14 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 	}
 	sequence := append([]map[string]starlark.Value(nil), d.Tables["InstallExecuteSequence"]...)
 	sort.SliceStable(sequence, func(i, j int) bool { return integer(sequence[i], "Sequence") < integer(sequence[j], "Sequence") })
+	type earlyPropertyAction struct {
+		applicable, known bool
+		expanded          string
+	}
+	earlyProperties := map[string]earlyPropertyAction{}
 	// Property actions before costing contribute to feature/directory selection.
+	// Remember their original outcome: executing them again later can turn an
+	// explicit opt-out into a default after its DeleteIfOff action cleared it.
 	for _, row := range sequence {
 		if text(row, "Action") == "CostFinalize" {
 			break
@@ -218,8 +234,10 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 		action := custom[text(row, "Action")]
 		if action != nil && integer(action, "Type")&63 == 51 {
 			yes, known := p.conditionState(text(row, "Condition"), text(row, "Action"))
+			expanded := p.format(text(action, "Target"))
+			earlyProperties[text(row, "Action")] = earlyPropertyAction{yes, known, expanded}
 			if yes && known {
-				p.properties[text(action, "Source")] = p.format(text(action, "Target"))
+				p.properties[text(action, "Source")] = expanded
 			}
 			if !known {
 				p.unknown[text(action, "Source")] = true
@@ -307,6 +325,45 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 			break
 		}
 	}
+	for name, state := range options.FeatureStates {
+		if featureRows[name] == nil || (state != 2 && state != 3) {
+			return nil, fmt.Errorf("msi: invalid feature state override %s=%d", name, state)
+		}
+		if state == 3 && featureLevels[name] == 0 {
+			return nil, fmt.Errorf("msi: cannot enable disabled feature %s", name)
+		}
+		featureSelected[name] = state == 3
+	}
+	if len(options.FeatureStates) != 0 {
+		affected := map[string]bool{}
+		for name := range options.FeatureStates {
+			affected[name] = true
+		}
+		// FollowParent children inherit the final state unless themselves
+		// explicitly set by the modeled custom action. Tree depth is bounded.
+		for pass := 0; pass < 16; pass++ {
+			changed := false
+			for name, row := range featureRows {
+				parent := text(row, "Feature_Parent")
+				_, explicit := options.FeatureStates[name]
+				if explicit || parent == "" || !affected[parent] || integer(row, "Attributes")&2 == 0 {
+					continue
+				}
+				if !affected[name] {
+					affected[name] = true
+					changed = true
+				}
+				selected := featureLevels[name] > 0 && featureSelected[parent]
+				if selected != featureSelected[name] {
+					featureSelected[name] = selected
+					changed = true
+				}
+			}
+			if !changed {
+				break
+			}
+		}
+	}
 	for name, selected := range featureSelected {
 		p.properties["&"+name] = "2"
 		if selected {
@@ -370,6 +427,9 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 		if p.unknown[name] {
 			p.directories[name] = "[" + name + "]"
 		}
+		if p.directories[name] != "" && !p.unknown[name] {
+			p.directories[name] = strings.TrimRight(p.directories[name], `\/`) + `\`
+		}
 		delete(visiting, name)
 		return nil
 	}
@@ -397,6 +457,14 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 	lookup := func(name string) starfile.File {
 		return media[strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(name, "/"), `\`, "/"))]
 	}
+	cacheBytes := options.CabinetCacheBytes
+	if cacheBytes < 0 || cacheBytes > 8<<30 {
+		return nil, fmt.Errorf("msi: cabinet cache budget must be between zero and 8 GiB")
+	}
+	if cacheBytes == 0 {
+		cacheBytes = bytecache.DefaultBytes
+	}
+	cabinetCache := bytecache.New(cacheBytes)
 	cabinets := map[string]*cab.Archive{}
 	mediaRows := append([]map[string]starlark.Value(nil), d.Tables["Media"]...)
 	sort.Slice(mediaRows, func(i, j int) bool { return integer(mediaRows[i], "DiskId") < integer(mediaRows[j], "DiskId") })
@@ -436,7 +504,7 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 				}
 				if cabinetFile != nil {
 					var err error
-					archive, err = cab.Open(cabinetFile, true)
+					archive, err = cab.OpenWithCache(cabinetFile, true, cabinetCache, uint64(len(cabinets)+1))
 					if err != nil {
 						return nil, fmt.Errorf("msi: cabinet %s: %w", cabinetName, err)
 					}
@@ -579,7 +647,11 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 			continue
 		}
 		kind := integer(action, "Type") & 63
-		if kind == 51 && applicable && conditionKnown {
+		early, alreadyEvaluated := earlyProperties[name]
+		if alreadyEvaluated {
+			applicable, conditionKnown = early.applicable, early.known
+		}
+		if kind == 51 && applicable && conditionKnown && !alreadyEvaluated {
 			p.properties[text(action, "Source")] = p.format(text(action, "Target"))
 		}
 		if kind == 19 && applicable {
@@ -593,7 +665,11 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 		}
 		fields["condition"] = row["Condition"]
 		fields["sequence"] = row["Sequence"]
-		fields["target_expanded"] = starlark.String(p.format(text(action, "Target")))
+		if alreadyEvaluated {
+			fields["target_expanded"] = starlark.String(early.expanded)
+		} else {
+			fields["target_expanded"] = starlark.String(p.format(text(action, "Target")))
+		}
 		flags := integer(action, "Type")
 		phase := "immediate"
 		if flags&1024 != 0 {
@@ -657,5 +733,5 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 	for _, name := range keys {
 		featureValues = append(featureValues, starlark.String(name))
 	}
-	return record(map[string]starlark.Value{"format": starlark.String("msi"), "input_properties": inputProperties, "selected_features": starlark.NewList(featureValues), "files": starlark.NewList(files), "directories": starlark.NewList(folders), "effects": starlark.NewList(effects), "definitive_registry_writes": starlark.NewList(definitiveRegistry), "registry_writes": starlark.NewList(registry), "runtime_dependencies": starlark.NewList(p.runtime), "database": d, "custom_actions": starlark.NewList(actions), "unresolved": starlark.NewList(gaps)}), nil
+	return record(map[string]starlark.Value{"format": starlark.String("msi"), "input_properties": inputProperties, "selected_features": starlark.NewList(featureValues), "selected_components": selectedNames(p.selected), "directory_paths": stringMap(p.directories), "resolved_properties": knownProperties(p.properties, p.unknown), "unknown_properties": selectedNames(p.unknown), "files": starlark.NewList(files), "directories": starlark.NewList(folders), "effects": starlark.NewList(effects), "definitive_registry_writes": starlark.NewList(definitiveRegistry), "registry_writes": starlark.NewList(registry), "runtime_dependencies": starlark.NewList(p.runtime), "database": d, "custom_actions": starlark.NewList(actions), "unresolved": starlark.NewList(gaps)}), nil
 }
