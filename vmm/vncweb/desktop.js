@@ -10,6 +10,7 @@ function fit() {
   const scale = Math.min(window.innerWidth / canvas.width, window.innerHeight / canvas.height);
   canvas.style.width = `${canvas.width * scale}px`;
   canvas.style.height = `${canvas.height * scale}px`;
+  rfb?.requestResize(window.innerWidth, window.innerHeight);
 }
 window.addEventListener('resize', fit);
 function release() {
@@ -53,6 +54,7 @@ function connect() {
     },
   );
   rfb = client;
+  fit();
   ws.onmessage = event => {
     if (socket !== ws) return;
     try { client.feed(new Uint8Array(event.data)); }

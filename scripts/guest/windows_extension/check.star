@@ -2,7 +2,7 @@
 load("//tests:testing.star", "equal", "true")
 load("//scripts/guest/windows_extension:build.star", "compile_win16")
 
-def check_image(image, windows3, computer_use = False):
+def check_image(image, windows3, computer_use = False, display_agent = False):
     equal(image[:2], b"MZ")
     ne = binary.read_u32le(image, 0x3c)
     equal(image[ne:ne + 2], b"NE")
@@ -16,8 +16,8 @@ def check_image(image, windows3, computer_use = False):
         equal(binary.read_u16le(image, ne + 0x0c) & 0x300, 0x300)
     names = ne + binary.read_u16le(image, ne + 0x2a)
     refs = ne + binary.read_u16le(image, ne + 0x28)
-    equal(binary.read_u16le(image, ne + 0x1e), 2)
-    for i, name in enumerate([b"KERNEL", b"USER"]):
+    equal(binary.read_u16le(image, ne + 0x1e), 3)
+    for i, name in enumerate([b"KERNEL", b"USER", b"GDI"]):
         offset = binary.read_u16le(image, refs + i * 2)
         true(offset > 0, "offset zero resolves to SELF in the Windows 1 loader")
         at = names + offset
@@ -42,11 +42,16 @@ def check_image(image, windows3, computer_use = False):
         equal(binary.read_u16le(image, code_at + source), 0xffff, "terminated relocation chain")
         module = binary.read_u16le(image, at + 4)
         ordinal = binary.read_u16le(image, at + 6)
-        true(module in [1, 2] and ordinal > 0)
+        true(module in [1, 2, 3] and ordinal > 0)
         imported[(module, ordinal)] = True
     # InitTask, LoadModule, native file read/write, COM open/read/write, message pump.
     symbols = [(1, 91), (1, 45), (2, 200), (2, 204), (2, 205), (2, 109)]
-    symbols += [(1, 51), (1, 52), (2, 121), (2, 179)] if computer_use else [(1, 82), (1, 86)]
+    if computer_use or display_agent:
+        symbols += [(2, 66), (2, 68), (2, 179), (3, 80)]
+    if computer_use:
+        symbols += [(1, 51), (1, 52), (2, 121)]
+    elif not display_agent:
+        symbols += [(1, 82), (1, 86)]
     for symbol in symbols:
         true(symbol in imported, "missing native import " + str(symbol))
     data_at = binary.read_u16le(image, segments + 8) << shift
@@ -64,3 +69,6 @@ def main(args):
         print("PASS Win16 native image", "3.x" if windows3 else "1.x/2.x")
     check_image(compile_win16(root, computer_use = True), False, computer_use = True)
     print("PASS Windows 1.01 computer-use image and journal imports")
+    for windows3 in [False, True]:
+        check_image(compile_win16(root, windows3 = windows3, display_agent = True), windows3, display_agent = True)
+        print("PASS Win16 display image", "3.x" if windows3 else "1.x/2.x")

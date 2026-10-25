@@ -14,6 +14,14 @@ Relative pointing uses click capture and Ctrl+Alt release. An optional
 requests EWMH fullscreen; a cooperating window manager is required. The concrete
 backend decides available keys, pointer modes and wheel support.
 
+An optional `vmm.ResizeDisplaySource` lets the guest desktop follow window and
+fullscreen dimensions after a 200 ms debounce. Capture and input continue during
+the request. `DisplayResizeReadiness` delays requests until the guest driver is
+ready; rejected dimensions are not retried without a viewport change. Automatic
+requests preserve aspect ratio within 1920×1080, matching the current 8 MiB
+Windows framebuffer. Presentation uses captured dimensions until the guest has
+applied its new mode.
+
 Platform code was copied/adapted with permission from the sister gowin project
 (`window_linux.go`, `input.go`, MIT; license retained in `internal/xwindow/LICENSE`).
 Changes add VM capture/warp handling, focus-loss events, cursor hiding, fullscreen

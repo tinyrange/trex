@@ -44,3 +44,29 @@ func writeARFixtureMember(t *testing.T, out *bytes.Buffer, name string, data []b
 		out.WriteByte('\n')
 	}
 }
+
+func TestCOFFArchiveNULTerminatedLongNames(t *testing.T) {
+	var data bytes.Buffer
+	data.WriteString("!<arch>\n")
+	first, second := "library/first-object.obj", "library/second-object.obj"
+	writeARFixtureMember(t, &data, "//", []byte(first+"\x00"+second+"\x00"), 0)
+	writeARFixtureMember(t, &data, "/0", []byte("first"), 0)
+	writeARFixtureMember(t, &data, fmt.Sprintf("/%d", len(first)+1), []byte("second"), 0)
+	a, err := Open(&starfile.Bytes{Data: data.Bytes()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, expected := range map[string]string{first: "first", second: "second"} {
+		v, found, err := a.Get(starlark.String(name))
+		if err != nil || !found {
+			t.Fatal(name, found, err)
+		}
+		body, err := starfile.ReadAll(v.(*arEntryFile))
+		if err != nil || string(body) != expected {
+			t.Fatal(name, string(body), err)
+		}
+	}
+	if _, err := arGNUFilename([]byte("unterminated"), 0); err == nil {
+		t.Fatal("unterminated long name accepted")
+	}
+}

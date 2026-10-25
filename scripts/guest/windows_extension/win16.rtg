@@ -27,10 +27,10 @@ go backend {
         dll := out.StaticImportDLL(id)
         name := out.StaticImportName(id)
         if dll == "TREX" {
-            if name == "JournalBegin" { if words != 1 { panic("journal argument count") }; out.Byte(0x58) }
+            if name == "JournalBegin" || name == "ConfigCall" || name == "FarCall2" || name == "DisplayEntry" { if words != 1 { panic("native bridge argument count") }; out.Byte(0x58) }
             out.Bytes3(0xe8,3,0) // call local native bridge
             out.Byte(0xe9); skip:=out.Len(); out.Uint16(0)
-            if name == "JournalBegin" { neJournalBegin(out) } else if name == "JournalPending" { neJournalPending(out) } else if name == "JournalEnd" { neJournalEnd(out) } else { panic("unknown native journal bridge") }
+            if name == "JournalBegin" { neJournalBegin(out) } else if name == "JournalPending" { neJournalPending(out) } else if name == "JournalEnd" { neJournalEnd(out) } else if name == "ConfigCall" { neConfigCall(out) } else if name == "FarCall2" { neFarCall2(out) } else if name == "DisplayEntry" { neDisplayEntry(out) } else { panic("unknown native bridge") }
             nePutWord(out.Code(),skip,out.Len()-skip-2)
             return
         }
@@ -50,6 +50,13 @@ go backend {
             if name == "TranslateMessage" { ordinal = 113; count = 2 }
             if name == "DispatchMessage" { ordinal = 114; count = 2 }
             if name == "GetSystemMetrics" { ordinal = 179; count = 1 }
+            if name == "GetActiveWindow" { ordinal = 60; count = 0 }
+            if name == "GetWindowWord" { ordinal = 133; count = 2 }
+            if name == "GetWindowRect" { ordinal = 32; count = 3 }
+            if name == "GetWindowText" { ordinal = 36; count = 4 }
+            if name == "ShowWindow" { ordinal = 42; count = 2 }
+            if name == "GetDC" { ordinal = 66; count = 1 }
+            if name == "ReleaseDC" { ordinal = 68; count = 2 }
             if name == "GetTickCount" { ordinal = 13; count = 0 }
         }
         if dll == "KERNEL" {
@@ -60,6 +67,12 @@ go backend {
             if name == "_lread" { ordinal = 82; count = 4 }
             if name == "_lwrite" { ordinal = 86; count = 4 }
             if name == "LoadModule" { ordinal = 45; count = 4 }
+            if name == "Yield" { ordinal = 29; count = 0 }
+        }
+        if dll == "GDI" {
+            module = 3
+            if name == "GetDeviceCaps" { ordinal = 80; count = 2 }
+            if name == "Escape" { ordinal = 38; count = 7 }
         }
         if ordinal == 0 { panic("unsupported Win16 import") }
         if words != count { panic("Win16 Pascal import argument count mismatch") }
@@ -72,6 +85,54 @@ go backend {
         }
         neCall(out,module,ordinal)
         out.Bytes2(0x1e,0x07) // Renvo near copies require ES=DS.
+    }
+    func neDisplayEntry(out *RTGEmitter) {
+        out.Byte(0x53); out.Byte(0x56); out.Byte(0x57); out.Byte(0x06); out.Byte(0x1e)
+        out.Bytes2(0x89,0xc6)
+        out.Byte(0x1e); out.Bytes3(0x8d,0x44,10); out.Byte(0x50)
+        neCall(out,1,47)
+        out.Bytes2(0x85,0xc0); out.Byte(0x74); absent:=out.Len(); out.Byte(0)
+        out.Byte(0x50); out.Bytes2(0x31,0xdb); out.Byte(0x53)
+        out.Bytes3(0xbb,0x58,2); out.Byte(0x53)
+        neCall(out,1,50)
+        out.Bytes2(0x89,0x04); out.Bytes3(0x89,0x54,2)
+        out.Bytes2(0x89,0xd0)
+        out.Code()[absent]=byte(out.Len()-absent-1)
+        out.Byte(0x1f); out.Byte(0x07); out.Byte(0x5f); out.Byte(0x5e); out.Byte(0x5b); out.Byte(0xc3)
+    }
+    // Calls a resolved native far Pascal function with two WORD arguments.
+    // The private record contains offset, selector, arguments, then result.
+    func neFarCall2(out *RTGEmitter) {
+        out.Byte(0x53); out.Byte(0x56); out.Byte(0x57); out.Byte(0x06); out.Byte(0x1e)
+        out.Bytes2(0x89,0xc6)
+        out.Bytes3(0xff,0x74,4); out.Bytes3(0xff,0x74,6)
+        out.Bytes2(0xff,0x1c)
+        out.Bytes3(0x89,0x44,8)
+        out.Byte(0x1f); out.Byte(0x07); out.Byte(0x5f); out.Byte(0x5e); out.Byte(0x5b); out.Byte(0xc3)
+    }
+    // Original Windows 95 DDK CONFIGMG.H Not_VxD ABI: AX service ordinal,
+    // near-cdecl BP frame with DWORD arguments at BP+4, far pointers included.
+    // The endpoint only exposes bounded read-only services; this bridge is
+    // internal and has no imported DLL dependency on earlier Windows builds.
+    func neConfigCall(out *RTGEmitter) {
+        out.Byte(0x53); out.Byte(0x56); out.Byte(0x57); out.Byte(0x06); out.Byte(0x1e)
+        out.Bytes2(0x89,0xc6) // si=service/result/4 DWORD argument record
+        out.Bytes3(0xb8,0x84,0x16); out.Bytes3(0xbb,0x33,0)
+        out.Bytes2(0x31,0xff); out.Bytes2(0x8e,0xc7); out.Bytes2(0xcd,0x2f)
+        out.Bytes2(0x8c,0xc0); out.Bytes2(0x09,0xf8)
+        out.Bytes2(0x75,8)
+        out.Bytes4(0xc7,0x44,2,0xff); out.Byte(0xff)
+        out.Byte(0xeb); absent:=out.Len(); out.Byte(0)
+        out.Byte(0x90)
+        out.Byte(0x06); out.Byte(0x57) // far entry, above the synthetic cdecl frame
+        for offset:=18; offset>=4; offset-=2 { out.Bytes3(0xff,0x74,byte(offset)) }
+        out.Bytes2(0x31,0xc0); out.Byte(0x50) // near return slot
+        out.Byte(0x55); out.Bytes2(0x89,0xe5)
+        out.Bytes2(0x8b,0x04); out.Bytes3(0xff,0x5e,20)
+        out.Bytes3(0x89,0x44,2)
+        out.Bytes2(0x89,0xec); out.Byte(0x5d); out.Bytes3(0x83,0xc4,22)
+        out.Code()[absent]=byte(out.Len()-absent-1)
+        out.Byte(0x1f); out.Byte(0x07); out.Byte(0x5f); out.Byte(0x5e); out.Byte(0x5b); out.Byte(0xc3)
     }
     // Native WH_JOURNALPLAYBACK bridge. USER owns input routing, capture and
     // key/button state. The callback is an ordinary far Pascal hook reached
@@ -249,7 +310,7 @@ go backend {
         header[n+1]='E'
         header[n+2]=4
         if version >= 0x300 { header[n+2]=5 }
-        nePutWord(header,n+4,0x72)
+        nePutWord(header,n+4,0x78)
         nePutWord(header,n+6,2)
         flags := 6
         if version >= 0x300 { flags = 0x302 } // Multiple data; Windows GUI application.
@@ -261,15 +322,15 @@ go backend {
         nePutWord(header,n+0x16,1)
         nePutWord(header,n+0x1a,2)
         nePutWord(header,n+0x1c,2)
-        nePutWord(header,n+0x1e,2)
+        nePutWord(header,n+0x1e,3)
         nePutWord(header,n+0x20,1)
-        nePutWord(header,n+0x2c,n+0x74)
+        nePutWord(header,n+0x2c,n+0x7a)
         nePutWord(header,n+0x22,0x40)
         nePutWord(header,n+0x24,0x50)
         nePutWord(header,n+0x50,4)
         nePutWord(header,n+0x26,0x54)
         nePutWord(header,n+0x28,0x60)
-        nePutWord(header,n+0x2a,0x64)
+        nePutWord(header,n+0x2a,0x66)
         nePutWord(header,n+0x32,4)
         header[n+0x36]=2 // Windows executable
         nePutWord(header,n+0x3e,version)
@@ -285,13 +346,16 @@ go backend {
         header[n+0x54]=7
         copy(header[n+0x55:],[]byte("TREXEXT"))
         // Offset zero means SELF to the Windows 1 loader. Reserve that empty
-        // import name and start KERNEL at 1 (not 0), USER at 8.
+        // import name and start KERNEL at 1 (not 0), USER at 8, GDI at 13.
         nePutWord(header,n+0x60,1)
         nePutWord(header,n+0x62,8)
-        header[n+0x65]=6
-        copy(header[n+0x66:],[]byte("KERNEL"))
-        header[n+0x6c]=4
-        copy(header[n+0x6d:],[]byte("USER"))
+        nePutWord(header,n+0x64,13)
+        header[n+0x67]=6
+        copy(header[n+0x68:],[]byte("KERNEL"))
+        header[n+0x6e]=4
+        copy(header[n+0x6f:],[]byte("USER"))
+        header[n+0x73]=3
+        copy(header[n+0x74:],[]byte("GDI"))
         result := append(header,code...)
         result = neAppendWord(result,len(neFixups)/3)
         for i:=0;i<len(neFixups);i+=3 {

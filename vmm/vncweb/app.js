@@ -19,6 +19,16 @@ let absolute = false;
 const held = new Set();
 const buttonMask = button => [1, 2, 4][button] || 0;
 
+function resizeViewport() {
+  const parent = canvas.parentElement;
+  const style = getComputedStyle(parent);
+  const width = parent.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const height = window.innerHeight - parent.getBoundingClientRect().top - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  if (width > 0 && height > 0) rfb?.requestResize(width, height);
+}
+new ResizeObserver(resizeViewport).observe(canvas.parentElement);
+window.addEventListener('resize', resizeViewport);
+
 function release() {
   if (active) {
     for (const key of held) rfb.key(key, false);
@@ -87,6 +97,7 @@ function connect() {
     },
   );
   rfb = client;
+  resizeViewport();
   ws.onmessage = event => {
     if (socket !== ws) return;
     try {

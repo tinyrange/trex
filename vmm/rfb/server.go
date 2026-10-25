@@ -1,6 +1,7 @@
 // Package rfb implements an RFB 3.8 display session over a portable byte channel.
 // Authentication belongs to the enclosing transport. Raw true-colour pixels,
-// DesktopSize, keyboard transitions and pointer events are supported.
+// DesktopSize, ExtendedDesktopSize, keyboard transitions and pointer events are
+// supported. Resize requests require an optional vmm.ResizeDisplaySource.
 package rfb
 
 import (
@@ -55,6 +56,8 @@ type session struct {
 	format                                  []byte
 	width, height                           int
 	resize                                  bool
+	extendedResize, resizeAdvertised        bool
+	screenID, screenFlags                   uint32
 	previous                                *image.RGBA
 	px, py                                  int
 	pointer                                 bool
@@ -144,6 +147,8 @@ func (s *session) message() error {
 		return s.pointerEvent()
 	case 6:
 		return s.discardClipboard()
+	case 251:
+		return s.setDesktopSize()
 	default:
 		return fmt.Errorf("unsupported RFB message %d", typeByte[0])
 	}
@@ -177,16 +182,92 @@ func (s *session) setEncodings() error {
 		return err
 	}
 	s.resize = false
+	s.extendedResize = false
 	s.pointerTypes = false
 	for i := 0; i < n; i++ {
 		if int32(be.Uint32(b[i*4:])) == -223 {
 			s.resize = true
+		}
+		if int32(be.Uint32(b[i*4:])) == -308 {
+			s.extendedResize = true
 		}
 		if int32(be.Uint32(b[i*4:])) == -257 {
 			s.pointerTypes = true
 		}
 	}
 	return nil
+}
+
+func (s *session) resizeReady() (bool, error) {
+	if _, ok := s.display.(vmm.ResizeDisplaySource); !ok {
+		return false, nil
+	}
+	if ready, ok := s.display.(vmm.DisplayResizeReadiness); ok {
+		return ready.ResizeReady(s.ctx)
+	}
+	return true, nil
+}
+
+func (s *session) extendedDesktopSize(reason, status uint16) error {
+	b := make([]byte, 36)
+	b[3] = 1
+	be.PutUint16(b[4:], reason)
+	be.PutUint16(b[6:], status)
+	be.PutUint16(b[8:], uint16(s.width))
+	be.PutUint16(b[10:], uint16(s.height))
+	be.PutUint32(b[12:], 0xfffffecc) // ExtendedDesktopSize (-308).
+	b[16] = 1                        // One screen covering the framebuffer.
+	be.PutUint32(b[20:], s.screenID)
+	be.PutUint16(b[28:], uint16(s.width))
+	be.PutUint16(b[30:], uint16(s.height))
+	be.PutUint32(b[32:], s.screenFlags)
+	return s.write(b)
+}
+
+func (s *session) setDesktopSize() error {
+	b, err := s.read(7)
+	if err != nil {
+		return err
+	}
+	w, h := int(be.Uint16(b[1:])), int(be.Uint16(b[3:]))
+	screens, err := s.read(int(b[5]) * 16)
+	if err != nil {
+		return err
+	}
+	if !s.extendedResize || !s.resizeAdvertised {
+		return fmt.Errorf("SetDesktopSize before resize capability negotiation")
+	}
+	status := uint16(0)
+	if len(screens) != 16 || w < 1 || h < 1 || w > 4096 || h > 4096 ||
+		be.Uint16(screens[4:]) != 0 || be.Uint16(screens[6:]) != 0 ||
+		int(be.Uint16(screens[8:])) != w || int(be.Uint16(screens[10:])) != h {
+		status = 3 // Invalid layout; all records were consumed above.
+	} else if ready, err := s.resizeReady(); err != nil || !ready {
+		status = 1
+	} else {
+		ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
+		err := s.display.(vmm.ResizeDisplaySource).Resize(ctx, w, h)
+		cancel()
+		if err != nil {
+			status = 3
+		} else {
+			f, err := s.display.Capture(s.ctx)
+			if err != nil {
+				return err
+			}
+			if err := validFrame(f); err != nil {
+				return err
+			}
+			if f.Rect.Dx() != w || f.Rect.Dy() != h {
+				status = 3
+			} else {
+				s.width, s.height = w, h
+				s.screenID, s.screenFlags = be.Uint32(screens), be.Uint32(screens[12:])
+				s.previous = nil
+			}
+		}
+	}
+	return s.extendedDesktopSize(1, status)
 }
 
 func (s *session) requestUpdate() error {
@@ -308,6 +389,25 @@ func (s *session) update(req []byte) error {
 	if err = validFrame(f); err != nil {
 		return err
 	}
+	if s.extendedResize {
+		ready, err := s.resizeReady()
+		if err != nil {
+			return err
+		}
+		if (ready && !s.resizeAdvertised) || (s.resizeAdvertised && (req[0] == 0 || f.Rect.Dx() != s.width || f.Rect.Dy() != s.height)) {
+			s.resizeAdvertised = true
+			s.width, s.height = f.Rect.Dx(), f.Rect.Dy()
+			s.previous = nil
+			if err := s.extendedDesktopSize(0, 0); err != nil {
+				return err
+			}
+			if req[0] != 0 {
+				return nil
+			}
+			// The required layout update has no pixel rectangles. Fulfil a
+			// full update request with a separate pixel update as well.
+		}
+	}
 	if s.pointerTypes {
 		absolute := false
 		if source, ok := s.display.(vmm.AbsolutePointerSource); ok {
@@ -326,7 +426,12 @@ func (s *session) update(req []byte) error {
 			be.PutUint16(b[8:], uint16(s.width))
 			be.PutUint16(b[10:], uint16(s.height))
 			be.PutUint32(b[12:], 0xfffffeff)
-			return s.write(b)
+			if err := s.write(b); err != nil {
+				return err
+			}
+			if req[0] != 0 {
+				return nil
+			}
 		}
 	}
 	if f.Rect.Dx() != s.width || f.Rect.Dy() != s.height {

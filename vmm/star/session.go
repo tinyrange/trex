@@ -164,6 +164,17 @@ func (v *vmmSessionValue) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("type_and_enter", v.typeAndEnterBuiltin), nil
 	case "pointer":
 		return starlark.NewBuiltin("pointer", v.pointerBuiltin), nil
+	case "resize":
+		return starlark.NewBuiltin("resize", v.resizeBuiltin), nil
+	case "resize_ready":
+		if _, ok := v.driver.(vmmapi.ResizeDisplaySource); !ok {
+			return starlark.False, nil
+		}
+		if driver, ok := v.driver.(vmmapi.DisplayResizeReadiness); ok {
+			ready, err := driver.ResizeReady(v.ctx)
+			return starlark.Bool(ready), err
+		}
+		return starlark.True, nil
 	case "record":
 		return starlark.NewBuiltin("vm.record", v.recordBuiltin), nil
 	case "screenshot":
@@ -180,7 +191,7 @@ func (v *vmmSessionValue) AttrNames() []string {
 	return []string{
 		"backend_id", "capabilities", "channel", "chord", "close", "debugger", "detach", "extension",
 		"has_capability", "key", "next_event", "pause", "pointer", "powerdown", "reset", "result", "resume",
-		"record", "running", "screenshot", "send_keys", "send_text", "shutdown", "status", "stop", "tap", "type_and_enter", "wait",
+		"record", "resize", "resize_ready", "running", "screenshot", "send_keys", "send_text", "shutdown", "status", "stop", "tap", "type_and_enter", "wait",
 	}
 }
 
@@ -512,6 +523,30 @@ func (v *vmmSessionValue) sendInput(input VMMInput) (starlark.Value, error) {
 	defer cancel()
 	if err := driver.Input(ctx, input); err != nil {
 		return nil, normalizeVMMError(VMMErrorBackend, "send VM input", err)
+	}
+	return starlark.None, nil
+}
+
+func (v *vmmSessionValue) resizeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var width, height int
+	timeout := starvalue.Number(60)
+	if err := starlark.UnpackArgs("resize", args, kwargs, "width", &width, "height", &height, "timeout?", &timeout); err != nil {
+		return nil, err
+	}
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("resize dimensions must be positive")
+	}
+	driver, ok := v.driver.(vmmapi.ResizeDisplaySource)
+	if !ok {
+		return nil, unsupportedVMM("live display resize")
+	}
+	ctx, cancel, err := v.operationContext(float64(timeout))
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	if err := driver.Resize(ctx, width, height); err != nil {
+		return nil, normalizeVMMError(VMMErrorBackend, "resize guest display", err)
 	}
 	return starlark.None, nil
 }

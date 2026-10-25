@@ -175,6 +175,13 @@ func (p *pc) installACPI() error {
 		}
 		aml = append(aml, data...)
 	}
+	if p.serial.attached {
+		data, err := (acpi.ISADevice{Name: "COM1", ID: "PNP0501", Parent: `\_SB.PCI0`, Ports: [][2]uint16{{0x3f8, 8}}, IRQs: []uint8{4}}).AML()
+		if err != nil {
+			return err
+		}
+		aml = append(aml, data...)
+	}
 	if p.hpet != nil {
 		data, err := (acpi.ISADevice{Name: "HPET", ID: "PNP0103", Parent: `\_SB.PCI0`, Memory: [][2]uint32{{hpetAddress, 0x400}}}).AML()
 		if err != nil {
