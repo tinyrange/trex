@@ -2289,6 +2289,18 @@ Reads WiX v3 Burn attached CAB container boundaries from PE metadata, returning 
 
 Opens concatenated bzip2 streams, including legacy randomized blocks, as a lazy read-only file with a bounded decoded block cache. Block and stream checksums are checked during reads; size scans the complete stream. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. cache=True requires explicit positive maximum_bytes, eagerly validates every member to EOF, and returns an immutable paged RAM snapshot supporting random access without replay or host files; integrity or overflow failures return no partial result. Does not interpret an archive inside the stream.
 
+### `archive.c2r`
+
+`archive.c2r(database, stream) -> entries/find`
+
+Indexes an Office Click-to-Run full stream using a schema-5 UnityDB. Entries expose package-relative path, size, packages, data and verify(); find is case-insensitive. Lazy reads verify stored-block SHA256 and bounded zlib decoding. verify() also checks the complete logical-file SHA256. Metadata references, block coverage, source extents and paths are validated before returning. Uses one shared decoded-block cache; keep both sources unchanged. Does not apply deltas, install Office, interpret App-V manifests, activate products, or authenticate catalog signatures. Pin or authenticate metadata separately.
+
+### `archive.c2r_database`
+
+`archive.c2r_database(file) -> frozen dict[str, list[tuple]]`
+
+Decodes a bounded version-0x30 Office UnityDB into frozen literal tables. Checks declared extents, zlib framing and decoded SQL SHA-256; SQL statements are never executed. Supports the emitted integer/string INSERT subset, not arbitrary SQLite. Integrity checks do not authenticate the publisher.
+
 ### `archive.cab`
 
 `archive.cab(file, cache=True) -> cab`

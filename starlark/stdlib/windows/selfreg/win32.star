@@ -96,6 +96,7 @@ _KERNEL_SIGNATURES = {
     "getcomputernameexw": 3,
     "getcpinfo": 2,
     "getcurrentactctx": 1,
+    "queryactctxw": 7,
     "getcurrentdirectorya": 2,
     "getcurrentdirectoryw": 2,
     "getdateformata": 6,
@@ -349,6 +350,7 @@ _KERNEL_SIGNATURES = {
     "setfilepointerex": 5,
     "setfiletime": 4,
     "systemtimetofiletime": 2,
+    "systemtimetotzspecificlocaltime": 3,
     "sleep": 1,
     "sleepex": 2,
     "switchtothread": 0,
@@ -4153,6 +4155,33 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write_u32le(args[2], 1 if state["time_adjustment_disabled"] else 0)
             state["last_error"] = 0
             return 1
+        if name == "systemtimetotzspecificlocaltime":
+            if not args[1] or not args[2]:
+                state["last_error"] = 87
+                return 0
+            bias = 0
+            if args[0]:
+                # A fixed-offset zone has no transition months. Do not silently
+                # treat daylight-saving rules as a fixed offset.
+                zone = machine.read(args[0], 172)
+                if binary.read_u16le(zone, 70) or binary.read_u16le(zone, 154):
+                    fail("SystemTimeToTzSpecificLocalTime daylight transitions are not modeled")
+                bias = binary.read_u32le(zone, 0)
+                if bias & 0x80000000:
+                    bias -= 0x100000000
+            fields = binary.cursor(machine.read(args[1], 16))
+            year, month = fields.u16le(), fields.u16le()
+            fields.u16le()
+            ticks = _filetime_ticks(year, month, fields.u16le(), fields.u16le(), fields.u16le(), fields.u16le(), fields.u16le())
+            converted = None if ticks == None else _filetime_fields(ticks - bias * 60 * 10000000)
+            if converted == None:
+                state["last_error"] = 87
+                return 0
+            output = binary.builder(capacity = 16)
+            for field in converted:
+                output.u16le(field)
+            machine.write(args[2], output.bytes())
+            return 1
         if name == "systemtimetofiletime":
             if not args[0] or not args[1]:
                 state["last_error"] = 87
@@ -4814,6 +4843,55 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 return 0xffffffff
             state["last_error"] = 0
             return create_handle("actctx", {"path": path, "manifest": manifest, "references": 1})
+        if name == "queryactctxw":
+            flags, handle, subinstance, info_class, output, size, required = args
+            if info_class != 1 or subinstance or flags & ~0x8000001c:
+                fail("QueryActCtxW only models basic information")
+            selectors = flags & 0x1c
+            if selectors not in [0, 4, 8, 16]:
+                state["last_error"] = 87
+                return 0
+            if selectors in [4, 16]:
+                selected = None
+                for loaded in machine.modules:
+                    if (selectors == 4 and handle == loaded.base) or (selectors == 16 and loaded.base <= handle and handle < loaded.base + loaded.image_size):
+                        selected = loaded
+                        break
+                if selected == None:
+                    state["last_error"] = 87
+                    return 0
+                # Resolve the actual image, not a synthetic success for every
+                # mapped module. Manifest-bearing images need loader support.
+                sources = [value for path, value in files.items() if path.replace("\\", "/").split("/")[-1].lower() == selected.name.replace("\\", "/").split("/")[-1].lower()]
+                if len(sources) != 1:
+                    fail("QueryActCtxW requires an unambiguous source image")
+                external_name = selected.name.replace("\\", "/").split("/")[-1].lower() + ".manifest"
+                if any([path.replace("\\", "/").split("/")[-1].lower() == external_name for path in files]):
+                    fail("QueryActCtxW external manifest association is not modeled")
+                image = windows.pe(sources[0])
+                if any([item["type"] == "#24" for item in image.resources]):
+                    fail("QueryActCtxW module manifest association is not modeled")
+                handle = 0
+            elif selectors == 8:
+                handle = state["current_actctx"]
+            context = state["handles"].get(handle) if handle else None
+            if handle and (type(context) != "dict" or context.get("kind") != "actctx"):
+                state["last_error"] = 6
+                return 0
+            length = machine.pointer_size * 2
+            if required:
+                machine.write_pointer(required, length)
+            if not output or size < length:
+                state["last_error"] = 122
+                return 0
+            machine.write(output, b"\x00" * length)
+            machine.write_pointer(output, handle)
+            if handle and not flags & 0x80000000:
+                if "references" in context["value"]:
+                    context["value"]["references"] += 1
+                else:
+                    state["actctx_refs"] += 1
+            return 1
         if name == "getcurrentactctx":
             if not args[0]:
                 state["last_error"] = 87
@@ -7345,6 +7423,23 @@ def msvcrt_plugin(kernel = None):
         return errors[thread_id]
 
     contract_signatures = {
+        "vcruntime140.dll": {
+            "strrchr": 2,
+            "memset": 3,
+            "memcpy": 3,
+            "memmove": 3,
+            "memcmp": 3,
+        },
+        "api-ms-win-crt-heap-l1-1-0.dll": {
+            "malloc": 1,
+            "calloc": 2,
+            "realloc": 2,
+            "free": 1,
+        },
+        "api-ms-win-crt-locale-l1-1-0.dll": {
+            "localeconv": 0,
+            "__initialize_lconv_for_unsigned_char": 0,
+        },
         "api-ms-win-crt-private-l1-1-0.dll": {
             "_o__execute_onexit_table": 1,
             "_o__initialize_onexit_table": 1,
@@ -7359,8 +7454,16 @@ def msvcrt_plugin(kernel = None):
         },
         "api-ms-win-crt-stdio-l1-1-0.dll": {
             "__stdio_common_vswprintf": 6,
+            "__stdio_common_vswprintf_s": 6,
         },
         "api-ms-win-crt-string-l1-1-0.dll": {
+            "_wcsnicmp": 3,
+            "_wcslwr_s": 2,
+            "wcscpy_s": 3,
+            "strcpy_s": 3,
+            "_stricmp": 2,
+            "wcsncpy_s": 4,
+            "strlen": 1,
             "wcslen": 1,
             "memset": 3,
             "strcmp": 2,
@@ -7453,6 +7556,7 @@ def msvcrt_plugin(kernel = None):
         "_purecall": 0,
         "setlocale": 2,
         "localeconv": 0,
+        "__initialize_lconv_for_unsigned_char": 0,
         "wcslen": 1,
         "wcstombs": 3,
         "wcscpy": 2,
@@ -7880,18 +7984,27 @@ def msvcrt_plugin(kernel = None):
             return previous
         if name in ["_xcptfilter", "_purecall"]:
             return 0
-        if name == "localeconv":
+        if name in ["localeconv", "__initialize_lconv_for_unsigned_char"]:
             if state.get("locale", "C") not in ["C", ""]:
                 fail("localeconv only models the C locale")
             if "lconv" not in state:
                 width = event.machine.pointer_size
-                address = event.machine.allocate(size = width * 10 + 8, name = "msvcrt.lconv")
+                address = event.machine.allocate(size = width * 18 + 8, name = "msvcrt.lconv")
                 empty = event.machine.allocate(value = b"\x00")
                 decimal = event.machine.allocate(value = b".\x00")
                 for index in range(10):
                     event.machine.write_pointer(address + index * width, decimal if index == 0 else empty)
                 event.machine.write(address + width * 10, b"\x7f" * 8)
+                wide_empty = event.machine.allocate(value = b"\x00\x00")
+                wide_decimal = event.machine.allocate(value = b".\x00\x00\x00")
+                for index in range(8):
+                    event.machine.write_pointer(address + width * 10 + 8 + index * width, wide_decimal if index == 0 else wide_empty)
                 state["lconv"] = address
+            if name == "__initialize_lconv_for_unsigned_char":
+                # UCRT /J initialization changes the eight CHAR_MAX fields
+                # of the C-locale structure in place; existing pointers survive.
+                event.machine.write(state["lconv"] + event.machine.pointer_size * 10, b"\xff" * 8)
+                return 0
             return state["lconv"]
         if name == "setlocale":
             if args[1]:
@@ -8489,6 +8602,24 @@ def msvcrt_plugin(kernel = None):
             needle = event.machine.read_cstring(args[1], encoding = "utf16le")
             index = value.find(needle)
             return 0 if index < 0 else args[0] + index * 2
+        if name == "_wcslwr_s":
+            pointer, capacity = args
+            if not pointer or not capacity:
+                event.machine.write_u32le(errno_address(event.machine), 22)
+                return 22
+            if capacity > 1048576 or state.get("locale", "C") not in ["C", ""]:
+                fail("unsupported secure lowercase locale or bound")
+            units = []
+            for index in range(capacity):
+                unit = event.machine.read_u16le(pointer + index * 2)
+                if unit == 0:
+                    for offset, value in enumerate(units):
+                        event.machine.write_u16le(pointer + offset * 2, value)
+                    return 0
+                units.append(unit + 32 if 65 <= unit and unit <= 90 else unit)
+            event.machine.write_u16le(pointer, 0)
+            event.machine.write_u32le(errno_address(event.machine), 22)
+            return 22
         if name in ["_wcslwr", "_wcsupr"]:
             value = event.machine.read_cstring(args[0], encoding = "utf16le")
             value = value.lower() if name == "_wcslwr" else value.upper()
@@ -8678,7 +8809,7 @@ def msvcrt_plugin(kernel = None):
                 if len(value) < args[1]:
                     event.machine.write(args[0] + len(written), b"\x00")
             return len(value) if len(value) <= args[1] else 0xffffffff
-        if name == "__stdio_common_vswprintf":
+        if name in ["__stdio_common_vswprintf", "__stdio_common_vswprintf_s"]:
             shift = 2 if event.machine.pointer_size == 4 else 1
             options = args[0] | (args[1] << 32 if shift == 2 else 0)
             buffer, capacity, format_ptr, locale, values_ptr = args[shift:shift + 5]
@@ -8693,6 +8824,10 @@ def msvcrt_plugin(kernel = None):
             encoded = binary.encode(text, encoding = "utf16le")
             count = len(encoded) // 2
             if not buffer or not capacity:
+                return 0xffffffff
+            if name == "__stdio_common_vswprintf_s" and count >= capacity:
+                event.machine.write_u16le(buffer, 0)
+                event.machine.write_u32le(errno_address(event.machine), 34)
                 return 0xffffffff
             written = min(count, capacity - 1)
             event.machine.write(buffer, encoded[:written * 2])
@@ -8839,7 +8974,7 @@ def msvcrt_plugin(kernel = None):
                 )
         for module, module_signatures in contract_signatures.items():
             for name, argc in module_signatures.items():
-                if name == "__stdio_common_vswprintf" and machine.pointer_size == 4:
+                if name in ["__stdio_common_vswprintf", "__stdio_common_vswprintf_s"] and machine.pointer_size == 4:
                     argc += 1
                 machine.provide_export(
                     callback,
@@ -8855,7 +8990,7 @@ def msvcrt_plugin(kernel = None):
             name = imported.name.lower()
             module = imported.module.lower()
             if module in contract_signatures and name in contract_signatures[module]:
-                machine.hook(callback, address = imported.address, argc = contract_signatures[module][name] + (1 if name == "__stdio_common_vswprintf" and machine.pointer_size == 4 else 0), convention = "cdecl")
+                machine.hook(callback, address = imported.address, argc = contract_signatures[module][name] + (1 if name in ["__stdio_common_vswprintf", "__stdio_common_vswprintf_s"] and machine.pointer_size == 4 else 0), convention = "cdecl")
                 continue
             if module not in ["msvcrt.dll", "crtdll.dll", "ntdll.dll"]:
                 continue
