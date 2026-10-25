@@ -1,13 +1,13 @@
 """Native PE registry observation ABI, bounds and handle-lifetime check."""
-load("//trex/scripts/guest/windows_extension:build_pe.star", "compile_pe")
+load("//scripts/guest/windows_extension:build_pe.star", "compile_pe")
 
 def check(value, message):
     if not value:
         fail(message)
 
-def validate(architecture):
+def validate(architecture, trex_root = "."):
     # No costly shared prefix/checkpoint: this executes the bounded endpoint.
-    machine = emulator.machine(image = compile_pe("trex", architecture = architecture), instruction_limit = 3000000)
+    machine = emulator.machine(image = compile_pe(trex_root, architecture = architecture), instruction_limit = 3000000)
     plugin = emulator.plugin(lambda machine: None, state = {"input": 0, "output": [], "opened": [], "closed": []})
     machine.use(plugin)
     state = plugin.state
@@ -72,6 +72,7 @@ def validate(architecture):
     check(state["closed"] == [0x1200, 0x1201, 0x1202], "query success and failure must close owned keys")
 
 def main(args):
+    root = args[0] if args else "."
     for architecture in ["386", "amd64"]:
-        validate(architecture)
+        validate(architecture, root)
     print("PASS native x86/x64 registry query bounds, predefined handles and cleanup")
