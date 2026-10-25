@@ -47,8 +47,17 @@ def optical_media(file):
     return disc
 
 def main(args):
+    if len(args) == 2 and args[0].lower().endswith(".db"):
+        source = open(args[0])
+        stream = open(args[1])
+        tables = archive.c2r_database(source)
+        installer = archive.c2r(source, stream)
+        print("C2R source inspection only: tables, installer.entries, installer.find(path); entry.data and entry.verify()")
+        print("This does not install Office, interpret App-V integration, or activate a product")
+        repl()
+        return
     if len(args) not in [1, 2, 3]:
-        fail("usage: installer_repl.star INSTALLER | IMAGE /INSTALLER | ARCHIVE IMAGE_MEMBER /INSTALLER")
+        fail("usage: installer_repl.star INSTALLER | IMAGE /INSTALLER | ARCHIVE IMAGE_MEMBER /INSTALLER | C2R.db STREAM.dat")
 
     media_source = open(args[0])
     disk_media = None
@@ -71,6 +80,7 @@ def main(args):
         if disk_media == None and images[0].path.lower().endswith((".img", ".ima")):
             floppies = images
             disk_media = floppy_files(floppies)
+
         # Solid archive random reads otherwise replay decompression for every
         # filesystem lookup. Keep the selected optical image entirely in memory.
         media_source = binary.view(images[0].bytes()) if disk_media == None and images[0].size <= 512 << 20 else images[0]
@@ -87,6 +97,7 @@ def main(args):
     installer = archive.installer(source) if msi == None and acme == None and setup_inf == None and probe["supported"] else None
     payload = installer.payload if installer != None else None
     script = installer.installscript if installer != None else None
+
     # Bind the imported helper in main's scope so the scoped REPL can use it.
     analyze_installer = analyze
     installer_modifications = installation

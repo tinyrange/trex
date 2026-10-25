@@ -991,6 +991,108 @@ def test_crt_imported_mode_data_matches_accessors():
         equal(machine.read_pointer(argv + machine.pointer_size * 2), 0)
         equal(machine.read_pointer(machine.read_pointer(environment_output)), 0)
 
+def test_crt_unsigned_char_locale_initialization():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        for initialize_first in [False, True]:
+            machine = emulator.machine(code = b"\xc3", architecture = architecture)
+            machine.use([module["msvcrt_plugin"]()])
+            localeconv = machine.resolve_export("api-ms-win-crt-locale-l1-1-0.dll", name = "localeconv")
+            initialize = machine.resolve_export("api-ms-win-crt-locale-l1-1-0.dll", name = "__initialize_lconv_for_unsigned_char")
+            if initialize_first:
+                equal(machine.call(initialize).value, 0)
+            address = machine.call(localeconv).value
+            width = machine.pointer_size
+            equal(machine.read(address + width * 10, 8), (b"\xff" if initialize_first else b"\x7f") * 8)
+            equal(machine.call(initialize).value, 0)
+            equal(machine.call(localeconv).value, address)
+            equal(machine.read(address + width * 10, 8), b"\xff" * 8)
+            equal(machine.read_cstring(machine.read_pointer(address), encoding = "ascii"), ".")
+            equal(machine.read_cstring(machine.read_pointer(address + width), encoding = "ascii"), "")
+            wide = address + width * 10 + 8
+            equal(machine.read_cstring(machine.read_pointer(wide), encoding = "utf16le"), ".")
+            equal(machine.read_cstring(machine.read_pointer(wide + 7 * width), encoding = "utf16le"), "")
+
+
+
+def test_query_actctx_basic_bounds():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use([kernel])
+        query = machine.resolve_export("kernel32.dll", name = "QueryActCtxW")
+        width = machine.pointer_size
+        required = machine.allocate(value = b"\xff" * width)
+        output = machine.allocate(value = b"\x55" * (width * 2 + 4))
+        equal(machine.call(query, args = [0, 0, 0, 1, output, width * 2 - 1, required]).value, 0)
+        equal(kernel.state["last_error"], 122)
+        equal(machine.read_pointer(required), width * 2)
+        equal(machine.read(output, width * 2 + 4), b"\x55" * (width * 2 + 4))
+        equal(machine.call(query, args = [0, 0, 0, 1, output, width * 2, required]).value, 1)
+        equal(machine.read(output, width * 2), b"\x00" * (width * 2))
+        equal(machine.read(output + width * 2, 4), b"\x55" * 4)
+        equal(machine.call(query, args = [12, 0, 0, 1, output, width * 2, required]).value, 0)
+        equal(kernel.state["last_error"], 87)
+        equal(machine.call(query, args = [0, 0x12345, 0, 1, output, width * 2, required]).value, 0)
+        equal(kernel.state["last_error"], 6)
+        equal(machine.call(query, args = [8, 0, 0, 1, output, width * 2, required]).value, 1)
+        equal(machine.read_pointer(output), 0)
+
+def test_fixed_timezone_and_secure_wide_crt():
+    def system_time(fields):
+        builder = binary.builder()
+        for field in fields:
+            builder.u16le(field)
+        return builder.bytes()
+
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use([kernel, module["msvcrt_plugin"](kernel = kernel)])
+        convert = machine.resolve_export("kernel32.dll", name = "SystemTimeToTzSpecificLocalTime")
+        # UTC March 1 minus one hour crosses the leap-day boundary.
+        utc = machine.allocate(value = system_time([2024, 3, 5, 1, 0, 30, 45, 123]))
+        local = machine.allocate(value = b"\xaa" * 16)
+        zone = machine.allocate(size = 172, value = binary.u32le(60))
+        equal(machine.call(convert, args = [zone, utc, local]).value, 1)
+        equal(machine.read(local, 16), system_time([2024, 2, 4, 29, 23, 30, 45, 123]))
+        equal(machine.call(convert, args = [0, utc, local]).value, 1)
+        equal(machine.read(local, 16), machine.read(utc, 16))
+        machine.write_u32le(zone, 0xffffffc4)
+        equal(machine.call(convert, args = [zone, utc, local]).value, 1)
+        equal(machine.read_u16le(local + 8), 1)
+        machine.write_u16le(utc + 2, 13)
+        before = machine.read(local, 16)
+        equal(machine.call(convert, args = [zone, utc, local]).value, 0)
+        equal(machine.read(local, 16), before)
+        equal(kernel.state["last_error"], 87)
+        lower = machine.resolve_export("api-ms-win-crt-string-l1-1-0.dll", name = "_wcslwr_s")
+        text = machine.allocate(value = binary.encode("AZÉ!", encoding = "utf16le", nul = True))
+        equal(machine.call(lower, args = [text, 5]).value, 0)
+        equal(machine.read_cstring(text, encoding = "utf16le"), "azÉ!")
+        errno = machine.call(machine.resolve_export("msvcrt.dll", name = "_errno")).value
+        machine.write(text, binary.encode("ABCD", encoding = "utf16le"))
+        equal(machine.call(lower, args = [text, 4]).value, 22)
+        equal(machine.read_u16le(text), 0)
+        equal(machine.read_u32le(errno), 22)
+        equal(machine.read_u16le(text + 2), 66)
+        format = machine.allocate(value = binary.encode("%s:%d", encoding = "utf16le", nul = True))
+        word = machine.allocate(value = binary.encode("AZ", encoding = "utf16le", nul = True))
+        values = machine.allocate(size = machine.pointer_size * 2)
+        machine.write_pointer(values, word)
+        machine.write_pointer(values + machine.pointer_size, 7)
+        output = machine.allocate(value = b"\x55" * 16)
+        formatting = machine.resolve_export("api-ms-win-crt-stdio-l1-1-0.dll", name = "__stdio_common_vswprintf_s")
+        prefix = [4, 0] if architecture == "x86" else [4]
+        equal(machine.call(formatting, args = prefix + [output, 5, format, 0, values]).value, 4)
+        equal(machine.read_cstring(output, encoding = "utf16le"), "AZ:7")
+        equal(machine.read(output + 10, 6), b"\x55" * 6)
+        equal(machine.call(formatting, args = prefix + [output, 4, format, 0, values]).value & 0xffffffff, 0xffffffff)
+        equal(machine.read_u16le(output), 0)
+        equal(machine.read_u32le(errno), 34)
+
 def test_crt_api_set_contracts():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     machine = emulator.machine(code = b"\x31\xc0\xc3", architecture = "amd64")
@@ -1759,6 +1861,38 @@ def test_rpc_runtime_signatures():
     equal(machine.call(inquire, args = [0, attributes]).value, 0)
     equal(machine.read_u32le(attributes + 0x18), 6)
     equal(machine.read_u16le(attributes + 0x40), 1)
+
+
+def test_rpc_pointer_outputs_and_release():
+    module = testing.module("@stdlib//windows/emulation:rpc.star")
+    registry_module = testing.module("@stdlib//windows/selfreg:registry.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use([module["rpc_plugin"](registry_module["registry_plugin"](), "fixture.dll")])
+        protocol = machine.allocate(value = binary.encode("ncalrpc", encoding = "utf16le", nul = True))
+        endpoint = machine.allocate(value = binary.encode("TEST", encoding = "utf16le", nul = True))
+        output = machine.allocate(value = b"\xff" * machine.pointer_size)
+        binding = machine.allocate(value = b"\xff" * machine.pointer_size)
+        compose = machine.resolve_export("rpcrt4.dll", name = "RpcStringBindingComposeW")
+        equal(machine.call(compose, args = [0, protocol, 0, endpoint, 0, output]).value, 0)
+        string = machine.read_pointer(output)
+        equal(machine.read_cstring(string, encoding = "utf16le"), "ncalrpc:[TEST]")
+        bind = machine.resolve_export("rpcrt4.dll", name = "RpcBindingFromStringBindingW")
+        equal(machine.call(bind, args = [string, binding]).value, 0)
+        true(machine.read_pointer(binding) != 0)
+        release = machine.resolve_export("rpcrt4.dll", name = "RpcBindingFree")
+        equal(machine.call(release, args = [binding]).value, 0)
+        equal(machine.read_pointer(binding), 0)
+        free = machine.resolve_export("rpcrt4.dll", name = "RpcStringFreeW")
+        equal(machine.call(free, args = [output]).value, 0)
+        equal(machine.read_pointer(output), 0)
+        uuid = machine.allocate(value = module["_uuid_bytes"]("00112233-4455-6677-8899-aabbccddeeff"))
+        machine.write(output, b"\xff" * machine.pointer_size)
+        convert = machine.resolve_export("rpcrt4.dll", name = "UuidToStringW")
+        equal(machine.call(convert, args = [uuid, output]).value, 0)
+        equal(machine.read_cstring(machine.read_pointer(output), encoding = "utf16le"), "00112233-4455-6677-8899-aabbccddeeff")
+        equal(machine.call(free, args = [output]).value, 0)
+        equal(machine.read_pointer(output), 0)
 
 def test_kernel_virtual_file_entries():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -3199,6 +3333,10 @@ TEST_SUITE = suite("stdlib/internal", [
     case("crt_errno_is_stable_and_writable", test_crt_errno_is_stable_and_writable),
     case("crt_imported_mode_data_matches_accessors", test_crt_imported_mode_data_matches_accessors),
     case("crt_api_set_contracts", test_crt_api_set_contracts),
+    case("query_actctx_basic_bounds", test_query_actctx_basic_bounds),
+    case("fixed_timezone_and_secure_wide_crt", test_fixed_timezone_and_secure_wide_crt),
+    case("rpc_pointer_outputs_and_release", test_rpc_pointer_outputs_and_release),
+    case("crt_unsigned_char_locale_initialization", test_crt_unsigned_char_locale_initialization),
     case("kernel_budget_threads_remain_runnable", test_kernel_budget_threads_remain_runnable),
     case("kernel_immediate_timer_and_thread_priority", test_kernel_immediate_timer_and_thread_priority),
     case("kernel_threadpool_timer_lifecycle", test_kernel_threadpool_timer_lifecycle),

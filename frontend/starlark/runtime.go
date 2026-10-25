@@ -25,6 +25,7 @@ import (
 	"github.com/tinyrange/trex/archive/bru"
 	"github.com/tinyrange/trex/archive/bsddump"
 	"github.com/tinyrange/trex/archive/bzip2"
+	"github.com/tinyrange/trex/archive/c2r"
 	cabarchive "github.com/tinyrange/trex/archive/cab"
 	"github.com/tinyrange/trex/archive/cfb"
 	"github.com/tinyrange/trex/archive/compactpro"
@@ -177,6 +178,8 @@ func predeclared() starlark.StringDict {
 				"bom":              starlark.NewBuiltin("bom", bom.Builtin),
 				"lzfse":            starlark.NewBuiltin("lzfse", lzfse.Builtin),
 				"xar":              starlark.NewBuiltin("xar", xar.Builtin),
+				"c2r":              starlark.NewBuiltin("c2r", c2r.Builtin),
+				"c2r_database":     starlark.NewBuiltin("c2r_database", c2r.DatabaseBuiltin),
 				"udif":             starlark.NewBuiltin("udif", udif.Builtin),
 				"cpio":             starlark.NewBuiltin("cpio", cpio.Builtin),
 				"cpio_build":       starlark.NewBuiltin("cpio_build", cpio.BuildBuiltin),
