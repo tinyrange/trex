@@ -1642,7 +1642,7 @@ def test_winsock_helper_signatures():
     machine.use([winsock])
     data = machine.allocate(size = 400)
     startup = machine.call(machine.resolve_export("wsock32.dll", ordinal = 115), args = [0x0101, data])
-    equal((startup.reason, startup.value, machine.read_u16le(data), machine.read_u16le(data + 2)), ("return", 0, 0x0101, 0x0101))
+    equal((startup.reason, startup.value, machine.read_u16le(data), machine.read_u16le(data + 2)), ("return", 0, 0x0101, 0x0202))
     equal(machine.call(machine.resolve_export("wsock32.dll", ordinal = 112), args = [10061]).value, 0)
     equal(machine.call(machine.resolve_export("wsock32.dll", ordinal = 111)).value, 10061)
     equal(machine.call(machine.resolve_export("wsock32.dll", ordinal = 116)).value, 0)

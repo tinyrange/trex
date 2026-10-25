@@ -92,6 +92,7 @@ import (
 	filesystemvhdx "github.com/tinyrange/trex/filesystem/vhdx"
 	filesystemxfs "github.com/tinyrange/trex/filesystem/xfs"
 	acpistar "github.com/tinyrange/trex/firmware/acpi/star"
+	"github.com/tinyrange/trex/installer/burn"
 	"github.com/tinyrange/trex/installer/installshield"
 	"github.com/tinyrange/trex/installer/installshield/installscript"
 	"github.com/tinyrange/trex/installer/msi"
@@ -140,6 +141,7 @@ func predeclared() starlark.StringDict {
 				"cfb":              starlark.NewBuiltin("cfb", cfb.Builtin),
 				"cab_set":          starlark.NewBuiltin("cab_set", cabarchive.SetBuiltin),
 				"installer":        starlark.NewBuiltin("installer", installshield.InstallerBuiltin),
+				"burn_containers":  starlark.NewBuiltin("burn_containers", burn.Builtin),
 				"installer_probe":  starlark.NewBuiltin("installer_probe", installshield.ProbeBuiltin),
 				"nsis_list":        starlark.NewBuiltin("nsis_list", nsis.ListBuiltin),
 				"nsis":             starlark.NewBuiltin("nsis", nsis.Builtin),

@@ -19,10 +19,13 @@ func (*Database) Freeze()               {}
 func (*Database) Truth() starlark.Bool  { return starlark.True }
 func (*Database) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: msi") }
 func (*Database) AttrNames() []string {
-	return []string{"tables", "table", "codepage", "schema", "plan"}
+	return []string{"tables", "table", "codepage", "schema", "plan", "package_code"}
 }
 func (d *Database) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "package_code":
+		code, err := d.PackageCode()
+		return starlark.String(code), err
 	case "plan":
 		return starlark.NewBuiltin("msi.plan", d.planBuiltin), nil
 	case "codepage":
@@ -68,12 +71,13 @@ func (d *Database) Attr(name string) (starlark.Value, error) {
 }
 
 func (d *Database) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var properties, media *starlark.Dict
+	var properties, media, featureStates *starlark.Dict
 	var features *starlark.List
-	if err := starlark.UnpackArgs("msi.plan", args, kwargs, "properties?", &properties, "features?", &features, "media?", &media); err != nil {
+	var cacheBytes int64
+	if err := starlark.UnpackArgs("msi.plan", args, kwargs, "properties?", &properties, "features?", &features, "feature_states?", &featureStates, "media?", &media, "cabinet_cache_bytes?", &cacheBytes); err != nil {
 		return nil, err
 	}
-	options := PlanOptions{Properties: map[string]string{}, Media: map[string]starfile.File{}}
+	options := PlanOptions{CabinetCacheBytes: cacheBytes, Properties: map[string]string{}, Media: map[string]starfile.File{}}
 	if properties != nil {
 		for _, pair := range properties.Items() {
 			key, ok := starlark.AsString(pair[0])
@@ -102,6 +106,17 @@ func (d *Database) planBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 				return nil, fmt.Errorf("msi.plan: feature names must be strings")
 			}
 			options.Features = append(options.Features, name)
+		}
+	}
+	if featureStates != nil {
+		options.FeatureStates = map[string]int{}
+		for _, pair := range featureStates.Items() {
+			name, ok := starlark.AsString(pair[0])
+			state, err := starlark.AsInt32(pair[1])
+			if !ok || err != nil {
+				return nil, fmt.Errorf("msi.plan: feature_states must map names to integer install states")
+			}
+			options.FeatureStates[name] = state
 		}
 	}
 	return d.Plan(options)

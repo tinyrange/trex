@@ -128,3 +128,50 @@ func (c *CPU) truncateSingleToInteger(input uint32, width int) (uint64, error) {
 	}
 	return result, nil
 }
+
+// doubleToSingle implements the finite-normal range used by configuration
+// parsers. Exceptional inputs/results stop explicitly until modeled.
+func (c *CPU) doubleToSingle(input uint64) (uint32, error) {
+	value := math.Float64frombits(input)
+	if input&0x7fffffffffffffff == 0 {
+		return uint32(input >> 32), nil
+	}
+	exponent := (input >> 52) & 2047
+	if exponent == 0 || exponent == 2047 {
+		return 0, fmt.Errorf("unsupported CVTSD2SS operand %#x", input)
+	}
+	result := float32(value)
+	bits := math.Float32bits(result)
+	if bits&0x7f800000 == 0 || bits&0x7f800000 == 0x7f800000 {
+		return 0, fmt.Errorf("unsupported CVTSD2SS result %#x", input)
+	}
+	if float64(result) == value {
+		return bits, nil
+	}
+	control := c.readMXCSR()
+	if err := c.setMXCSR(control | 1<<5); err != nil {
+		return 0, err
+	}
+	if control&(1<<12) == 0 {
+		return 0, fmt.Errorf("unmasked SIMD precision exception")
+	}
+	above := float64(result) > value
+	switch (control >> 13) & 3 {
+	case 1:
+		if above {
+			result = math.Nextafter32(result, float32(math.Inf(-1)))
+		}
+	case 2:
+		if !above {
+			result = math.Nextafter32(result, float32(math.Inf(1)))
+		}
+	case 3:
+		if (value > 0 && above) || (value < 0 && !above) {
+			result = math.Nextafter32(result, 0)
+		}
+	}
+	if math.Float32bits(result)&0x7f800000 == 0 {
+		return 0, fmt.Errorf("unsupported CVTSD2SS subnormal rounded result %#x", input)
+	}
+	return math.Float32bits(result), nil
+}
