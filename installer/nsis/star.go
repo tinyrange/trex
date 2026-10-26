@@ -36,8 +36,12 @@ func ListBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, k
 			"filetime": starlark.MakeUint64(e.FileTime),
 		}))
 	}
+	format := "nsis2-ansi"
+	if len(listing.strings) >= 2 && listing.strings[1] == 0 {
+		format = "nsis3-unicode"
+	}
 	return starfile.NewRecord(starlark.StringDict{
-		"format":             starlark.String("nsis2-ansi"),
+		"format":             starlark.String(format),
 		"header_offset":      starlark.MakeInt64(listing.HeaderOffset),
 		"data_offset":        starlark.MakeInt64(listing.DataOffset),
 		"header_size":        starlark.MakeInt64(listing.HeaderSize),

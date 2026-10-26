@@ -1,6 +1,7 @@
 # Native NSIS payloads and installation plans
 
-This package implements NSIS 2 ANSI stored/DEFLATE blocks and solid LZMA streams:
+This package implements NSIS 2 ANSI and NSIS 3 Unicode metadata, with
+stored/DEFLATE blocks and solid LZMA streams:
 
 - `List(storage.Reader, Options)` / `archive.nsis_list` read metadata and member
   length prefixes only for non-solid containers. Solid LZMA requires decoding
@@ -40,7 +41,7 @@ no external extractor, guest installer execution, or host staging is used.
 - `maximum_bytes` defaults to 512 MiB and bounds cumulative **unique decoded
   payload** bytes; shared data is decoded once. In generic installer APIs this
   argument currently applies to NSIS. `auto` propagates its expansion budget.
-- Listings preserve instruction order, raw ANSI names, duplicates, data offsets,
+- Listings preserve instruction order, raw ANSI or decoded UTF-16 names, duplicates, data offsets,
   packed lengths, compression flags and FILETIME. No ANSI code page is inferred.
 - `output_directory_hint` is only the nearest preceding SetOutPath in bytecode
   order, **not** a resolved destination. Variables/language/shell references
@@ -53,8 +54,12 @@ no external extractor, guest installer execution, or host staging is used.
 - Native WriteUninstaller uses the original executable stub, bounded embedded
   icon patches and uninstall container, and computes the CRC excluding the
   initial 512 bytes and final checksum word. It does not execute the result.
-- Solid DEFLATE/bzip2, other codecs, Unicode strings and customized opcode
-  tables are not supported. Solid LZMA uses the existing native 7z LZMA engine;
+- Unicode string offsets are UTF-16 code-unit indices; references, escaped
+  control units and surrogate pairs are decoded strictly. Truncated references
+  and unpaired surrogates fail. Section tables accept bounded 24-byte records
+  or full records with the 1024-character ANSI/Unicode runtime name buffer;
+  unknown strides fail rather than shifting later section records.
+- Solid DEFLATE/bzip2, other codecs and customized opcode tables are not supported. Solid LZMA uses the existing native 7z LZMA engine;
   its dictionary is capped at 64 MiB and it requires an end marker. The format label does not authenticate a producer version.
   Input signatures/CRCs are not generally verified; product policy should pin
   its installer digest. Generic parsing does not imply successful installation.
