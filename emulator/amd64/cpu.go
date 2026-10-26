@@ -790,7 +790,7 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			c.resultFlags(value, width)
 			err = write(value)
-		case x86asm.XORPS, x86asm.PXOR, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PUNPCKLQDQ, x86asm.PUNPCKLWD, x86asm.PSHUFLW, x86asm.PSHUFD:
+		case x86asm.XORPS, x86asm.PXOR, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PUNPCKLQDQ, x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.PSHUFLW, x86asm.PSHUFD:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
 				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
@@ -831,6 +831,13 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 					for i := 0; i < 4; i++ {
 						lane := int((uint8(immediate) >> uint(2*i)) & 3)
 						copy(result[laneWidth*i:laneWidth*(i+1)], value[laneWidth*lane:laneWidth*(lane+1)])
+					}
+					c.xmm[destination-x86asm.X0] = result
+				} else if inst.Op == x86asm.PUNPCKLBW {
+					left := c.xmm[destination-x86asm.X0]
+					var result [16]byte
+					for i := 0; i < 8; i++ {
+						result[2*i], result[2*i+1] = left[i], value[i]
 					}
 					c.xmm[destination-x86asm.X0] = result
 				} else if inst.Op == x86asm.PUNPCKLWD {

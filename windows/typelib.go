@@ -65,6 +65,10 @@ func peTypeLibsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if err != nil {
 		return nil, fmt.Errorf("pe_typelibs: %w", err)
 	}
+	return typeLibRecords(libraries)
+}
+
+func typeLibRecords(libraries []msftTypeLib) (*starlark.List, error) {
 	values := make([]starlark.Value, 0, len(libraries))
 	for _, library := range libraries {
 		types := make([]starlark.Value, 0, len(library.typeInfo))

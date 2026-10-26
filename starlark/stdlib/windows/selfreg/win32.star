@@ -150,6 +150,8 @@ _KERNEL_SIGNATURES = {
     "getshortpathnamew": 3,
     "globaladdatoma": 1,
     "globaladdatomw": 1,
+    "globalfindatoma": 1,
+    "globalfindatomw": 1,
     "getexitcodethread": 2,
     "getdrivetypea": 1,
     "getdrivetypew": 1,
@@ -178,6 +180,7 @@ _KERNEL_SIGNATURES = {
     "getnativesysteminfo": 1,
     "isdebuggerpresent": 0,
     "isvalidcodepage": 1,
+    "isvalidlocale": 2,
     "isprocessorfeaturepresent": 1,
     "gettimeformata": 6,
     "gettimeformatw": 6,
@@ -272,6 +275,7 @@ _KERNEL_SIGNATURES = {
     "isbadstringptra": 2,
     "isbadstringptrw": 2,
     "iswow64process": 2,
+    "iswow64process2": 3,
     "leavecriticalsection": 1,
     "freelibrary": 1,
     "lstrcata": 2,
@@ -1397,6 +1401,9 @@ def _heap_storage(machine, size, name, value = b""):
 def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, on_process_create = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800, tls_slots = 0, on_module_map = None):
     """Models deterministic allocation, strings, paths, files, and OS facts.
 
+    `version.native_machine` may explicitly select IMAGE_FILE_MACHINE_I386
+    (0x14c) or AMD64 (0x8664) for native-system/WOW64 queries. Omission preserves
+    a native process of the emulated image architecture; it never uses the host.
     `files` maps guest paths to bytes or trex files. They are made
     available directly to target file APIs without host filesystem staging.
     `directories` supplies empty or otherwise implicit guest directories.
@@ -2133,8 +2140,34 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             # Registration-time DllMain only requires acknowledgement of the
             # Win9x flat-thunk pair; it does not invoke a 16-bit target.
             return 1
-        if name in ["addatoma", "addatomw", "globaladdatoma", "globaladdatomw"]:
-            return 0xc000
+        if name in ["addatoma", "addatomw", "globaladdatoma", "globaladdatomw", "globalfindatoma", "globalfindatomw"]:
+            integer = args[0] if args[0] <= 0xffff else None
+            text = "" if integer != None else machine.read_cstring(args[0], encoding = "utf16le" if name.endswith("w") else "cp1252")
+            if text.startswith("#") and text[1:].isdigit():
+                integer = int(text[1:])
+            if integer != None:
+                if integer > 0 and integer < 0xc000:
+                    return integer
+                state["last_error"] = 87
+                return 0
+            if not text or len(binary.encode(text, encoding = "utf16le")) // 2 > 255:
+                state["last_error"] = 87
+                return 0
+            table = state.setdefault("global_atoms" if name.startswith("global") else "local_atoms", {})
+            key = text.lower()
+            if key in table:
+                if "addatom" in name:
+                    table[key]["references"] += 1
+                return table[key]["atom"]
+            if "findatom" in name:
+                state["last_error"] = 2
+                return 0
+            if len(table) >= 0x4000:
+                state["last_error"] = 8
+                return 0
+            atom = 0xc000 + len(table)
+            table[key] = {"atom": atom, "references": 1}
+            return atom
         if name in ["rtldospathnametorelativentpathname_u", "rtldospathnametontpathname_u"]:
             if not args[0] or not args[1]:
                 return 0
@@ -3960,6 +3993,13 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             return 1252
         if name == "getoemcp":
             return 437
+        if name == "isvalidlocale":
+            # This semantic environment exposes en-US and the invariant
+            # locale, not the host's installed locale database.
+            if args[1] not in [1, 2]:  # LCID_INSTALLED, LCID_SUPPORTED
+                state["last_error"] = 87
+                return 0
+            return 1 if args[0] in [0x007f, 0x0409] else 0
         if name == "isvalidcodepage":
             return 1 if args[0] in [37, 437, 65001, 1252] else 0
         if name == "getcpinfo":
@@ -4224,15 +4264,19 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
         if name in ["getsysteminfo", "getnativesysteminfo"]:
             layout = system_info_layout(machine.pointer_size)
             amd64 = machine.pointer_size == 8
+            native_machine = version.get("native_machine", 0x8664 if amd64 else 0x14c)
+            if native_machine not in [0x14c, 0x8664] or (amd64 and native_machine == 0x14c):
+                fail("unsupported native processor architecture")
+            reported_amd64 = native_machine == 0x8664 if name == "getnativesysteminfo" else amd64
             machine.write(args[0], b"\x00" * layout["Size"])
             for field, value in {
-                "ProcessorArchitecture": 9 if amd64 else 0,
+                "ProcessorArchitecture": 9 if reported_amd64 else 0,
                 "ProcessorLevel": 6,
             }.items():
                 machine.write_u16le(args[0] + layout[field], value)
             for field, value in {
                 "PageSize": 4096, "NumberOfProcessors": 1,
-                "ProcessorType": 8664 if amd64 else 586, "AllocationGranularity": 0x10000,
+                "ProcessorType": 8664 if reported_amd64 else 586, "AllocationGranularity": 0x10000,
             }.items():
                 machine.write_u32le(args[0] + layout[field], value)
             for field, value in {
@@ -5072,8 +5116,25 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             # Executable callbacks in this environment come from mapped target
             # images or bounded semantic exports; null is never callable.
             return 1 if args[0] == 0 else 0
-        if name == "iswow64process":
-            machine.write_u32le(args[1], 0)
+        if name in ["iswow64process", "iswow64process2"]:
+            mask = (1 << (machine.pointer_size * 8)) - 1
+            handle = state["handles"].get(args[0])
+            if args[0] != mask and (handle == None or handle.get("kind") != "process_reference" or handle["value"]["id"] != 4):
+                state["last_error"] = 6
+                return 0
+            if not args[1]:
+                state["last_error"] = 87
+                return 0
+            process_machine = 0x8664 if machine.pointer_size == 8 else 0x14c
+            native_machine = version.get("native_machine", process_machine)
+            if native_machine not in [0x14c, 0x8664] or (process_machine == 0x8664 and native_machine == 0x14c):
+                fail("unsupported native processor architecture")
+            if name == "iswow64process2":
+                machine.write_u16le(args[1], process_machine if process_machine != native_machine else 0)
+                if args[2]:
+                    machine.write_u16le(args[2], native_machine)
+            else:
+                machine.write_u32le(args[1], int(process_machine != native_machine))
             return 1
         if name == "rtldeletecriticalsection":
             state["critical_sections"].pop(args[0], None)
@@ -7517,6 +7578,7 @@ def msvcrt_plugin(kernel = None):
         "ftell": 1,
         "fwrite": 4,
         "fputs": 2,
+        "fputws": 2,
         "setvbuf": 4,
         "ungetc": 2,
         "ungetwc": 2,
@@ -8316,8 +8378,18 @@ def msvcrt_plugin(kernel = None):
                 if (source[index:index + 1] in rejected) == (name == "strcspn"):
                     return index
             return len(source)
-        if name == "fputs":
-            value = event.machine.read_cbytes(args[0])
+        if name in ["fputs", "fputws"]:
+            current = stream(args[1])
+            if current == None:
+                return 0xffffffff
+            if name == "fputws":
+                text = event.machine.read_cstring(args[0], encoding = "utf16le")
+                encoding = current["wide_encoding"]
+                if encoding != "utf16le" and any([ch > "\x7f" for ch in text.elems()]):
+                    fail("fputws non-ASCII conversion requires explicit CRT locale")
+                value = binary.encode(text, encoding = "utf16le" if encoding == "utf16le" else "ascii")
+            else:
+                value = event.machine.read_cbytes(args[0])
             return 0 if stream_write(event.machine, args[1], value) else 0xffffffff
         if name == "fwrite":
             total = args[1] * args[2]
