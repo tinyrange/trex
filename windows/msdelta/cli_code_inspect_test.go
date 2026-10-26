@@ -44,6 +44,9 @@ func TestCLIInspectionNamesStringsAndIL(t *testing.T) {
 	if info.EntryPoint != 0x06000001 || len(info.Methods) != 1 || info.Methods[0].Name != "Main" {
 		t.Fatalf("unexpected entry/method: %+v", info)
 	}
+	if info.RuntimeVersion != "v4" || info.CorFlags != 1 {
+		t.Fatalf("runtime/header metadata: %+v", info)
+	}
 	if info.Strings[0x70000001] != "Hi" {
 		t.Fatalf("strings: %v", info.Strings)
 	}

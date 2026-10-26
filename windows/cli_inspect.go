@@ -52,5 +52,5 @@ func cliInspectBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 			return nil, err
 		}
 	}
-	return starfile.NewRecord(starlark.StringDict{"entry_point": starlark.MakeUint(uint(info.EntryPoint)), "rows": starlark.NewList(rows), "methods": starlark.NewList(methods), "strings": strings}), nil
+	return starfile.NewRecord(starlark.StringDict{"runtime_version": starlark.String(info.RuntimeVersion), "cor_flags": starlark.MakeUint(uint(info.CorFlags)), "entry_point": starlark.MakeUint(uint(info.EntryPoint)), "rows": starlark.NewList(rows), "methods": starlark.NewList(methods), "strings": strings}), nil
 }

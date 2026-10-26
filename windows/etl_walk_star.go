@@ -36,6 +36,8 @@ func etlWalkBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.
 			return nil
 		}
 		record := starfile.NewRecord(starlark.StringDict{
+			"provider_id": starlark.Bytes(string(e.ProviderID[:])), "event_id": starlark.MakeInt(int(e.EventID)),
+			"marker": starlark.MakeInt(int(e.Marker)), "message_flags": starlark.MakeInt(int(e.MessageFlags)),
 			"offset": starlark.MakeInt64(e.Offset), "tick": starlark.MakeUint64(e.Timestamp),
 			"cpu": starlark.MakeInt(int(e.CPU)), "header_type": starlark.MakeInt(int(e.HeaderType)),
 			"group": starlark.MakeInt(int(e.Group)), "opcode": starlark.MakeInt(int(e.Opcode)), "version": starlark.MakeInt(int(e.Version)),

@@ -591,7 +591,7 @@ func renderXML(prefix []binaryXMLPart, root *binaryXMLNode, suffix []binaryXMLPa
 	}
 	writer := &boundedXMLWriter{maximum: maximum}
 	for _, part := range prefix {
-		if err := renderXMLPart(writer, part); err != nil {
+		if err := renderXMLDocumentPart(writer, part); err != nil {
 			return nil, err
 		}
 	}
@@ -599,11 +599,23 @@ func renderXML(prefix []binaryXMLPart, root *binaryXMLNode, suffix []binaryXMLPa
 		return nil, err
 	}
 	for _, part := range suffix {
-		if err := renderXMLPart(writer, part); err != nil {
+		if err := renderXMLDocumentPart(writer, part); err != nil {
 			return nil, err
 		}
 	}
 	return bytes.Clone(writer.buffer.Bytes()), nil
+}
+
+// Character references are not permitted outside the document element, even
+// when they decode to whitespace. Keep prolog/epilog whitespace literal.
+func renderXMLDocumentPart(writer *boundedXMLWriter, part binaryXMLPart) error {
+	if part.kind == binaryXMLText {
+		if strings.Trim(part.text, " \t\r\n") != "" {
+			return fmt.Errorf("non-whitespace character data outside root element")
+		}
+		return writer.writeString(part.text)
+	}
+	return renderXMLPart(writer, part)
 }
 
 func renderXMLNode(writer *boundedXMLWriter, node *binaryXMLNode) error {

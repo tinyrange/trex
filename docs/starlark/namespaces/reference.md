@@ -1968,6 +1968,9 @@ Models registration-visible GDI stock objects without a host display.
 
 Models deterministic allocation, strings, paths, files, and OS facts.
 
+    `version.native_machine` may explicitly select IMAGE_FILE_MACHINE_I386
+    (0x14c) or AMD64 (0x8664) for native-system/WOW64 queries. Omission preserves
+    a native process of the emulated image architecture; it never uses the host.
     `files` maps guest paths to bytes or trex files. They are made
     available directly to target file APIs without host filesystem staging.
     `directories` supplies empty or otherwise implicit guest directories.
@@ -2475,6 +2478,12 @@ Reads level-0 LHA headers and stored lh0 or Huffman/LZSS lh5 payloads. Checks he
 
 Opens Apple LZFSE v1/v2, LZVN and stored-block streams as a read-only file. Bounds block size/count and retains a 64 MiB decoded cache plus 256 KiB match history. Backward reads outside cache replay preceding dependent blocks. Validates entropy states, source/output lengths, match distances and end marker; LZFSE has no content checksum. Explicit maximum_bytes bounds total decoded bytes. No host or C decoder is used.
 
+### `archive.lzma`
+
+`archive.lzma(file, maximum_bytes=512MiB, max_dictionary=64MiB) -> file`
+
+Decodes one standalone LZMA stream into a bounded in-memory file. Checks header size, dictionary limit, decoded length, stream termination and trailing data. LZMA has no checksum; callers must authenticate the enclosing payload. This does not interpret the decoded archive.
+
 ### `archive.mac_resource`
 
 `archive.mac_resource(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
@@ -2492,6 +2501,12 @@ Decodes NSIS 2 ANSI non-solid stored/DEFLATE metadata and file payloads natively
 `archive.nsis_list(file, maximum_scan=16MiB, maximum_metadata=64MiB, maximum_instructions=1000000) -> record`
 
 Lists File instructions from the NSIS 2 ANSI non-solid stored/NSIS-DEFLATE metadata layout without executing the installer or reading member contents. Returns format, header_offset, data_offset, header_size, header_compression, instruction_count and ordered entries. Entries retain name, raw_name bytes, instruction index, output_directory_hint, directory_instruction, relative data_offset, absolute offset of the member length word, packed_size, compressed and filetime. Repeated names and payload references are preserved. Directory hints are only the nearest preceding SetOutPath in bytecode order, not resolved installation destinations; variables, shell folders and language references remain symbolic, and literal dollars are doubled. Version-dependent variables remain numeric. This is a listing, not an installation plan or readable file view: no decoded sizes, CRC verification or extraction are claimed. Solid streams, other codecs and Unicode metadata are not supported. Zero limits select defaults; limits bound signature scanning, packed/decoded metadata, rendered text and instruction count.
+
+### `archive.omaha_payload`
+
+`archive.omaha_payload(file, maximum_bytes=512MiB, max_dictionary=64MiB) -> file`
+
+Decodes an Omaha metainstaller LZMA/BCJ2 payload resource into a portable file, normally a tar archive. Bounds both expanded stages, validates all four stream extents and complete BCJ2 termination. Does not select PE resources, execute installer code, authenticate publishers or apply installation effects.
 
 ### `archive.pack`
 
@@ -4140,7 +4155,7 @@ Validates X.509 paths using only explicit roots (at most 64), intermediates (at 
 
 `windows.cli_inspect(value, method='') -> record`
 
-Reads CLI metadata and selected managed method bodies without executing them. Accepts a portable file or bytes, at most 32 MiB. Returns entry_point (raw COR header entry field), rows (token, columns in ECMA-335 table order), strings (user-string token to text), and methods (token, name, instructions). String/blob columns are decoded; coded references and table indexes become tokens, except null remains zero; list-end sentinels are preserved as token-shaped indexes. Other columns retain their integer value, including GUID heap indexes. method is a case-sensitive method-name substring; empty selects all IL bodies. Each instruction has offset relative to IL code, numeric opcode, raw operand bytes and token (zero for non-token operands). Bounds tables/heaps/bodies, limits rows to 100000, decoded row heaps to 64 MiB and instructions to 1000000, and rejects unknown opcodes. Does not verify IL stack/control flow, resolve external assemblies, decode signatures or exception clauses, evaluate feature gates, or claim observed runtime effects.
+Reads CLI metadata and selected managed method bodies without executing them. Accepts a portable file or bytes, at most 32 MiB. Returns runtime_version (metadata version string without trailing NUL padding), cor_flags (raw COR header flags), entry_point (raw COR header entry field), rows (token, columns in ECMA-335 table order), strings (user-string token to text), and methods (token, name, instructions). String/blob columns are decoded; coded references and table indexes become tokens, except null remains zero; list-end sentinels are preserved as token-shaped indexes. Other columns retain their integer value, including GUID heap indexes. method is a case-sensitive method-name substring; empty selects all IL bodies. Each instruction has offset relative to IL code, numeric opcode, raw operand bytes and token (zero for non-token operands). Bounds tables/heaps/bodies, limits rows to 100000, decoded row heaps to 64 MiB and instructions to 1000000, and rejects unknown opcodes. Does not verify IL stack/control flow, resolve external assemblies, decode signatures or exception clauses, evaluate feature gates, or claim observed runtime effects.
 
 ### `windows.clone_file_entries`
 
@@ -4383,7 +4398,7 @@ fail rather than silently truncating. No symbols or network access is implicit.
 
 `windows.etl_walk(file, visit, group=-1, opcode=-1, min_tick=0, max_tick=0, max_events=4000000) -> dict`
 
-Visits raw records from a finalized sequential uncompressed kernel ETL in file order, NOT timestamp order. Calls visit(record); callback return values are ignored and errors stop traversal. Records contain offset, tick, cpu, header_type, group, opcode, version, pid, tid and owned payload bytes. Unavailable PID/TID are 0xffffffff; non-kernel group is 255. Optional group/opcode (-1 or 0..255) and inclusive raw min_tick/max_tick filters select callbacks; max_tick=0 is unbounded. The entire file is still validated and all records count toward max_events (1..4000000); input is bounded to 1 GiB and buffers to 1 MiB. Returns logfile header and loss counters. Callers must check loss, interpret clocks and schemas, account for lifecycle reuse and sort selected records before scheduler attribution. A thread running on the ReadyThread CPU is not proof of the wake source: interrupts may intervene. No symbols, inferred dependency claims, guest execution or network access.
+Visits raw records from a finalized sequential uncompressed kernel ETL in file order, NOT timestamp order. Calls visit(record); callback return values are ignored and errors stop traversal. Records contain offset, tick, cpu, header_type, group, opcode, version, pid, tid and owned payload bytes. Also exposes marker, provider_id (16 GUID bytes in Windows byte order), event_id and message_flags. Supports bounded WPP TraceMessage framing (marker 0x9000); its optional timestamp/TID/PID fields follow message_flags. Missing timestamps are zero; payload schemas are not inferred. Unavailable PID/TID are 0xffffffff; non-kernel group is 255. Optional group/opcode (-1 or 0..255) and inclusive raw min_tick/max_tick filters select callbacks; max_tick=0 is unbounded. The entire file is still validated and all records count toward max_events (1..4000000); input is bounded to 1 GiB and buffers to 1 MiB. Returns logfile header and loss counters. Callers must check loss, interpret clocks and schemas, account for lifecycle reuse and sort selected records before scheduler attribution. A thread running on the ReadyThread CPU is not proof of the wake source: interrupts may intervene. No symbols, inferred dependency claims, guest execution or network access.
 
 ### `windows.event_log`
 
@@ -4810,6 +4825,12 @@ Retrieves a bounded symbol file from a symbol-server layout using its name and i
 
 Generates an ephemeral RSA-2048 key and self-signed code-signing certificate. not_before and not_after are explicit Unix seconds supplied by the caller. Returns an opaque identity with a public certificate attribute; does not install trust or change driver-signing policy.
 
+### `windows.type_library`
+
+`windows.type_library(value) -> dict`
+
+Reads one standalone MSFT or SLTG type library from a file or bytes, bounded to 16 MiB. Returns the same guid/name/description/version/language/lcid/flags/syskind/types fact dictionary as an element of windows.pe(file).typelibs. Rejects PE containers and unknown signatures; does not register or execute the library.
+
 ### `windows.update_catalog`
 
 `windows.update_catalog(device_attributes, caller_attributes, products, locales, user_agent, assume_non_leaf_installed) -> windows_update_catalog`
@@ -4922,7 +4943,7 @@ Builds a Windows NT Winsock 2 Protocol_Catalog9 PackedCatalogItem from an ASCII 
 
 `windows.wmi_repository(files=None, documents=None, default_namespace='root\cimv2', server_name='')`
 
-Either parses supplied repository files or constructs repository files from parsed MOF documents; exactly one input mode is required. Construction uses default_namespace and server_name to resolve repository identities without running WMI.
+Parses supplied repository files, builds an NT5 repository from MOF documents alone, or appends documents to supplied modern repository files. Modern append preserves the original object store, imports existing class layouts and defaults, rejects replacement identities, and rebuilds a checksummed index with three ordered mapping checkpoints. No WMI service or compiler is executed. Modern repositories expose class_layout(namespace, name) and instances(namespace, name); intrinsic classes resolve through __SYSTEMCLASS. Creating a namespace still requires explicit policy for its __NAMESPACE entry, __thisNAMESPACE security descriptor and __SystemSecurity singleton; parsing or appending MOF does not infer namespace security.
 
 ### `windows.wow64_registry_key`
 

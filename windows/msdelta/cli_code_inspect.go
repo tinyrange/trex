@@ -12,10 +12,12 @@ import (
 // Rows use ECMA-335 table/column order; coded indexes are expanded to tokens.
 // Heap string and blob columns are decoded, other columns remain uint32.
 type CLIInspection struct {
-	EntryPoint uint32
-	Rows       []CLIRow
-	Methods    []CLIMethod
-	Strings    map[uint32]string
+	RuntimeVersion string
+	CorFlags       uint32
+	EntryPoint     uint32
+	Rows           []CLIRow
+	Methods        []CLIMethod
+	Strings        map[uint32]string
 }
 type CLIRow struct {
 	Token   uint32
@@ -48,7 +50,11 @@ func InspectCLI(source []byte, method string) (*CLIInspection, error) {
 		return nil, err
 	}
 	cor, _ := pe.rawOffset(pe.directories[14].rva)
-	out := &CLIInspection{EntryPoint: get32(source, cor+20), Strings: map[uint32]string{}}
+	// parseCLIMetadata has bounded the full version string inside metadata.
+	root := int(m.MetadataOffset)
+	versionLength := int(get32(source, root+12))
+	runtimeVersion := strings.TrimRight(string(source[root+16:root+16+versionLength]), "\x00")
+	out := &CLIInspection{RuntimeVersion: runtimeVersion, CorFlags: get32(source, cor+16), EntryPoint: get32(source, cor+20), Strings: map[uint32]string{}}
 	heap := func(id int) []byte { s := m.Streams[id]; return source[int(s.Offset) : int(s.Offset)+int(s.Size)] }
 	strHeap, blobHeap, us := heap(0), heap(2), heap(1)
 	readString := func(index uint32) (string, error) {

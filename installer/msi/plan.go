@@ -58,6 +58,32 @@ func record(fields map[string]starlark.Value) *starlark.Dict {
 	}
 	return d
 }
+
+// canonicalDirectory normalizes separators in an absolute drive directory.
+// Formatted MSI directory properties can contain a trailing separator followed
+// by another separator in a type-51 assignment (the Windows SDK's AppVerifier
+// directory does this). Keep unresolved, relative and UNC/device paths intact;
+// in particular, do not hide traversal components from the plan's consumer.
+func canonicalDirectory(value string) string {
+	if len(value) < 3 || value[1] != ':' || (value[2] != '\\' && value[2] != '/') {
+		return value
+	}
+	var out strings.Builder
+	separator := false
+	for _, c := range value {
+		if c == '\\' || c == '/' {
+			if !separator {
+				out.WriteByte('\\')
+			}
+			separator = true
+		} else {
+			out.WriteRune(c)
+			separator = false
+		}
+	}
+	return out.String()
+}
+
 func winJoin(parent, name string) string {
 	if name == "." || name == "" {
 		return parent
@@ -428,7 +454,7 @@ func (d *Database) Plan(options PlanOptions) (*starlark.Dict, error) {
 			p.directories[name] = "[" + name + "]"
 		}
 		if p.directories[name] != "" && !p.unknown[name] {
-			p.directories[name] = strings.TrimRight(p.directories[name], `\/`) + `\`
+			p.directories[name] = strings.TrimRight(canonicalDirectory(p.directories[name]), `\/`) + `\`
 		}
 		delete(visiting, name)
 		return nil

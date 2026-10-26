@@ -6,14 +6,20 @@ implementation. Format references used for implementation:
 * Microsoft PerfView (MIT), `src/TraceEvent/TraceEventNativeMethods.cs` and
   `Parsers/KernelTraceEventParser.cs`: TRACE_LOGFILE_HEADER and kernel payloads.
 * Airbus CERT etl-parser (Apache-2.0), `etl/wmi.py`, `system.py`, `trace.py`,
-  `parsers/kernel/header.py`: on-disk buffer and record structure definitions.
+  `parsers/kernel/header.py`, `wintrace.py`: on-disk buffer and record structure definitions.
+* Microsoft Windows SDK `shared/evntrace.h`: ordered TRACE_MESSAGE flag fields
+  and provider pointer-size flags for WPP TraceMessage records (marker 0x9000).
 
 The applicable reference licenses are included alongside this document. No
 Python/C# implementation or runtime dependency is imported. Earlier investigation
 consulted another parser; that implementation was not used to implement this reader.
 
 Scope: finalized sequential, uncompressed ETL, 32/64-bit kernel system, compact,
-and perfinfo framing, classic and manifest framing. Unsupported record framing,
+and perfinfo framing, classic, manifest and WPP TraceMessage framing. Default
+log-file mode zero and explicit sequential mode one are accepted. WPP optional
+sequence/GUID/component-ID/timestamp/system fields are bounded before access;
+obsolete performance-timestamp and unknown flags are rejected. Raw event IDs,
+GUID bytes and message flags are exposed; WPP payload schemas are not inferred. Unsupported record framing,
 clock modes, compression, malformed lengths and truncated logs fail explicitly.
 Generic non-kernel payloads are counted, not guessed. Payload schema support is
 version-gated. Buffer and event loss must be surfaced in every report.
