@@ -60,6 +60,11 @@ type Event struct {
 	Version    uint16
 	PID, TID   uint32
 	Payload    []byte
+	// ProviderID uses Windows GUID byte order; zero for kernel records.
+	ProviderID   [16]byte
+	EventID      uint16
+	MessageFlags uint16
+	Marker       uint16
 }
 
 // Walk validates framing and visits events in file order (NOT timestamp order).
@@ -163,9 +168,13 @@ func Walk(ctx context.Context, r io.ReaderAt, size int64, limits Limits, visit f
 
 func record(b []byte) (Event, int, error) {
 	var e Event
+	if len(b) >= 8 && le.Uint16(b[2:]) == 0x9000 {
+		return messageRecord(b)
+	}
 	if len(b) < 8 || b[3] != 0xc0 {
 		return e, 0, fmt.Errorf("unsupported marker")
 	}
+	e.Marker = le.Uint16(b[2:])
 	e.HeaderType = b[2]
 	e.Group = 0xff
 	e.PID = 0xffffffff
@@ -205,6 +214,7 @@ func record(b []byte) (Event, int, error) {
 		if n < hdr || n > len(b) {
 			return e, 0, fmt.Errorf("invalid classic record length")
 		}
+		copy(e.ProviderID[:], b[24:40])
 		e.Opcode = b[4]
 		e.Version = le.Uint16(b[6:])
 		e.TID = le.Uint32(b[8:])
@@ -215,6 +225,8 @@ func record(b []byte) (Event, int, error) {
 		if n < hdr || n > len(b) {
 			return e, 0, fmt.Errorf("invalid event-header record length")
 		}
+		copy(e.ProviderID[:], b[24:40])
+		e.EventID = le.Uint16(b[40:])
 		e.Opcode = b[45]
 		e.Version = uint16(b[42])
 		e.TID = le.Uint32(b[8:])
@@ -255,7 +267,8 @@ func logfileHeader(e Event) (Header, error) {
 	h.Clock = le.Uint32(b[tail+24:])
 	h.BuffersLost = le.Uint32(b[tail+28:])
 	h.StartTick = e.Timestamp
-	if le.Uint32(b[32:])&3 != 1 {
+	// Zero is the default sequential mode; 1 explicitly requests sequential.
+	if le.Uint32(b[32:])&3 > 1 {
 		return h, fmt.Errorf("ETL: only sequential logs supported")
 	}
 	if h.Processors == 0 || h.Processors > 4096 || h.QPCFrequency == 0 || h.QPCFrequency > 1_000_000_000_000 {

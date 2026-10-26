@@ -51,6 +51,7 @@ func Builtins() starlark.StringDict {
 		"icon":                             windowsIconBuiltin,
 		"pe":                               peObjectBuiltin,
 		"cli_inspect":                      cliInspectBuiltin,
+		"type_library":                     typeLibraryBuiltin,
 		"pe32_executable":                  pe32ExecutableBuiltin,
 		"pe32_link":                        pe32LinkBuiltin,
 		"hive_from_patches":                hiveFromPatchesBuiltin,
