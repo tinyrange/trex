@@ -98,6 +98,7 @@ import (
 	"github.com/tinyrange/trex/installer/installshield/installscript"
 	"github.com/tinyrange/trex/installer/msi"
 	"github.com/tinyrange/trex/installer/nsis"
+	"github.com/tinyrange/trex/installer/omaha"
 	imagestar "github.com/tinyrange/trex/media/image/star"
 	"github.com/tinyrange/trex/renvostar"
 	starcrypto "github.com/tinyrange/trex/script/crypto"
@@ -143,6 +144,7 @@ func predeclared() starlark.StringDict {
 				"cab_set":          starlark.NewBuiltin("cab_set", cabarchive.SetBuiltin),
 				"installer":        starlark.NewBuiltin("installer", installshield.InstallerBuiltin),
 				"burn_containers":  starlark.NewBuiltin("burn_containers", burn.Builtin),
+				"omaha_payload":    starlark.NewBuiltin("omaha_payload", omaha.Builtin),
 				"installer_probe":  starlark.NewBuiltin("installer_probe", installshield.ProbeBuiltin),
 				"nsis_list":        starlark.NewBuiltin("nsis_list", nsis.ListBuiltin),
 				"nsis":             starlark.NewBuiltin("nsis", nsis.Builtin),
@@ -157,6 +159,7 @@ func predeclared() starlark.StringDict {
 				"tar":              starlark.NewBuiltin("tar", filesystemapi.TarBuiltin),
 				"wim":              starlark.NewBuiltin("wim", wim.Builtin),
 				"xz":               starlark.NewBuiltin("xz", xz.Builtin),
+				"lzma":             starlark.NewBuiltin("lzma", compressed.LZMABuiltin),
 				"rar":              starlark.NewBuiltin("rar", rar.Builtin),
 				"zstd":             starlark.NewBuiltin("zstd", zstd.Builtin),
 				"zip":              starlark.NewBuiltin("zip", ziparchive.Builtin),
