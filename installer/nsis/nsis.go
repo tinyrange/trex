@@ -1,6 +1,7 @@
 // Package nsis decodes payloads and plans bounded declarative installation effects
 // without executing installer code.
-// It reads NSIS 2 ANSI stored/DEFLATE blocks and solid LZMA streams. See README.md
+// It reads NSIS 2 ANSI and NSIS 3 Unicode metadata, stored/DEFLATE blocks,
+// and solid LZMA streams. See README.md
 // for the format references and the distinction between a listing and a plan.
 package nsis
 
@@ -257,16 +258,31 @@ func (l *Listing) parseMetadata(data []byte, source storage.Reader, end int64, o
 	if table[0] != 0 {
 		return fmt.Errorf("nsis: missing initial empty string")
 	}
-	if len(table) > 1 && table[1] == 0 {
-		return fmt.Errorf("%w: Unicode strings", ErrUnsupported)
+	if len(table) > 1 && table[1] == 0 && len(table)%2 != 0 {
+		return fmt.Errorf("nsis: odd UTF-16 string table size")
 	}
 	l.strings = bytes.Clone(table)
 	sectionBlock := blocks[1]
 	if sectionBlock.offset > code.offset || uint64(sectionBlock.count)*24 > uint64(code.offset-sectionBlock.offset) {
 		return fmt.Errorf("nsis: section table out of bounds: offset=%d count=%d code=%d", sectionBlock.offset, sectionBlock.count, code.offset)
 	}
+	sectionStride := uint32(24)
+	if sectionBlock.count != 0 {
+		span := code.offset - sectionBlock.offset
+		if span%sectionBlock.count != 0 {
+			return fmt.Errorf("nsis: misaligned section table")
+		}
+		sectionStride = span / sectionBlock.count
+		fullStride := uint32(24 + 1024)
+		if len(table) > 1 && table[1] == 0 {
+			fullStride = 24 + 2048
+		}
+		if sectionStride != 24 && sectionStride != fullStride {
+			return fmt.Errorf("%w: section record size %d", ErrUnsupported, sectionStride)
+		}
+	}
 	for n := uint32(0); n < sectionBlock.count; n++ {
-		record := data[sectionBlock.offset+n*24:][:24]
+		record := data[sectionBlock.offset+n*sectionStride:][:24]
 		start, count := u32(record[12:]), u32(record[16:])
 		if uint64(start)+uint64(count) > uint64(code.count) {
 			return fmt.Errorf("nsis: section code range out of bounds")
@@ -342,6 +358,9 @@ func (l *Listing) parseMetadata(data []byte, source storage.Reader, end int64, o
 // ANSI bytes are retained verbatim; no host code page is inferred. Expressions
 // are rendered symbolically, not expanded against the host or an assumed guest.
 func decodeString(table []byte, offset int32) (string, []byte, error) {
+	if len(table) >= 2 && table[0] == 0 && table[1] == 0 {
+		return decodeUTF16String(table, offset)
+	}
 	if offset < 0 {
 		return fmt.Sprintf("${LANG:%d}", -int64(offset)-1), nil, nil
 	}
