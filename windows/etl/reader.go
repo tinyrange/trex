@@ -65,6 +65,9 @@ type Event struct {
 	EventID      uint16
 	MessageFlags uint16
 	Marker       uint16
+	HeaderFlags  uint16
+	ActivityID   [16]byte
+	ExtendedData []ExtendedData
 }
 
 // Walk validates framing and visits events in file order (NOT timestamp order).
@@ -226,6 +229,8 @@ func record(b []byte) (Event, int, error) {
 			return e, 0, fmt.Errorf("invalid event-header record length")
 		}
 		copy(e.ProviderID[:], b[24:40])
+		e.HeaderFlags = le.Uint16(b[4:6])
+		copy(e.ActivityID[:], b[64:80])
 		e.EventID = le.Uint16(b[40:])
 		e.Opcode = b[45]
 		e.Version = uint16(b[42])
@@ -234,6 +239,14 @@ func record(b []byte) (Event, int, error) {
 		e.Timestamp = le.Uint64(b[16:])
 	default:
 		return e, 0, fmt.Errorf("unsupported header type %#x", b[2])
+	}
+	if (e.HeaderType == 0x12 || e.HeaderType == 0x13) && e.HeaderFlags&1 != 0 {
+		items, used, err := eventExtensions(b[hdr:n])
+		if err != nil {
+			return e, 0, err
+		}
+		e.ExtendedData = items
+		hdr += used
 	}
 	e.Payload = b[hdr:n]
 	return e, n, nil

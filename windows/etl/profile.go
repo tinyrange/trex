@@ -11,15 +11,28 @@ import (
 // Profile is an IP-sampling profile, not an inferred CSwitch/function profile.
 // Samples are counts, not seconds; no fixed interrupt frequency is assumed.
 type Profile struct {
-	Header         Header           `json:"header"`
-	Samples        uint64           `json:"samples"`
-	UnknownProcess uint64           `json:"unknown_process_samples"`
-	UnknownImage   uint64           `json:"unknown_image_samples"`
-	Modules        []Module         `json:"modules"`
-	Processes      []ProfileProcess `json:"processes"`
-	Points         []SamplePoint    `json:"points"`
-	Warnings       []string         `json:"warnings"`
+	Header         Header              `json:"header"`
+	Samples        uint64              `json:"samples"`
+	UnknownProcess uint64              `json:"unknown_process_samples"`
+	UnknownImage   uint64              `json:"unknown_image_samples"`
+	Modules        []Module            `json:"modules"`
+	ImageEvents    []ImageMappingEvent `json:"image_events"`
+	Processes      []ProfileProcess    `json:"processes"`
+	Points         []SamplePoint       `json:"points"`
+	Warnings       []string            `json:"warnings"`
 }
+
+// ImageMappingEvent retains observed load/unload/rundown epochs for resolving
+// addresses recorded by another session in the same boot clock. End rundown
+// must not be treated as an earlier load. PID reuse remains the caller's concern.
+type ImageMappingEvent struct {
+	Tick   uint64 `json:"tick"`
+	PID    uint32 `json:"pid"`
+	Opcode byte   `json:"opcode"`
+	Base   uint64 `json:"base"`
+	Module
+}
+
 type Module struct {
 	Path      string `json:"path"`
 	Size      uint64 `json:"size"`
@@ -50,7 +63,7 @@ type profileEvent struct {
 }
 
 func ProfileTrace(ctx context.Context, r io.ReaderAt, size int64, limits Limits) (*Profile, error) {
-	out := &Profile{Modules: []Module{}, Processes: []ProfileProcess{}, Points: []SamplePoint{}, Warnings: []string{}}
+	out := &Profile{ImageEvents: []ImageMappingEvent{}, Modules: []Module{}, Processes: []ProfileProcess{}, Points: []SamplePoint{}, Warnings: []string{}}
 	var events []profileEvent
 	pointer := 4
 	first := true
@@ -146,6 +159,7 @@ func ProfileTrace(ctx context.Context, r io.ReaderAt, size int64, limits Limits)
 				delete(threads, e.tid)
 			}
 		case 20:
+			out.ImageEvents = append(out.ImageEvents, ImageMappingEvent{Tick: e.tick, PID: e.pid, Opcode: e.op, Base: e.address, Module: Module{Path: e.name, Size: e.size, Timestamp: e.timestamp, Checksum: e.checksum}})
 			// Kernel addresses are shared across process address spaces.
 			p := -1
 			if e.address < 1<<63 {

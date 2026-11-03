@@ -87,11 +87,15 @@ func (h *huffmanCode) rebuild(frequencies []uint64) error {
 		h.parent[internalEnd] = -1
 		internalEnd++
 	}
+	// Parents are appended after their children. Walk backwards once to
+	// derive all depths, reusing weights after tree construction is complete.
+	// This avoids a separate root walk for every leaf on each adaptive rebuild.
+	h.nodeWeight[nodeCount-1] = 0
+	for node := nodeCount - 2; node >= 0; node-- {
+		h.nodeWeight[node] = h.nodeWeight[h.parent[node]] + 1
+	}
 	for symbol := range symbols {
-		depth := 0
-		for node := symbol; h.parent[node] >= 0; node = h.parent[node] {
-			depth++
-		}
+		depth := h.nodeWeight[symbol]
 		if depth == 0 || depth > maxHuffmanCodeLength {
 			return fmt.Errorf("lzms: Huffman code length %d for symbol %d", depth, symbol)
 		}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf16"
 
@@ -40,12 +41,15 @@ func TestExternalResourceBacksWIMEntryBySHA1(t *testing.T) {
 }
 
 type countingWIMFile struct {
+	mu    sync.Mutex
 	data  []byte
 	reads int
 }
 
 func (f *countingWIMFile) ReadAt(p []byte, off int64) (int, error) {
+	f.mu.Lock()
 	f.reads++
+	f.mu.Unlock()
 	if off >= int64(len(f.data)) {
 		return 0, io.EOF
 	}
