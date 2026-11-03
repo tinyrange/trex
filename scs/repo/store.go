@@ -41,12 +41,19 @@ type location struct {
 	depth  byte
 }
 type catalog struct {
-	Refs map[string]ID `json:"refs"`
+	Refs    map[string]ID `json:"refs"`
+	Indexed bool          `json:"indexed,omitempty"`
+	Index   ID            `json:"index,omitempty"`
+	Update  *refUpdate    `json:"update,omitempty"`
 }
 
 // Repository owns an exclusively supplied storage backend for its lifetime. Methods are safe for
-// concurrent use. Only Publish changes durable named workspace roots.
+// concurrent use. Publish/Promote/Drop change durable named workspace roots.
 type Repository struct {
+	refIndex        *childIndex
+	indexedRefs     bool
+	metrics         OperationStats
+	derived         map[derivedKey]Revision
 	fast            *fastState
 	skipCheckpoint  bool
 	checkpointStart int64
@@ -212,16 +219,12 @@ func (r *Repository) scan() error {
 		}
 		if h[0] == refsKind {
 			var c catalog
-			if err := json.Unmarshal(data, &c); err != nil || c.Refs == nil {
-				return fmt.Errorf("invalid roots at %d", off)
+			if err := json.Unmarshal(data, &c); err != nil {
+				return err
 			}
-			for name, id := range c.Refs {
-				loc, ok := r.lookupObject(key(id))
-				if !validName(name) || !ok || loc.kind != snapshotKind {
-					return fmt.Errorf("invalid workspace root %q", name)
-				}
+			if err := r.installCatalog(c); err != nil {
+				return fmt.Errorf("invalid roots at %d: %w", off, err)
 			}
-			r.refs = c.Refs
 		} else {
 			r.objects[key(id)] = location{offset: off + headerSize, size: int(n), kind: h[0]}
 			if h[0] == gitObjectKind {
@@ -308,6 +311,8 @@ func (r *Repository) appendEncoded(kind byte, id ID, data []byte, logical int, d
 		return "", err
 	}
 	r.end = off + headerSize + int64(len(data))
+	r.metrics.RecordsAppended++
+	r.metrics.BytesAppended += uint64(headerSize + len(data))
 	if kind != refsKind {
 		loc := location{offset: off + headerSize, size: logical, kind: kind, depth: depth}
 		if kind == bodyKind {
@@ -334,6 +339,8 @@ func (r *Repository) appendEncoded(kind byte, id ID, data []byte, logical int, d
 			return "", err
 		}
 		r.fast.pendingRefs = c.Refs
+		r.fast.pendingIndexedRefs = c.Indexed
+		r.fast.pendingRefIndex = c.Index
 	}
 	if kind == gitCatalogKind && r.fast != nil {
 		var c GitCatalog
@@ -378,6 +385,8 @@ func (r *Repository) getRaw(id objectKey, kind byte) ([]byte, error) {
 		return nil, err
 	}
 	b := make([]byte, loc.size)
+	r.metrics.ObjectReads++
+	r.metrics.ObjectBytesRead += uint64(loc.size)
 	if _, err := r.f.ReadAt(b, loc.offset); err != nil {
 		return nil, err
 	}

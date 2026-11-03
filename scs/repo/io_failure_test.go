@@ -87,6 +87,10 @@ func failureBase(t *testing.T, mode string) ([]byte, ID) {
 	must(t, err)
 	_, err = w.Publish("sibling")
 	must(t, err)
+	if mode == "indexed" {
+		must(t, r.EnableIndexedRefs())
+		must(t, r.Checkpoint())
+	}
 	if mode == "paged" {
 		must(t, r.Checkpoint())
 	}
@@ -149,7 +153,7 @@ func assertRecovered(t *testing.T, path string, old, new ID, allowNew bool) {
 	}
 }
 func TestStorageWriteAndSyncFailureRecovery(t *testing.T) {
-	for _, mode := range []string{"v2", "v3", "paged", "legacy-checkpoint"} {
+	for _, mode := range []string{"v2", "v3", "paged", "legacy-checkpoint", "indexed"} {
 		t.Run(mode, func(t *testing.T) {
 			original, old := failureBase(t, mode)
 			dir := t.TempDir()
