@@ -79,8 +79,24 @@ func (i inspection) performance(_ *starlark.Thread, _ *starlark.Builtin, args st
 		for key, c := range stats.IO {
 			io[key] = c.value()
 		}
+		cpus := make([]any, 0, len(p.cpus))
+		for _, cpu := range p.cpus {
+			if counter, ok := cpu.(interface {
+				ExecutionCounters() (map[string]uint64, error)
+			}); ok {
+				values, err := counter.ExecutionCounters()
+				if err != nil {
+					return err
+				}
+				fields := make(map[string]any, len(values))
+				for key, value := range values {
+					fields[key] = value
+				}
+				cpus = append(cpus, fields)
+			}
+		}
 		var err error
-		out, err = starvalue.Starlark(map[string]any{"elapsed_ns": uint64(time.Since(stats.started)), "io": io, "completion": stats.Completion.value(), "dma_read": stats.Read.value(), "dma_delivery": stats.ReadDelivery.value(), "dma_write": stats.Write.value()})
+		out, err = starvalue.Starlark(map[string]any{"elapsed_ns": uint64(time.Since(stats.started)), "cpus": cpus, "io": io, "completion": stats.Completion.value(), "dma_read": stats.Read.value(), "dma_delivery": stats.ReadDelivery.value(), "dma_write": stats.Write.value()})
 		return err
 	})
 	return out, err
