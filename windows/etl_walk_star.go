@@ -35,10 +35,24 @@ func etlWalkBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.
 		if (group >= 0 && int(e.Group) != group) || (opcode >= 0 && int(e.Opcode) != opcode) || e.Timestamp < minTick || (maxTick != 0 && e.Timestamp > maxTick) {
 			return nil
 		}
+		var extensions []starlark.Value
+		for _, item := range e.ExtendedData {
+			frames := make([]starlark.Value, len(item.Stack))
+			for j, ip := range item.Stack {
+				frames[j] = starlark.MakeUint64(ip)
+			}
+			extensions = append(extensions, starfile.NewRecord(starlark.StringDict{
+				"type": starlark.MakeInt(int(item.Type)), "linkage": starlark.MakeInt(int(item.Linkage)),
+				"data": starlark.Bytes(string(item.Data)), "match_id": starlark.MakeUint64(item.MatchID),
+				"pointer_size": starlark.MakeInt(int(item.PointerSize)), "stack": starlark.NewList(frames),
+			}))
+		}
 		record := starfile.NewRecord(starlark.StringDict{
 			"provider_id": starlark.Bytes(string(e.ProviderID[:])), "event_id": starlark.MakeInt(int(e.EventID)),
 			"marker": starlark.MakeInt(int(e.Marker)), "message_flags": starlark.MakeInt(int(e.MessageFlags)),
-			"offset": starlark.MakeInt64(e.Offset), "tick": starlark.MakeUint64(e.Timestamp),
+			"header_flags": starlark.MakeInt(int(e.HeaderFlags)), "activity_id": starlark.Bytes(string(e.ActivityID[:])),
+			"extensions": starlark.NewList(extensions),
+			"offset":     starlark.MakeInt64(e.Offset), "tick": starlark.MakeUint64(e.Timestamp),
 			"cpu": starlark.MakeInt(int(e.CPU)), "header_type": starlark.MakeInt(int(e.HeaderType)),
 			"group": starlark.MakeInt(int(e.Group)), "opcode": starlark.MakeInt(int(e.Opcode)), "version": starlark.MakeInt(int(e.Version)),
 			"pid": starlark.MakeUint64(uint64(e.PID)), "tid": starlark.MakeUint64(uint64(e.TID)), "payload": starlark.Bytes(string(e.Payload)),

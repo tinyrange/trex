@@ -43,7 +43,33 @@ func Decompress(data []byte, outputSize int) ([]byte, error) {
 	return output, nil
 }
 
+// DecompressPrefix restores exactly the requested leading bytes of a block.
+// The full output size still selects the block's coding alphabet and bounds
+// all matches. The unused suffix is not decoded or structurally validated.
+func DecompressPrefix(data []byte, outputSize, prefixSize int) ([]byte, error) {
+	if prefixSize < 0 || prefixSize > outputSize {
+		return nil, fmt.Errorf("lzms: invalid prefix size %d for %d", prefixSize, outputSize)
+	}
+	stop := outputSize
+	// Address restoration ignores the last sixteen bytes of a full block.
+	// Decode this lookahead so every returned byte has the same transform as
+	// it would have after complete expansion, including operands at the edge.
+	if prefixSize < outputSize-16 {
+		stop = prefixSize + 16
+	}
+	output, err := decompressIntermediateTo(data, outputSize, stop)
+	if err != nil {
+		return nil, err
+	}
+	restoreX86Addresses(output)
+	return output[:prefixSize], nil
+}
+
 func decompressIntermediate(data []byte, outputSize int) ([]byte, error) {
+	return decompressIntermediateTo(data, outputSize, outputSize)
+}
+
+func decompressIntermediateTo(data []byte, outputSize, stop int) ([]byte, error) {
 	if outputSize < 0 || int64(outputSize) > maximumOutputSize {
 		return nil, fmt.Errorf("lzms: invalid output size %d", outputSize)
 	}
@@ -70,7 +96,7 @@ func decompressIntermediate(data []byte, outputSize int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := d.decodeItems(); err != nil {
+	if err := d.decodeItemsTo(stop); err != nil {
 		return nil, err
 	}
 	return d.output, nil
@@ -150,8 +176,10 @@ func newDecoder(data []byte, outputSize, positionSymbols int) (*decoder, error) 
 	}, nil
 }
 
-func (d *decoder) decodeItems() error {
-	for len(d.output) < d.want {
+func (d *decoder) decodeItems() error { return d.decodeItemsTo(d.want) }
+
+func (d *decoder) decodeItemsTo(stop int) error {
+	for len(d.output) < stop {
 		d.recentLZ.beginItem()
 		d.recentDelta.beginItem()
 		isMatch, err := d.literalMatch.decode(d.rangeStream)
