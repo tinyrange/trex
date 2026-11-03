@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -29,12 +30,14 @@ type object struct {
 	pending    bool
 }
 type file struct {
-	name    string
-	root    *Root
-	file    *os.File
-	object  *object
-	options smb.OpenOptions
-	closed  bool
+	name          string
+	root          *Root
+	file          *os.File
+	object        *object
+	options       smb.OpenOptions
+	closed        bool
+	directoryRead int
+	nativeErr     error
 }
 
 var _ smb.FileSystem = (*Root)(nil)
@@ -70,7 +73,7 @@ func (r *Root) resolve(name string) (string, error) {
 	for i, part := range parts {
 		candidate := parent + "/" + part
 		info, err := r.root.Lstat(candidate)
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) || (runtime.GOOS == "windows" && err == nil) {
 			d, e := r.root.OpenFile(parent, os.O_RDONLY|safeOpenFlags, 0)
 			if e != nil {
 				return "", e
@@ -283,6 +286,9 @@ func (r *Root) Close() error {
 	return errors.Join(result, r.root.Close())
 }
 func (f *file) check(access smb.Access) error {
+	if f.nativeErr != nil {
+		return f.nativeErr
+	}
 	if f.closed || f.root.closed {
 		return fs.ErrClosed
 	}
@@ -356,7 +362,9 @@ func (f *file) ReadDir(count int) ([]fs.FileInfo, error) {
 	if count < 1 || count > 128 {
 		return nil, fs.ErrInvalid
 	}
-	return f.file.Readdir(count)
+	entries, err := f.file.Readdir(count)
+	f.directoryRead += len(entries)
+	return entries, err
 }
 func (f *file) Rewind() error {
 	f.root.mu.Lock()
@@ -365,6 +373,9 @@ func (f *file) Rewind() error {
 		return e
 	}
 	_, e := f.file.Seek(0, 0)
+	if e == nil {
+		f.directoryRead = 0
+	}
 	return e
 }
 func (f *file) current() error { return f.matches(f.name) }
@@ -461,8 +472,9 @@ func (f *file) Rename(name string, replace bool) error {
 			return smb.ErrSharingViolation
 		}
 	}
-	if e := f.root.root.Rename(f.name, target); e != nil {
-		return e
+	renamed, renameErr := renameNative(f, target)
+	if !renamed {
+		return renameErr
 	}
 	old := f.name
 	for h := range f.root.handles {
@@ -473,7 +485,7 @@ func (f *file) Rename(name string, replace bool) error {
 			h.object.deleteName = target + strings.TrimPrefix(h.object.deleteName, old)
 		}
 	}
-	return nil
+	return renameErr
 }
 func (f *file) closeLocked() error {
 	if f.closed {
