@@ -51,8 +51,8 @@ func renameNative(f *file, target string) (bool, error) {
 			}
 			if e == nil && info.IsDir() {
 				for remaining := h.directoryRead; remaining > 0; {
-					entries, readErr := reopened.Readdir(min(remaining, 128))
-					remaining -= len(entries)
+					names, readErr := reopened.Readdirnames(min(remaining, 128))
+					remaining -= len(names)
 					if readErr != nil {
 						if readErr != io.EOF {
 							e = readErr

@@ -76,6 +76,16 @@ func TestDirectoryRenamePreservesChildEnumeration(t *testing.T) {
 		if seen[info.Name()] {
 			t.Fatal("repeated entry", info.Name())
 		}
+		if info.Size() != 1 || !info.Mode().IsRegular() {
+			t.Fatalf("wrong child metadata: %s %d %v", info.Name(), info.Size(), info.Mode())
+		}
 		seen[info.Name()] = true
+	}
+	if err = child.Rewind(); err != nil {
+		t.Fatal(err)
+	}
+	all, err := child.ReadDir(128)
+	if err != nil || len(all) != 10 {
+		t.Fatalf("rewind after rename: %d entries, %v", len(all), err)
 	}
 }

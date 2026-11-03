@@ -362,9 +362,34 @@ func (f *file) ReadDir(count int) ([]fs.FileInfo, error) {
 	if count < 1 || count > 128 {
 		return nil, fs.ErrInvalid
 	}
-	entries, err := f.file.Readdir(count)
-	f.directoryRead += len(entries)
-	return entries, err
+	if err := f.current(); err != nil {
+		return nil, err
+	}
+	// Readdir uses os.File's original name when statting entries on Unix.
+	// A parent rename leaves that name stale. Preserve the descriptor's cursor,
+	// but resolve metadata through the current rooted SMB name instead.
+	var entries []fs.FileInfo
+	for len(entries) < count {
+		names, err := f.file.Readdirnames(count - len(entries))
+		f.directoryRead += len(names)
+		for _, name := range names {
+			info, statErr := f.root.root.Lstat(f.name + "/" + name)
+			if errors.Is(statErr, fs.ErrNotExist) {
+				continue // Match os.File.Readdir when an entry disappears.
+			}
+			if statErr != nil {
+				return entries, statErr
+			}
+			entries = append(entries, info)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && len(entries) != 0 {
+				return entries, nil
+			}
+			return entries, err
+		}
+	}
+	return entries, nil
 }
 func (f *file) Rewind() error {
 	f.root.mu.Lock()
