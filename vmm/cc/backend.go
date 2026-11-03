@@ -36,14 +36,14 @@ type Backend struct {
 	// OverlayLimit bounds dirty snapshot memory; zero uses 256 MiB.
 	OverlayLimit int64
 	// CPUFactory selects a software execution engine while retaining identical
-	// firmware and PC device semantics. Nil selects CrumbleCracker/KVM.
+	// firmware and PC device semantics. Nil selects native KVM or WHP on x86.
 	CPUFactory func(context.Context) (hypervisor.X86, error)
 	// Name overrides the backend identity for an alternate CPU engine.
 	Name string
 }
 
 func Available() bool {
-	return runtime.GOOS == "linux" && runtime.GOARCH == "amd64" || runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
+	return (runtime.GOOS == "linux" || runtime.GOOS == "windows") && runtime.GOARCH == "amd64" || runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
 }
 func Capabilities() []string {
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
@@ -88,8 +88,8 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if b.PrivateAppleISA {
 		add("private_apple_isa", "private Apple ISA requires the native ARM64 backend")
 	}
-	if b.CPUFactory == nil && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64") {
-		add("backend", "PC execution requires Linux/amd64 KVM")
+	if b.CPUFactory == nil && ((runtime.GOOS != "linux" && runtime.GOOS != "windows") || runtime.GOARCH != "amd64") {
+		add("backend", "PC execution requires Linux/amd64 KVM or Windows/amd64 WHP")
 	}
 	if m.ARM64Platform != nil {
 		add("platform", "ARM64 platforms require ARM64 execution")
@@ -127,7 +127,7 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		add("overlay_limit", "snapshot overlay limit must be positive")
 	}
 	if b.CPUFactory == nil && !Available() {
-		add("backend", "cc PC execution requires Linux/amd64 KVM")
+		add("backend", "cc PC execution requires Linux/amd64 KVM or Windows/amd64 WHP")
 	}
 	if m.Architecture != "i386" && m.Architecture != "x86_64" {
 		add("architecture", "cc PC supports i386 and x86_64")
