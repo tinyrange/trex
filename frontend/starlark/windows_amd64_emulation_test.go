@@ -172,6 +172,42 @@ check()
 	}
 }
 
+func TestRegistrationGeneratedHardLinkEntries(t *testing.T) {
+	thread, predeclared, err := newStarlarkRuntime("-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	predeclared["image"] = relocatablePE32TestImage(t, 0x200000)
+	_, err = starlark.ExecFile(thread, "generated-links.star", `
+load("@stdlib//windows/emulation:runner.star", "run")
+def execute(machine):
+    source = machine.allocate(value=binary.encode("C:/root/source.inf", encoding="utf16le", nul=True))
+    alias = machine.allocate(value=binary.encode("C:/root/alias.inf", encoding="utf16le", nul=True))
+    return machine.call(machine.resolve_export("kernel32.dll", name="CreateHardLinkW"), args=[alias,source,0])
+def check():
+    result = run(binary.concat([image]), "example.dll", files={"C:/root/source.inf": binary.concat([b"lazy payload"])}, volumes={"C:": {"filesystem":"NTFS"}}, execute=execute)
+    if result["result"].reason != "return" or result["result"].value != 1:
+        fail("hard link creation failed")
+    entries = result["generated_entries"]
+    source, alias = r"c:\root\source.inf", r"c:\root\alias.inf"
+    if sorted(entries) != [alias, source]:
+        fail("link effects must include the original file object")
+    if entries[source].get("hardlink_to") != alias or "hardlink_to" in entries[alias]:
+        fail("hard-link effects must have one deterministic canonical path")
+    if entries[source]["data"] != b"lazy payload" or entries[alias]["data"] != b"lazy payload":
+        fail("lazy payload lost during link export")
+    if result["generated_files"] != {source:b"lazy payload", alias:b"lazy payload"}:
+        fail("content-only compatibility view lost link content")
+check()
+`, predeclared)
+	if err != nil {
+		if evaluation, ok := err.(*starlark.EvalError); ok {
+			t.Fatal(evaluation.Backtrace())
+		}
+		t.Fatal(err)
+	}
+}
+
 func TestCountedStringInitializationAcrossArchitectures(t *testing.T) {
 	architectureScript(t, `
 load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
@@ -382,6 +418,19 @@ def exercise(architecture):
     result = machine.call(write,args=[file,payload,4,written,0])
     check(result.reason == "return" and result.value == 1)
     check(kernel.state["paths"]["c:\\root\\child\\file.bin"]["data"] == b"body")
+    ntwrite = machine.resolve_export("ntdll.dll",name="NtWriteFile")
+    position = machine.allocate(size=8)
+    machine.write(payload,b"next")
+    # ULONG Length occupies only the low DWORD of its x64 stack slot.
+    result = machine.call(ntwrite,args=[file,0,0,0,io,payload,padding|4,position,0])
+    check(result.reason == "return" and result.value == 0)
+    check(machine.read_u32le(io) == 0 and machine.read_pointer(io+machine.pointer_size) == 4)
+    check(machine.read_u32le(io+2*machine.pointer_size) == 0xaaaaaaaa)
+    check(kernel.state["paths"]["c:\\root\\child\\file.bin"]["data"] == b"next")
+    result = machine.call(ntwrite,args=[file,0,0,0,io,payload,padding|0xffffffff,position,0])
+    check(result.reason == "return" and result.value == 0xc000000d)
+    check(machine.read_u32le(io) == 0xc000000d and machine.read_pointer(io+machine.pointer_size) == 0)
+    check(kernel.state["paths"]["c:\\root\\child\\file.bin"]["data"] == b"next")
     check(machine.call(close,args=[file]).value == 0)
     check(make(4,0x60) == 0)
     check(machine.read_pointer(io+machine.pointer_size) == 3)
@@ -774,6 +823,8 @@ def exercise(architecture):
     block = machine.read_pointer(parameters+process["parameters"]["Environment"])
     check(machine.read_cstring(block,encoding="utf16le") == "SystemRoot=C:\\WINDOWS")
     check(machine.read_u8(peb+2) == 0)
+    check(machine.read_cstring(0x7ffe0030,encoding="utf16le") == "C:\\WINDOWS")
+    check(machine.read(0x7ffe0030+520,8) == b"\x00"*8)
     tls_alloc = machine.resolve_export("kernel32.dll",name="TlsAlloc")
     tls_set = machine.resolve_export("kernel32.dll",name="TlsSetValue")
     tls_get = machine.resolve_export("kernel32.dll",name="TlsGetValue")
@@ -1135,6 +1186,40 @@ def exercise(architecture):
             check(machine.read(output,20) == crypto.hash("sha1",message))
             check(machine.read(current,64) == b"\x00"*64)
             check(machine.read_u32le(current+84) == 0 and machine.read_u32le(current+88) == 0)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestVersionMaskAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+def check(condition):
+    if not condition:
+        fail("version mask ABI check failed")
+def exercise(architecture):
+    machine = emulator.machine(architecture=architecture, code=b"\xc3")
+    kernel = kernel32_plugin(version={"major":10,"minor":0,"build":26300,"service_pack_major":0,"service_pack_minor":0})
+    machine.use(kernel)
+    set_mask = machine.resolve_export("kernel32.dll",name="VerSetConditionMask")
+    # Preserve opaque high bits through ULONGLONG argument and return marshalling.
+    initial = 0x8000000100000000
+    args = [initial,4,3] if machine.pointer_size == 8 else [0,0x80000001,4,3]
+    result = machine.call(set_mask,args=args)
+    check(result.reason == "return")
+    mask = result.value if machine.pointer_size == 8 else result.value | (machine.get_register("edx") << 32)
+    check(mask == initial | 0xc0)
+    for suffix, size in [("A",156),("W",284)]:
+        info = machine.allocate(size=size)
+        machine.write_u32le(info,size)
+        verify = machine.resolve_export("kernel32.dll",name="VerifyVersionInfo"+suffix)
+        for build, expected in [(14394,1),(26300,1),(26301,0)]:
+            machine.write_u32le(info+12,build)
+            # R9 is not an argument on x64; poison it to catch split-mask handling.
+            args = [info,4,mask,0xffffffffffffffff] if machine.pointer_size == 8 else [info,4,mask&0xffffffff,mask>>32]
+            result = machine.call(verify,args=args)
+            check(result.reason == "return" and result.value == expected)
+            check(kernel.state["last_error"] == (0 if expected else 1150))
 exercise("x86")
 exercise("amd64")
 `)

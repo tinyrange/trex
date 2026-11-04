@@ -31,11 +31,11 @@ func infBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kw
 	default:
 		return nil, fmt.Errorf("inf: got %s, want file, string, or bytes", value.Type())
 	}
-	parsed, err := parseINF(decodeINFText(data))
+	parsed, directives, err := parseINFDirectives(decodeINFText(data))
 	if err != nil {
 		return nil, err
 	}
-	return &infFile{json: parsed}, nil
+	return &infFile{json: parsed, directives: directives}, nil
 }
 
 func decodeINFText(data []byte) string {
@@ -57,7 +57,8 @@ func decodeINFText(data []byte) string {
 }
 
 type infFile struct {
-	json *starlark.Dict
+	json       *starlark.Dict
+	directives *starlark.List
 }
 
 type infInstallSection struct {
@@ -65,9 +66,14 @@ type infInstallSection struct {
 	section *starlark.Dict
 }
 
-func (f *infFile) String() string       { return "<windows.inf>" }
-func (f *infFile) Type() string         { return "inf" }
-func (f *infFile) Freeze()              { f.json.Freeze() }
+func (f *infFile) String() string { return "<windows.inf>" }
+func (f *infFile) Type() string   { return "inf" }
+func (f *infFile) Freeze() {
+	f.json.Freeze()
+	if f.directives != nil {
+		f.directives.Freeze()
+	}
+}
 func (f *infFile) Truth() starlark.Bool { return starlark.True }
 func (f *infFile) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", f.Type())
@@ -87,6 +93,8 @@ func (f *infFile) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "json":
 		return f.json, nil
+	case "directives":
+		return f.directives, nil
 	case "section":
 		return starlark.NewBuiltin("section", f.sectionBuiltin), nil
 	case "install_sections":
@@ -101,7 +109,7 @@ func (f *infFile) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (f *infFile) AttrNames() []string {
-	return []string{"hkr_keys", "hkr_patches", "install_sections", "json", "section", "section_patches"}
+	return []string{"directives", "hkr_keys", "hkr_patches", "install_sections", "json", "section", "section_patches"}
 }
 
 // hkrKeysBuiltin returns explicit key-only AddReg targets from the referenced
@@ -324,9 +332,21 @@ func infValueRows(value starlark.Value) []*starlark.List {
 	return rows
 }
 
+// parseINF retains the existing section projection for registry/install callers.
 func parseINF(data string) (*starlark.Dict, error) {
+	root, _, err := parseINFDirectives(data)
+	return root, err
+}
+
+// parseINFDirectives additionally retains every logical row in source order,
+// before string expansion or duplicate-key grouping. Empty section markers have
+// key/fields None. This view permits conservative instruction comparisons that
+// cannot mistake reordered or interleaved repeated directives for equality.
+func parseINFDirectives(data string) (*starlark.Dict, *starlark.List, error) {
 	root := starlark.NewDict(0)
 	var section *starlark.Dict
+	var sectionName starlark.String
+	directives := starlark.NewList(nil)
 	for _, raw := range infLogicalLines(data) {
 		line := strings.TrimPrefix(strings.TrimSpace(raw), "\ufeff")
 		line = stripINFComment(line)
@@ -335,16 +355,18 @@ func parseINF(data string) (*starlark.Dict, error) {
 		}
 		if strings.HasPrefix(line, "[") && strings.Contains(line, "]") {
 			name := starlark.String(strings.TrimSpace(line[1:strings.Index(line, "]")]))
+			sectionName = name
+			directives.Append(starlark.Tuple{name, starlark.None, starlark.None})
 			existing, found, err := infSection(root, name.GoString())
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if found {
 				section = existing
 			} else {
 				section = starlark.NewDict(0)
 				if err := root.SetKey(name, section); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 			}
 			continue
@@ -353,17 +375,18 @@ func parseINF(data string) (*starlark.Dict, error) {
 			continue
 		}
 		key, row := parseINFLine(line)
+		directives.Append(starlark.Tuple{sectionName, starlark.String(key), row})
 		if key == "" {
 			key = fmt.Sprintf("@%d", section.Len())
 		}
 		if err := appendINFRow(section, key, row); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if err := expandINFStrings(root); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return root, nil
+	return root, directives, nil
 }
 
 func expandINFStrings(root *starlark.Dict) error {

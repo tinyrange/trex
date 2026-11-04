@@ -3,6 +3,8 @@ package native
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/tinyrange/trex/lifecycle"
 	starvalue "github.com/tinyrange/trex/storage/star"
@@ -15,9 +17,10 @@ import (
 // forge an offer from a different synchronization.
 type catalogValue struct {
 	*starvalue.Record
-	catalog  *windowsupdate.Catalog
-	options  windowsupdate.ScanOptions
-	protocol windowsupdate.ClientProtocol
+	catalog      *windowsupdate.Catalog
+	options      windowsupdate.ScanOptions
+	protocol     windowsupdate.ClientProtocol
+	allowNetwork bool
 }
 
 func (*catalogValue) Type() string { return "windows_update_catalog" }
@@ -30,11 +33,13 @@ type offerValue struct {
 
 func (*offerValue) Type() string { return "windows_update_offer" }
 
-// CatalogBuiltin synchronizes once with an explicit caller-authored profile.
+// CatalogBuiltin replays cached source responses by default. network=True
+// explicitly synchronizes and refreshes that exact caller-authored profile.
 // It exposes all revisions and declared file identities, without selecting an
 // OS, rejecting previews, truncating the selection set or downloading payloads.
 func CatalogBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	options, err := unpackScanOptions(args, kwargs)
+	var background, network bool
+	options, err := unpackScanOptions(args, kwargs, &background, &network)
 	if err != nil {
 		return nil, err
 	}
@@ -42,15 +47,43 @@ func CatalogBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.
 	if err != nil {
 		return nil, fmt.Errorf("update_catalog: %w", err)
 	}
-	protocol := windowsupdate.ClientProtocol{Transport: Transport{}}
-	catalog, err := protocol.SyncCatalog(resources.Context(), options)
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		return nil, fmt.Errorf("update_catalog: locate cache: %w", err)
+	}
+	var protocol windowsupdate.ClientProtocol
+	if network {
+		client, err := microsoftUpdateHTTPClient()
+		if err != nil {
+			return nil, fmt.Errorf("update_catalog: initialize transport: %w", err)
+		}
+		if _, err := resources.Add(&httpClientSession{client}); err != nil {
+			client.CloseIdleConnections()
+			return nil, err
+		}
+		protocol.Transport = Transport{Client: client}
+	}
+	scan := func(ctx context.Context) (*windowsupdate.Catalog, error) {
+		return cachedCatalog(ctx, filepath.Join(cacheRoot, "tinyrangex", "uup"), options, network, protocol)
+	}
+	if background {
+		request, err := newCatalogRequest(resources, options, protocol, scan)
+		if err != nil {
+			return nil, err
+		}
+		request.allowNetwork = network
+		return request, nil
+	}
+	catalog, err := scan(resources.Context())
 	if err != nil {
 		return nil, fmt.Errorf("update_catalog: %w", err)
 	}
-	return newCatalogValue(catalog, options, protocol), nil
+	value := newCatalogValue(catalog, options, protocol)
+	value.allowNetwork = network
+	return value, nil
 }
 
-func unpackScanOptions(args starlark.Tuple, kwargs []starlark.Tuple) (windowsupdate.ScanOptions, error) {
+func unpackScanOptions(args starlark.Tuple, kwargs []starlark.Tuple, background, network *bool) (windowsupdate.ScanOptions, error) {
 	var device, caller *starlark.Dict
 	var locales *starlark.List
 	var options windowsupdate.ScanOptions
@@ -58,6 +91,7 @@ func unpackScanOptions(args starlark.Tuple, kwargs []starlark.Tuple) (windowsupd
 		"device_attributes", &device, "caller_attributes", &caller,
 		"products", &options.Products, "locales", &locales,
 		"user_agent", &options.UserAgent, "assume_non_leaf_installed", &options.AssumeNonLeafInstalled,
+		"background?", background, "network?", network,
 	); err != nil {
 		return options, err
 	}
@@ -167,6 +201,9 @@ func selectedOffer(catalogArg, offerArg starlark.Value) (*catalogValue, windowsu
 // Resolving payload locations reuses the original catalog/profile. It cannot
 // silently rescan, rank other offers, or switch the caller's selected revision.
 func (catalog *catalogValue) resolveFiles(ctx context.Context, offer windowsupdate.Offer) ([]windowsupdate.Offer, []windowsupdate.File, error) {
+	if !catalog.allowNetwork {
+		return nil, nil, fmt.Errorf("offline catalog cannot resolve payload URLs; use explicit fetch=true preparation")
+	}
 	closure, err := catalog.catalog.ResolveBundleClosure(offer)
 	if err != nil {
 		return nil, nil, err

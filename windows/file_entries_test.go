@@ -48,3 +48,39 @@ func TestCloneFileEntriesOwnershipAndOrder(t *testing.T) {
 		t.Fatal("copy mutated original")
 	}
 }
+
+func TestCloneFileEntriesPreservesAliasesNotEqualContent(t *testing.T) {
+	shared := starlark.NewDict(1)
+	_ = shared.SetKey(starlark.String("size"), starlark.MakeInt(4))
+	separate := starlark.NewDict(1)
+	_ = separate.SetKey(starlark.String("size"), starlark.MakeInt(4))
+	entries := starlark.NewDict(3)
+	_ = entries.SetKey(starlark.String("a"), shared)
+	_ = entries.SetKey(starlark.String("b"), shared)
+	_ = entries.SetKey(starlark.String("c"), separate)
+	entries.Freeze()
+	result, err := cloneFileEntriesBuiltin(nil, nil, starlark.Tuple{entries}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloned := result.(*starlark.Dict)
+	a, _, _ := cloned.Get(starlark.String("a"))
+	b, _, _ := cloned.Get(starlark.String("b"))
+	c, _, _ := cloned.Get(starlark.String("c"))
+	if a != b || a == c || a == shared || c == separate {
+		t.Fatal("file-object ownership or aliasing changed")
+	}
+	if err := a.(*starlark.Dict).SetKey(starlark.String("size"), starlark.MakeInt(9)); err != nil {
+		t.Fatal(err)
+	}
+	size, _, _ := b.(*starlark.Dict).Get(starlark.String("size"))
+	if size != starlark.MakeInt(9) {
+		t.Fatal("clone lost alias")
+	}
+	for _, entry := range []*starlark.Dict{shared, separate, c.(*starlark.Dict)} {
+		size, _, _ := entry.Get(starlark.String("size"))
+		if size != starlark.MakeInt(4) {
+			t.Fatal("mutation escaped file object")
+		}
+	}
+}

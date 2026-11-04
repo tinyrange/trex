@@ -53,7 +53,13 @@ func TestAssemblyRegistryData(t *testing.T) {
 		{"REG_MULTI_SZ", `"first","second"`, `["first", "second"]`},
 		{"REG_MULTI_SZ", `vmms`, `["vmms"]`},
 		{"REG_MULTI_SZ", `"MountedDevices\"`, `["MountedDevices\\"]`},
-		{"REG_MULTI_SZ", `"a,b", "a""b"`, `["a,b", "a\"b"]`},
+		{"REG_MULTI_SZ", `"a,b","c"`, `["a,b", "c"]`},
+		{"REG_MULTI_SZ", `One,Keep`, `["One,Keep"]`},
+		{"REG_MULTI_SZ", ` "One","Keep"`, `[" \"One\",\"Keep\""]`},
+		{"REG_MULTI_SZ", `   `, `["   "]`},
+		{"REG_MULTI_SZ", "One\nKeep", `["One\nKeep"]`},
+		{"REG_MULTI_SZ", `"A","","B"`, `["A", "B"]`},
+		{"REG_MULTI_SZ", `""`, `[]`},
 		{"REG_MULTI_SZ", ``, `[]`},
 		{"REG_DWORD", `0xffffffff`, `4294967295`},
 		{"REG_DWORD", `-1`, `4294967295`},
@@ -61,6 +67,8 @@ func TestAssemblyRegistryData(t *testing.T) {
 		{"REG_QWORD", `0x100000000`, `4294967296`},
 		{"REG_QWORD", `0x0`, `0`},
 		{"REG_NONE", ``, `b""`},
+		{"REG_NONE", `0102`, `b""`},
+		{"REG_NONE", `not hex`, `b""`},
 		{"REG_RESOURCE_LIST", `00aB`, `b"\x00\xab"`},
 		{"REG_RESOURCE_REQUIREMENTS_LIST", `0100`, `b"\x01\x00"`},
 		{"REG_SZ", `a,b`, `"a,b"`},
@@ -82,7 +90,9 @@ func TestAssemblyRegistryData(t *testing.T) {
 		})
 	}
 	for _, tc := range [][2]string{
-		{"REG_MULTI_SZ", `"unterminated`}, {"REG_MULTI_SZ", "a\nb"},
+		{"REG_MULTI_SZ", `"unterminated`}, {"REG_MULTI_SZ", `"a,b", "c"`},
+		{"REG_MULTI_SZ", `"a""b"`}, {"REG_MULTI_SZ", `"One",`},
+		{"REG_MULTI_SZ", `"One"garbage`}, {"REG_MULTI_SZ", `"One";"Two"`},
 		{"REG_MULTI_SZ", "a\x00b"}, {"REG_BINARY", "0"},
 		{"REG_QWORD", "00"}, {"REG_DWORD", "4294967296"}, {"unsupported", ""},
 		{"FFFF0012", "0"}, {"FFFF0012", "not hex"}, {"FFFF001", "00"}, {"1FFFF0012", "00"}, {"GGGG0012", "00"},
@@ -94,6 +104,10 @@ func TestAssemblyRegistryData(t *testing.T) {
 }
 
 func TestAssemblyRegistryMacroExpansion(t *testing.T) {
+	ignored, err := assemblyRegistryDataBuiltin(nil, nil, starlark.Tuple{starlark.String("REG_NONE"), starlark.String("$(unknown)"), starlark.NewDict(0)}, nil)
+	if err != nil || ignored.String() != `b""` {
+		t.Fatalf("REG_NONE text was interpreted: %v, %v", ignored, err)
+	}
 	macros := map[string]string{"runtime.system32": `C:\Windows\SysWOW64`, "assembly.empty": "", "build.packagemoniker": "$(build.PackageMoniker)"}
 	for _, tc := range [][2]string{
 		{`$(Runtime.System32)\fdssdp.dll`, `C:\Windows\SysWOW64\fdssdp.dll`},

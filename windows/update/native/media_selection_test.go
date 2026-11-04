@@ -59,6 +59,10 @@ func TestCatalogSelectionPreservesIdentityWithoutDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := selected.resolveFiles(context.Background(), offer); err == nil || len(transport.requests) != 0 {
+		t.Fatal("default catalog resolved network locations")
+	}
+	selected.allowNetwork = true // Explicit online location-refresh test.
 	// Server/preview titles are not filtered by Go. Refresh resolves only this
 	// exact revision with the original profile and never calls SyncCatalog.
 	for iteration := 0; iteration < 2; iteration++ {

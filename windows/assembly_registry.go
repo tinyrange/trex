@@ -2,10 +2,8 @@ package windows
 
 import (
 	"encoding/binary"
-	"encoding/csv"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 
@@ -20,6 +18,10 @@ func assemblyRegistryDataBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args s
 	var variables *starlark.Dict
 	if err := starlark.UnpackArgs("assembly_registry_data", args, kwargs, "value_type", &kind, "value", &value, "variables?", &variables); err != nil {
 		return nil, err
+	}
+	// CSI InterpretValueData ignores REG_NONE text, including macro-like text.
+	if strings.EqualFold(kind, "REG_NONE") {
+		return starlark.Bytes(""), nil
 	}
 	if variables != nil && strings.Contains(value, "$(") {
 		macros := make(map[string]string, variables.Len())
@@ -41,7 +43,13 @@ func assemblyRegistryDataBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args s
 			return nil, err
 		}
 	}
+	return decodeAssemblyRegistryData(kind, value)
+}
+
+func decodeAssemblyRegistryData(kind, value string) (starlark.Value, error) {
 	switch strings.ToUpper(kind) {
+	case "REG_NONE":
+		return starlark.Bytes(""), nil
 	case "REG_SZ", "REG_EXPAND_SZ":
 		return starlark.String(value), nil
 	case "REG_DWORD":
@@ -55,28 +63,16 @@ func assemblyRegistryDataBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args s
 		}
 		return starlark.MakeUint64(n), nil
 	case "REG_MULTI_SZ":
-		if strings.TrimSpace(value) == "" {
-			return starlark.NewList(nil), nil
-		}
-		reader := csv.NewReader(strings.NewReader(value))
-		reader.FieldsPerRecord = -1
-		reader.TrimLeadingSpace = true
-		fields, err := reader.Read()
+		fields, err := assemblyRegistryMultiString(value)
 		if err != nil {
-			return nil, fmt.Errorf("assembly_registry_data: multi-string: %w", err)
-		}
-		if _, err := reader.Read(); err != io.EOF {
-			return nil, fmt.Errorf("assembly_registry_data: multi-string must contain one record")
+			return nil, err
 		}
 		values := make([]starlark.Value, len(fields))
 		for i, field := range fields {
-			if strings.ContainsRune(field, 0) {
-				return nil, fmt.Errorf("assembly_registry_data: multi-string contains NUL")
-			}
 			values[i] = starlark.String(field)
 		}
 		return starlark.NewList(values), nil
-	case "REG_QWORD", "REG_BINARY", "REG_NONE", "REG_RESOURCE_LIST", "REG_RESOURCE_REQUIREMENTS_LIST":
+	case "REG_QWORD", "REG_BINARY", "REG_RESOURCE_LIST", "REG_RESOURCE_REQUIREMENTS_LIST":
 		if strings.EqualFold(kind, "REG_QWORD") && strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "0x") {
 			n, err := strconv.ParseUint(strings.TrimSpace(value)[2:], 16, 64)
 			if err != nil {
@@ -145,5 +141,45 @@ func expandAssemblyRegistryMacros(value string, macros map[string]string) (strin
 		}
 		result.WriteString(replacement)
 		value = value[end+1:]
+	}
+}
+
+// assemblyRegistryMultiString follows the CSI declaration grammar, not CSV.
+// A leading quote selects a list of exactly comma-separated quoted strings;
+// otherwise the entire text is one string, including commas and whitespace.
+// Quotes and backslashes are not escape characters. Empty quoted entries do
+// not contribute strings. This decodes data only, not contribution operations:
+// an empty unquoted declaration and an empty quoted list can commit differently.
+func assemblyRegistryMultiString(value string) ([]string, error) {
+	if strings.ContainsRune(value, 0) {
+		return nil, fmt.Errorf("assembly_registry_data: multi-string contains NUL")
+	}
+	if value == "" {
+		return nil, nil
+	}
+	if value[0] != '"' {
+		return []string{value}, nil
+	}
+	var fields []string
+	for {
+		if len(value) == 0 || value[0] != '"' {
+			return nil, fmt.Errorf("assembly_registry_data: multi-string requires a quoted entry")
+		}
+		end := strings.IndexByte(value[1:], '"')
+		if end < 0 {
+			return nil, fmt.Errorf("assembly_registry_data: unterminated multi-string entry")
+		}
+		end++
+		if end > 1 {
+			fields = append(fields, value[1:end])
+		}
+		value = value[end+1:]
+		if value == "" {
+			return fields, nil
+		}
+		if value[0] != ',' {
+			return nil, fmt.Errorf("assembly_registry_data: multi-string requires a comma separator")
+		}
+		value = value[1:]
 	}
 }

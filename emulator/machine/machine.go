@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	binaryapi "github.com/tinyrange/trex/binary"
 	"github.com/tinyrange/trex/emulator/amd64"
@@ -451,7 +452,15 @@ func (m *Machine) runUntil(thread *starlark.Thread, until *uint64) (starlark.Val
 			event := record(starlark.StringDict{"machine": m, "module": starlark.String(hook.module), "name": starlark.String(hook.name), "address": starlark.MakeUint64(pc), "return_address": starlark.MakeUint64(binary.LittleEndian.Uint64(data[:])), "args": starlark.NewList(values)})
 			transferSerial := m.transferSerial
 			m.hookDepth++
+			var started time.Time
+			profiling := m.profileCalls
+			if profiling {
+				started = time.Now()
+			}
 			result, err := starlark.Call(thread, hook.callback, starlark.Tuple{event}, nil)
+			if profiling {
+				m.observeCall(pc, hook, binary.LittleEndian.Uint64(data[:]), arguments, time.Since(started))
+			}
 			m.hookDepth--
 			if err != nil {
 				return m.result("plugin", steps, err.Error()), nil

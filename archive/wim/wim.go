@@ -3,6 +3,7 @@ package wim
 import (
 	"bytes"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -73,6 +74,8 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 }
 
 type Archive struct {
+	// directoryMu protects lazy directory and path indexes during concurrent reads.
+	directoryMu     sync.Mutex
 	legacyIDs       map[uint32][20]byte
 	file            storage.Reader
 	flags           uint32
@@ -91,13 +94,14 @@ type Archive struct {
 }
 
 type image struct {
-	index    int
-	resource wimResource
-	metadata []byte
-	security [][]byte
-	root     entry
-	dirs     map[string][]entry
-	byPath   map[string]entry
+	index          int
+	resource       wimResource
+	metadata       []byte // Legacy metadata and explicitly constructed images.
+	metadataDigest [32]byte
+	security       [][]byte
+	root           entry
+	dirs           map[string][]entry
+	byPath         map[string]entry
 }
 
 type wimResource struct {
@@ -889,9 +893,10 @@ func (w *Archive) readImages() error {
 		}
 		metadata = append(metadata, imageMetadata{w.boot, data})
 	}
-	// Retain the bytes validated above: rereading all metadata in a second
-	// pass can evict and decompress the same resources again. These bytes
-	// are retained by the image objects in either case.
+	// Validate every image now, but retain decoded directory metadata only in
+	// the bounded archive cache. Product selection touches every edition; that
+	// must not pin them all alongside the running guest. Small
+	// root/security records must own their bytes rather than alias that buffer.
 	for idx, item := range metadata {
 		resource, data := item.resource, item.data
 		root, err := parseWIMRoot(data, idx+1)
@@ -902,14 +907,18 @@ func (w *Archive) readImages() error {
 		if err != nil {
 			return fmt.Errorf("wim image %d security: %w", idx+1, err)
 		}
+		for i := range security {
+			security[i] = bytes.Clone(security[i])
+		}
+		detachWIMEntry(&root)
 		w.images = append(w.images, image{
-			index:    idx + 1,
-			resource: resource,
-			metadata: data,
-			security: security,
-			root:     root,
-			dirs:     make(map[string][]entry),
-			byPath:   map[string]entry{wimPathKey(root.path): root},
+			index:          idx + 1,
+			resource:       resource,
+			metadataDigest: sha256.Sum256(data),
+			security:       security,
+			root:           root,
+			dirs:           make(map[string][]entry),
+			byPath:         map[string]entry{wimPathKey(root.path): root},
 		})
 	}
 	return nil
@@ -1196,7 +1205,7 @@ func (w *Archive) lookupPath(name string) (entry, error) {
 		if !strings.HasPrefix(key+"/", wimPathKey(image.root.path)+"/") {
 			continue
 		}
-		if found, ok := image.byPath[key]; ok {
+		if found, ok := w.cachedPath(image, key); ok {
 			return found, nil
 		}
 		current := image.root
@@ -1209,7 +1218,7 @@ func (w *Archive) lookupPath(name string) (entry, error) {
 			if err != nil {
 				return entry{}, err
 			}
-			child, found := image.byPath[wimPathKey(current.path+"/"+part)]
+			child, found := w.cachedPath(image, wimPathKey(current.path+"/"+part))
 			if !found {
 				return entry{}, fmt.Errorf("wim: path %q not found", name)
 			}
@@ -1251,7 +1260,16 @@ func (w *Archive) dirEntries(name string) ([]entry, error) {
 	return nil, nil
 }
 
+func (w *Archive) cachedPath(image *image, key string) (entry, bool) {
+	w.directoryMu.Lock()
+	defer w.directoryMu.Unlock()
+	found, ok := image.byPath[key]
+	return found, ok
+}
+
 func (w *Archive) readWIMDir(image *image, dir entry) ([]entry, error) {
+	w.directoryMu.Lock()
+	defer w.directoryMu.Unlock()
 	if !dir.isDir || dir.subdirOff == 0 {
 		return nil, nil
 	}
@@ -1262,7 +1280,10 @@ func (w *Archive) readWIMDir(image *image, dir entry) ([]entry, error) {
 	if w.legacyIDs != nil {
 		return w.readLegacyDir(image, dir)
 	}
-	data := image.metadata
+	data, err := w.imageMetadata(image)
+	if err != nil {
+		return nil, err
+	}
 	var entries []entry
 	for off := int(dir.subdirOff); ; {
 		if off+8 > len(data) || binary.LittleEndian.Uint64(data[off:off+8]) == 0 {
@@ -1285,15 +1306,17 @@ func (w *Archive) readWIMDir(image *image, dir entry) ([]entry, error) {
 		if location, ok := w.byHash[string(entry.hash[:])]; ok {
 			entry.size = location.blobSize
 		}
+		detachWIMEntry(&entry)
 		entries = append(entries, entry)
 		off += length
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].isDir != entries[j].isDir {
-			return entries[i].isDir
-		}
-		return strings.ToLower(entries[i].name) < strings.ToLower(entries[j].name)
-	})
+	// Sorting large manifest directories must not allocate a folded name on
+	// every comparison. Keep the original directory-first, non-stable order.
+	keys := make([]string, len(entries))
+	for i := range entries {
+		keys[i] = strings.ToLower(entries[i].name)
+	}
+	sort.Sort(foldedEntrySorter{entries, keys})
 	for _, child := range entries {
 		key := wimPathKey(child.path)
 		if _, exists := image.byPath[key]; !exists {

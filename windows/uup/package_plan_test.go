@@ -87,6 +87,12 @@ func TestSelectedDeploymentInstallsNewComponentFamily(t *testing.T) {
 			if len(got) != 2 || got[policy.Name].Identity.Name != policy.Name || got[deployment.Name].Identity.Name != deployment.Name {
 				t.Fatalf("selected deployment must install its new policy, but not an inapplicable optional branch: %#v", got)
 			}
+			if len(plan.DeploymentSources) != 1 || plan.DeploymentSources[0].Deployment.ExactKey() != deployment.ExactKey() {
+				t.Fatalf("lost deployment source: %+v", plan.DeploymentSources)
+			}
+			if deps := got[deployment.Name].InstallDependencies; len(deps) != 1 || deps[0].ExactKey() != policy.ExactKey() {
+				t.Fatalf("ownership must exclude inapplicable optional branch: %+v", deps)
+			}
 			if !state.hasInstalledComponent(policy) {
 				t.Fatal("new policy was not made available to following stages")
 			}
@@ -151,7 +157,7 @@ func TestPackageManifestApplicabilityUsesParentClauses(t *testing.T) {
 	if packageManifestApplicable(enterpriseG, state, nil) {
 		t.Fatal("absent SKU parent made child applicable")
 	}
-	if !packageManifestApplicable(newChild, state, map[string]struct{}{newRoot.ExactKey(): {}}) {
+	if !packageManifestApplicable(newChild, state, map[string]AssemblyIdentity{newRoot.ExactKey(): newRoot}) {
 		t.Fatal("selected stage parent did not make new child applicable")
 	}
 	if !packageManifestApplicable(&AssemblyManifest{}, state, nil) {

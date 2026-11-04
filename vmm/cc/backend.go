@@ -311,6 +311,7 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 	platform.framebuffer = ram[m.Memory : uint64(m.Memory)+ramfb.Size]
 	if disk.Bus == "nvme" {
 		platform.nvme = newPCINVMe(platform)
+		platform.nvme.controller.EnableAsyncIO(func() { _ = cpu.Cancel() })
 	} else if b.PCIIDE || b.UEFI {
 		platform.pciIDE = newPCIIDE()
 		if b.IDEModel == "ich7-pata" {

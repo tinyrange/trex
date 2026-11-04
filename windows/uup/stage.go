@@ -34,28 +34,31 @@ const (
 )
 
 type CumulativeStage struct {
-	MetadataName          string
-	PSFName               string
-	Metadata              *wim.Archive
-	metadataCAB           *cab.Archive
-	PSF                   storage.Reader
-	Index                 *ContainerIndex
-	History               *ContainerIndex
-	Graph                 *CumulativeGraph
-	canonicalByTarget     map[string]DeltaPayload
-	expressByTarget       map[string]DeltaPayload
-	canonicalCache        map[string][]byte
-	canonicalRetained     int64
-	canonicalMu           sync.Mutex
-	carryIndexOnce        sync.Once
-	carryByTarget         map[string]CarryPayload
-	metadataArchives      []stageMetadataArchive
-	assemblyResolver      func(ContentDescriptor) (storage.Reader, error)
-	assemblyNameResolver  func(string) (storage.Reader, error)
-	assemblyReadOrder     func(ContentDescriptor) (wim.FileReadOrder, bool)
-	assemblyNameReadOrder func(string) (wim.FileReadOrder, bool)
-	assemblyDictionary    func() (storage.Reader, error)
-	predecessorByStem     map[string]string
+	MetadataName             string
+	PSFName                  string
+	Metadata                 *wim.Archive
+	metadataCAB              *cab.Archive
+	PSF                      storage.Reader
+	Index                    *ContainerIndex
+	History                  *ContainerIndex
+	Graph                    *CumulativeGraph
+	canonicalByTarget        map[string]DeltaPayload
+	expressByTarget          map[string]DeltaPayload
+	canonicalCache           map[string][]byte
+	canonicalRetained        int64
+	canonicalMu              sync.Mutex
+	carryIndexOnce           sync.Once
+	carryByTarget            map[string]CarryPayload
+	metadataArchives         []stageMetadataArchive
+	assemblyResolver         func(ContentDescriptor) (storage.Reader, error)
+	baseRecovery             *reverseAssemblyResolver
+	assemblyNameResolver     func(string) (storage.Reader, error)
+	assemblyReadOrder        func(ContentDescriptor) (wim.FileReadOrder, bool)
+	assemblyNameReadOrder    func(string) (wim.FileReadOrder, bool)
+	assemblyDictionary       func() (storage.Reader, error)
+	predecessorByStem        map[string]string
+	predecessorMu            sync.RWMutex
+	bindComponentPredecessor func(AssemblyIdentity, string)
 }
 
 type stageMetadataArchive struct {
@@ -395,13 +398,30 @@ func (s *CumulativeStage) materializeExpress(payload DeltaPayload) ([]byte, erro
 		return nil, fmt.Errorf("uup servicing: express record for %q: %w", payload.Target.Name, err)
 	}
 	if payload.Literal {
-		if payload.RecordType != "RAW" || payload.Basis != nil || payload.RecordBasis != nil || payload.RecordTarget != nil {
+		if payload.DirectDelta || payload.RecordType != "RAW" || payload.Basis != nil || payload.RecordBasis != nil || payload.RecordTarget != nil {
 			return nil, fmt.Errorf("uup servicing: literal target %q has delta reconstruction fields", payload.Target.Name)
 		}
 		if err := verifyContentDescriptor(payload.Target, record); err != nil {
 			return nil, fmt.Errorf("uup servicing: literal target %q: %w", payload.Target.Name, err)
 		}
 		return s.retainTarget(key, record, maximumCanonicalRetainedTarget), nil
+	}
+	if payload.DirectDelta {
+		if payload.RecordType != "PA30" || payload.RecordBasis != nil || payload.RecordTarget != nil {
+			return nil, fmt.Errorf("uup servicing: direct target %q has nested reconstruction fields", payload.Target.Name)
+		}
+		basis, err := s.resolveExpressBasis(s.nameExpressBasis(payload.Target.Name, payload.Basis))
+		if err != nil {
+			return nil, err
+		}
+		target, err := msdelta.ApplyBounded(basis, record, uint64(maximumCanonicalTarget))
+		if err != nil {
+			return target, fmt.Errorf("uup servicing: apply direct target %q: %w", payload.Target.Name, err)
+		}
+		if err := verifyContentDescriptor(payload.Target, target); err != nil {
+			return nil, err
+		}
+		return s.retainTarget(key, target, maximumCanonicalRetainedTarget), nil
 	}
 	patch := record
 	var err error
@@ -468,14 +488,16 @@ func (s *CumulativeStage) DiagnoseContentTarget(name string) (storage.Reader, er
 }
 
 func (s *CumulativeStage) nameExpressBasis(targetName string, descriptor *ContentDescriptor) *ContentDescriptor {
-	if descriptor == nil || descriptor.Name != "" || len(s.predecessorByStem) == 0 {
+	if descriptor == nil || descriptor.Name != "" {
 		return descriptor
 	}
 	identity, relative, err := ParseComponentContentName(targetName)
 	if err != nil {
 		return descriptor
 	}
+	s.predecessorMu.RLock()
 	predecessor, found := s.predecessorByStem[normalizeCIXName(identity.Stem)]
+	s.predecessorMu.RUnlock()
 	if !found || predecessor == "" {
 		return descriptor
 	}
@@ -674,7 +696,7 @@ func OpenCanonicalStage(name string, reader storage.Reader) (*CumulativeStage, e
 	if err != nil {
 		return nil, err
 	}
-	index, err := ParseContainerIndex(io.NewSectionReader(indexFile, 0, indexFile.Size()))
+	index, err := parseContainerIndexFile(indexFile)
 	if err != nil {
 		return nil, fmt.Errorf("uup servicing: canonical cabinet %q ContainerIndex: %w", name, err)
 	}
@@ -943,7 +965,7 @@ func (s *CumulativeStage) openExpressGraph() error {
 	if err != nil {
 		return fmt.Errorf("uup servicing: open PSF index: %w", err)
 	}
-	index, err := ParseContainerIndex(io.NewSectionReader(indexFile, 0, indexFile.Size()))
+	index, err := parseContainerIndexFile(indexFile)
 	if err != nil {
 		return err
 	}
@@ -998,7 +1020,7 @@ func (s *CumulativeStage) openExpressGraph() error {
 	if err != nil {
 		return err
 	}
-	history, err := ParseContainerIndex(io.NewSectionReader(historyFile, 0, historyFile.Size()))
+	history, err := parseContainerIndexFile(historyFile)
 	if err != nil {
 		return err
 	}

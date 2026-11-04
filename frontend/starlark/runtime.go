@@ -1,13 +1,8 @@
 package starlarkfrontend
 
 import (
-	"crypto/md5"
-	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/sha512"
 	hexenc "encoding/hex"
 	"fmt"
-	"hash"
 	"io"
 	"math/big"
 	"strings"
@@ -31,6 +26,7 @@ import (
 	"github.com/tinyrange/trex/archive/compressed"
 	"github.com/tinyrange/trex/archive/cpio"
 	"github.com/tinyrange/trex/archive/crx"
+	"github.com/tinyrange/trex/archive/dcs"
 	"github.com/tinyrange/trex/archive/gzip"
 	"github.com/tinyrange/trex/archive/hunk"
 	"github.com/tinyrange/trex/archive/ibmisave"
@@ -174,6 +170,7 @@ func predeclared() starlark.StringDict {
 				"aea":              starlark.NewBuiltin("aea", aea.Builtin),
 				"bom":              starlark.NewBuiltin("bom", bom.Builtin),
 				"lzfse":            starlark.NewBuiltin("lzfse", lzfse.Builtin),
+				"dcs":              starlark.NewBuiltin("dcs", dcs.Builtin),
 				"xar":              starlark.NewBuiltin("xar", xar.Builtin),
 				"udif":             starlark.NewBuiltin("udif", udif.Builtin),
 				"cpio":             starlark.NewBuiltin("cpio", cpio.Builtin),
@@ -324,6 +321,7 @@ func predeclared() starlark.StringDict {
 		"directory":      starlark.NewBuiltin("directory", filesystemapi.DirectoryBuiltin),
 		"bytes_concat":   starlark.NewBuiltin("bytes_concat", bytesConcatBuiltin),
 		"digest":         starlark.NewBuiltin("digest", digestBuiltin),
+		"digest_many":    starlark.NewBuiltin("digest_many", digestManyBuiltin),
 		"hex":            starlark.NewBuiltin("hex", hexBuiltin),
 		"help":           starlark.NewBuiltin("help", helpBuiltin),
 		"http_file":      nativeIO["http_file"],
@@ -343,18 +341,12 @@ func digestBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple,
 	if err := starlark.UnpackArgs("digest", args, kwargs, "value", &value, "algorithm?", &algorithm); err != nil {
 		return nil, err
 	}
-	var h hash.Hash
-	switch strings.ToLower(algorithm) {
-	case "md5":
-		h = md5.New()
-	case "sha1", "sha-1":
-		h = sha1.New()
-	case "sha256", "sha-256":
-		h = sha256.New()
-	case "sha512", "sha-512":
-		h = sha512.New()
-	default:
-		return nil, fmt.Errorf("digest: unsupported algorithm %q", algorithm)
+	h, err := digestHash(algorithm)
+	if err != nil {
+		return nil, err
+	}
+	if digest, ok := verifiedDigest(value, algorithm); ok {
+		return digest, nil
 	}
 	if file, ok := value.(File); ok {
 		if _, err := io.Copy(h, io.NewSectionReader(file, 0, file.Size())); err != nil {

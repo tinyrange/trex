@@ -386,7 +386,15 @@ func (d *lzxDecoder) decodeCompressedBlock(br *lzxBitReader, out *[]byte, end in
 			return fmt.Errorf("lzx: invalid match offset %d", offset)
 		}
 		start := len(*out)
-		d.putMatch(out, offset, min(length, end-start))
+		length = min(length, end-start)
+		if offset >= length && offset <= start {
+			// A nonoverlapping match needs neither initial-zero history nor
+			// iterative expansion. Keep that common case in the symbol loop.
+			*out = (*out)[:start+length]
+			copy((*out)[start:], (*out)[start-offset:start-offset+length])
+		} else {
+			d.putMatch(out, offset, length)
+		}
 		// Matches contain no intervening input bits, so one alignment suffices
 		// even if the copy crosses a frame boundary. Do not align at block end.
 		if start/lzxFrameSize != len(*out)/lzxFrameSize && (len(*out)%lzxFrameSize != 0 || len(*out) < end) {

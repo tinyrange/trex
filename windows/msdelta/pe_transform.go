@@ -2,7 +2,9 @@ package msdelta
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
+	"slices"
 )
 
 const (
@@ -450,15 +452,9 @@ func transformUnlistedPointersX86(data []byte, layout peLayout, rift riftTable, 
 }
 
 func sortRelocations(entries []relocationEntry) {
-	for index := 1; index < len(entries); index++ {
-		value := entries[index]
-		place := index
-		for place > 0 && entries[place-1].rva > value.rva {
-			entries[place] = entries[place-1]
-			place--
-		}
-		entries[place] = value
-	}
+	slices.SortStableFunc(entries, func(a, b relocationEntry) int {
+		return cmp.Compare(a.rva, b.rva)
+	})
 }
 
 func markPEBytes(marker []byte, offset, size int) {

@@ -25,18 +25,21 @@ const (
 	httpRangeAttempts     = 3
 	httpRangeAttemptLimit = 8 * time.Second
 	httpRangeFetchLimit   = 25 * time.Second
+	httpRangeResolveLimit = 60 * time.Second
 )
 
 var nextHTTPRangeSource atomic.Uint64
 
 // HTTPRangeLocationResolver renews locations for the same immutable file.
-// It must preserve the declared content identity and size. It is called only
-// after a forbidden response, within the existing fetch deadline.
+// It must preserve the declared content identity and size. It is called on a
+// cache miss when OpenSHA256 has no initial URLs (bounded to 60 seconds), or
+// after a forbidden response within the existing fetch deadline.
 type HTTPRangeLocationResolver func(context.Context, string, int64, []string) ([]string, error)
 
 // HTTPRangeFile is a read-only random-access HTTP file backed by a bounded
 // in-memory chunk LRU. It never creates a host file or disk cache.
 type HTTPRangeFile struct {
+	offline          bool
 	context          context.Context
 	name             string
 	urls             []string
@@ -55,6 +58,7 @@ type HTTPRangeFile struct {
 // opens. The bound therefore applies to the complete HTTP operation, not once
 // per payload.
 type HTTPRangePool struct {
+	offline          bool
 	client           *http.Client
 	chunk            int64
 	cache            *bytecache.Cache
@@ -74,6 +78,17 @@ func NewPersistentHTTPRangePool(chunkBytes, cacheBytes int64, client *http.Clien
 		return nil, err
 	}
 	p.diskCache = disk
+	return p, nil
+}
+
+// NewOfflineHTTPRangePool serves only existing source ranges. Neither URL
+// resolution nor HTTP is permitted, including deferred reads after construction.
+func NewOfflineHTTPRangePool(chunkBytes, cacheBytes int64, disk *HTTPRangeDiskCache) (*HTTPRangePool, error) {
+	p, err := NewPersistentHTTPRangePool(chunkBytes, cacheBytes, nil, nil, disk)
+	if err != nil {
+		return nil, err
+	}
+	p.offline = true
 	return p, nil
 }
 
@@ -111,13 +126,16 @@ func (p *HTTPRangePool) Open(ctx context.Context, name string, urls []string, si
 	if p != nil && p.diskCache != nil {
 		return nil, fmt.Errorf("persistent HTTP source requires an immutable SHA-256 identity")
 	}
-	return p.open(ctx, name, urls, size)
+	return p.open(ctx, name, urls, size, false)
 }
 
 // Discover opens a lazy file after a bounded HEAD request determines its size.
 // It never downloads the body. Subsequent range reads validate the total size
 // as usual; discovery does not replace format identity or content verification.
 func (p *HTTPRangePool) Discover(ctx context.Context, name string, urls []string) (*HTTPRangeFile, error) {
+	if p != nil && p.offline {
+		return nil, fmt.Errorf("offline HTTP pool cannot discover remote file sizes")
+	}
 	if p == nil || p.client == nil || p.cache == nil {
 		return nil, fmt.Errorf("HTTP range pool is not initialized")
 	}
@@ -152,12 +170,14 @@ func (p *HTTPRangePool) Discover(ctx context.Context, name string, urls []string
 // OpenSHA256 keys persistent bytes by the declared content digest and size,
 // never by expiring URLs or filenames. Range checksums detect cache damage;
 // they do not replace the caller's complete payload/target hash verification.
+// With a location resolver, urls may be empty: cached ranges need no location
+// lookup; the first uncached read resolves locations before fetching bytes.
 func (p *HTTPRangePool) OpenSHA256(ctx context.Context, name string, urls []string, size int64, digest string) (*HTTPRangeFile, error) {
 	decoded, err := hex.DecodeString(digest)
 	if err != nil || len(decoded) != sha256.Size {
 		return nil, fmt.Errorf("HTTP source SHA-256 must contain 64 hexadecimal digits")
 	}
-	f, err := p.open(ctx, name, urls, size)
+	f, err := p.open(ctx, name, urls, size, true)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +186,7 @@ func (p *HTTPRangePool) OpenSHA256(ctx context.Context, name string, urls []stri
 	return f, nil
 }
 
-func (p *HTTPRangePool) open(ctx context.Context, name string, urls []string, size int64) (*HTTPRangeFile, error) {
+func (p *HTTPRangePool) open(ctx context.Context, name string, urls []string, size int64, deferred bool) (*HTTPRangeFile, error) {
 	if p == nil || p.client == nil || p.cache == nil {
 		return nil, fmt.Errorf("HTTP range pool is not initialized")
 	}
@@ -177,13 +197,13 @@ func (p *HTTPRangePool) open(ctx context.Context, name string, urls []string, si
 		ctx = context.Background()
 	}
 	selected := validHTTPRangeLocations(urls)
-	if len(selected) == 0 {
+	if len(selected) == 0 && !(deferred && len(urls) == 0 && (p.resolveLocations != nil || p.offline)) {
 		return nil, fmt.Errorf("HTTP range file has no absolute HTTP(S) URL")
 	}
 	return &HTTPRangeFile{
 		context: ctx, name: name, urls: selected, size: size, chunk: p.chunk,
 		client: p.client, cache: p.cache, cacheSourceID: nextHTTPRangeSource.Add(1),
-		resolveLocations: p.resolveLocations,
+		resolveLocations: p.resolveLocations, offline: p.offline,
 	}, nil
 }
 
@@ -271,6 +291,20 @@ func (f *HTTPRangeFile) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *HTTPRangeFile) fetch(start, length int64) ([]byte, error) {
+	if f.offline {
+		return nil, fmt.Errorf("offline payload cache miss: %q bytes [%d:%d], SHA-256 %x; run explicit fetch=true preparation", f.name, start, start+length, f.digest)
+	}
+	if urls, version := f.locations(); len(urls) == 0 {
+		// fetch is reached only after both byte caches miss. Resolve separately
+		// from the range-request budget, as SOAP discovery may be much slower
+		// than fetching a chunk. Concurrent chunks share the first resolution.
+		ctx, cancel := context.WithTimeout(f.context, httpRangeResolveLimit)
+		err := f.refreshLocations(ctx, version)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("resolve HTTP locations for %q: %w", f.name, err)
+		}
+	}
 	end := start + length - 1
 	var lastErr error
 	fetchContext, cancelFetch := context.WithTimeout(f.context, httpRangeFetchLimit)

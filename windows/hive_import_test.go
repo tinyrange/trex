@@ -2,92 +2,168 @@ package windows
 
 import (
 	"bytes"
-	starfile "github.com/tinyrange/trex/storage/star"
-	"go.starlark.net/starlark"
-	"strings"
+	"encoding/binary"
+	"fmt"
 	"testing"
+
+	starfile "github.com/tinyrange/trex/storage/star"
+	registry "github.com/tinyrange/trex/windows/registry"
+	"go.starlark.net/starlark"
 )
 
-func TestHiveSourceImportPreservesMetadataAndRawValues(t *testing.T) {
-	root := newRegistryTree("SOURCE")
-	key := ensureRegistryKeyParts(root, []string{"literal/slash", "X:path"})
-	key.class = []byte{0, 1, 0xfe, 0xff}
-	key.flags, key.flagsSet = 0x20, true
-	key.values["X:name"] = registryData{typ: regSZ, data: append(utf16Bytes(`X:\Upper;x:\lower`), 0xff)}
-	key.values["binary"] = registryData{typ: regBinary, data: utf16Bytes("X:")}
-	key.values["link"] = registryData{typ: regLink, data: utf16Bytes("X:")}
-	key.values["unknown"] = registryData{typ: 0x1234, data: []byte{1, 2, 3}}
-	key.values["multi"] = registryData{typ: regMultiSZ, data: utf16Bytes("X:\\a\x00x:\\b\x00\x00")}
-	ensureRegistryKey(root, "/empty")
-	setRegistryValue(root, "/remove/child", "gone", registryString(regSZ, "value"))
-	setRegistryValue(root, "/keep", "Drop", registryString(regSZ, "drop"))
-	setRegistryValue(root, "/keep/child", "Drop", registryString(regSZ, "keep"))
-	data, err := buildRegistryHiveWithFormat(root, registryHiveFormat{major: 1, minor: 3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	source := &starfile.Bytes{Name: "source", Data: data}
-	// Compare the native import with the original public export/rebuild path.
-	legacyPatches, err := hivePatchesBuiltin(nil, nil, starlark.Tuple{source}, []starlark.Tuple{{starlark.String("raw"), starlark.True}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyKeys, err := hiveKeysBuiltin(nil, nil, starlark.Tuple{source}, []starlark.Tuple{{starlark.String("metadata"), starlark.True}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	old, err := hiveFromPatchesBuiltin(nil, nil, starlark.Tuple{starlark.String("RESULT"), legacyPatches}, []starlark.Tuple{{starlark.String("keys"), legacyKeys}, {starlark.String("format"), source}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fresh, err := hiveFromPatchesBuiltin(nil, nil, starlark.Tuple{starlark.String("RESULT"), starlark.NewList(nil)}, []starlark.Tuple{{starlark.String("source"), source}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldData, _ := starfile.ReadAll(old.(starfile.File))
-	freshData, _ := starfile.ReadAll(fresh.(starfile.File))
-	if !bytes.Equal(oldData, freshData) {
-		t.Fatal("native import differs from lossless export/rebuild")
-	}
-	drop := starlark.NewDict(2)
-	drop.SetKey(starlark.String("key"), starlark.String(`\KEEP`))
-	drop.SetKey(starlark.String("name"), starlark.String("drop"))
-	result := newRegistryTree("RESULT")
-	err = importRegistryHive(result, source, "x:", "C:", starlark.NewList([]starlark.Value{starlark.String("/REMOVE")}), starlark.NewList([]starlark.Value{drop}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := ensureRegistryKeyParts(result, []string{"literal/slash", "C:path"})
-	want := append(utf16Bytes(`C:\Upper;c:\lower`), 0xff)
-	if !bytes.Equal(target.values["C:name"].data, want) {
-		t.Fatalf("raw UTF16 not relocated losslessly: %x", target.values["C:name"].data)
-	}
-	if !bytes.Equal(target.values["multi"].data, utf16Bytes("C:\\a\x00c:\\b\x00\x00")) {
-		t.Fatal("MULTI_SZ relocation lost separators or terminators")
-	}
-	for _, name := range []string{"binary", "link"} {
-		if !bytes.Equal(target.values[name].data, utf16Bytes("X:")) {
-			t.Fatalf("relocated nonstring %s", name)
+// Read the built hive with the independent portable reader. These paths have
+// identical display strings but refer to different physical registry nodes.
+func TestHiveImportExclusionsPreserveLiteralComponents(t *testing.T) {
+	paths := [][]string{{"C:Literal/Slash", "Leaf"}, {"C:Literal", "Slash", "Leaf"}}
+	for _, minor := range []uint32{1, 2, 3, 4, 5} {
+		for selected := range paths {
+			for _, removeKey := range []bool{false, true} {
+				t.Run(fmt.Sprintf("1.%d/path%d/key%t", minor, selected, removeKey), func(t *testing.T) {
+					root := newRegistryTree("ROOT")
+					for _, parts := range paths {
+						node := ensureRegistryKeyParts(root, parts)
+						node.flags, node.flagsSet = 0, true
+						node.class = utf16Bytes("literal-class")
+						node.security = defaultRegistrySecurityDescriptor()
+						setRegistryValueParts(root, parts, "C:Value", registryData{typ: 0x1234, data: []byte{0xff, 0, 0x81}})
+						setRegistryValueParts(root, parts, "Text", registryString(regSZ, `C:\Windows`))
+						ensureRegistryKeyParts(root, appendRegistryPathPart(parts, "Empty"))
+					}
+					// Backslash, percent and dot spellings in component lists are
+					// literal too, not separators, escaping, or path normalization.
+					odd := []string{`Literal\Backslash`, "%2f", ".."}
+					ensureRegistryKeyParts(root, odd)
+					data, err := buildRegistryHiveWithFormat(root, registryHiveFormat{major: 1, minor: minor})
+					if err != nil {
+						t.Fatal(err)
+					}
+					parts := append([]string(nil), paths[selected]...)
+					parts[0] = "D:" + parts[0][2:]
+					// Case-insensitive lookup must not change component boundaries.
+					parts[len(parts)-1] = "lEAF"
+					record := starlark.NewDict(2)
+					if err := record.SetKey(starlark.String("key_parts"), registryPathList(parts)); err != nil {
+						t.Fatal(err)
+					}
+					option := "exclude_keys"
+					if !removeKey {
+						option = "exclude_values"
+						if err := record.SetKey(starlark.String("name"), starlark.String("d:vALUE")); err != nil {
+							t.Fatal(err)
+						}
+					}
+					value, err := hiveFromPatchesBuiltin(nil, nil,
+						starlark.Tuple{starlark.String("IMPORTED"), starlark.NewList(nil)},
+						[]starlark.Tuple{
+							{starlark.String("source"), testHiveFile(data)},
+							{starlark.String("source_drive"), starlark.String("C:")},
+							{starlark.String("target_drive"), starlark.String("D:")},
+							{starlark.String(option), starlark.NewList([]starlark.Value{record})},
+						})
+					if err != nil {
+						t.Fatal(err)
+					}
+					out, err := starfile.ReadAll(value.(starfile.File))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := binary.LittleEndian.Uint32(out[24:28]); got != minor {
+						t.Fatalf("format = %d, want %d", got, minor)
+					}
+					hive, err := registry.Open(testHiveFile(out))
+					if err != nil {
+						t.Fatal(err)
+					}
+					for index, sourceParts := range paths {
+						final := append([]string(nil), sourceParts...)
+						final[0] = "D:" + final[0][2:]
+						key, err := hive.LookupParts(final)
+						if removeKey && index == selected {
+							if err == nil {
+								t.Fatalf("excluded key survived: %q", final)
+							}
+							if _, err := hive.LookupParts(appendRegistryPathPart(final, "Empty")); err == nil {
+								t.Fatal("excluded descendant survived")
+							}
+							continue
+						}
+						if err != nil {
+							t.Fatal(err)
+						}
+						class, err := hive.KeyClass(key)
+						if err != nil || !bytes.Equal(class, utf16Bytes("literal-class")) || key.Flags != 0 {
+							t.Fatalf("metadata changed: %v", err)
+						}
+						security, err := hive.KeySecurity(key)
+						if err != nil || !bytes.Equal(security, defaultRegistrySecurityDescriptor()) {
+							t.Fatalf("security changed: %v", err)
+						}
+						if _, err := hive.LookupParts(appendRegistryPathPart(final, "Empty")); err != nil {
+							t.Fatalf("empty key lost: %v", err)
+						}
+						cells, err := hive.ValueCells(key)
+						if err != nil {
+							t.Fatal(err)
+						}
+						wantCount := 2
+						if !removeKey && index == selected {
+							wantCount = 1
+						}
+						if len(cells) != wantCount {
+							t.Fatalf("value count = %d, want %d at %q", len(cells), wantCount, final)
+						}
+						for _, cell := range cells {
+							v, err := hive.ReadValue(cell)
+							if err != nil {
+								t.Fatal(err)
+							}
+							switch v.Name {
+							case "D:Value":
+								if v.Type != 0x1234 || !bytes.Equal(v.Data, []byte{0xff, 0, 0x81}) {
+									t.Fatal("raw value changed")
+								}
+							case "Text":
+								if v.Type != regSZ || !bytes.Equal(v.Data, registryString(regSZ, `D:\Windows`).data) {
+									t.Fatal("text relocation changed")
+								}
+							default:
+								t.Fatalf("unexpected value %q", v.Name)
+							}
+						}
+					}
+					if _, err := hive.LookupParts(odd); err != nil {
+						t.Fatalf("literal backslash/percent/dot key lost: %v", err)
+					}
+				})
+			}
 		}
 	}
-	if target.values["unknown"].typ != 0x1234 || !bytes.Equal(target.class, key.class) || target.flags != key.flags {
-		t.Fatal("lost type or key metadata")
+}
+
+func TestHiveImportLegacyExclusionDoesNotMatchLiteralSlash(t *testing.T) {
+	root := newRegistryTree("ROOT")
+	ensureRegistryKeyParts(root, []string{"Literal/Slash", "Leaf"})
+	ensureRegistryKeyParts(root, []string{"Literal", "Slash", "Leaf"})
+	data, err := buildRegistryHive(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name := range result.subkeys {
-		if strings.EqualFold(name, "remove") {
-			t.Fatal("excluded subtree remains")
-		}
+	out := newRegistryTree("IMPORTED")
+	if err := importRegistryHive(out, testHiveFile(data), "", "", starlark.NewList([]starlark.Value{starlark.String(`\lITERAL\sLASH`)}), starlark.None); err != nil {
+		t.Fatal(err)
 	}
-	keep := ensureRegistryKey(result, "/keep")
-	if len(keep.values) != 0 || len(ensureRegistryKey(result, "/keep/child").values) != 1 {
-		t.Fatal("value exclusion was not exact-key/case-insensitive")
+	built, err := buildRegistryHive(out)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := result.subkeys["EMPTY"]; !ok {
-		t.Fatal("empty key lost")
+	hive, err := registry.Open(testHiveFile(built))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, drives := range [][2]string{{"X:", ""}, {"", "C:"}, {"XX:", "C:"}} {
-		if importRegistryHive(newRegistryTree("BAD"), source, drives[0], drives[1], starlark.None, starlark.None) == nil {
-			t.Fatalf("accepted invalid drives %q", drives)
-		}
+	if _, err := hive.LookupParts([]string{"Literal/Slash", "Leaf"}); err != nil {
+		t.Fatalf("literal sibling removed: %v", err)
+	}
+	if _, err := hive.LookupParts([]string{"Literal", "Slash"}); err == nil {
+		t.Fatal("legacy subtree survived")
 	}
 }

@@ -156,6 +156,14 @@ func inspectPatchRangeBounded(source, delta []byte, start, end int, maximumTarge
 			return PatchRangeInfo{}, err
 		}
 	}
+	if header.Version == "PA31" && header.FileTypeSet&0x100 != 0 {
+		trace := &patchTraceCollector{start: start, end: end}
+		target, err := decodePlaybackTraced(source, header.Patch, header.TargetSize, trace)
+		if err != nil {
+			return PatchRangeInfo{}, err
+		}
+		return PatchRangeInfo{Start: start, End: end, Decoded: append([]byte(nil), target[start:end]...), Matches: trace.matches}, nil
+	}
 	var preprocess *pePreprocess
 	var transformTrace *peTransformTrace
 	if includeTransforms {
@@ -271,6 +279,10 @@ func reconstructBounded(source, delta []byte, maximumTargetSize uint64) ([]byte,
 		if err := verifyHash("source", source, header.HashAlgorithm, header.ExtensionHash); err != nil {
 			return nil, nil, err
 		}
+	}
+	if header.Version == "PA31" && header.FileTypeSet&0x100 != 0 {
+		target, err := decodePlayback(source, header.Patch, header.TargetSize)
+		return target, header, err
 	}
 	originalSource := source
 	var preprocess *pePreprocess
@@ -503,17 +515,27 @@ func appendRiftedSource(target *[]byte, source []byte, length uint32, rift riftT
 }
 
 func appendCombinedMatch(target *[]byte, source []byte, start int, length uint32) error {
-	for range length {
-		if start < 0 || start >= len(source)+len(*target) {
-			return errors.New("combined source match ran past available history")
-		}
-		if start < len(source) {
-			*target = append(*target, source[start])
-		} else {
-			targetOffset := start - len(source)
-			*target = append(*target, (*target)[targetOffset])
-		}
-		start++
+	if length == 0 {
+		return nil
+	}
+	if start < 0 || start >= len(source)+len(*target) {
+		return errors.New("combined source match ran past available history")
+	}
+	if start < len(source) {
+		count := int(min(uint64(length), uint64(len(source)-start)))
+		*target = append(*target, source[start:start+count]...)
+		start += count
+		length -= uint32(count)
+	}
+	// History may overlap the appended bytes. Copy the available prefix in
+	// whole spans, allowing each span to become history for the next one.
+	offset := start - len(source)
+	for length != 0 {
+		count := int(min(uint64(length), uint64(len(*target)-offset)))
+		*target = append(*target, (*target)[offset:offset+count]...)
+		length -= uint32(count)
+		// Keeping offset fixed repeats the same period, doubling the usable
+		// prefix each iteration even for one-byte repetition matches.
 	}
 	return nil
 }

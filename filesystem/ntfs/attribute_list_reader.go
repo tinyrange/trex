@@ -1,6 +1,7 @@
 package ntfs
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 
@@ -21,6 +22,12 @@ type ntfsReadAttributeListEntry struct {
 func parseNTFSReadAttributeList(data []byte) ([]ntfsReadAttributeListEntry, error) {
 	var entries []ntfsReadAttributeListEntry
 	for offset := 0; offset < len(data); {
+		// Windows can retain zero-filled capacity after the last list entry.
+		// Accept only an entirely zero tail after a real entry: a zero type
+		// followed by nonzero data is not a terminator hiding more records.
+		if len(entries) != 0 && len(bytes.Trim(data[offset:], "\x00")) == 0 {
+			break
+		}
 		if len(data)-offset < 26 {
 			return nil, fmt.Errorf("truncated entry at %#x", offset)
 		}

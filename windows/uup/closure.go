@@ -98,7 +98,11 @@ func ResolveAssemblyClosure(installedPackages, installedComponents []AssemblyIde
 }
 
 func (i AssemblyIdentity) ExactKey() string {
-	return i.StableKey() + "\x00" + strings.ToLower(i.Version)
+	language := i.Language
+	if language == "" {
+		language = "neutral"
+	}
+	return strings.ToLower(strings.Join([]string{i.Name, i.PublicKeyToken, i.ProcessorArchitecture, language, i.Version}, "\x00"))
 }
 
 func newManifestCatalog(kind string, manifests []NamedAssemblyManifest) (*manifestCatalog, error) {

@@ -50,24 +50,34 @@ func (c *CPU) packedSinglesToDoubles(value uint64) ([16]byte, error) {
 	return result, nil
 }
 
-// signedIntegerToSingle performs one rounding directly from the integer, avoiding
-// double rounding through binary64 for 64-bit operands.
+// signedIntegerToSingle avoids double rounding through binary64 for qwords.
 func (c *CPU) signedIntegerToSingle(value int64) (uint32, error) {
+	result, err := c.signedIntegerToBinary(value, 23, 127, 31)
+	return uint32(result), err
+}
+
+func (c *CPU) signedIntegerToDouble(value int64) (uint64, error) {
+	return c.signedIntegerToBinary(value, 52, 1023, 63)
+}
+
+// signedIntegerToBinary rounds once from the full signed integer according to
+// MXCSR, including precision status and unmasked-exception behavior.
+func (c *CPU) signedIntegerToBinary(value int64, fractionBits, bias, signBit int) (uint64, error) {
 	if value == 0 {
 		return 0, nil
 	}
 	magnitude := uint64(value)
-	var sign uint32
+	var sign uint64
 	if value < 0 {
-		sign = 1 << 31
+		sign = uint64(1) << uint(signBit)
 		magnitude = -magnitude
 	}
 	exponent := bits.Len64(magnitude) - 1
 	significand := magnitude
-	if exponent <= 23 {
-		significand <<= uint(23 - exponent)
+	if exponent <= fractionBits {
+		significand <<= uint(fractionBits - exponent)
 	} else {
-		shift := uint(exponent - 23)
+		shift := uint(exponent - fractionBits)
 		significand = magnitude >> shift
 		remainder := magnitude & ((uint64(1) << shift) - 1)
 		if remainder != 0 {
@@ -91,13 +101,13 @@ func (c *CPU) signedIntegerToSingle(value int64) (uint32, error) {
 			if increment {
 				significand++
 			}
-			if significand == 1<<24 {
+			if significand == uint64(1)<<uint(fractionBits+1) {
 				significand >>= 1
 				exponent++
 			}
 		}
 	}
-	return sign | uint32(exponent+127)<<23 | uint32(significand)&0x7fffff, nil
+	return sign | uint64(exponent+bias)<<uint(fractionBits) | significand&((uint64(1)<<uint(fractionBits))-1), nil
 }
 
 func (c *CPU) truncateSingleToInteger(input uint32, width int) (uint64, error) {
@@ -106,6 +116,18 @@ func (c *CPU) truncateSingleToInteger(input uint32, width int) (uint64, error) {
 		input &= 0x80000000
 	}
 	value := float64(math.Float32frombits(input))
+	return c.truncateScalarToInteger(value, width, control)
+}
+
+func (c *CPU) truncateDoubleToInteger(input uint64, width int) (uint64, error) {
+	control := c.readMXCSR()
+	if control&(1<<6) != 0 && input&0x7ff0000000000000 == 0 {
+		input &= uint64(1) << 63
+	}
+	return c.truncateScalarToInteger(math.Float64frombits(input), width, control)
+}
+
+func (c *CPU) truncateScalarToInteger(value float64, width int, control uint64) (uint64, error) {
 	truncated := math.Trunc(value)
 	limit := math.Ldexp(1, width*8-1)
 	var exceptions, result uint64

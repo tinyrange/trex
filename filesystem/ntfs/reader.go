@@ -538,20 +538,7 @@ func (v *ntfsVolume) scanMFT(mft starfile.File, sectorSize int64) error {
 					continue
 				}
 				parent := binary.LittleEndian.Uint64(attribute.value[:8]) & 0x0000ffffffffffff
-				replaced := false
-				for index := range node.links {
-					if node.links[index].parent != parent {
-						continue
-					}
-					if ntfsReadNamespaceRank(namespace) > ntfsReadNamespaceRank(node.links[index].namespace) {
-						node.links[index] = ntfsReadLink{node: node, parent: parent, name: name, namespace: namespace}
-					}
-					replaced = true
-					break
-				}
-				if !replaced {
-					node.links = append(node.links, ntfsReadLink{node: node, parent: parent, name: name, namespace: namespace})
-				}
+				mergeNTFSReadLink(node, ntfsReadLink{node: node, parent: parent, name: name, namespace: namespace})
 			case ntfsAttrData:
 				file := &ntfsReadFile{name: node.name, volume: v.file, clusterSize: v.clusterSize, size: attribute.size, firstVCN: attribute.firstVCN, resident: attribute.value, runs: attribute.runs}
 				if attribute.flags&0x0001 != 0 {
@@ -823,14 +810,30 @@ func isSelfRelativeSecurityDescriptor(descriptor []byte) bool {
 }
 
 func mergeNTFSReadLink(node *ntfsReadNode, link ntfsReadLink) {
-	for index := range node.links {
-		if node.links[index].parent != link.parent {
+	// A parent can contain several distinct hardlink names for one record.
+	// Namespace ranking may discard a DOS alias, never a second long name.
+	for index, existing := range node.links {
+		if existing.parent != link.parent {
 			continue
 		}
-		if ntfsReadNamespaceRank(link.namespace) > ntfsReadNamespaceRank(node.links[index].namespace) {
-			node.links[index] = link
+		if strings.EqualFold(existing.name, link.name) {
+			if ntfsReadNamespaceRank(link.namespace) > ntfsReadNamespaceRank(existing.namespace) {
+				node.links[index] = link
+			}
+			return
 		}
-		return
+		if link.namespace == 2 && existing.namespace != 2 {
+			return
+		}
+	}
+	if link.namespace != 2 {
+		retained := node.links[:0]
+		for _, existing := range node.links {
+			if existing.parent != link.parent || existing.namespace != 2 {
+				retained = append(retained, existing)
+			}
+		}
+		node.links = retained
 	}
 	node.links = append(node.links, link)
 }

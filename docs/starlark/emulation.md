@@ -60,6 +60,28 @@ is `return`. `expected_return` and per-buffer `expected` validate the actual
 contract; instruction exhaustion is not a successful return. Set
 `expected_reason=None` only when explicitly inspecting other stop reasons.
 
+## AMD64 semantic-call profiling
+
+Use `machine.profile(calls=True, reset=True)` on an AMD64 machine to enable
+bounded timing of the original semantic callbacks, including dynamically
+resolved exports. This is independent of sampled instruction profiling;
+callbacks, arguments, native return values and instruction budgets are unchanged.
+Timing is off by default. `calls=False` disables collection, and `calls=None`
+leaves its setting unchanged.
+
+`profile(limit=256)` returns `calls` sorted by total elapsed seconds, along with
+`calls_enabled`, `call_tracked` and `call_dropped`. Each call record has `address`,
+`module`, `name`, `count`, `seconds`, `max_seconds`, and the `caller` and first
+sixteen integer `arguments` of its slowest observed invocation.
+`arguments_truncated` reports omitted arguments. No pointed-to memory is copied.
+Times are inclusive of nested native invocations, so do not sum nested durations
+as exclusive CPU time. Collection retains at most the constructor's
+`profile_limit` distinct callback addresses; calls at additional addresses are
+counted in `call_dropped`. `reset=True` returns the old report then clears both
+instruction and call counters, without changing either collection setting.
+Snapshots have independent counters. Reports include callbacks that fail, and
+do not turn those failures into successful native returns.
+
 ## Replace or wrap an installed method
 
 ```starlark
@@ -264,3 +286,265 @@ synchronous/asynchronous direct or preconfigured session creation and close.
 It retains the async flag but does not implement asynchronous requests or
 callbacks, and does not claim any network transfer succeeded. Unimplemented
 operations remain explicit stops.
+
+
+### Resource-only Windows modules
+
+The common Windows kernel/resource/user32 plugins share exact-path,
+reference-counted `LoadLibraryExW(..., 0, 0x20)` resource handles. This path
+parses the supplied PE as data: it does not map executable instructions,
+resolve dependencies, call DllMain, or require the resource PE's ISA to match
+the machine. Resource-only images remain absent from GetModuleHandle's
+executable inventory. FindResource/SizeofResource and LoadString bind the
+same immutable source; final FreeLibrary invalidates subsequent lookups.
+Other loader modes retain their existing, separate executable-mapping policy.
+
+LoadStringW's caller-buffer path returns UTF-16 code units and truncates at
+`capacity - 1` units, including when that boundary splits a surrogate pair.
+The libraryloader-l1-1-0 API-set export uses the same handler as user32.
+The secure wide CRT formatter supports bounded unsigned integer formats and
+bare non-null `%s`, with UTF-16 capacity/counts. Unsupported format modifiers,
+null-string invalid-parameter policy, and range-error handler execution are
+not replaced by fabricated success.
+
+
+The private CRT API-set `_o_malloc`/`_o_free` exports share the modeled CRT
+allocation arena with `malloc`/`free` and C++ allocation operators. They do not
+create an independent heap or relax allocation ownership checks. The native
+SecureBoot advanced installer exercises these exports through factory creation
+and final release.
+
+The WCP/Events initialization path additionally exercises these bounded services:
+
+- `_o___stdio_common_vswprintf` handles unsigned integer and explicit narrow/
+  wide string conversions with the UCRT legacy-termination flag, default locale,
+  and UTF-16 capacity/return counts. `_o___stdio_common_vsnprintf_s` handles
+  bounded signed/unsigned integer formats and widths, including sign-aware zero padding. Both reject unsupported options,
+  formats, locales and truncation/error-handler paths before writing output.
+  UCRT's 64-bit options word occupies two x86 stack slots and one x64 slot;
+  variadic 64-bit integers likewise preserve the Windows ABI. SDK
+  `corecrt_stdio_config.h` option bits are used, not guessed MSVCRT aliases.
+- Private `_o__itow_s` and `wcschr`, and string-API-set `wcsnlen`, reuse the existing
+  implementations. Private `_o_towupper` and `_o__wcsicmp` admit only their
+  verified ASCII/default-locale subset (and WEOF for the former); unsupported
+  NLS-dependent input fails explicitly.
+- `RtlCreateUnicodeStringFromAsciiz` owns a tracked allocation released through
+  `RtlFreeUnicodeString`. Only bounded ASCII input is admitted without native
+  NLS tables. `LdrGetDllHandleEx` currently supports only default-directory
+  lookup of an absent ASCII module basename, returning `STATUS_DLL_NOT_FOUND`
+  without changing the output pointer. Found-module refcount/pinning semantics
+  and nondefault options deliberately stop rather than return invented handles.
+- `LdrDisableThreadCalloutsForDll` validates an exact mapped-module base and
+  records DontCallForThreads in plugin state. The inspected NTDLL returns
+  success for static-TLS modules **without** setting that flag; the emulator
+  follows this distinction. Once this bounded loader contract is active,
+  CreateThread/work-item creation rejects modules still needing native thread
+  notifications or per-thread static TLS. It does not silently omit that work.
+  This does not generalize the older separate DisableThreadLibraryCalls model.
+
+These operations enable real WCP parsing and EventsInstaller queue/commit;
+none stand in for an installer result or an exception handler. See the native
+Events section of `../formats/csi-offline-state.md` for exact binary identities,
+independent Install/Inspect behavior and deliberately incomplete CBS scope.
+
+The private CRT `_o_memcpy_s` entry point supports zero-count calls and valid,
+nonoverlapping copies up to 16 MiB. It preserves binary bytes and destination
+guards on x86 and x64. Invalid arguments, overlap, and oversized operations
+stop before writes instead of inventing an invalid-parameter handler policy.
+The private `_o__errno` entry point shares the public `_errno` per-thread,
+guest-memory-backed integer; it does not clear errors or return a success code.
+`_o__wcstoui64` and `_wcstoui64` support bounded C-locale integer prefixes,
+base autodetection, optional UTF-16 end pointers, unsigned negation and overflow
+saturation with ERANGE. x86 returns the full result in EDX:EAX. Null inputs or
+invalid bases set EINVAL and stop rather than inventing invalid-handler policy.
+
+`RtlTimeToTimeFields` converts nonnegative signed 64-bit NT timestamps using the deterministic Gregorian calendar, including leap-century rules and millisecond truncation. Its eight SHORT fields use TIME_FIELDS order (weekday last), not SYSTEMTIME order. Negative timestamps and null pointers remain explicit unsupported inputs; no host clock is consulted.
+
+Native counted Unicode copy and append use the target pointer width, preserve raw UTF-16 units (including surrogate pairs and unpaired surrogates), and leave append output unchanged on insufficient capacity. They do not reinterpret the amd64 descriptor padding as a 32-bit buffer pointer.
+
+### Module filenames and native registry transactions
+
+`runner.run(module_paths={...})` and `kernel32_plugin(module_paths={...})`
+accept explicit guest filenames keyed by module name. `GetModuleFileNameA/W`
+uses the requested HMODULE; it no longer substitutes the primary module path
+for dependencies. The runner preserves declared `files` paths using the loader's
+same first-match selection. No host filename or guessed system directory is
+introduced. Unknown handles fail without writing; UTF-16 capacities count code
+units. Truncation follows the modeled XP versus Vista+ contract.
+
+`registry_transactions_plugin(registry, kernel)` supports unnamed local
+`NtCreateTransaction`, synchronous `NtCommitTransaction`/`NtRollbackTransaction`,
+and `RegOpenKeyTransactedW`/`RegCreateKeyTransactedW`. Transacted key operations
+use private registry overlays. Ordinary handles cannot observe those writes
+until commit; rollback and closing an active transaction discard them. Commit
+rejects intervening ordinary writes instead of overwriting them. Named or
+distributed transactions, timeouts, alternate registry views, asynchronous
+completion and non-close use of terminal transacted key handles remain explicit
+unsupported paths. This is isolated registry state, not host KTM or a claim of
+complete Windows transaction semantics.
+
+Native NetSetup initialization additionally exercises the NTDLL classic ETW
+aliases (`EtwRegisterTraceGuidsA/W`, `EtwUnregisterTraceGuids`, enable queries,
+and trace-message calls). They share the ADVAPI provider table and preserve
+64-bit REGHANDLE values on both x86 and x64. No host tracing session is enabled.
+AMD64 `UNPCKHPD` preserves source lanes for aliased operands and does not modify
+registers or flags when its memory operand faults.
+
+`wcscpy_s` copies raw UTF-16 units with bounded capacities. Invalid/range inputs
+clear the documented destination prefix and set errno, then stop because native
+invalid-parameter-handler policy is not supplied. `VarUI4FromStr` (OLEAUT32
+ordinal 277 and its named export) supports the observed decimal-integer subset,
+including DWORD overflow and guard preservation; other numeric forms, locales,
+and nonzero flags fail explicitly rather than being silently approximated.
+
+The process environment publishes `PEB.ImageBaseAddress` and bounded loader-list
+prefixes for actual mapped PE images. Lists preserve native pointer widths and
+owned filename buffers, keep the primary image first, and refresh when the runner
+maps a dependency. Semantic export placeholders are not fabricated as PE images.
+Unmodeled loader metadata and unloading remain outside this prefix model.
+
+Modern NTDLL ETW aliases (`EtwEventRegister`, `EtwEventSetInformation`,
+`EtwEventEnabled`, `EtwEventWrite`, `EtwEventUnregister`) share the Event Log
+plugin's provider ownership with their ADVAPI32 forwarders.
+`LdrQueryImageFileExecutionOptions` queries explicit target SOFTWARE state:
+absent values return name-not-found; the supported present-value subset is a
+matching DWORD with sufficient output space. Other type/buffer policies stop.
+`RtlGetAppContainerNamedObjectPath` follows the inspected non-AppContainer branch:
+success with an empty native-width UNICODE_STRING, not an invented container path
+or a NOT_APPCONTAINER failure. Explicit AppContainer SIDs are unsupported.
+
+
+Object-directory admission is explicit. `object_directories` maps absolute NT
+names to allowed specific/standard access masks, or records containing `access`
+and self-relative `security` bytes. Opens retain independent owned handles;
+case-insensitive lookup is opt-in, and invalid/closed roots and excess rights
+cannot manufacture an object. This is an admission model, not an ACL evaluator.
+Security queries require READ_CONTROL and actual target NTDLL
+`RtlQuerySecurityObject`; no descriptor is synthesized when facts are missing.
+`object_security_module` can select a separately admitted native implementation
+image without publishing all its unrelated optional exports to the target loader.
+The native routine performs descriptor projection and required-size handling.
+
+Native token queries support owned `TokenStatistics` (class 10), owner, primary
+group, integrity level, and explicitly supplied default-DACL/process-trust facts.
+Class 6 is `TokenDefaultDacl`, not a statistics shortcut. `token_facts` may provide
+`owner`, `primary_group` and `process_trust_sid` SID bytes, `default_dacl` ACL bytes,
+and an `integrity_level` RID. Empty bytes explicitly denote a NULL default DACL
+or absent process-trust SID; omission is unknown and fails closed for those two
+queries. Owner/group otherwise use the explicit setup identity, and integrity
+defaults to high. These model facts are not host account or protected-process
+observations. Token statistics keep identity stable across handles, assign new
+identities to duplicates, and change ModifiedId for actual privilege changes.
+
+### Native setup-process queries and CRT fields
+
+`NtQuerySystemInformation` classes 0 and 1 describe the same bounded
+single-processor model as `GetNativeSystemInfo`, not the host CPU. Class 0 uses
+44 bytes on x86 and 64 on AMD64, with native-width address/mask fields. Class 1
+uses the 12-byte processor structure on both architectures. Its KF feature bits
+are translated from the modeled PF instruction-feature indices (CMPXCHG8B, MMX,
+SSE, 3DNow, RDTSC, SSE2, SSE3); kernel paging and vendor capabilities are not
+inferred. Short buffers preserve their contents and report the required length;
+a sufficient-length NULL output is an access violation. ReturnLength is optional.
+
+Read-only native token queries recognize the architecture-width pseudo handles
+for current process (-4), current thread (-5), and effective token (-6). No
+impersonation token means STATUS_NO_TOKEN for -5, while -6 selects the process
+token. These queries neither create handles nor authorize mutating token APIs.
+Unknown default-DACL or process-trust facts still fail closed; explicit empty
+facts mean NULL, not a fabricated default.
+
+The secure wide formatter shares one renderer between `swprintf_s` and
+`vswprintf_s`, with native stack/va-list argument acquisition. The bounded string
+forms `%s`, `%ls`, and `%ws` count UTF-16 units, including surrogate pairs.
+Invalid-parameter/range-handler policy remains an explicit stop, not assumed
+successful truncation. The scanf integer subset supports multiple fields,
+literal separators, widths and suppression, including native GUID/property-key
+formats. It consumes only actual pointer arguments, preserves unassigned output
+on partial matches, and distinguishes EOF from matching failure; string scanning
+and general secure scanf policy are not implied.
+
+AMD64 ADDSS preserves the upper 96 destination bits and integer flags. Its
+finite-normal/signed-zero subset uses exact guard/round/sticky alignment for all
+four MXCSR rounding modes, including exponent gaps beyond binary64 precision.
+Inexact masked operations set the precision status; unmasked precision stops
+before updating the destination/PC. NaNs, infinities, subnormal operands/results,
+and overflow remain explicit unsupported boundaries, as with the existing
+bounded scalar multiply/divide model.
+
+### Owned registry-handle duplication
+
+The Windows runner connects registry handles to `DuplicateHandle`, native
+`NtDuplicateObject`/`ZwDuplicateObject`, and `NtClose` through an ownership
+bridge. The admitted subset is same-process, non-inheritable duplication with
+`DUPLICATE_SAME_ACCESS` or an explicit concrete subset of the source grant,
+optionally `DUPLICATE_CLOSE_SOURCE`. Native duplicates return NTSTATUS without
+changing Win32 last-error state; both process handles must be the current-process
+pseudo-handle. Generic/MAXIMUM_ALLOWED requests and access expansion fail closed.
+KEY_WOW64 selector bits choose a view and are not retained as granted rights.
+The duplicate has an independent lifetime but retains the source key object,
+granted-access metadata and deletion tombstone. It cannot retarget a newly
+created key at the old pathname. Active transacted duplicates remain routed to
+their private overlay; they do not expose uncommitted changes to ordinary keys.
+Unsupported inheritance/access-selection modes stop before mutation. Predefined
+HKEY constants are not duplicable kernel handles. These checks do not claim
+complete access enforcement for every existing registry API.
+
+The process-environment plugin reserves an owned zeroed page for the PEB rather
+than allocating only its populated prefix. Native NTDLL reads AMD64 pShimData at
+`+2d8`; the old 256-byte allocation let that read alias later loader records.
+Loading an additional real runtime therefore looked like an enabled shim table.
+The larger reserved region prevents module-count-dependent process state; it
+does not implement appcompat or claim semantics for every reserved PEB field.
+
+
+## Explicit native AMD64 exception runtime
+
+`windows/emulation:native_exceptions.star` binds explicitly supplied real NTDLL
+and MSVCRT PE images. RaiseException marshaling tail-enters native RtlRaiseException;
+NTDLL walks actual PE unwind tables and native MSVCRT chooses and executes its
+own cleanup/catch funclets. RtlUnwindEx and RtlRestoreContext remain native code.
+The bridge does not replace private installer routines or manufacture HRESULTs.
+It is opt-in, requires AMD64, bounds retained exception records, and exposes
+`finish(machine)` for teardown after all native calls. Its `state.raises` is an
+input audit, not an independent claim that exceptions were handled. Unsupported
+hardware dispatch, dynamic tables, privileged returns and nonlocal transfers
+across embedding `machine.invoke` boundaries are not silently emulated.
+
+NtQueryVirtualMemory/ZwQueryVirtualMemory class 6 (MemoryImageInformation) accepts
+only the current-process pseudo-handle and actual loaded PE extents. Its x86 and
+AMD64 layouts are 12 and 24 bytes. Short outputs remain untouched; non-image
+addresses and unimplemented classes fail explicitly. Signing level zero means
+unverified, not trusted. Native NTDLL uses this boundary to discover its mapped
+exception tables, without reading host memory or synthesizing loader tables.
+
+The AMD64 processor implements FNSTCW and FXRSTOR for the admitted reset x87
+state; FXRSTOR restores all sixteen XMM registers and validated MXCSR atomically.
+Non-reset x87 contexts remain explicitly unsupported. IRETQ admits only unchanged,
+non-null CPL3 CS/SS selectors and canonical 48-bit RIP/RSP. It consumes all five
+long-mode frame slots, preserves IOPL and appropriately restricts IF, restores RF,
+and rejects task/virtualization flags and privilege/selector changes before
+mutating CPU state. The Windows environment initializes CS=33h and SS=2bh;
+segment bases remain independent. These instructions let real NTDLL capture and
+restore the language-handler context rather than substituting a catch jump.
+
+### Native registry metadata and performance counters
+
+`NtQueryKey` supports KeyFullInformation (class 2) and KeyCachedInformation
+(class 4). Both require KEY_QUERY_VALUE and preserve the separate deletion and
+handle-lifetime checks. Full information reports source-backed class bytes,
+current direct child/value counts, and UTF-16 byte maxima. Short fixed headers
+return STATUS_BUFFER_TOO_SMALL without output; a complete header with truncated
+class data returns STATUS_BUFFER_OVERFLOW with the full required length. Source
+key timestamps are preserved; overlay writes do not synthesize a running registry
+clock. Newly created classless keys use zero time. Other information classes
+remain explicit unsupported boundaries.
+
+Hive key attributes `class_bytes` and `last_write_time` expose the raw class
+payload and unsigned NT FILETIME, respectively. They are read-only metadata,
+not a mutation API or an inferred empty class.
+
+`NtQueryPerformanceCounter`/`ZwQueryPerformanceCounter` share the existing
+Win32 deterministic clock and 10 MHz frequency. Both outputs are 64-bit on x86
+and AMD64; frequency is optional. The native API returns NTSTATUS and leaves
+last-error unchanged. It does not measure host execution time.

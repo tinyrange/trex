@@ -812,6 +812,25 @@ Models GetAdaptersInfo for an explicitly empty IPv4 adapter inventory.
     adapter or successful empty linked list. It is not installed by default;
     disconnected but configured adapters require a different inventory model.
 
+## `windows/emulation/native_exceptions.star`
+
+Execute AMD64 language-specific exception handling in explicit native DLLs.
+
+This bridge marshals RaiseException and binds public runtime exports. Native
+NTDLL walks PE unwind tables; native MSVCRT runs matching, cleanup, and catch
+funclets. No private installer address or canned exception outcome is used.
+
+### `native_exceptions_plugin`
+
+Bind explicitly loaded AMD64 runtime images; no implicit DLL loading.
+
+    Install after the shared Windows process semantics. `finish(machine)` frees
+    owned exception records only after the caller has completed all native calls
+    and teardown; it closes this bridge to subsequent raises. `state.raises`
+    records requested exceptions, not an assertion that each was handled.
+    Hardware exceptions, dynamic function tables and nonlocal transfers across
+    an embedding `machine.invoke` boundary are not supplied by this bridge.
+
 ## `windows/emulation/patterns.star`
 
 Compact, validated executable signatures and emulator transformations.
@@ -921,16 +940,51 @@ Runs one target export or executable using semantic system-DLL plugins.
     any of its values. `process_create_provider(machine, request)` supplies a
     bounded semantic result for child-process creation. Each `plugin_factories`
     callback runs after the core
-    runtime plugins are constructed and receives a record containing `crt` and
-    `module_files`; it must return one emulator plugin. This lets callers add
+    runtime plugins are constructed and receives a record containing `crt`,
+    `cryptoapi`, `kernel`, and `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
+    `object_directories` maps exact NT directory names to explicit allowed access
+    masks (or records with access and explicit self-relative security bytes).
+    Queries execute RtlQuerySecurityObject in the explicit `object_security_module`.
+    This grants no host namespace access or synthetic security descriptors.
+    `module_paths` supplies explicit guest filenames for module-handle filename
+    queries; it does not load images or infer paths from host file objects.
     `virtual_modules` explicitly adds semantic DLL names to LoadLibrary lookup;
     callers must supply their exports through plugins. No native DLL is loaded. Keys
     missing from those plugins still fail on resolution or invocation.
+    `api_set_namespace` supplies the parsed target Windows API-set schema to
+    loader lookup, including importer-specific hosts. It neither admits host
+    modules nor supplies exports: use explicit virtual_modules or actual module
+    sources. `loader_lookup_observer(machine, query)` observes module/procedure
+    lookup before return, and may stop a missing required capability before a
+    native delay-loader exception. No exception is suppressed or handled for it.
+    `token_privileges` is an explicit LUID-to-attribute inventory for the
+    modeled caller's primary token (enabled bit 2, enabled-by-default bit 1).
+    Native backup/restore registry opens consult the current effective token,
+    including subsequent privilege changes and thread impersonation.
+    It defaults empty: AdjustTokenPrivileges cannot grant an unowned privilege.
+    This is emulator caller policy, not a change to the offline target image.
+    `registry_key_deletions` retains successful key-removal events, including
+    empty keys and names later recreated. Reconcile them with final registry
+    keys and value patches; they are effects, not a committed hive image.
+    `registry_effects` additionally captures only surviving touched value bytes,
+    final key metadata and removals. Use it rather than replaying historical
+    sets after key deletion. Missing key-creation security remains explicit.
+    `registry_hive_mounts` supplies explicit static source-hive namespace mounts
+    to registry_plugin. It does not emulate hive loading or infer user profiles;
+    effects preserve namespace paths for caller-directed hive publication.
+    `registry_creation_provider(machine, request)` is passed to registry_plugin's
+    on_create_key boundary, including the exact view's existing parent security.
+    It must supply all missing descriptors before any key mutation; the runner
+    never infers inheritance policy or falls back to copying a parent ACL.
     `generated_entries` retains newly created or changed files and directories
     as path-keyed records with `directory`, file `data`, and optional DOS
-    `attributes` and owned self-relative `security` bytes. `generated_files`
+    `attributes`, raw file times, `extended_attributes` name/flags/value dictionaries,
+    and owned self-relative `security` bytes. EA records are copied, not shared
+    with mutable execution state. `generated_files`
     is the content-only compatibility view; use entries to preserve metadata.
+    A `hardlink_to` entry names the canonical generated path of the same file
+    object. Content-only consumers deliberately lose this identity information.
 
 ## `windows/emulation/urlmon.star`
 
@@ -1657,6 +1711,15 @@ Semantic CryptoAPI and WinTrust registration contracts.
 The plugin consumes public registration structures passed by a target export.
 It does not execute CRYPT32 or WINTRUST implementation DLLs.
 
+### `bcrypt_hash_plugin`
+
+CNG SHA-1/SHA-256 pseudo-algorithm handles and owned ordinary hashes.
+
+    Uses the documented Windows 10 SHA pseudo handles. Unkeyed non-reusable hashes use an owned opaque object. The 256-byte
+    caller-object footprint matches measured target primitive-provider queries
+    and successful native creation; no private Microsoft object layout is exposed. Other algorithms and flags stop explicitly;
+    hashing never establishes certificate, catalog or signature trust.
+
 ### `crypto_registration_plugin`
 
 Models WinTrust action, default-usage, SIP, and OID registration.
@@ -1749,6 +1812,25 @@ Bounded semantic MSXML DOM interfaces backed by `binary.xml`.
 
 Returns a pluggable COM provider for MSXML DOM document classes.
 
+## `windows/selfreg/objects.star`
+
+Explicit object-manager directory facts, independent of the host namespace.
+
+### `object_directories_plugin`
+
+Open declared absolute directories with caller-supplied allowed access.
+
+    `directories` maps exact NT names to allowed specific/standard access masks.
+    Values may also be records with `access` and explicit self-relative `security`
+    bytes. NtQuerySecurityObject checks owned-handle rights and delegates projection
+    to the real mapped target NTDLL RtlQuerySecurityObject. `security_module` may
+    name a separately admitted native implementation image, without exposing its
+    unrelated optional exports to the target loader. Missing security facts
+    or native implementation fail closed. These are admission facts, not an ACL
+    access evaluator. No default objects, host namespace, enumeration, mutation, generic access,
+    inheritance or symbolic links are supplied. Relative opens require an owned
+    directory root. Unknown names in this closed namespace return not-found.
+
 ## `windows/selfreg/plugins.star`
 
 Composable import-hook plugins for Windows self-registration emulation.
@@ -1806,6 +1888,10 @@ Parses one textual REGINST resource into registry operations.
 
 Registry API plugin for deterministic Windows self-registration emulation.
 
+### `registry_handles_plugin`
+
+Connect owned registry keys to same-process kernel handle operations.
+
 ### `registry_plugin`
 
 Returns a registry plugin initialized from hive-style dictionaries.
@@ -1815,7 +1901,38 @@ Returns a registry plugin initialized from hive-style dictionaries.
     Initial keys use `hive` and `key`; they make empty setup-created namespaces
     observable without being reported as writes. `hives` may map hive names to
     parsed `windows.hive` objects; these are consulted lazily and overridden by
-    explicit keys, values, and subsequent writes.
+    explicit keys, values, and subsequent writes. Static `mounts` entries
+    contain hive, key (encoded non-root namespace path), and parsed source hive.
+    Mounts are nonoverlapping immutable inputs, not RegLoadKey/NtLoadKey emulation.
+    Their metadata and values remain source-backed; effects retain mounted
+    namespace paths for caller-directed publication. Removing a mount or an
+    ancestor is unsupported, rather than deleting across hive boundaries.
+    RegDeleteKey(A/W/Ex) deletes only leaves, including lazy source values;
+    open references remain owned and cannot alias a recreated name. Ex accepts
+    default/native views only. Alternate views, empty-name self-deletion and
+    complete NT ACL authorization are not modeled. key_deletions() reports
+    successful key removals, including empty source keys and names later
+    recreated; callers must reconcile those events with final keys/values.
+    effects() captures surviving owned value bytes, final key metadata and
+    removals before hive teardown; unlike patches(), it cannot resurrect a
+    write made to an earlier deleted key object. Neither report supplies
+    missing key-creation security or implies a committed hive image.
+    on_create_key(machine, request) may supply exact final descriptors for
+    every missing key in one native create request. It runs before mutation
+    and must return an encoded-key-to-bytes dictionary covering missing_keys.
+    Request metadata includes API, creator descriptor address, class/options
+    and access. parent_key and parent_security identify the nearest existing
+    ancestor in this exact view, including transacted security; an unknown
+    descriptor stays None. Caller-specific inheritance/identity policy stays outside this
+    registry namespace model. Without a provider, creation security is unknown.
+    on_open_key(machine, request) optionally resolves existing-key opens against
+    the exact overlay/source descriptor. Return concrete granted rights or None
+    for access denied. Unknown descriptors remain None, never a null DACL.
+    This callback does not establish new-key authorization or inheritance.
+    effective_token_privileges() supplies a fresh LUID-to-attributes mapping for
+    backup/restore opens of existing keys. No provider fails closed; no enabled
+    backup/restore privilege returns access denied. New backup/restore keys
+    remain unsupported rather than inventing privileged creation security.
 
 ## `windows/selfreg/rpcrt.star`
 
@@ -1858,16 +1975,51 @@ Runs one target export or executable using semantic system-DLL plugins.
     any of its values. `process_create_provider(machine, request)` supplies a
     bounded semantic result for child-process creation. Each `plugin_factories`
     callback runs after the core
-    runtime plugins are constructed and receives a record containing `crt` and
-    `module_files`; it must return one emulator plugin. This lets callers add
+    runtime plugins are constructed and receives a record containing `crt`,
+    `cryptoapi`, `kernel`, and `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
+    `object_directories` maps exact NT directory names to explicit allowed access
+    masks (or records with access and explicit self-relative security bytes).
+    Queries execute RtlQuerySecurityObject in the explicit `object_security_module`.
+    This grants no host namespace access or synthetic security descriptors.
+    `module_paths` supplies explicit guest filenames for module-handle filename
+    queries; it does not load images or infer paths from host file objects.
     `virtual_modules` explicitly adds semantic DLL names to LoadLibrary lookup;
     callers must supply their exports through plugins. No native DLL is loaded. Keys
     missing from those plugins still fail on resolution or invocation.
+    `api_set_namespace` supplies the parsed target Windows API-set schema to
+    loader lookup, including importer-specific hosts. It neither admits host
+    modules nor supplies exports: use explicit virtual_modules or actual module
+    sources. `loader_lookup_observer(machine, query)` observes module/procedure
+    lookup before return, and may stop a missing required capability before a
+    native delay-loader exception. No exception is suppressed or handled for it.
+    `token_privileges` is an explicit LUID-to-attribute inventory for the
+    modeled caller's primary token (enabled bit 2, enabled-by-default bit 1).
+    Native backup/restore registry opens consult the current effective token,
+    including subsequent privilege changes and thread impersonation.
+    It defaults empty: AdjustTokenPrivileges cannot grant an unowned privilege.
+    This is emulator caller policy, not a change to the offline target image.
+    `registry_key_deletions` retains successful key-removal events, including
+    empty keys and names later recreated. Reconcile them with final registry
+    keys and value patches; they are effects, not a committed hive image.
+    `registry_effects` additionally captures only surviving touched value bytes,
+    final key metadata and removals. Use it rather than replaying historical
+    sets after key deletion. Missing key-creation security remains explicit.
+    `registry_hive_mounts` supplies explicit static source-hive namespace mounts
+    to registry_plugin. It does not emulate hive loading or infer user profiles;
+    effects preserve namespace paths for caller-directed hive publication.
+    `registry_creation_provider(machine, request)` is passed to registry_plugin's
+    on_create_key boundary, including the exact view's existing parent security.
+    It must supply all missing descriptors before any key mutation; the runner
+    never infers inheritance policy or falls back to copying a parent ACL.
     `generated_entries` retains newly created or changed files and directories
     as path-keyed records with `directory`, file `data`, and optional DOS
-    `attributes` and owned self-relative `security` bytes. `generated_files`
+    `attributes`, raw file times, `extended_attributes` name/flags/value dictionaries,
+    and owned self-relative `security` bytes. EA records are copied, not shared
+    with mutable execution state. `generated_files`
     is the content-only compatibility view; use entries to preserve metadata.
+    A `hardlink_to` entry names the canonical generated path of the same file
+    object. Content-only consumers deliberately lose this identity information.
 
 ## `windows/selfreg/script.star`
 
@@ -1917,6 +2069,21 @@ Models INF access, install sections, queues, and process-local logging.
     File operations stay inside the supplied virtual kernel backend and
     registry sections are applied through the live registration model.
 
+## `windows/selfreg/transactions.star`
+
+Bounded, isolated KTM registry transactions for native installer calls.
+
+### `registry_transactions_plugin`
+
+Model unnamed local transactions with synchronous commit and rollback.
+
+    Registry operations through transacted handles use private overlays. Ordinary
+    handles continue seeing committed state. Commit publishes only after checking
+    that the parent overlay has not changed; concurrent writers are unsupported,
+    never silently overwritten. Rollback and closing an active transaction discard
+    its overlay. Named/distributed transactions, timeouts, notifications, alternate
+    registry views, and non-close use of terminal transacted keys fail closed.
+
 ## `windows/selfreg/typelib.star`
 
 Registry policy for MSFT and SLTG type libraries exposed by windows.pe().
@@ -1954,7 +2121,9 @@ Models registration-time COMCTL32 controls and headless property sheets.
 Models a mutable Win32 environment.
 
     `system_time` is a portable Unix timestamp used to initialize the
-    KUSER_SHARED_DATA wall clock visible to native code.
+    KUSER_SHARED_DATA wall clock visible to native code. Its read-only
+    NtSystemRoot is initialized from SystemRoot (or windir, then C:\Windows);
+    later process-environment changes do not change that boot-time fact.
 
 ### `event_log_plugin`
 
@@ -1968,9 +2137,33 @@ Models registration-visible GDI stock objects without a host display.
 
 Models deterministic allocation, strings, paths, files, and OS facts.
 
+    `module_paths` maps module names to explicit guest filenames, preserving
+    their spelling. GetModuleFileName uses the requested HMODULE, not the
+    primary filename for every image. An unspecified dependency keeps its
+    loader name; no host path or guessed system directory is substituted.
+    `api_set_namespace` is an optional parsed target namespace from
+    windows.api_set_namespace. API-set loads and handle lookup resolve its actual
+    host using the native caller's mapped module as importer. Host admission and
+    exports remain explicit: a namespace does not supply missing DLLs or APIs.
+    `on_loader_lookup(machine, query)` observes module/procedure lookups before
+    their return; queries include kind, module and found, plus procedure or API
+    fields. A capability guard may raise there; machine.run can retry the same
+    pending lookup after the required implementation has been installed.
     `files` maps guest paths to bytes or trex files. They are made
     available directly to target file APIs without host filesystem staging.
     `directories` supplies empty or otherwise implicit guest directories.
+    `prepared_file_entries` is cloned; names sharing an entry retain their
+    alias relationship without sharing mutable metadata with the caller.
+    File handles and mappings retain that object across rename/recreation.
+    CreateHardLinkA/W requires explicit local NTFS `volumes` facts; distinct
+    declared drives reject cross-volume links. Links share content, security,
+    file IDs, and sharing checks. Delete-pending names are removed after the
+    last modeled handle/view releases the object. CreateFileA/W DELETE_ON_CLOSE
+    retains the requesting open object across DuplicateHandle and rename; it
+    requires delete sharing and does not delete a later path occupant. The
+    distinct NtCreateFile FILE_DELETE_ON_CLOSE option remains unsupported.
+    Reparse links, drive aliases,
+    full NT authorization, and resizing live mapped views are not modeled.
     `on_thread_create(event, thread)` may schedule the captured start routine
     using emulator control APIs; no host thread is created implicitly.
     `on_system_query(machine, query)` may inspect one live, bounded diagnostic
@@ -1988,6 +2181,11 @@ Models the memory-backed LZ file-handle APIs used by setup helpers.
 ### `msvcrt_plugin`
 
 Models CRT memory, strings, locale data, and guest-backed streams.
+
+    wcstok_s uses caller-owned continuation pointers and UTF-16 code-unit
+    offsets, retaining the terminator address after exhaustion. Its invalid
+    arguments set the modeled per-thread errno to EINVAL and stop explicitly:
+    the secure CRT invalid-parameter handler/fail-fast policy is not simulated.
 
 ### `netapi_plugin`
 
@@ -2025,6 +2223,15 @@ Exposes immutable PE resources, selected by live module handles.
 ### `security_plugin`
 
 Models an elevated interactive token for setup-time Win32 checks.
+
+    Native ACE append and absolute/self-relative descriptor validation support
+    bounded simple ACEs, real SID/mask bytes, NT statuses and failure atomicity.
+    Descriptor conversion preserves native component order and sizing behavior;
+    it is serialization, not access authorization. Self-impersonation and bounded
+    native token duplication/thread attachment retain owned token objects and
+    independent privilege attributes. Native privilege adjustment reports real
+    changes and STATUS_NOT_ALL_ASSIGNED; it cannot invent unowned privileges. Existing non-simple ACE
+    validation remains an explicit gap. None of these changes image ACL policy.
 
 ### `shell32_plugin`
 
@@ -2064,6 +2271,2058 @@ Models Winsock with explicit DNS data and exclusively in-memory connections.
     connect(address_bytes, port, server_channel) returns True to accept a
     connection. The provider receives the server end of a memory pair; there
     is no native networking fallback. Retain mutable server state in a plugin.
+
+## `windows/servicing/appx_native.star`
+
+Publish AppxReg's native queued user-registration invalidations atomically.
+
+Manifest registry declarations constrain package names only. The real AppxReg
+Commit and WCP primitive executor decide which existing user records to remove.
+This is not AppX deployment, provisioning, or a CBS completion declaration.
+
+### `apply_native_appx`
+
+Run the qualified native AppX queue and publish authorized deletions on root; reject missing hives, incomplete queues and stale sources.
+
+### `appx_package_authority`
+
+Derive deletion authority from bounded, explicitly selected AppX jobs.
+
+### `plan_native_appx`
+
+Validate deletion-only AppX effects against job authority and the exact source hive; return registry plans without publication.
+
+## `windows/servicing/backup.star`
+
+BootRecovery backups selected from admitted component transitions.
+
+WCP 9703 ContainsBackup (113310) selects the exact category identity.
+FormatBackupFileNameWithReallocate (26c05c) uses the low 32 bits of
+RtlHashEncodedLBlob, lowercase, plus the sanitized component filename.
+Backups are independent files, not aliases of the protected source object.
+
+### `apply_update_backups`
+
+Preflight the complete backup plan, then publish independent copies and retirements on root; return selected/written/retired counts.
+
+### `plan_update_backups`
+
+Select BootRecovery copies and retirements from admitted manifests, checking exact staged hashes and retaining source/destination epochs.
+
+## `windows/servicing/boot_installers.star`
+
+Native offline FVE/SecureBoot admission; not firmware or CBS completion.
+
+### `apply_update_boot_installers`
+
+Execute bounded offline boot-installer jobs and publish checked effects; online firmware and CBS lifecycle remain separate.
+
+### `boot_installer_jobs`
+
+Collect supported offline FVE and SecureBoot jobs from admitted runtime transitions; reject unsupported declarations.
+
+### `publish_secureboot_effects`
+
+Validate and publish the qualified SecureBoot value on root; return emitted patches, not firmware-update completion.
+
+### `validate_secureboot_effects`
+
+Require the single supported native AvailableUpdates write and return its selected SYSTEM key.
+
+## `windows/servicing/catalog_hints.star`
+
+Publish catalog lookup hints, never cached signing levels or trust verdicts.
+
+The admitted DriverStore path writes v1 hints for each non-catalog member of
+an explicitly cataloged INF repository. Verify the exact source bytes, nested
+catalog signature, timestamp chains and each member before any EA mutation.
+
+### `apply_catalog_hints`
+
+Validate catalog bytes and file bindings for the batch, then publish hint EAs on the selected objects.
+
+### `audit_catalog_hints`
+
+Verify emitted hints against the actual registered catalog tree.
+
+    This is read-only and independent of the publication planner. A different
+    catalog leaf is not automatically equivalent: it must exist in CatRoot,
+    have an authenticated signing timestamp and chains, and cover the member's
+    logical bytes. Duplicate catalog leaves must contain identical bytes.
+    No reference-image catalogs or filesystem objects participate.
+
+### `catalog_hint_name`
+
+Decode a v1 lookup hint without treating it as a trust decision.
+
+### `package_hint_paths`
+
+Read exact signed SPC Hint attributes, never infer eligibility from PE type.
+
+    CBS9703 CipSetEasForEachHint (6b90c) skips short v2 subject IDs,
+    selects OID 1.3.6.1.4.1.311.12.2.1, flags&10001==10001 and Hint.
+    Its offline path is Windows/WinSxS/<NUL-terminated UTF16 value>.
+
+### `plan_driver_catalog_hints`
+
+Plan signed driver catalog hints for explicit amd64 host jobs and repository bindings; do not modify root.
+
+### `plan_package_catalog_hints`
+
+Verify actual catalogs and members in execution order, retaining last writer.
+
+    Absent signed paths are not installed by this operation. Native tries the
+    open and reports failure; we record absent paths without creating files.
+    Present files must still match their own catalog entry, including retained
+    compressed base content. No cached signing level is fabricated.
+
+## `windows/servicing/catalogs.star`
+
+Signed package catalog preparation and candidate publication.
+
+Trust is qualified against the unchanged baseline ROOT inventory and signed
+MUM membership, not a fabricated database or a blanket Windows trust claim.
+
+### `apply_package_catalogs`
+
+Publish checked MUM/CAT bytes and CatRoot aliases on a candidate tree.
+
+    prepared must be the unchanged result of prepare_package_catalogs against
+    this baseline. If omitted, preparation runs first. This mutates root and
+    preserves existing file security; the caller owns cross-phase rollback.
+    Native trust-provider policy and catalog database rebuilding are separate.
+
+### `prepare_package_catalogs`
+
+Capture signed catalog/MUM evidence without changing the candidate tree.
+
+## `windows/servicing/components.star`
+
+Exact CSI composition, installed-mark and winner analysis. No state writes.
+
+The result is not complete servicing: driver operations, payload/effect
+materialization, catalog verification and transaction persistence are separate.
+
+### `analyze_servicing_components`
+
+Count complete installed ownership and project changed compositions.
+
+    Unchanged deployments use persisted c! membership, not guessed dispositions.
+    Every changed/staged deployment still follows its complete manifest graph.
+    audit_baseline additionally recomputes and checks every unchanged graph.
+
+### `bind_servicing_runtime_sources`
+
+Bind exact versioned runtime sources to staged/resident store entries.
+
+    This does not stage files or authorize activation. Family keys are never
+    used as payload identities. Hash-derived paths must be unique, and each
+    exact identity must have been resolved by component analysis or staging.
+    Returned lazy references retain provenance; callers still need content,
+    security, attributes, compression and transaction policy before writing.
+
+### `open_servicing_runtime_source`
+
+Open and revalidate one exact runtime source; never mutate an image.
+
+    DCS is a resident storage container, not the projected file's byte stream.
+    The bounded native Identity/SHA256 policy must agree after expansion.
+
+### `plan_servicing_payloads`
+
+Join exact staging compositions to store-file plans, not runtime effects.
+
+    Resident manifests are classified for subsequent payload verification, not
+    treated as evidence of completed staging. New plans contain every selected
+    component's manifest and declared files; package catalogs remain separate.
+
+### `project_servicing_sources`
+
+Project source edits for successful staging then ordinary installation.
+
+    This is conditional construction analysis, NOT evidence that those phases
+    succeeded. Pin edits require staged manifests; staged-source edits require
+    completed payload staging. Pending-content staging is not modeled here.
+    Driver references still require their separate operation queue. No writes
+    are applied and no composition/status/payload completion is inferred.
+
+### `verify_resident_payloads`
+
+Verify exact resident store files after DCS expansion; no catalog trust.
+
+    Nested Identity SHA-1/SHA-256 and legacy SHA-1 ImageDigest declarations
+    are checked independently. Unsupported hash policies fail, never bypass.
+    COMPONENTS-backed manifest resolution has already validated full identities;
+    reject path-hash collisions rather than selecting a filename by version.
+
+### `verify_servicing_catalogs`
+
+Check staged-source catalog integrity, complete membership and X.509 paths.
+
+    Anchors come only from the unchanged base ROOT registry store. Code-signing
+    and timestamping paths are checked at each authenticated timestamp. This is
+    NOT Windows trust-provider policy: root-store property policy, revocation,
+    disallowed CTLs and CBS publisher policy still require separate validation.
+    Nothing is installed, staged or marked by this content inspection.
+
+### `verify_servicing_payloads`
+
+Force native reconstruction and reads; no installed-state claims/writes.
+
+    This verifies new component content against available graph/manifest hashes.
+    It does not establish catalog trust or validate the resident content reused.
+    The result retains plans rather than all decoded file bytes in memory.
+
+## `windows/servicing/csi.star`
+
+Value-scoped CSI publication for a caller-owned candidate directory.
+
+Not a complete CBS transaction or package-completion writer.
+
+### `apply_csi_state`
+
+Build and read back COMPONENTS and SOFTWARE changes before publication; preserve unrelated values and return CSI effects, not package completion.
+
+### `inspect_native_package_context`
+
+Inspect the exact 9703 CBS metadata prefix; no image writes or commit.
+
+    Runs the real serviced CRT, MUM parser, WCP identity factory, constructors
+    and package population against caller-supplied parsed hive sources. These
+    are function-level controls, NOT a fully initialized servicing session or a
+    completed stage/install. Only ordinary object inputs are linked manually:
+    the native identity authority and the constructed store-parameter object.
+    No package/session/CSI success, Active or completion flag is supplied.
+
+    Version-gated private addresses come from the exact matching public PDBs.
+    Returns the runner's effects/stop evidence; result retains machine, pointers
+    and bounded steps for follow-up in the inspection REPL. Do not infer success
+    from a returned dictionary: require each native step's return/value. A fresh
+    run is needed after contributing code/input changes; snapshots share plugin
+    state and must not be treated as independent registry/filesystem variants.
+
+## `windows/servicing/driver_apply.star`
+
+Ordered driver/ownership/file construction; CBS finalization remains separate.
+
+### `finish_update_driver_file_tree`
+
+Publish a completed native session, then apply files WITHOUT restaging.
+
+    The session checks actual phase returns, array guards, closed references,
+    backing-hive bytes and complete native file objects before yielding a clone.
+    Original COMPONENTS must still match the owner's source inventory. Changes
+    stay on that independent tree until the entire function returns successfully.
+
+### `prepare_update_driver_file_tree`
+
+Build an independent direct-replacement candidate and file report. This uses qualified equivalent-INF replacement, not the separate native-session API; version is retained for caller compatibility.
+
+### `prepare_update_native_driver_file_tree`
+
+Execute the native transaction on staged sources, then finish once.
+
+    Neither target mutations nor partial phase output escape on failure. In
+    particular, do not restage after native driver installation: that would
+    overwrite native security, aliases and deletions before qualification.
+
+## `windows/servicing/driver_catalogs.star`
+
+Bounded readonly catalog metadata for the observed offline-driver path.
+
+Does not implement WinVerifyTrust, catalog installation or publisher policy.
+Unknown APIs stop at their native call boundary without returning success.
+
+### `update_driver_catalogs`
+
+Create an emulator plugin for catalog enumeration and metadata, with explicit kernel and CryptoAPI state.
+
+## `windows/servicing/driver_cleanup.star`
+
+Retire one completed native driver host; never complete a driver phase for it.
+
+CloseContext and DLL detach do not close every process-owned registry handle.
+The isolated host is no longer used after this boundary. Release those references
+through RegCloseKey and unload its owned mounts through the existing provider,
+which serializes actual final effects before removing the namespace. No pending
+mount, live reference, hive edit or phase result is discarded or fabricated.
+
+### `retire_update_driver_process`
+
+Retire a completed native driver host once, only after all phases including Close; reject live or already-retired sessions.
+
+## `windows/servicing/driver_destinations.star`
+
+Independently qualify native driver projections outside its source inventory.
+
+The host input inventory includes selected source objects, not every runtime
+alias. Authorize replacement only by the admitted manifest's exact after hash,
+an entirely unchanged resident dependency, or an exact staged driver catalog.
+These checks authorize content construction, not CBS package completion.
+
+### `prepare_update_driver_destination_authority`
+
+Keep only actual native output leaves, releasing the large full hierarchy.
+
+### `qualify_update_driver_destinations`
+
+Bind generated driver destinations to admitted payload and prepared path authority; return qualified paths and counts.
+
+## `windows/servicing/driver_direct.star`
+
+Direct equivalent-INF replacement; one staged payload and one file pass.
+
+No native installer execution, guest-side repair, or prepared-image cache. The
+caller still owns catalog trust, CSI/CBS lifecycle and non-driver installers.
+
+### `finish_update_direct_driver_tree`
+
+Continue a staged candidate without replaying recovery generation.
+
+### `prepare_update_direct_driver_tree`
+
+Clone root, stage payloads once and apply qualified direct driver/file changes; return the independent candidate and phase report.
+
+## `windows/servicing/driver_eas.star`
+
+Persist the measured offline DriverStore catalog-hint EA operation.
+
+This is not a general protected-EA, catalog-trust or access-check implementation.
+Only an actual owned FILE_WRITE_EA handle to the explicit offline repository and
+one structurally valid v1 $CI.CatalogHint update are admitted. Other policy stops
+before returning to native code. Existing unrelated EAs and hardlinks survive.
+
+### `update_driver_eas`
+
+Create an emulator EA plugin that validates and records native writes against the supplied kernel file objects.
+
+## `windows/servicing/driver_files.star`
+
+Apply the final native driver's file objects, not content-only copies.
+
+Requires closed native file/mapping references and no pending deletions. Native
+hive writes are verified against the mount provider's already-built backing
+files. Unknown target paths, missing final file security and unobserved directory
+creation policy fail before changing the image.
+
+### `apply_update_driver_file_effects`
+
+Recheck all native file-plan guards, then publish files, metadata, links and deletions to root; return effect counts.
+
+### `collect_update_driver_entries`
+
+Snapshot changed native file entries and link targets from the supplied kernel state.
+
+### `plan_update_driver_file_effects`
+
+Plan native file-object publication only after handles, views and pending deletes are closed; return guarded file/directory effects.
+
+### `prepare_update_driver_transaction`
+
+Return a fully verified independent tree; never partially publish effects.
+
+    The native mount provider must have closed every hive epoch. Its independently
+    committed backing hives and the final kernel file objects describe one native
+    execution. Callers publish only the returned root after this function succeeds.
+
+## `windows/servicing/driver_hives.star`
+
+Bounded native offline-driver hive mount provider.
+
+Models the observed successful-buffer/owned-reference SSU path, not a general
+kernel hive lifecycle or authorization model. A successful ordinary unload first
+constructs actual backing-hive effects, as does an owned native flush while
+references remain open; pending/busy mounts never fake success.
+Namespace teardown is kept outside the next captured native mutation epoch.
+
+### `update_driver_hive_mounts`
+
+Create an emulator plugin for explicit offline hive mounts and flush epochs; host mount namespaces are not published target keys.
+
+## `windows/servicing/driver_inputs.star`
+
+Reconstruct the exact immutable file inputs of the pinned driver host.
+
+### `build_update_driver_input_entries`
+
+Build native virtual-file inputs from explicit driver jobs and the actual INF/DriverStore namespace, retaining file metadata.
+
+## `windows/servicing/driver_owners.star`
+
+Ordinary CBS driver owner mutations, independently verified against native CBS.
+
+The pinned 26100.9703 Add/RemoveDriver owner controls (RVAs 10f9d4/10a234)
+establish first/last owner results and zero-valued additions. All 1,648 update
+operations were compared to native output. This constructs those same physical
+keys, preserving literal Base64 components and unrelated values/security.
+It is NOT driver installation: callers publish only with the completed matching
+driver-store transaction. No package state, privileges or completion flags change.
+
+### `apply_update_driver_owners`
+
+Require the original COMPONENTS digest before publishing the prepared owner hive; return owner-change counts.
+
+### `order_update_driver_owner_operations`
+
+Ordinary forward DOQ execution, not queue registration order.
+
+    CBS9703 DoqExecuteImmediate 10dfed..10e06e installs noncritical then
+    critical groups before either uninstall pass. DoqIsCritical 10bb98
+    groups every case-insensitive INF match with a CRITDOQ- update; the
+    update prefix comparison at 12b892 is case-sensitive wcsncmp.
+    Input is the already reduced, uncompleted queue in sequence order.
+
+### `plan_update_driver_owners`
+
+Apply owner primitives in the supplied execution order, without sorting.
+
+## `windows/servicing/driver_random.star`
+
+Execute the source NTDLL's self-initializing RtlRandomEx for offline drivers.
+
+The process cookie is an explicit virtual-process input, not an observed target
+OS cookie, trust verdict, privilege or servicing state. No initialization flag or
+random table is patched. The source routine initializes its own state. Its only
+admitted process query is ProcessCookie for the current virtual process. This
+bounded AMD64 path does not implement arbitrary NTDLL syscalls or initialization.
+
+### `update_driver_native_random`
+
+Create a qualified native random/process-cookie plugin; require an explicit ULONG cookie and the expected native exports.
+
+## `windows/servicing/driver_replace_hives.star`
+
+Construct paired, equivalent-INF DriverDatabase replacements without x86.
+
+Preserve installed configuration and physical hive placement. The caller supplies
+complete new repositories, not templates' INF-only FileSize values. Nothing is
+published until all hives have been built and read back successfully.
+
+### `apply_version_only_driver_hives`
+
+Preflight every source hive before publishing version-only driver replacements; return the number of written hives.
+
+### `plan_version_only_driver_hives`
+
+replacements carry exact before/after names, version, size and INF name.
+
+    Each replacement must already have passed the ordered-INF equality guard.
+    This routine requires an actual old package; absent or multiple bindings
+    are not silently repaired from a manifest template.
+
+## `windows/servicing/driver_replacements.star`
+
+Plan version-only replacements from actual driver inputs, without emulation.
+
+This is deliberately not a general INF installer. A matching CBS first/last
+owner pair, exact manifest hashes, and unchanged INF instructions are required.
+The plan does not itself publish files, invent package state, or run a guest.
+
+### `plan_version_only_driver_replacements`
+
+Bind before/after driver sources and owner operations, accepting only supported equivalent-INF version transitions.
+
+### `require_version_only_driver_inf`
+
+Reject changed instructions, including ordering and duplicate directives.
+
+## `windows/servicing/driver_repositories.star`
+
+Complete native DriverStore layouts for admitted version-only replacements.
+
+CSI runtime projections are not repository inventory (including WOW64 drivers).
+Authorize every relative name against both the installed layout and the new
+manifest, verify all logical source bytes before writing, then link exact store
+objects. No native installer execution or architecture-wide path rewriting.
+
+### `apply_direct_driver_repositories`
+
+Re-resolve and verify repository source epochs before publication; optionally audit payload bytes and return file/directory counts.
+
+### `plan_direct_driver_repositories`
+
+Plan repository files/directories from explicit replacement jobs and manifests, retaining source epochs for publication.
+
+## `windows/servicing/driver_retire.star`
+
+Retire repository directories only for admitted last-owner replacements.
+
+Called after replacement files, registry bindings and CSI owners are published
+on the private candidate. Retained source packages and WinSxS files are untouched.
+
+### `apply_direct_driver_retirement`
+
+Reject stale files or extra namespace entries before deleting planned predecessor repositories; return removal counts.
+
+### `plan_direct_driver_retirement`
+
+Plan removal of unretained predecessor repositories, capturing their complete namespace and file epochs.
+
+## `windows/servicing/driver_runtime.star`
+
+Refresh installed runtime aliases of admitted equivalent-INF replacements.
+
+The installed file object, not a filename or matching bytes, establishes the
+binding. No INF execution, new runtime destination, generic CSI projection or
+FileMap ownership is inferred. Repository planning has already bound each new
+source to an unchanged installed layout and a manifest hash.
+
+### `apply_direct_driver_runtime`
+
+Preflight runtime alias authority before replacing links; preserve independently selected winners and return replacement counts.
+
+### `plan_direct_driver_runtime`
+
+Select installed runtime aliases for explicitly bound driver repository replacements.
+
+## `windows/servicing/driver_session.star`
+
+Pinned native driver transaction for the offline update construction.
+
+One retained session owns all three phases and Close. Instruction-limit stops
+resume the same call, never recreate a phase. publish() returns an independently
+verified filesystem tree, not a CBS completion flag. Payloads must already be
+staged; do not replay staging after publishing native file objects.
+
+### `prepare_update_driver_session`
+
+Prepare start/advance/finish/publish callbacks for the exact qualified native driver ABI. The current SSU and DLL identity guards are intentional support limits, not a general Windows driver transaction.
+
+## `windows/servicing/drivers.star`
+
+Ordinary empty-queue driver planning, not driver-store/CBS completion.
+
+Keep MUM declaration provenance, exact INF digest, and each package/update owner.
+Planning neither installs drivers nor authorizes package completion or file removal.
+
+### `plan_update_driver_operations`
+
+Bind admitted ordinary actions to declared INF metadata and manifest hash.
+
+    manifests is an exact canonical CSI identity (casefolded) to decoded manifest
+    map, including resident declarations. Only normal/force ranking declarations
+    are retained; this does not map them to native driver-store flags. Payload
+    verification, staging, new-owner key security, driver-store effects and queue
+    execution remain mandatory separate phases. No image mutations occur here.
+
+### `reduce_update_driver_queue`
+
+Reduce new, uncompleted operations using the observed native queue rules.
+
+    The caller must supply an explicit persisted-queue inventory. Nonempty queues
+    require native load/recovery policy and are rejected. Records require exact
+    identity text and owner (package~update); comparisons are CASE SENSITIVE.
+    Conflicting duplicate metadata fails rather than relying on native first-win.
+    Native completed-state reversal is deliberately outside this empty-queue path.
+
+### `select_update_driver_source_paths`
+
+Select actual descendants of already-bound component source roots.
+
+    INF SourceDisks paths can name nested architecture directories. Selection
+    retains that existing hierarchy, not a flattened list or synthetic aliases.
+    Binding roots to admitted manifests/driver jobs remains the caller's duty.
+
+## `windows/servicing/events.star`
+
+Native offline event publisher/channel and shared-autologger registration.
+
+This models the bounded Admin/Operational registration delta, not the whole
+advanced-installer queue. Event definitions remain in hash-qualified PE payloads.
+No host wevtutil invocation or installer emulator participates in construction.
+
+### `plan_update_event_registry`
+
+Construct exact bounded publisher/channel/shared-session hive effects.
+
+    Preexisting changed publishers must match the old declared registration.
+    Unknown extra child state is not destroyed. Changed channel modes, custom
+    access/logging/publishing, external user configuration and unestablished
+    key-creation security fail before any hive publication.
+
+### `prepare_update_event_registration`
+
+Reduce registration fields globally by GUID before deciding removals.
+
+    Event/task/template definitions are intentionally not treated as registry
+    data. Unsupported changed channel configuration is rejected by the planner.
+    Equal shared GUID declarations must agree, including channel order.
+
+### `validate_update_event_resources`
+
+Validate newly registered GUIDs in the actual final projected PE bytes.
+
+## `windows/servicing/events_native.star`
+
+Validate and atomically publish real Events-installer hive effects.
+
+Jobs must already come from native queue admission. This module does not infer
+jobs from XML, execute online phases, or declare CBS package completion.
+
+### `apply_native_events`
+
+Execute all explicit jobs before committing any native registry effect.
+
+### `events_jobs_from_queue`
+
+Use the common native smart-installer job mapping for Events.
+
+### `plan_native_events`
+
+Build all target hive bytes; no image mutation occurs on any rejection.
+
+## `windows/servicing/file_apply.star`
+
+Bounded file/FileMap phase orchestration; not complete CBS servicing.
+
+### `apply_update_directory_removals`
+
+Remove changed empty directories bottom-up only when no FileMap ownership remains; return removed and retained-owned paths.
+
+### `prepare_and_apply_staged_update_file_effects`
+
+Commit existing hash-qualified sources without recreating their objects.
+
+    Native driver staging may already own links, EAs and final file metadata.
+    Replaying payload staging here would unlink those real objects. This entry
+    plans from the actual current tree; source bindings/security and mutable
+    projections are checked without eagerly reading every payload.
+
+### `prepare_and_apply_update_file_effects`
+
+Plan hierarchy and directories, stage payloads, and apply ordered file/FileMap effects on root; this is a mutating phase, not complete servicing.
+
+## `windows/servicing/file_commit.star`
+
+Apply bounded native CSI file effects, never package lifecycle shortcuts.
+
+Inputs are the full hierarchy and already-staged, hash-qualified WinSxS sources.
+Planning reads the image but does not modify it. It rejects absent source
+security instead of silently preserving the destination's old WIM descriptor.
+
+### `apply_update_directories`
+
+Preflight directory existence/security before creating directories and applying planned descriptors; return effect counts.
+
+### `apply_update_file_commits`
+
+Apply one native pass: 1 before LUA maps, 2 after LUA maps.
+
+    The caller preserves the hierarchy's directory-security and LUA ordering.
+    This applies portable object effects; it neither completes driver queues nor
+    advances CBS package/component lifecycle or pretends to execute a session.
+
+### `image_path_names`
+
+Return the case-folded file-derived namespace, excluding empty directories; mutable=False requests a read-only index.
+
+### `plan_update_directories`
+
+Construct effective ancestor security before any file/map mutation.
+
+    Directory child-enumeration propagation must be disabled by actual native
+    configuration. Missing implicit ancestors use the bounded SYSTEM creation
+    policy, not WRP permissions copied from a nearby directory.
+
+### `plan_update_file_commits`
+
+Plan all dirty primary/link/removal effects against unchanged paths.
+
+    source_paths maps the native FileInfo key to its exact staged store path.
+    Validate source metadata, security, link prerequisites and writable
+    decisions before any mutation. Exhaustive byte verification is opt-in. User-modified writable files preserve bytes
+    AND metadata. Old-only immutable projections are unlinked without hashing.
+
+## `windows/servicing/file_stage.star`
+
+Store-file preparation for the bounded offline update construction.
+
+This implements source-folder and component-file ACL effects, manifest creation
+security, logical payloads and exact source joins. Driver queues and component/
+CBS lifecycle finalization remain separate.
+
+### `build_update_source_folder_security`
+
+Derive the established native source-folder descriptor from the actual parent security; return descriptor bytes.
+
+### `resolve_update_source_paths`
+
+Bind prepared source identities to exact staged or resident paths in root; reject missing or ambiguous sources.
+
+### `stage_update_payload_files`
+
+Materialize admitted payload sources and their security/metadata on root; do not replay this after native driver publication.
+
+## `windows/servicing/filemap_security.star`
+
+Final FileMap security from the observed native WCP default pair.
+
+This is a final metadata constructor, not token acquisition or a shortcut that
+copies a resident map's permissions. Creation's default DACL is overwritten by
+this complete setter; the bounded new-map path establishes absence of labels.
+
+### `prepare_update_filemap_security`
+
+Prepare FileMap descriptors from the actual parent and planned records, preserving native audit and integrity-label semantics.
+
+## `windows/servicing/files.star`
+
+Native path/FileMap construction for caller-owned offline images.
+
+Planning is separate from applying effects. In particular a complete map plan
+is not permission to mark a package installed or discard driver-store state.
+
+### `apply_update_filemaps`
+
+Apply a validated LUA plan with explicit final map descriptors.
+
+    Security is keyed by the plan's exact output path; it must come from the
+    native security constructor, not default filesystem inheritance. The entire
+    plan's source digests and descriptors are checked before any mutation.
+    This does not apply the final file/directory pass or commit package state.
+
+### `plan_update_filemaps`
+
+Plan the complete LUA pass against unchanged baseline maps.
+
+    The caller must complete the preliminary boot-critical file pass first.
+    Only its already-state-2 immutable shape is supported here; accepting a
+    writable/link state without the real pass would manufacture post-pass state.
+    Directory collisions retain resident ownership and obey the actual hive's
+    native strict-directory policy. Any file-owner conflict fails before writes.
+
+### `prepare_update_file_hierarchy`
+
+Resolve amd64 runtime paths, hashes and security against explicit baseline hives; return reduced hierarchy, sources and collision policy.
+
+## `windows/servicing/gac.star`
+
+Guarded refresh of existing CLR4 GAC assemblies from CSI declarations.
+
+This is not Fusion registration or NGEN completion. New cache directories,
+assembly identity changes and removals require their own installer phases and
+are rejected. No oracle paths, hashes or registry results enter this planner.
+
+### `apply_update_gac`
+
+Validate the full GAC batch before refreshing files; runtime Fusion/NGen validation is not implied.
+
+### `apply_update_gac_notifications`
+
+Check file epochs/timestamps before publishing prepared Fusion counters and notifications.
+
+### `plan_update_gac`
+
+Plan qualified Fusion cache refreshes from runtime transitions and exact component stems; retain source/destination guards.
+
+### `plan_update_gac_notifications`
+
+Notify Fusion using the installed assembly's last-write FILETIME.
+
+    This is NOT a wall clock and must agree with the file Fusion will inspect.
+    Existing cache identities only: lifecycle changes are rejected by the same
+    guarded cache planner. Reference counting is unchanged for these replacements.
+
+## `windows/servicing/http.star`
+
+Execute the admitted HTTPAI queue through the native CSI harness.
+
+The XML reader supplies CDF input, not predicted registry effects. The actual
+DLL decides which writes to make; publication is bounded and atomic.
+
+### `apply_update_http`
+
+Execute the qualified native HTTP installer and publish checked offline reservations; return phase evidence, not CBS completion.
+
+### `http_installer_jobs`
+
+Select bounded HTTP installer jobs and reservations from runtime transitions without mutating the image.
+
+### `http_reservations`
+
+Parse the supported HTTPAI declaration shape into reservations; reject unsupported attributes or structure.
+
+### `publish_http_effects`
+
+Validate native HTTP writes against reservation authority and the selected SYSTEM control set before publication.
+
+## `windows/servicing/http_native.star`
+
+Execute native HTTP queue phases against a private hive, then publish once.
+
+### `apply_native_http`
+
+Run both native phases in order; a late failure publishes neither phase.
+
+### `plan_native_http_effects`
+
+Check exact per-call URL authority before building any new hive bytes.
+
+## `windows/servicing/installer.star`
+
+Bounded native CSI basic-installer execution against an offline registry.
+
+This is an explicit, narrow CSI ABI adapter, not an implementation of an
+installer's decisions. Unsupported methods stop execution without publication.
+
+### `basic_jobs_from_queue`
+
+Bind native phase-8 removal and phase-10 installation entries to inputs.
+
+    This preserves native queue order and both identity references. It does not
+    infer executor eligibility, inspect smart installers or declare a phase done.
+
+### `expand_csi_windows_path`
+
+Expand the explicit target Windows-root token, rejecting other namespaces.
+
+### `run_basic_installer`
+
+Execute an identity-qualified basic installer for supported install/uninstall phases under explicit instruction limits; return native outcomes and effects.
+
+### `run_http_installer`
+
+Run the bounded native HTTP profile with explicit SYSTEM bytes, rows, operation and phase; return captured effects.
+
+## `windows/servicing/key_flags.star`
+
+Bounded CSI registry-key flags bridge, backed by explicit offline hives.
+
+The native installer chooses keys, recursion and flags. This bridge records
+uncommitted metadata edits; it neither creates keys nor publishes a hive.
+
+Pinned target-kernel evidence: CmQueryKey 0x85878a returns class-5's three
+DWORDs (UserFlags, key flags, virtualization flags). CmSetKeyFlags 0x9af0fb
+sets nk+0x34 bits20..23; disable bit2 also clears nk.Flags bit0x80. The native
+luainstall ApplyRegistryKeyRecurse reads the third DWORD, ORs its selected
+policy, and calls IRtlKey slot27/class2. Enumeration names remain borrowed
+until the next batch or enumerator release; LBLOBs use WCP's own allocator.
+
+### `create_key_flags_registry`
+
+Allocate native key-flags registry interfaces using explicit SOFTWARE/SYSTEM hives and caller-owned allocation callbacks.
+
+## `windows/servicing/media_categories.star`
+
+Construct the MediaCategories subset of admitted KS registration.
+
+This does not claim all Include/Needs or RunOnce work is complete. Existing
+values survive unless the exact KS declaration replaces them. Newly created
+keys use the explicit target administrator subject, never an oracle host SID.
+
+### `apply_update_media_categories`
+
+Recheck the source hive and INF proofs before publishing MediaCategories; None represents an empty plan.
+
+### `plan_update_media_categories`
+
+Plan supported amd64 MediaCategories updates from driver jobs, exact ks.inf bytes and an explicit subject group.
+
+## `windows/servicing/migration.star`
+
+Maintain migration manifest membership from admitted component transitions.
+
+Retain unaffected entries in order, then append new declarations in transition
+order. This is a membership index; reference transaction enumeration order is
+not an input to construction.
+
+### `apply_update_migration`
+
+Validate the migration plan source/epoch and proofs before writing its replacement index; return membership counts.
+
+### `plan_update_migration`
+
+Plan migration-index membership from admitted payloads and baseline components, preserving source and manifest proofs.
+
+## `windows/servicing/native_configuration.star`
+
+Pinned native store-option interpretation against explicit hive snapshots.
+
+### `query_native_installer_options`
+
+Read native HKCU service options, not transaction admission or SKU state.
+
+    Native code owns policy precedence, value decoding, defaults and lifetime.
+    MobileStore is compared with 1, not interpreted as a generic Boolean;
+    MobileStoreVersion is compared with 4 by the actual executor caller.
+    No POQ disposition or transaction identity is inferred from these values.
+
+### `query_native_mobile_store_version`
+
+Resolve executor +0x41; transaction-derived +0x40 remains unknown.
+
+## `windows/servicing/native_eligibility.star`
+
+Pinned native executor eligibility probe, not a complete execution planner.
+
+### `determine_per_user_eligibility`
+
+Run DetermineIfHKCUShouldRun against explicit target inputs.
+
+    The two booleans are CQueueExecutor fields +0x40 (Initialize flags bit 2)
+    and +0x41 (store option equals 4). Neither is inferred here. Callers must
+    establish them for the actual transaction before applying these results.
+    A True result only passes this gate; it does not prove complete eligibility,
+    execution, an installed inventory, or a committed CBS transaction.
+
+## `windows/servicing/native_inventory.star`
+
+Read-only native CSI install-map inputs for complete inspection inventory.
+
+### `build_native_inspection_inventory`
+
+Query every target candidate before returning an unchanged inventory.
+
+### `inspection_candidates`
+
+Read every persisted component and sum all installed-source backlinks.
+
+### `query_native_install_map`
+
+Query native winning versions and identity kinds, without guessing inventory.
+
+    This does not itself count installed ownership or exclude changed identities.
+    Callers supply complete candidates and validated reference counts separately.
+
+### `resolve_inspection_manifests`
+
+Bind selected native identities to exact decoded manifests and CSI hashes.
+
+    Analysis intentionally preloads only changed compositions. Complete native
+    inspection also needs unchanged components outside those compositions. Read
+    those through the exact resident source, never a guessed stem or reference
+    image. A missing or mismatched manifest rejects the entire input batch.
+
+### `select_inspection_inventory`
+
+Select the native Fetch(flags=40h) inventory, minus both changed sides.
+
+    native_rows must come from query_native_install_map against the exact target
+    SOFTWARE hive. Complete row coverage is mandatory, including unowned staged
+    components. The optional expected_marks independently reconciles population
+    analysis against persisted source counts; it cannot supply missing counts.
+
+## `windows/servicing/native_lsa.star`
+
+Read-only LSA identity boundary for the pinned offline servicing process.
+
+Only SECURITY/Policy domain identity records are read; secrets, authentication,
+account mutations and remote machines are outside this adapter. The explicit
+query_access is an isolated process capability, not an inferred policy DACL or
+a claim about a booted host. Native WCP owns SID cache interpretation.
+
+### `read_servicing_policy`
+
+Read the bounded servicing policy from explicit native inputs; reject unsupported source layout rather than synthesizing policy.
+
+### `servicing_lsa_plugin`
+
+Serve classes 5 and 12 from explicit immutable target policy records.
+
+    query_access must be an explicit bool. False denies POLICY_VIEW_LOCAL_INFORMATION;
+    True permits that one right only. No MAXIMUM_ALLOWED or generic-access grant.
+    Handles and result allocations are independent, owned and checkpointed.
+    NTSTATUS failures preserve outputs and the Win32 thread last-error slot.
+
+## `windows/servicing/native_midground.star`
+
+Execute the pinned native service-category merger on explicit queue inputs.
+
+This does not execute online ServicesSmartInstaller or publish any effects.
+
+### `run_native_service_category`
+
+Run the qualified native service-category implementation with explicit hives, jobs and token privileges under an instruction bound.
+
+### `service_category_jobs`
+
+Bind native service-category queue entries to explicit changed and inspection manifests, preserving queue order.
+
+## `windows/servicing/native_queue.star`
+
+Derive phase 3..12 AI entries with the pinned native WCP implementation.
+
+This returns an execution plan, not committed servicing state. It deliberately
+uses the ordinary non-repair/non-debug flags (0) and no external transforms.
+Explicit source/target hives permit bounded read-only transformer-state queries;
+all other native environment operations stop execution.
+
+### `derive_offline_queue`
+
+Return native finalized entries for explicit (old, new) manifest pairs.
+
+    Omitted inspect_manifests explicitly leaves the installed inventory unknown.
+    The returned inspection_required flag must not be treated as satisfied.
+    Entry operation numbers belong to ExecutionQueueEntry, NOT the smart
+    installer interface. Identity references are (input-index, side) pairs.
+    Caller must still supply the complete inspection inventory, dispatch the
+    native operation and execute/commit every applicable phase. Phases 60/61
+    are outside this adapter. Inspection references index inspect_manifests.
+    registry_snapshots is an explicit (before, after) pair of COMPONENTS/SYSTEM
+    hive maps for native transformer admission; omission fails on any SIL read.
+    progress, when supplied, receives bounded completed-input counts (every
+    progress_interval inputs and at each stage end), not mutable emulator state
+    or a partial queue. This interval does not change native queue decisions.
+    Individual manifests are limited to 16 MiB, the total to 512 MiB, and each
+    native call to the explicit instruction_limit (at most two billion).
+
+## `windows/servicing/native_runtime.star`
+
+Pinned servicing runtime boundary, not a replacement for native installer logic.
+
+Map the target NTDLL under native-ntdll.dll. Only explicitly admitted public
+exports are visible through ntdll.dll; native internal heap/token boundaries
+use the emulator's owned process state. Optional feature-query status remains
+the native result, not proof of the target system's effective feature policy.
+
+### `native_registry_creation_provider`
+
+Assign NULL-creator registry security with the pinned target kernel.
+
+    This isolated, non-restricted SYSTEM subject uses the same explicit owner,
+    group, default DACL and integrity facts as the network process. Native
+    CmpCreateChild calls SeAssignSecurity(container=1, registry mapping, pool=1).
+    No installer HRESULT, ACL inheritance decision or descriptor is synthesized.
+    Explicit creators, class names and special create options remain unsupported.
+
+### `ntdll_runtime_plugin`
+
+Create the qualified native ntdll runtime plugin for emulation; this is not a host or booted-guest execution API.
+
+### `prepare_network_runtime`
+
+Construct the isolated setup process's RPC directory, not a host ACL snapshot.
+
+    SMSS supplies native creation security. Native NTDLL assigns an independent
+    directory with no parent and default inheritance flags, using the target's
+    directory generic mapping and verified SYSTEM token defaults. The resulting
+    self-relative descriptor is queried by real RPC/NTDLL; it is never published
+    into image registry security. This model does not claim the token or object
+    namespace of a booted servicing process, nor effective feature-policy state.
+
+## `windows/servicing/ngen.star`
+
+Manifest-owned deferred NGEN commands. Never runs ngen or marks it complete.
+
+### `apply_update_ngen`
+
+Preflight queue inputs and publish prepared deferred NGEN registry effects; return publication evidence, not completed compilation.
+
+### `collect_update_ngen`
+
+Collect supported NGEN declarations from runtime transitions, retaining architecture and native ordering.
+
+### `plan_update_ngen`
+
+Plan deferred native-image queue entries from admitted runtime declarations without compiling managed code.
+
+## `windows/servicing/package_audit.star`
+
+Read-only package-state provenance audit; never repair or downgrade state.
+
+### `audit_package_states`
+
+Account for EVERY final package, including native non-installed entries.
+
+    State provenance is not independent payload/installer validation. Report
+    concrete metadata contradictions separately; never infer missing effects
+    from a missing timestamp, an unrun check or a constructed state value.
+
+## `windows/servicing/package_indexes.star`
+
+CBS package metadata indexes, independent of package lifecycle state.
+
+These are MUM-derived lookup/dependency records. Planning them does not prove
+manifest resolution, payload staging, installation, owner state or completion.
+No CurrentState, Owners, session, Active or completion records are produced.
+
+### `plan_servicing_package_indexes`
+
+Derive value-scoped native indexes from one exact package MUM.
+
+    PackageDetect stores the parent-integration enum, not a state. Standalone
+    blocks omit their own identities but still recurse into nested blocks.
+    UpdateDetect records parent update references only, never local ones.
+    ComponentDetect retains every applicable updateComponent target and source,
+    with the base elevation (not the source payload's alternative-target bit).
+    No applicability pruning.
+    Returned patches are not authorization to apply or to register a package.
+
+## `windows/servicing/package_security.star`
+
+Protection for newly published CBS package manifests and catalogs.
+
+CBS package publication is not WCP payload staging: the former keeps the
+protected resource ACL and audit policy, including auto-inheritance controls.
+Catalogs with installed deployments take WCP staging protection instead.
+Neither constructor replaces the security of already resident objects.
+
+### `new_package_catalog_security`
+
+Derive the native staged catalog descriptor from the actual destination parent.
+
+### `new_package_manifest_security`
+
+Derive the native staged package-manifest descriptor from the actual destination parent.
+
+## `windows/servicing/package_store.star`
+
+Publish admitted package dispositions after constructing their effects.
+
+CBS state is consumed by Windows servicing, not an internal confidence flag.
+Never cap installed packages or owner requests at Resolved because validation
+is outstanding. See docs/windows-package-state-policy.md.
+
+### `package_metadata_executions`
+
+Select admitted metadata, not merely the last population action.
+
+    Merge can converge a previously processed stage/install to ActionNone.
+    MUMPopulated records that admission; the final target still limits lifetime.
+    This selects metadata; final state publication follows the applied effects.
+
+### `plan_resident_package_dispositions`
+
+Persist explicit resident execution transitions after construction effects.
+
+    FinalCommitPackagesState retains 0x50; dirty/action normalization to 0x40
+    does not apply to persistence. Owner overlays retain unmentioned owners.
+    Only the observed installed-to-superseded transition is supported here;
+    removal/reinstallation requires its own effects and must fail closed.
+
+### `publish_package_metadata`
+
+Publish new packages with their admitted stage/install dispositions.
+
+    Called after file, registry, installer and CSI effects have been applied.
+    Audit exact signed metadata and emitted composition before publication.
+    Unchanged native packages are preserved; explicit resident transitions
+    are persisted alongside new packages. Unsupported dispositions fail
+    without writing a conservative placeholder into Windows' registry.
+
+## `windows/servicing/plan.star`
+
+Plan package phases without mutating an image or selecting product policy.
+
+The caller supplies one immutable baseline and explicit metadata closure.
+A successful plan is admission evidence, NOT a completed CBS transaction.
+
+### `plan_package_phases`
+
+Return install population and a compact, independently owned closure.
+
+    StageChain ordering is captured before install planning. Both phases use
+    the same baseline and complete closure; only afterward are unused MUMs and
+    decoded XML released from the returned record. The input closure is not
+    modified. Equal-state admitted wrappers remain present even when their
+    final action is a no-op. Missing closed metadata fails rather than silently
+    manufacturing a package disposition.
+
+    No payload staging, registry publication, emulation, VM boot, network
+    selection, or host output occurs here. Source objects may retain lazy
+    readers; keep their backing capabilities alive through construction.
+
+## `windows/servicing/population.star`
+
+Offline servicing construction policy. No guest or host servicing tools.
+
+Metadata availability, package admission, and image mutation are distinct phases.
+This module must not turn an incomplete analysis into bootable update media.
+
+### `collect_servicing_metadata`
+
+Close exact package references over raw/express MUMs and the base store.
+
+    Optional hives are the exact recipe baseline, before update writes. Use the
+    same baseline for population, composition, source and winner analysis.
+    Roots and features are explicit caller policy, not inferred from preliminary
+    payload selection. All registered store packages seed the closure, including
+    staged and absent registrations. Parent applicability and XML contained flags
+    NEVER prune metadata. Missing references are returned, not authorized to skip.
+
+### `plan_servicing_population`
+
+Plan ordinary package admission; reject unsupported or unresolved policy.
+
+    This does not apply a CSI transaction or authorize boot. Unknown nonzero
+    references fail: the metadata closure is not an omission allowlist.
+
+## `windows/servicing/print_queue.star`
+
+Queue admitted native-architecture printer replacements for first boot.
+
+Records come from exact installed replacement INF inputs, never a reference
+hive. Queue presence means pending work, not successful printer installation.
+Opaque entry IDs are deterministic; Windows' incidental random IDs are not an
+image-construction requirement.
+
+### `apply_direct_print_queue`
+
+Validate the pending print plan input epochs and publish its registry effects.
+
+### `plan_direct_print_queue`
+
+Plan supported print-driver pending operations from explicit driver jobs and repository bindings.
+
+## `windows/servicing/queue_registry.star`
+
+Read-only IRtl SIL bridge for native queue transformer-state queries.
+
+The pinned WCP code owns all interpretation and queue decisions. This bridge
+supplies bytes from explicit source/target hives, including genuine not-found
+results. It cannot create keys, write values, or consult the host registry.
+
+### `create_configuration_registry`
+
+Return (SIL, optional SideBySide/Configuration key) for native options.
+
+### `create_executor_registry`
+
+Read only the native executor's HKCU eligibility policy path.
+
+### `create_install_map_registry`
+
+Read only SOFTWARE's native Winners map; return (SIL, map root key).
+
+### `create_queue_registry`
+
+Read only the native queue transformer's established registry paths.
+
+## `windows/servicing/recovery.star`
+
+Verified recovery publication; generated metadata policy remains explicit.
+
+The production generator binds every record to an admitted forward edge.
+WCP supplies a fixed reverse-target timestamp, independent of payload times.
+File security uses component-staging policy, including driver ACLs.
+
+### `apply_generated_recovery`
+
+Check the complete generated-recovery batch before writing records or CSI markers; return emitted markers.
+
+### `apply_inherited_recovery`
+
+Validate and publish planned inherited recovery records and metadata on root.
+
+### `plan_generated_recovery`
+
+Plan generated recovery records with an explicit target FILETIME; do not infer timestamps from wall-clock or reference output.
+
+### `plan_inherited_recovery`
+
+Plan inherited recovery records from explicit root/payload state without treating missing evidence as a recovery marker.
+
+### `retained_recovery_flags`
+
+Read retained recovery flags from established image records; do not invent recovery state for absent records.
+
+## `windows/servicing/registry.star`
+
+Native ordinary registry planning, separate from hive publication.
+
+A complete before/after contribution inventory is required even when only a
+small subtree changes. Provider disposition and security assignment happen
+later against the actual candidate hives, never against a declaration count.
+
+### `plan_update_ordinary_registry`
+
+Plan complete ordinary keys/values against the actual constructed image.
+
+    No hive is published until every target passes native readback. Unchanged
+    user-profile trees require no binding. Changed profiles, atomic mutable
+    trees and nonempty retired-security cleanup fail closed, never get reported
+    as completed. Literal key components are retained, including dot and slash.
+
+### `prepare_update_registry_keys`
+
+Reduce exact admitted keys in family order, retaining separate profiles.
+
+    `buckets` must come from the complete affected install-closure capacity.
+    Equal-bucket contributions are allowed only when ordering cannot alter
+    descriptor selection. The native reducer preserves first ownership and
+    last nonempty security independently; dictionary iteration is not priority.
+
+## `windows/servicing/registry_access.star`
+
+Bounded existing-key access policy for the declared offline driver subject.
+
+This is not a general Windows token/authorization service. The driver session
+uses a non-restricted SYSTEM subject, enabled BA/WD/AU groups, high integrity,
+and no privilege-based ordinary-open grants. Unknown ACEs or higher-integrity
+objects stop construction rather than silently relaxing access.
+
+### `update_driver_key_open_access`
+
+Evaluate driver registry access against an established descriptor and request; return granted access or denial.
+
+## `windows/servicing/registry_effects.star`
+
+Commit captured native registry effects, not historical sets or CBS success.
+
+Bindings identify an exact source hive and an optional encoded emulator mount
+prefix. Capture registry.effects() while each hive is mounted, before teardown.
+All newly materialized keys require separately established final security; the
+writer's parent-copy fallback is deliberately not used as native creation policy.
+
+### `apply_update_registry_effects`
+
+Recheck all source-hive digests before publishing the prepared registry batch; return hive/value/key effect counts.
+
+### `build_update_driver_key_security`
+
+Measured NULL-creator SYSTEM key policy for this exact driver database.
+
+    Original kernel CmpCreateChild -> SeAssignSecurity, legacy parent control
+    8004, either the three-ACE DriverDatabase policy or the independently
+    captured seven-ACE COMPONENTS policy. The latter is a fixed point
+    under actual native creation at INF/hash depth and for new CSI component,
+    deployment and catalog keys. Unlike NTFS, no 4000
+    normalization or AI flags are added. Child owner/group come from the
+    declared subject, not arbitrary parent principals. The independently measured Print PackagesToAdd parent also produces the
+    seven-ACE child. Other ACLs/controls require their own evidence.
+
+### `build_update_driver_property_key_security`
+
+Require the established native property creator and parent descriptor before returning protected device-property security.
+
+### `plan_update_registry_effects`
+
+Build and read back all final hive bytes before modifying the image.
+
+### `update_driver_key_creation_provider`
+
+Bind only the explicitly declared SYSTEM subject, not arbitrary tokens.
+
+## `windows/servicing/runtime.star`
+
+Exact winner-transition runtime analysis, not an installer queue or application.
+
+Primitive file/registry effects, dual-mode driver operations and advanced
+installer phase/inspection policy remain separate from equivalence predicates.
+Record identity is the stable transition label; component_identity is the exact
+side-specific source identity, or None for incomplete inspection-only fixtures.
+Only the latter identifies exact payloads; native FileInfo interning has its
+own servicing-family comparison for supported version scopes.
+
+### `analyze_servicing_directories`
+
+Read ordered directory declarations, never infer creation or ownership.
+
+    Only direct assembly/directories/directory nodes participate. Retain raw
+    attributes (including owner and compression) for native operation policy.
+    A repeated destination is not collapsed, and each side resolves security
+    definitions in its own manifest. Implicit file parents are not declarations.
+
+### `analyze_servicing_file_paths`
+
+Select native directory IDs, not resolved paths or authorized effects.
+
+    Only direct assembly files with a leading directory macro are decomposed.
+    Missing destinationPath remains explicit; driver projection policy is not
+    inferred from its absence. Profile lookup and offline root mapping must
+    resolve every directory ID before any filesystem changes can be planned.
+
+### `analyze_servicing_file_security`
+
+Resolve manifest-local declarations, not effective object permissions.
+
+    Missing references, the CSI (inherit) marker, and explicit SDDL remain
+    distinct. Neither operationHint nor SDDL is interpreted as permission to
+    change an object; native defaulting, inheritance and commit policy are
+    separate from this analysis. Preserve attributes for that later policy.
+
+### `analyze_servicing_registry_declarations`
+
+Collect admitted primitive declarations, not an ordered registry plan.
+
+    Native 26100.9441 ProcessChange bypasses registry and later primitives for
+    exact Type=dualModeDriver unless the existing-store ConfigOptions has all
+    bits 0x33. Earlier file processing and separate CBS driver operations are
+    NOT bypassed. Excluded transitions remain explicit for those consumers.
+    Case folding Type here would disagree with native identity classification.
+
+    Keys include their complete XML node (including security/empty keys), and
+    values retain unexpanded attributes and side-specific source identity.
+    Nothing is decoded, reduced, ordered, rooted, authorized or applied.
+
+### `analyze_servicing_runtime`
+
+Capture manifest-bound component transitions and declaration inventories from composition analysis; MOF equivalence is not an installer queue.
+
+### `assign_servicing_directory_security`
+
+Assign the bounded directory request's metadata, not token authority.
+
+    Native SeSetSecurityDescriptorInfoEx preserves bounded audit components,
+    clears AR controls, retains AI and makes absent audit SACLs present-NULL.
+    Existing mandatory labels are retained by the common category selection.
+    Owner authorization must have been established separately; SYSTEM alone
+    cannot assign the TrustedInstaller owner used by the conditional forms.
+
+### `assign_servicing_file_security`
+
+Construct the bounded kernel-assigned descriptor, without applying it.
+
+    This models the observed NTFS SeSetSecurityDescriptorInfoEx flags-0x4000
+    metadata transformation for the ordinary file request above. It is not a
+    token authorization check or an NTFS transaction. The caller must supply
+    the actual current descriptor, including labels shared by hardlinks.
+    Audit updates preserve existing mandatory labels; other SACL categories
+    require their own information-mask policy and fail closed here.
+
+### `assign_servicing_staged_file_security`
+
+Apply the bounded staging metadata transformation, without authorization.
+
+    Native staging updates labels as well as audit security. The observed
+    request has a present-NULL SACL and clears existing labels, unlike the
+    runtime hardlink setter. Non-NULL requested SACLs require separate label
+    validation policy and are deliberately unsupported by this entry point.
+    The native comparison declares a SYSTEM-integrity servicing subject with
+    an owner-capable TrustedInstaller group; this does not grant that access.
+
+### `build_servicing_created_security`
+
+Build the bounded SYSTEM creation descriptor before WCP's setter.
+
+    Models NULL file creator security, or directory creator O:SYG:SY, with
+    SYSTEM owner/primary group and SYSTEM integrity. This is not a general
+    token-dependent SeAssignSecurityEx implementation. The native NTFS path
+    takes auto-DACL inheritance only when the parent has DACL_AUTO_INHERITED.
+    Noninheritable ordinary parent audit ACEs do not propagate. If no DACL
+    inherits, the caller must explicitly supply the subject token default DACL.
+    Only nonpropagating allow ACEs with mapped file rights are supported there;
+    legacy inheritance and other token/SACL policies remain fail-closed.
+
+### `build_servicing_directory_security_request`
+
+Build a bounded explicit or selected-default directory request.
+
+    This is WCP's directory setter input, not creation-time inheritance or
+    authorization. Covers protected DACLs, explicit unprotected DACLs and
+    noninheritable ordinary audit SACLs observed in the pinned update.
+    Other control/SACL forms fail closed until separately established.
+
+### `build_servicing_file_security_request`
+
+Construct the bounded WCP ordinary-file request, not an NTFS effect.
+
+    The caller selects the child descriptor and supplies the actual parent.
+    This composes the proven defaulting, native-RTL inheritance and WCP final
+    file-control policies. It does not select commit flags, authorize a write,
+    set kernel security, handle directories or model token-dependent defaults.
+    Present-NULL/defaulted child ACLs remain rejected by preparation.
+
+### `build_servicing_immutable_file_security_request`
+
+Select the proven ordinary immutable-file request from native flags.
+
+    The supplied parent is the effective destination parent at commit time,
+    not necessarily its base-image descriptor. These added/paired state-2
+    cases set security on the linked source object. Source staging metadata,
+    hardlink mutation, authorization and ordering remain caller obligations.
+
+### `build_servicing_registry_security_request`
+
+Build the bounded explicit WCP key setter request, not a hive effect.
+
+    Missing principals default to SYSTEM; key rights use container inheritance.
+    Empty unprotected audit ACLs disappear, protected empty ACLs survive.
+    A selected explicit label suppresses parent labels and requests LABEL_SECURITY
+    information; a merely inherited label does not request that category.
+    Audit entries precede the label regardless of selected input order.
+    default=True selects the observed GetRegistryDefaultSecurity descriptor,
+    with no explicit declaration. defer_inheritance=True models the separate
+    setter flag: no parent query, no generic-rights/creator transformation,
+    and original ACE ordering retained for later propagation.
+    No kernel assignment, token ownership authorization, key creation, or
+    transaction ordering is implied. Absent/NULL child DACLs and
+    protected NULL SACLs remain outside this explicit-declaration path.
+
+### `build_servicing_staged_file_security_request`
+
+Construct the observed component-file staging request, not its effect.
+
+    The caller must determine driverUpdate/dualModeDriver identity semantics
+    and supply the effective component-store parent. This models the ACL part
+    of ApplyAclsAndWofCompressIfNecessary with compression disabled, not the
+    staging dispatch, source attributes, owner authorization or kernel update.
+    Unlike runtime hardlink security, this request also updates integrity
+    labels. The ordinary assignment helper deliberately rejects that mask.
+
+### `collect_servicing_registry_contributions`
+
+Decode admitted values in native loops; do not select or apply winners.
+
+    Admission, version-specific path rules, macro roots and key capture policy
+    remain explicit recipe inputs. All contributors survive, including equal
+    before/after declarations and duplicates. There is no unsupported fallback.
+
+### `compile_servicing_file_security`
+
+Compile declaration bytes, retaining absent and CSI inherit separately.
+
+    This does not map generic rights, supply defaults, inherit parent ACEs or
+    authorize a filesystem mutation. Cache by exact SDDL, not definition name:
+    names are local to each side of each manifest transition.
+
+### `expand_servicing_environment_path`
+
+Expand only the three variables installed by the native offline provider.
+
+    ProfileList and ProgramFiles values use this provider, not the host user's
+    environment. Unknown variables fail closed rather than being substituted
+    with guessed user/profile paths. Expansion is a single pass.
+
+### `expand_servicing_registry_string`
+
+Expand a registry string/name against explicitly resolved DOS paths.
+
+    source_roots is the source_roots map from the offline path policy, NOT its
+    image-relative roots map. Registry data remains DOS syntax, not NT device
+    syntax or image paths. Environment references remain literal. The observed
+    unresolved build.PackageMoniker is also literal; other unknown macros fail
+    closed. This helper does not decide which registry data types expand text.
+
+### `map_servicing_offline_path`
+
+Map an already expanded DOS path; never infer another volume's mount.
+
+### `offline_servicing_path_context`
+
+Validate this recipe's one-volume, image-relative path mapping.
+
+    SystemRoot is read from the offline SOFTWARE hive, not the host environment.
+    windows_directory is an explicit absolute virtual path within that image.
+    It must retain the recorded Windows directory's spelling (ignoring case),
+    because the native drive mapping targets the offline Windows parent.
+    This is deliberately narrower than native arbitrary provider mappings.
+
+### `plan_servicing_filemap`
+
+Build one native FileMap action without applying filesystem effects.
+
+    The caller must select a dirty directory and supply immediate children with
+    POST-preliminary-file-pass state. None means the map did not exist; an empty
+    resident map is not a supported substitute. This composes the bounded native
+    transition, path metadata and encoder. It does not validate transaction-wide
+    collision policy, authorize paths, choose traversal order, apply security or
+    commit a servicing transaction. A remove action removes the map, NOT its
+    directory. No-op and removal have no content and are never encoded.
+
+### `prepare_servicing_file_security`
+
+Build the bounded ordinary-file setter input, not an applied descriptor.
+
+    WCP ApplySecurityToObjectWithDefaults supplies System for each missing
+    principal and empty unprotected ACLs for absent ACLs. CFile's option-4 path
+    conveys protection separately and does not preserve input AI/AR bits.
+    Generic rights are mapped by the native format API, which also validates
+    all component extents before these fixed-header patches. The existing
+    ACE bytes/order (including ID) otherwise survive until RTL inheritance.
+
+    The caller must first select a descriptor. None/(inherit)/absent references
+    are dispatch decisions, not descriptors. Present-NULL and defaulted controls
+    remain unsupported here; they require the separate provider/current-object
+    paths. No parent query, inheritance, final control pass or mutation occurs.
+
+### `prepare_servicing_projected_files`
+
+Prepare bounded ordinary ProcessFile inputs, retaining unresolved work.
+
+    This is not a full file plan. The unresolved list is carried forward and
+    must be discharged before a complete hierarchy/commit can be claimed.
+    External-source cases remain unsupported. Compression flags reflect the
+    explicitly selected native mode, not a file compression effect. The selected
+    policy must be for the ordinary direct transaction, not HKCU or repair.
+
+### `prepare_servicing_registry_value_data`
+
+Decode one ordinary modern registry declaration, not its commit policy.
+
+    The pinned native modern-profile path selects value, not IEDownlevelValue.
+    Options are retained verbatim for the reducer; decoding does not authorize
+    mutable writes, replace/merge behavior, priorities, or overlapping owners.
+    MULTI_SZ entries and unquoted-empty provenance must survive even though
+    their canonical raw encoding can coincide. No profile/key binding occurs.
+
+### `prepare_servicing_unprojected_files`
+
+Prepare source-only native inputs without dropping unprojected work.
+
+### `preprocess_servicing_directory_declarations`
+
+Compute each explicit directory's own change bits, not subtree skips.
+
+    This consumes ordered reduction, retaining all collisions and source
+    contributions for later policy validation. It does not include file work,
+    implicit ancestors, discovered children, inheritance, or commit effects.
+    An unchanged directory here must never suppress changed descendants.
+
+### `preprocess_servicing_file_declarations`
+
+Native own-change bits after all primary/link source contributions.
+
+    State differences alone are NOT file changes (unlike directories).
+    FileInfo equality uses the native interning key; hash presence, digest method,
+    transform and bytes are compared separately. This pass never reads or
+    modifies the image and does not authorize copy, removal or security work.
+
+### `preprocess_servicing_path_hierarchy`
+
+Propagate already-proven own changes through the complete path graph.
+
+    Both inputs must contain fully reduced and own-preprocessed records. Files
+    include extra link destinations. Omitting file work is NOT a supported way
+    to produce a directory-only commit plan. This pass adds implicit ancestors
+    and native unchanged-subtree bits, without querying or changing the image.
+    It does not authorize collisions, removals, phase selection or propagation
+    to filesystem children discovered during commit.
+
+### `preprocess_servicing_registry_keys`
+
+Compute ordinary key flags after independent complete value reduction.
+
+    value_changes maps EVERY explicit reduced key to its manifest-value change
+    boolean, even keys with no values. It is not a comparison against live hive
+    data. compiled_security maps exact SDDL to bytes compiled with the target's
+    identity context. Native pointer interning preserves equal-text equality;
+    different texts use the asymmetric registry-rights comparison.
+    The returned mapping does not authorize traversal order or hive mutation.
+
+### `redirect_servicing_machine_registry_path`
+
+Map a canonical NT machine-hive path for the pinned amd64 profile.
+
+    This is the observed 26100.9441 WCP rule set, not generic Windows version
+    policy. amd64 leaves paths unchanged; x86/wow64 use the native machine
+    rules. One explicit WOW6432Node at Software or Software/Classes is handled;
+    deeper/multiple explicit nodes fail closed. USER roots, root aliases,
+    provider mounts and value macro expansion are outside this helper.
+
+### `reduce_servicing_directory_declarations`
+
+Reduce ordered declarations, not filesystem effects or commit authority.
+
+    Models the bounded install/remove ProcessDirectory path: no repair,
+    filter-list exclusions, implicit ancestors, compression effects or native
+    collision-policy authorization. Repeated owned additions are recorded for
+    that later policy decision, not silently accepted as authorized writes.
+    Descriptor references remain manifest-local opaque definitions here.
+    Preprocessing must compare selected descriptor *semantics* and propagate
+    changed descendants before any unchanged-subtree optimization is valid.
+
+### `reduce_servicing_file_declarations`
+
+Reduce explicit native ProcessFile inputs; do not infer installer flags.
+
+    Each input must supply process_flags and source_hash (None or a native
+    digest_method/transform/digest record). This supports ordinary primary/link calls
+    with flags 1, 2, 8, 10, 20 and 40 only, not repair, filters, external
+    sources or collision policy. Repeated same-side destinations/primary
+    sources fail closed. Hashes live on interned sources, so links use their
+    primary's hashes even when the primary has another destination.
+
+### `reduce_servicing_registry_keys`
+
+Reduce a bounded ordered set of resolved ordinary keys in one pass.
+
+    Input records carry path, side, identity, descriptor and key_attributes.
+    Paths are already macro-expanded, rooted and view-redirected. This models
+    native last-nonempty descriptor selection separately from first-owner
+    retention. Overlapping owned additions are counted, not authorized. Either
+    side can arrive first; the caller supplies the native contribution order.
+    Implicit ancestors are retained, but namespace/profile anchors are provider-
+    owned. System and per-user passes must never share one reduction mapping.
+    No value reduction, exclusion authorization or hive writes happen here.
+
+### `reduce_servicing_unprojected_files`
+
+Retain native ProcessUnprojectedFile source/hash contributions.
+
+    Native 282f10 interns the same FileInfo table as projected files but makes
+    no runtime destination record. Flags20 and new-only1 select compression
+    and the component-wide GAC/NGEn marker, not projected immutable state.
+
+### `resolve_servicing_directory_paths`
+
+Resolve declared directories only; unknown roots fail, not guess.
+
+### `resolve_servicing_file_paths`
+
+Resolve explicit paths and retain bounded native unprojected work.
+    Ordinary identities without destinationPath use ProcessUnprojectedFile.
+    In the ordinary transaction (no 0x400 driver override), native
+    DoComponentOperation also forces dual-mode drivers down that source-only
+    path, even with destinationPath. Their runtime projection belongs to the
+    driver installer, not the generic file installer. Unprojected records still
+    require source/hash processing; incomplete identities remain unresolved.
+
+    driver_projection_candidates is only for independently checking actual
+    driver-installer outputs against declared hashes. It is not permission to
+    feed driver files into the ordinary file/FileMap installer.
+
+### `resolve_servicing_machine_registry_key`
+
+Resolve verified HKLM/HKCR root aliases and the pinned registry view.
+
+    Keys must already have macros expanded. HKCU/HKU, provider hive mounts,
+    CurrentControlSet resolution, virtualization and key security are separate.
+    Returned paths are canonical NT paths without a trailing separator.
+
+### `resolve_servicing_registry_key_pass`
+
+Map a manifest registry key to its architecture-qualified pass using the compiled native path mapper.
+
+### `select_servicing_file_commit_paths`
+
+Select native file-loop candidates, not an execution schedule.
+
+    Requires the complete own/subtree-preprocessed hierarchy. Phase 1 selects
+    boot-critical flag0x10 files; phase 2 selects its complement; phase 0
+    selects both. Clean bit4 and directories are excluded in every phase.
+    This models only the ordinary CommitDirectoryChanges file loop. Security-
+    only/external-store flags, ancestor opens, recursion order, global enable
+    gates and actual effects remain caller obligations. Returned sorted paths
+    are for selection/comparison, never authorization to reorder native work.
+
+### `select_servicing_file_hash`
+
+Bounded CmsGetFileHashInformation projection, not payload verification.
+
+    All files in the exact current transition use a single nested SHA256 with
+    Identity transform and no legacy hash. Native parsed enum 1 maps to digest
+    method 2; transform enum 0 maps to transform 1. Other shapes require their
+    own native selection/validation and are rejected, not guessed or ignored.
+
+### `select_servicing_new_registry_multi_action`
+
+Select a new-only nonempty MULTI_SZ contribution's observed effect.
+
+    Missing manifest hint is append in the pinned native ProcessValue path.
+    Existing strings survive append/prepend; an already present new entry is
+    not moved. New-only replace overwrites without mutable preservation.
+    Empty/unquoted-empty contributions and overlapping owners need separate
+    reduction, and must not be collapsed into this bounded single-owner case.
+
+### `select_servicing_paired_registry_dword_action`
+
+DWORD-only compatibility entry point for the paired value selector.
+
+### `select_servicing_paired_registry_multi_action`
+
+Return the observed ordinary MULTI_SZ merge effect, without applying it.
+
+    before/after are ordered contribution lists of nonempty strings from one
+    owner with ordinary priority and no override. Both sides must use the same
+    operation_hint and mutable setting. The caller must resolve the hint;
+    the default here explicitly selects append, not manifest default parsing.
+    An empty list means no entries (e.g. quoted empty declaration), not
+    the distinct unquoted empty-string contribution. Append/prepend merge
+    regardless of mutable; replace uses exact old-value preservation.
+    Current is a typed raw record or None. Only canonical
+    terminated current MULTI_SZ data is accepted; malformed data fails closed.
+    The caller establishes reduction/root/key policy. No hive is modified.
+
+### `select_servicing_paired_registry_value_action`
+
+Select the observed single-owner paired ordinary-value commit action.
+
+    Inputs are decoded typed raw records (type=int, raw=bytes), not XML text.
+    Supported types are NONE, SZ, EXPAND_SZ, BINARY, DWORD, QWORD and raw
+    numeric types greater than 11 (all 32 bits preserved). Both sides
+    must have ordinary priority, no override or operation hint, and the same
+    effective mutable flag. The caller establishes those
+    preconditions; this is not registry manifest arbitration. MULTI_SZ uses
+    different native merge behavior and must not enter this selector.
+    None means a missing current value, not an unreadable key. No registry
+    roots, security, ownership, key creation or effects are handled here.
+
+### `select_servicing_registry_empty_delete`
+
+Evaluate a queued key AFTER descendants and values have been processed.
+
+    Counts must come from the current physical key, including undeclared
+    contents; declaration counts cannot establish emptiness. Nonempty-key
+    security reset/propagation requires a separate configured policy.
+
+### `select_servicing_registry_key_commit`
+
+Select ordinary CreateKeysInKey work from a preprocessed native node.
+
+    This is not declaration reduction or permission to mutate a hive. The
+    caller must establish ordering, overlap/exclusion policy and parent state
+    first. `created` is the actual create disposition, not an existence guess.
+    Removal only queues an emptiness check AFTER value and descendant work;
+    implicit ancestors participate too. Missing removal keys are tolerated by
+    the provider. Mutable/protected-subtree and special auxiliary policies
+    deliberately remain outside this bounded selector.
+
+### `select_servicing_registry_value_action`
+
+Select a bounded ordinary single-owner registry value action.
+
+    Uses the paired ordinary-value selector's types and reduction preconditions.
+    None on one declaration side means that side has no contribution. Unlike
+    paired mutable updates, a new-only value overwrites without querying and
+    an old-only value deletes without checking whether it was user-modified.
+    A missing value during deletion is tolerated by the native commit path.
+    MULTI_SZ contributions require their separate merge/replace policy.
+
+### `select_servicing_writable_file_action`
+
+Select copy versus preservation for the observed paired writable shape.
+
+    This reads the current projected file, not its possibly DCS-encoded WinSxS
+    counterpart. It neither applies effects nor verifies the replacement source,
+    security authorization, FileMaps or transaction ordering. Missing projections,
+    different flags/states and non-identity hashes require separate native policy.
+
+### `servicing_directory_propagation_policy`
+
+Select the ordinary direct-transaction enumeration gate, not effects.
+
+    WCP raw layout +2c is MobileStore == 1. AnalyzePrimitiveInstallers maps
+    that byte to primitive flag 10, then PerformPrimitiveInstallation maps it
+    to coordinator flag 80. This is not equivalent to offline mode. The
+    coordinator also ORs the numeric SmiHiveUpdates configuration result into
+    its flags; retain that override rather than assuming it is a boolean.
+    This covers ordinary direct transactions only, not HKCU or repair setup.
+    The ordinary primitive flag mapping never supplies 20000; only the raw
+    SmiHiveUpdates override can set that bit here and suppress the primary
+    immutable flag. No full coordinator flag word is inferred from this subset.
+    A false enumeration gate does NOT suppress explicitly declared children,
+    their own security work, or inherited security on newly created objects.
+
+### `servicing_file_compression_policy`
+
+Select native CFileInstaller compression mode from SYSTEM/Setup.
+
+    IsCompactOSEnabled accepts only an exact DWORD and treats any nonzero
+    value as true. Missing/malformed values select noncompact mode. This
+    describes ProcessFile inputs, not authorization to compress file data.
+
+### `servicing_file_path_roots`
+
+Resolve the observed amd64 offline directory IDs; no file effects.
+
+### `servicing_file_security_matches_manifest`
+
+Compare independent descriptors with native WCP flags 2 (file rights).
+
+### `servicing_file_source_key`
+
+Bounded native FileInfo key, NOT an exact payload/store identity.
+
+    InsertFileInfo ignores all version fields for nonSxS scope, but retains
+    major/minor for absent scope. The source filename is independently case-folded.
+    Preserve the full component_identity on declarations for payload lookup;
+    neither a transition label nor this intern key authorizes source bytes.
+    Other scopes and non-ASCII comparison require additional native evidence.
+
+### `servicing_filemap_collision_policy`
+
+Select the ordinary direct transaction's directory collision gate.
+
+    Coordinator initialization ORs 0x4800 for SingleResourceOwnership and the
+    raw SmiHiveUpdates DWORD into its flags. InitializeCFileInstaller copies
+    bit 0x800 to the strict-directory byte. Ordinary primitive flags cannot
+    supply that bit. This is not a repair/custom-coordinator policy.
+
+### `servicing_filemap_collision_status`
+
+Return the native final collision HRESULT, not transaction success.
+
+    Directory dot-entry collisions retain the resident owner. Tolerating them
+    does not authorize ordinary file collisions or any other commit effects.
+    Other native final checks and all earlier failures remain independent.
+
+### `servicing_manifest_boot_critical`
+
+Bounded WcpManifest::IsBootCritical category membership predicate.
+
+### `servicing_primitive_family_capacity`
+
+Bound the native table capacity from complete affected TLC closures.
+
+    GenerateServicingFamilies inserts only install/uninstall operations (0/1),
+    and all members of their complete compositional closures. Stage, unstage,
+    pin and unpin operations do not add entries. The caller must supply the
+    identities from the verified complete affected install-mark analysis,
+    not merely changed winners.
+
+    Version-independent hashes give a lower bound on native family count;
+    distinct full identities give an upper bound, covering version-scoped
+    families without assuming their hash policy. Both bounds must imply the
+    same capacity. This does not resolve within-bucket insertion order.
+
+### `servicing_registry_driver_options`
+
+Read the pinned existing-store configuration, without changing store mode.
+
+    A missing/malformed value is outside this bounded recipe; it is not an
+    instruction to create a driver database or enable the offline-new-store
+    override. SYSTEM and DRIVERS are separate logical hives.
+
+### `servicing_registry_overlap_policy`
+
+Select ordinary direct-transaction overlap gates, not authorization.
+
+    CRegistryInstaller::Initialize copies coordinator bit 0x800 to both its
+    strict-key and strict-value bytes. The coordinator sets it from boolean
+    SingleResourceOwnership or the raw SmiHiveUpdates flag override. Other
+    coordinator modes and critical/state-separation/HKCU counters remain
+    independent obligations.
+
+### `servicing_registry_overlap_status`
+
+Return native DoesOverlapExist status from complete classified counts.
+
+    A total owner collision is not automatically a critical collision. Callers
+    must separately establish all six counters; absence cannot mean zero.
+    This does not classify contributions, authorize mutation, or replace
+    earlier parser/override/security failures.
+
+### `servicing_registry_path_roots`
+
+Resolve registry-backed roots for a no-SID offline servicing profile.
+
+    The caller supplies the image's SOFTWARE hive. No host registry, mounted
+    volume, current-user profile, or hardcoded Default directory participates.
+    Other special-directory IDs remain absent until separately resolved.
+
+### `servicing_registry_security_matches_manifest`
+
+Compare independent descriptors with native WCP flags 1 (key rights).
+
+    This is the asymmetric comparator used by ArbitrateKeySecurity, not the
+    entire arbitration or an applied-key security decision. Interned identical
+    descriptors use a separate native pointer-equality fast path; independent
+    descriptors with inherited ACEs must not be conflated with that case.
+
+## `windows/servicing/services_direct.star`
+
+Apply declared service deltas without running the service installer.
+
+Unchanged settings (including image policy) are preserved. This handles explicit
+SCM configuration and SvcHost membership; it neither starts services nor invents
+an advanced-installer completion record.
+
+### `apply_direct_services`
+
+Plan and publish supported direct service effects on root; return service/group and registry publication counts.
+
+### `collect_direct_services`
+
+Collect before/after service and group contributions from manifest-bound runtime transitions.
+
+### `plan_direct_services`
+
+Plan qualified service/group changes against actual SYSTEM and SOFTWARE state, preserving unrelated configuration and security.
+
+## `windows/servicing/services_native.star`
+
+Publish native phase-three service-category effects, never predicted merges.
+
+XML limits which SvcHost values the admitted native jobs may touch. Native WCP
+alone decides list contents, ordering, and deletions. Online service creation
+and CBS transaction completion are not covered by this adapter.
+
+### `apply_native_service_category`
+
+Run native service jobs with explicit privileges, validate their effects and publish only authorized hive changes.
+
+### `plan_native_service_category`
+
+Require the execution's exact SOFTWARE epoch and validate before writes.
+
+### `service_category_authority`
+
+Read declared group names only; this is not a replacement merger.
+
+## `windows/servicing/settings.star`
+
+Publish settings manifests from exact admitted component declarations.
+
+WCP 9703 ShouldManifestBeSettingsManifestLinked (11be48) tests configuration
+or RegistryKey.overridable count, not the presence of migration rules. The
+original encoded manifest is hardlinked; existing older versions are retained.
+
+### `apply_update_settings_manifests`
+
+Preflight settings source/destination objects before publishing manifest hardlinks; return selection/link counts.
+
+### `plan_update_settings_manifests`
+
+Select admitted settings manifests and bind exact source objects, security and destination epochs.
+
+## `windows/servicing/smart_installer.star`
+
+Execute pinned native CSI smart-installer jobs, without publishing effects.
+
+The real WCP parser constructs manifest objects; each real installer DLL owns all
+queue/commit decisions. This is not queue derivation or a CBS completion claim.
+
+### `run_appx_installer`
+
+Execute the bounded qualified AppX smart-installer profile with explicit token privileges and return native effects.
+
+### `run_events_installer`
+
+Execute the bounded qualified Events smart-installer profile against explicit hives and jobs; return native effects.
+
+### `run_network_drivers_installer`
+
+Run the qualified network-driver smart profile with explicit NetSetup modules, hives, jobs and optional native runtime context.
+
+### `run_smart_installer`
+
+Run explicit (operation, manifest-file) jobs and return uncommitted effects.
+
+    Operations are native Install=1, Uninstall=2, Inspect=3. Callers must derive
+    eligible jobs and offline phases independently. For per-user registry, the
+    caller must supply the exact profile SID (empty for the default template),
+    source-backed static mounts, local-policy read capability and caller token
+    privileges. This executes one admitted profile; it does not enumerate users,
+    establish phase eligibility or infer whether transaction POQs ran inline.
+    No registry changes escape
+    if initialization, parsing, queueing, commit, release or unload fails.
+
+### `run_system_protection_installer`
+
+Execute the bounded qualified System Protection smart-installer profile and capture key-flag effects.
+
+### `smart_jobs_from_queue`
+
+Translate native phase-9 entries for an admitted smart-installer profile.
+
+    WCP ExecuteSingle queues the new manifest as Install=1 first, then the old
+    manifest as Uninstall=2. Commit resolves that aggregate; these calls are
+    not immediate registry writes. Inspection uses its exact retained identity.
+
+## `windows/servicing/system_protection_native.star`
+
+Publish native System Protection key metadata only after complete execution.
+
+### `apply_native_system_protection`
+
+Run qualified System Protection jobs and publish validated key flags; return queue/parse/commit evidence.
+
+### `plan_native_key_flags`
+
+Build and verify existing-key flag edits without changing values/security.
+
+## `windows/servicing/timezone.star`
+
+Native offline timezone installer admission and atomic effect publication.
+
+### `apply_update_timezone`
+
+Execute qualified offline timezone resource handlers and publish checked effects; return resource/native-write evidence.
+
+### `publish_timezone_effects`
+
+Validate timezone writes against actual SOFTWARE/SYSTEM and the selected control set before publishing patches.
 
 ## `windows/symbols.star`
 
@@ -2125,13 +4384,19 @@ Materializes a list of binary values into one bytes value, preserving order. Use
 
 `digest(value, algorithm='sha256') -> bytes`
 
-Hashes a file, string or bytes value and returns raw digest bytes, not hexadecimal text. The default algorithm is SHA-256.
+Hashes a file, string or bytes value and returns raw digest bytes, not hexadecimal text. The default algorithm is SHA-256. Content-addressed immutable readers may reuse a SHA-256 digest only after complete byte verification; a cached identity is not a backing-store availability check.
+
+### `digest_many`
+
+`digest_many(values, algorithm='sha256', workers=4, while_running=None) -> list[bytes]`
+
+Hashes up to 65536 file, string or bytes inputs in input order using 1..8 parallel native readers (default 4). Reads and hashes each input (or reuses a previously byte-verified immutable SHA-256 identity), rejects short files and propagates read errors without returning partial results. Optional while_running is called once with no arguments on the caller interpreter thread while native readers run; its return value is ignored and an error aborts the batch only after joining every worker. Input membership is captured before the callback, but it must not mutate underlying bytes. No Starlark callbacks run in workers; source readers must support concurrent reads and remain unchanged until return.
 
 ### `directory`
 
 `directory() -> directory`
 
-A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
+A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. path_names(lower=False, include_empty=True) returns an independent dictionary of all file and directory paths (including root and empty directories), without reading file contents. Values retain exact spelling; lower=True lowercases lookup keys and rejects colliding file names. Directory spelling follows the first sorted descendant file; empty directories fill remaining names in sorted order. include_empty=False returns only files and their ancestors. Later namespace changes do not alter the snapshot. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
 `get_security(name)` returns the existing path's self-relative Windows security descriptor as immutable bytes, or `None` when no descriptor is assigned. Missing paths are errors. It does not synthesize inherited permissions or modify the tree.
 
@@ -2330,6 +4595,12 @@ Constructs a deterministic Linux-compatible newc archive from Unix entry diction
 `archive.crx(file) -> record(id, version, files, entries)`
 
 Verifies a CRX3 envelope and returns its developer ID, format version and ZIP entries as portable files without extraction. Checks all RSA/SHA-256 and P-256 ECDSA/SHA-256 signatures and requires a matching developer key. Header decoding is bounded to 1MiB. Does not pin a Chrome Web Store publisher key or parse legacy CRX2 packages. The source must remain open while reading entries.
+
+### `archive.dcs`
+
+`archive.dcs(file, maximum_bytes=512MiB) -> file`
+
+Expands a DCS v1 CBS component-store container to an in-memory read-only file using native LZMS decoding. maximum_bytes (1..512MiB) bounds both stored and expanded sizes; framing, block counts, lengths and trailing data are checked before returning content. This is separate from WIM resource compression and does not verify manifest hashes or catalog trust.
 
 ### `archive.gzip`
 
@@ -2993,9 +5264,15 @@ Creates a bounded random-access byte view, optionally over a source slice. It su
 
 ### `binary.xml`
 
-`binary.xml(value, maximum=16MiB, max_depth=256, max_nodes=1M)`
+`binary.xml(value, maximum=16MiB, max_depth=256, max_nodes=1M, discard_whitespace=False)`
 
-Parses XML into namespace-aware immutable document and node values. Size, depth and node-count limits bound parsing; with_root/with_children/with_text create edited values for serialization.
+Parses XML into namespace-aware immutable document and node values. Size, depth and node-count limits bound parsing; with_root/with_children/with_text create edited values for serialization. Optional discard_whitespace removes whitespace-only XML character-data tokens (space, tab, CR, LF) unless inherited xml:space requests preservation; xml:space=default resets preservation and unknown values preserve conservatively. Other text, attributes, comments and processing instructions remain unchanged. Default parsing retains all whitespace. This option is for structural analysis, not lossless editing or signed serialization. Nodes expose attribute_map(namespace='', strict=False), an independent name-to-value dictionary for one exact attribute namespace. Namespace declarations are ignored, duplicates in the selected namespace are rejected, and strict=True rejects attributes from any other namespace. Default element namespaces do not apply to unprefixed attributes.
+
+### `binary.xml_many`
+
+`binary.xml_many(values, workers=4, maximum=16MiB, max_depth=256, max_nodes=1M, discard_whitespace=False, total_maximum=256MiB)`
+
+Parses a list of at most 4096 XML inputs with 1..8 native workers (default 4), preserving input order and duplicates as independent immutable documents. XML options and per-document validation match binary.xml. Input/file conversion runs on the caller thread before parsing; workers receive owned byte snapshots and never call Starlark. total_maximum bounds aggregate input bytes (default and maximum 256 MiB). Input conversion errors precede parsing; otherwise the lowest failing input index determines the error after all workers join, with no partial result.
 
 ### `binary.zlib`
 
@@ -3791,11 +6068,23 @@ Evaluates supported Renvo make recipes against a virtual source tree and rebuild
 
 Creates an experimental in-process software x86 PC backend from Renvo x86.rfe. JIT-compiles hot 16-, 32- and 64-bit code using Renvo native blocks, without KVM or QEMU. Requires a supported 64-bit native-JIT host; unavailable executable memory is an error. Privileged/device/unsupported instructions use precise architectural slow paths. Shares BIOS, IDE, VGA, input and overlays with cc. MS-DOS 6.22 startup, Windows 3.11 standard/enhanced-mode Notepad, and Windows 98 SE Explorer/Notepad are verified. The graphical smokes verify keyboard input, PS/2 mouse-selected Save and changed bytes on the guest disk. Enhanced-mode paging and actual native-tier retirement are explicitly asserted. Implements basic x87, string port I/O, paging and protected/v8086 gates; parts of x87 and other legacy CPU/device features remain incomplete. overlay_limit bounds dirty snapshot memory in bytes. Inspect with vm.extension("rfe.v1").state().
 
+### `runtime.heap_profile`
+
+`runtime.heap_profile(limit=20, order_by='sampled_bytes') -> record`
+
+Returns a bounded read-only snapshot of the running Go allocation sampler, not a per-recipe ownership graph. limit defaults to 20 and must be 1..100. Returns sample_rate_bytes, total sampled_bytes/sampled_objects, stack_count, and entries ordered by retained sampled bytes. Each entry has sampled_bytes, sampled_objects and stack frames (function, line); paths and addresses are omitted. Raw counts are unscaled samples. Additional estimated_bytes/estimated_objects fields on entries and totals apply the inverse sampling probability from mean sampled object size; these are statistical estimates, not exact ownership measurements. order_by accepts sampled_bytes (default) or estimated_bytes. Counts and estimates may lag up to two GC cycles. Does not force collection or change sampling, GC policy, memory limits or guest timing. Bounds stack inventory to 1048576 and retries a changing inventory at most three times; failure returns no partial snapshot.
+
+### `runtime.release_memory`
+
+`runtime.release_memory() -> None`
+
+Explicitly runs a process-wide Go garbage collection and requests that unused heap pages be returned to the operating system. Drop unneeded construction references before calling it at a phase boundary. Reachable readers, caches and guest resources are not closed or evicted. Does not change GC policy or the memory limit and does not guarantee an RSS reduction or a hard memory bound. May pause concurrent work; include its elapsed time in end-to-end measurements.
+
 ### `runtime.stats`
 
 `runtime.stats() -> record`
 
-Returns a snapshot of runtime resource statistics for diagnostics and benchmarking. Counters describe the running runtime, not just one image recipe.
+Returns a snapshot of runtime resource statistics for diagnostics and benchmarking. Counters describe the running runtime, not just one image recipe. Includes heap allocation/goal, the configured soft memory limit, cumulative GC cycles and stop-the-world pause nanoseconds, and cumulative GC/runtime available CPU seconds. CPU seconds are runtime-wide capacity-accounting counters, not elapsed time or per-recipe work; compare snapshots rather than interpreting totals as a critical path. Observes configuration only; does not change GC policy, memory limits or guest clocks.
 
 ### `scs.create`
 
@@ -3981,7 +6270,7 @@ Builds a downloadable ZIP response for a directory in a supplied virtual filesys
 
 `windows.acl_entries(source) -> dict`
 
-Validates a complete revision-2/4 Windows ACL (at most 65,535 bytes), returning `revision` and `entries`. Every entry contains `type`, `flags` and its original `data` bytes. Simple allow, deny, audit, alarm and mandatory-label entries also contain a checked binary `sid` and numeric `mask`; other entry layouts retain opaque bytes with `sid` and `mask` set to `None`. Unused ACL allocation space is allowed. This inspects the format; it neither evaluates access nor resolves principals through the host.
+Validates a complete revision-2/4 Windows ACL (at most 65,535 bytes), returning `revision` and `entries`. Every entry contains `type`, `flags` and its original `data` bytes. Simple allow, deny, audit, alarm, mandatory-label and callback-allow entries also contain a checked binary `sid` and numeric `mask`. Callback application bytes remain in `data` after the SID; other entry layouts retain opaque bytes with `sid` and `mask` set to `None`. Unused ACL allocation space is allowed. This inspects the format; it neither evaluates access nor resolves principals through the host.
 
 ### `windows.acme_plan`
 
@@ -4037,32 +6326,53 @@ Builds a SCHEDULE_INTERVAL record from 168 hourly bytes, starting Sunday at 00:0
 
 Converts a wire-format SID to AD's stored form by reversing only the final subauthority's byte order.
 
+### `windows.api_set_namespace`
+
+`Decodes a raw v6 API-set namespace (.apiset section bytes or a file slice), limited to 16 MiB. Returns version, flags, hash_factor, entries and resolve(contract, importer=""). Entries preserve flags, UTF-16 hashed_length and ordered importer/host records. resolve uses the validated hashed prefix excluding the final revision, then selects an exact importer override or value-zero fallback; it does not guess nearest versions. Names are bounded ASCII UTF-16 module basenames; unresolved or empty hosts return None. Rejects unsupported versions, malformed offsets/counts/names, duplicate contracts/importers and ambiguous or inconsistent hash indexes. The result owns its parsed data. Does not load DLLs, invent hosts, initialize modules, implement their exports or confer trust.`
+
+Decodes a raw v6 API-set namespace (.apiset section bytes or a file slice), limited to 16 MiB. Returns version, flags, hash_factor, entries and resolve(contract, importer=""). Entries preserve flags, UTF-16 hashed_length and ordered importer/host records. resolve uses the validated hashed prefix excluding the final revision, then selects an exact importer override or value-zero fallback; it does not guess nearest versions. Names are bounded ASCII UTF-16 module basenames; unresolved or empty hosts return None. Rejects unsupported versions, malformed offsets/counts/names, duplicate contracts/importers and ambiguous or inconsistent hash indexes. The result owns its parsed data. Does not load DLLs, invent hosts, initialize modules, implement their exports or confer trust.
+
 ### `windows.appx_package_acl`
 
 `windows.appx_package_acl(parent, family, kind='root', framework=False) -> bytes`
 
 Constructs identity-scoped WindowsApps package DACLs from a native parent DACL. family is a package family name; kind is root, directory or file. By default adds conditional Users execute access bound to WIN://SYSAPPID, the derived family capability SID and Users read access. framework=True instead adds native shared-framework read/execute grants for both AppContainer groups and Users. Both policies inherit parent grants. Unsupported inheritable ACE types/flags and missing inherited grants fail closed. Does not construct an owner/SACL or register packages. No host security APIs.
 
+### `windows.assembly_declarations`
+
+`windows.assembly_declarations(root) -> record`
+
+Extracts ordered raw assembly declarations in one traversal of a binary.xml_node root. Returns a frozen record with architectures, files, directories, security_definitions, memberships and managed_assembly. Recognizes asm.v1/asm.v3 only and ignores foreign namespace nodes. Preserves duplicates, qualified attributes, absent versus empty values, unknown directory children, link content presence, and security references for caller validation. Bounds extraction to 1,048,576 visited nodes/attributes. This is not macro expansion, path validation, precedence, security resolution, installation policy or authenticity verification.
+
 ### `windows.assembly_manifest`
 
-`windows.assembly_manifest(value) -> record(identity, files, references, registry_keys)`
+`windows.assembly_manifest(value) -> assembly_manifest`
 
-Parses an assembly manifest XML value into identity attribute records and declared file records, including hashes and hash algorithms. The registry_keys list retains every declared key path, including empty CBS index keys, independently of values. It does not install a side-by-side assembly or verify those hashes.
+Parses an assembly manifest XML value into identity attribute records and declared file records, including hashes and hash algorithms. Each file also has digest=None or the declared nested XMLDSIG record (algorithm, transforms, value); unsupported algorithms/transforms are retained for inspection, not treated as verified. The registry_keys list retains every declared key path, including empty CBS index keys, independently of values. References also retain dependency_type, resource_type, qualified attributes and binding_redirects. deployment is the root deployment attribute list, or None when absent; impact is preserved without inferring installation. It does not install a side-by-side assembly or verify those hashes. Returns a lazy assembly_manifest view over an owned parse. Each call owns its projected mutable lists; fields materialize on first access. Freezing the view also freezes fields materialized later.
 
 ### `windows.assembly_registry_data`
 
 `windows.assembly_registry_data(value_type, value, variables=None) -> value`
 
-Decodes CBS manifest text into native hive-writer values. Multi-strings use
-quoted comma-separated fields (literal backslashes); QWORDs accept either
-eight little-endian hexadecimal bytes or a `0x` numeric literal. Binary, NONE,
-and resource-list data remain bytes. Eight-hex-digit numeric types (for example
+Decodes CBS manifest text into native hive-writer values. Multi-strings use strict comma-separated quoted fields when the first character
+is a quote; otherwise the entire text is one string, including commas and whitespace.
+There is no CSV quote escaping or separator whitespace trimming. Backslashes
+are literal and empty quoted entries contribute no strings. This decodes data,
+not registry contribution/merge operations. QWORDs accept either
+eight little-endian hexadecimal bytes or a `0x` numeric literal. Binary and resource-list data remain bytes. REG_NONE declaration text is ignored
+and decodes to empty bytes (including macro-like text). Eight-hex-digit numeric types (for example
 `FFFF0012` or `00040007`) decode hexadecimal data to raw bytes; the native hive
 writer accepts these type spellings and preserves all 32 type bits unchanged.
 Optional string `variables` expand named
 `$(name)` macros case-insensitively in one pass; unknown used macros are errors.
 Environment-variable strings are unchanged. Runtime path policy is supplied
 by the image recipe, not inferred from the host.
+
+### `windows.assign_registry_security`
+
+`windows.assign_registry_security(current, request, security_information) -> bytes`
+
+Constructs the bounded registry setter result from current/request descriptor bytes and explicit security_information. Requires owner, group, DACL and audit SACL with matching protection flags; optional LABEL replaces mandatory labels, otherwise current labels survive. Maps effective key rights (kernel execute 0x20039), preserves inherit-only generics and duplicate ACEs, consumes AR, and emits a present-NULL empty SACL. Unsupported controls, ACE categories and multiple labels fail closed. Does not create keys, inherit from parents, authorize the subject, propagate to descendants or write hives.
 
 ### `windows.batch_plan`
 
@@ -4076,6 +6386,24 @@ Inspects DOS batch commands and COPY source declarations using portable media fi
 
 Parses the first 40 bytes of an uncompressed 24/32-bit RGB Windows BITMAPINFOHEADER. Returns width, absolute height, depth, DWORD-aligned stride, pixel size, and top_down. Does not allocate pixels or access a display.
 
+### `windows.catalog`
+
+`windows.catalog(file) -> file`
+
+Owns at most 64 MiB of catalog bytes and parses its CTL index once, returning a read-only file. Reapplying catalog to that handle returns the same handle. catalog_index reuses the native index; catalog_signature lazily memoizes cryptographic content/signature/timestamp integrity on these exact bytes, returning independent projections. This is not certificate-chain, revocation, expiry, publisher or timestamp-authority trust. Callers must validate trust against the exact trust store and policy; no trust result is cached.
+
+### `windows.catalog_attributes`
+
+`windows.catalog_attributes(file) -> list`
+
+Parses ordered catalog-level CTL extensions from PKCS#7/CMS catalogs (64 MiB limit). Returns oid, critical, name_value, name, flags and raw value bytes. SPC name/value names are BMPStrings; flags and value bytes are preserved. Unknown extension OIDs remain opaque, duplicates remain distinct, and member/signer attributes are not enumerated. This is neither signature verification nor a trust decision.
+
+### `windows.catalog_entries`
+
+`windows.catalog_entries(file) -> dict`
+
+Returns version (1 or 2) and ordered CTL entries with subject, lookup digest and ordered attributes. SPC name/value attributes expose name, flags and exact value bytes; unknown values retain their DER. Member attributes are never taken from global extensions or signer metadata. Bounded to 64 MiB; malformed input fails. Parsing is not signature verification, path validation or a trust verdict.
+
 ### `windows.catalog_hash`
 
 `windows.catalog_hash(file, algorithm='sha1')`
@@ -4086,13 +6414,115 @@ Computes the Windows catalog membership hash of a file. For PE inputs this uses 
 
 `windows.catalog_index(file) -> dict`
 
-Parses signed-catalog CTL lookup entries into `sha1` and `sha256` byte lists. Version 1 uses SPC indirect-data digests; version 2 uses subject identifiers. Unrelated certificate/attribute octet strings are not treated as entries. Input is bounded to 64 MiB and malformed catalogs fail. These are catalog lookup keys, not signature verification or trust decisions. No network access or Windows API is used.
+Parses signed-catalog CTL lookup entries into `sha1` and `sha256` byte lists. Version 1 uses SPC indirect-data digests; version 2 uses subject identifiers. Unrelated certificate/attribute octet strings are not treated as entries. Input is bounded to 64 MiB and malformed catalogs fail. These are catalog lookup keys, not signature verification or trust decisions. No network access or Windows API is used. An input from windows.catalog reuses its owned parsed index, but every call returns independent mutable digest lists.
 
 ### `windows.catalog_members`
 
 `windows.catalog_members(value)`
 
 Reads a PKCS#7 catalog and returns its member digest byte strings. Extracting membership does not verify the catalog signature or establish certificate trust.
+
+### `windows.catalog_signature`
+
+`windows.catalog_signature(file) -> record`
+
+Verifies single-signer RSA/SHA-256 Windows catalog SignedData integrity and recognized Microsoft RFC3161 timestamps. Supports directly carried PKCS#7 CTLs and CMS OCTET STRING encapsulation with distinct signed hash domains. Returns the same signer, certificates, signature, unsigned_attributes, timestamp and digest_algorithm fields as pe_signature. Requires a parseable catalog membership index, bounds input to 64 MiB and certificate count to 32. Does not establish certificate-chain, revocation, publisher or Windows trust-provider policy. No host roots, clock or network are consulted.
+
+### `windows.cbs_component_owners`
+
+`windows.cbs_component_owners(installed, pinned, changes) -> record`
+
+Reduces explicit component-analyzer owner changes for one resolved version. installed and pinned are lists of dict(source=string_or_None, elevation=int); changes adds action=pin, unpin, install or uninstall and requires a string source. None is a native RTM placeholder, distinct from an empty string. Source names are case-sensitive; elevation is part of owner identity. Pass the complete ordered transaction prefix against the original baseline: identical source/elevation/action events are deduplicated in first-seen order, not replayed. Additions preserve existing owners; removal requires the exact source/elevation or consumes one anonymous RTM placeholder, otherwise fails. Returns a record with installed and pinned lists of source/elevation dicts; only installed elevations feed cbs_update_index.with_components. No inventory loading, RTM synthesis, package scheduling, winner selection or registry writes. Bounds: 1048576 combined owners/events, 64 KiB per source and 64 MiB combined source text. Unknown actions/elevations, malformed text, or missing removals fail with no partial result.
+
+### `windows.cbs_deployment_source`
+
+`windows.cbs_deployment_source(data) -> record`
+
+Decodes a bounded native two-length canonical CSI CBS source payload. Returns package, update, primary, opaque secondary bytes and source_key. Secondary data does not participate in source identity. Validates framing before slicing; inspection does not imply activation or interpret secondary bytes as an elevation.
+
+### `windows.cbs_deployment_source_data`
+
+`windows.cbs_deployment_source_data(manifest, update) -> bytes`
+
+Serializes a native two-length CBS deployment source payload from an exact package manifest and update name. The manifest may be a file, string or bytes, bounded at 64 MiB. Preserves the declared update spelling. Secondary bytes encode the first applicable updateComponent analyzer flags as decimal: the elevation mask plus bit 0 for multiple assemblyIdentity targets; absent analyzer entries yield empty secondary data. Direct updateComponent declarations precede nested applicability groups, independently of XML interleaving. Selectability does not supply source flags. Unknown elevations and missing or ambiguous updates fail. This formats data only; it does not install, stage, write state or replace existing opaque source payloads.
+
+### `windows.cbs_manifest`
+
+`windows.cbs_manifest(manifest) -> immutable parsed CBS manifest`
+
+Parses one CBS MUM into an immutable reusable value (32 MiB maximum). Accepted wherever CBS parent queries, update indexes, package-owner planning or deployment-source encoding accept a manifest. Reuses parsing only: comparison descriptors, candidates, intended states and aggregate byte bounds are still evaluated per call. Identity-validated update metadata files reuse their owned parse without rereading XML. No global cache, file writes or servicing effects.
+
+### `windows.cbs_package_owners`
+
+`windows.cbs_package_owners(packages, targets, editions=[]) -> list`
+
+Plans package-reference owner intents without modifying an image. packages is a list of dicts with manifest (file or bytes), intended_state (0x40 staged, 0x50 superseded or 0x70 installed), optional parents (resolved canonical package identity strings) and choices (update-name to boolean selectable overrides). targets is an explicit list of selected canonical package identities; every target and parent needs a package context. Returns sorted records with package, owner, integration, state and value (integration shifted 16 bits plus state). Local update names and parent-package scopes remain separate; repeated detectors within one applicable block are conjunctive, while separate applicable blocks are alternatives. Failed detect applicability retains the detector state (including absent or superseded), not an implicit staged floor. Local detection uses uncapped update intent; parent detection and emitted owners apply the containing package cap. Unknown conditions, cycles and unresolved metadata raise errors, never partial records. Supports detectNone and scoped detectUpdate with staged/detect dispositions, plus absent selectable defaults for dependency queries and selected content; edition-gated selectability accepts up to two explicitly resolved current/target edition identity names in editions. A nonmatching edition disables the selector, not the child. Missing edition context, absent owner intents requiring removal, capability restrictions and component predicates remain unsupported. Intended state is supplied transaction intent, not a computed CurrentState. This does not select packages, resolve parent versions, infer permanence, supersede packages, verify signatures or complete a servicing transaction. Lists are bounded to 65536 items; manifest input is at most 32 MiB each and 256 MiB total. No host tools, registry writes or network access.
+
+### `windows.cbs_parent_relationships`
+
+`windows.cbs_parent_relationships(packages, candidates) -> list`
+
+Tests native CBS IsParent relationships against explicit runtime version descriptors. Uses the same manifest/comparisons dicts and canonical candidate-name list as cbs_parent_update_scopes, but every root and nested rule participates, including nested-only families. EQ descriptors honor ignore_revision instead of performing exact lookup. Returns sorted unique matching candidate identities for each package. No state, disposition, standalone or Baseline relaxation is applied. This predicate does not reproduce reverse-index order, populate a watch list, authorize admission, or implement a servicing transaction. Bounds and all-or-error behavior match cbs_parent_update_scopes; no host tools or registry writes.
+
+### `windows.cbs_parent_states`
+
+`windows.cbs_parent_states(packages, candidates) -> list`
+
+Evaluates CBS parent states without modifying an image. packages is a list of dicts with manifest (file or bytes), comparisons (one runtime descriptor per parsed parent block in preorder), and optional standalone_satisfied (default false; caller-resolved package/session bypass). Each descriptor requires major_minor, build and revision operators (EQ/NE/GE/GT/LE/LT) and an explicit ignore_revision boolean. candidates is an effective-intent snapshot of dicts with canonical package identity string in package, intended_state, and explicit baseline boolean from the CBS Baseline attribute. Pending/session overrides must already be resolved. Returns one integer parent state per input package; no-parent is the 0x1000 unspecified sentinel, not installed. Exact/range version lookup, staged-Baseline descending revision relaxation, and nested parent constraints are evaluated separately from owner intents. This does not populate runtime descriptors, infer installed state from MUM presence, compute final CurrentState, supersede packages, or write registry records. Lists are bounded to 65536 entries; manifests to 32 MiB each and 256 MiB total. Invalid inputs raise errors without partial results. No host tools, guest execution or network access.
+
+### `windows.cbs_parent_update_scopes`
+
+`windows.cbs_parent_update_scopes(packages, candidates) -> list`
+
+Selects available parent packages for CBS update-name queries without modifying an image. packages is a list of dicts with manifest (file or bytes) and comparisons (one explicit runtime descriptor per parent block in preorder). Descriptors require major_minor, build, revision (EQ/NE/GE/GT/LE/LT) and ignore_revision. candidates is a list of canonical package identity strings. Returns one sorted, deduplicated list of matching package identities per input. Exact top-level references use exact lookup even when revision is ignored; ranged top-level references seed related families, then any root or nested rule can accept a candidate. Nested-only families do not seed candidates. Missing packages are skipped. This is not parent-state reduction: no state filter, disposition, standalone bypass or staged-Baseline revision relaxation applies. It does not enumerate updates, reproduce native release-type ordering, populate runtime descriptors, or perform a servicing transaction. Lists are bounded to 65536 inputs and 1048576 total results; manifests to 32 MiB each and 256 MiB total. Errors return no partial results. No host tools, registry writes or network access.
+
+### `windows.cbs_update_index`
+
+`windows.cbs_update_index(packages, editions=[]) -> cbs_update_index`
+
+Builds a read-only immutable CBS update-state snapshot. packages and editions use the same explicit contexts as cbs_package_owners, but intended_state also accepts resolved absent (0), resolved (0x20) and permanent (0x80) states. Returns a record with state(package, update), yielding raw_state and intended_state (capped by the containing package), and with_states(states), yielding an independent snapshot after replacing the targets in a canonical-package-name to state dict. All dependency memo entries are invalidated in the new snapshot, including transitive detections; old snapshots remain unchanged. Parent scopes, editions, choices, explicitly published targets and parsed manifests are retained. with_updates(package, states) creates a new snapshot with explicit published update targets (update-name to resolved state dict); 0x1000 clears an override. state prefers these targets even when they carry an earlier containing-package cap. applicable(package, update) evaluates metadata for that update instead, while detectors still honor published dependency targets. Neither query publishes its result. with_components(components) replaces the effective component-analyzer snapshot for updateComponent predicates and invalidates derived applicability, preserving published targets. Each entry requires identity (canonical CSI UTF-8 bytes) and owners (effective installed-owner elevation DWORDs, not package states). Purely staged owners must be excluded and transaction overlays resolved by the caller. Missing snapshots fail; an explicit empty snapshot is distinct. Supported elevate values are revision, distribution, build, version and install. Same-family strictly older components supply evidence; architecture, culture, type and versionScope remain distinct. Only nonSxS families discard the entire version; other scopes retain major/minor, preventing activation from a different side-by-side version family. This does not load ownership from a hive, update analyzer execution overlays or choose CSI winners. Component inputs are bounded to 1048576 entries/owner words and 64 MiB identity bytes. This does not model the separate native applicability-result cache or its invalidation policy. Rebuild with cbs_update_index if parent/selection/edition policies change. Pending/unspecified targets, duplicate case-insensitive changes and unknown packages are rejected. package_states() returns an independent canonical-package-name to target dict, including unadmitted inventory. package_state(package) queries one exact target without copying the inventory; missing contexts are errors, not inferred absent states. ordinary_population(roots, store_owners, applicability, populate_mum, work_limit, omitted_references=[], watch=..., allow_absent_references=False, store_loaded_packages=[], lcu_session=False) evaluates only an explicitly selected ordinary population prefix. store_loaded_packages supplies exact contexts resolved from the installed store (native source kind -1); only their ordinary deployment references may ignore a not-found child at nonzero target. It does not permit missing roots/MUM requests or grant this policy to new sources merely sharing a family. lcu_session explicitly models native LCU task flags and requires a Package_for_RollupFix root requested installed or staged; only not-found deployment children become optional. The returned unresolved_references records parent, package identity, update, intended_state and reason for every optional not-found lookup; these records are not admissions or content-installation evidence. Each root/request is a dict(package, owner, state, integration, ceiling), optionally preserve_store_owner, bypass_owners and skip_mum; store owners are dict(package, owner, state, integration). applicability(package, snapshot) must return a resolved state. populate_mum(package, snapshot, action) must return dict(before_updates=[requests], deferred=[requests]); both callbacks must be pure and explicitly resolve missing policy. MUM actions 2/3 require supersedence policy; 4/5/6 require lower-version reinstall policy. Initial unchanged installed items select action 3. A merge uses the previous target after completed MUM processing, otherwise the original state, then clears the processed flag. MUM processing is not once per item; it rechecks reinstall after immediate supersedence recursion. Immediate MUM requests precede update publication; deferred requests follow all roots/children. Updates publish in manifest order before depth-first child admission. Named execution requests replace state and retain first integration; dirty normalizes only superseded to staged. Returns index, executions (package, intended_state, owners, updates, update_starts, action, mum_populated, mum_processed, mum_passes, dirty, dirty_updates, watch_processed), and admissions. Unknown referenced packages fail unless explicitly omitted. allow_absent_references=True permits an unavailable reference only when its containing update target is absent; nonzero targets still fail. This models the native target-zero optional resolve path, not the broader session-flag policy; work_limit is required in 1..4194304 and bounds queued requests and evaluations. Optional watch is dict(initial_update, dependents, satellites), with all three pure callbacks required. initial_update(package, update, target, snapshot) returns dict(state, has_deployments) using the resolved native start state; deployment-free updates are initially dirty even when unchanged. dependents(notifier, snapshot) returns ordered deduplicated requests. satellites(notifier, admitted_package, snapshot) returns requests after each dependent/satellite admission drains; recursion keeps the same notifier. Notifications scan execution insertion order, repeat after admissions, preserve package dirtiness, and clear update dirtiness/mark processed only after children return. Any ordinary merge resets processed, even with unchanged target. Records, dirty-update lists and update_starts are independent callback snapshots. update_starts maps each update name to its first resolved state/has_deployments record; merges and notifications preserve it. It is empty without watch and is not post-stage CSI state. The returned population exposes execution_count without materializing its full mutable executions inspection list. selected_executions(packages, actions=...) intersects up to 65536 nonempty package-name strings case-insensitively with native execution order, returning fresh independent execution records only for matches; duplicates collapse and missing packages are omitted. Optional actions is a list of at most seven integer MUM actions in 0..6; filtering occurs before record materialization, and an explicit empty list selects nothing. Omitting it preserves all matching executions. This view never consults edits to the full inspection list. The returned population can explicitly capture `deployment_plan()`: this validates the complete native deployment projection once and returns admissions, execution_count, selected_executions, executions, deployment_actions and install_marks without retaining the admission index or package manifests. Dropping the original population then permits that graph to be reclaimed. The captured action evidence is private; changing either inspection list cannot change later marks. This is an action plan, not completed servicing. The returned population also provides deployment_actions(changed_only=False), a read-only projection in execution/manifest order: records contain package, update (exact spelling), deployment (CSI identity record), driver, driver_attributes (independent namespace/name/value records from the containing MUM driver declaration, including inf/ranking/bootCritical when declared), stage and action. No driver metadata is inferred from a dual_* identity or an INF-looking component file. Stage is separate from Execute: stage-only sources have stage=True and action=0; action=3 installs and action=4 uninstalls. With changed_only=True only records with stage=True or action!=0 are materialized, in the same order, AFTER validating the entire native action set. Default inspection retains unchanged references; update starts rather than package last-action determine operations. Resolved starts from watch are required for every deployment. Unsupported restaging, removal below staged, pending/resolved-only source states and undrained notifications fail. The method retains the native snapshot independently of mutable inspection records and returns fresh lists. install_marks(inventory) uses that same immutable action snapshot to analyze exact installed-source counts. inventory is a list of dict(identity=canonical CSI bytes, composition=records from csi_composition, installed_sources=native i!CBS_ payload bytes). Supply every resident owner, including unchanged owners, and every changed deployment; changed resident compositions must match their c! backlinks. An unchanged deployment may replace composition with persisted_members, a list of canonical CSI identity bytes from its installed c! backlinks. These contribute all baseline source counts without recomputing manifest graphs or inventing dispositions. Supplying both forms, duplicate members, missing roots of nonempty/installed inventories, or using persisted membership for an install/uninstall action fails. Empty membership is allowed only for an unowned unchanged deployment. Returns component records with identity, initial/final counts, affected and impactful_install. Each installed source contributes a mark, not merely each active deployment; source conflicts and duplicate changes fail. Uninstall closures can set impactful_install even when another source keeps the component installed. Stage-only changes do not alter install marks. Input identity/source data is bounded to 64 MiB, entries to 4194304. This analysis does not persist sources, resolve non-CBS source policy or execute driver operations. Driver records additionally require native driver-store/DOQ operations; this projection neither executes them nor selects winners, materializes files or authorizes registry writes. These callbacks must explicitly resolve native indexes, child rules, pending/session state and satellite requests. Omit watch to stop before notifications; watch fields are then not evidence of notifications. Deferred MUM work during watching fails because transaction queue policy is not supplied. Inputs and retained snapshots are unchanged; any error returns no partial result. This prefix excludes force-state, pending resolution, CBSBLR owner clearing, capability wrappers, target-raise restrictions, feature-controlled staged restaging, automatic watch-index/initial-state resolution, component execution, permanence and final persistence. It is never a fallback for unsupported transaction policy or authorization to write CurrentState. Uses the same manifest/list bounds as cbs_package_owners; no registry writes, host tools or network access. Returns a native immutable cbs_update_index snapshot, bounded to 65,536 packages, with lazily bound methods. package_state_vector(packages) returns an ordered tuple of intended states for up to 65,536 package-name strings. It queries this exact snapshot; publication never reuses another snapshot's state memo.
+
+### `windows.cdf_decode`
+
+`windows.cdf_decode(data) -> dict`
+
+Parses version-one PcmH compiled data container bytes. Returns a mutable dictionary with flags, format (16 bytes), root, auxiliary_root, strings, identities, appids, guids, and blobs. The three ID indexes refer to zero-based blobs; GUIDs are inline 16-byte values; blobs are (kind, opaque bytes) tuples. 0xffffffff denotes an absent root. Validates the noncryptographic IHA8 checksum, extents and outer references; does not validate nested-table semantics, decode strings, authenticate contents, or decide FileMap ownership. Input/expanded payload bounded to 64 MiB and each record list to 1048576. No host parsing or writes.
+
+### `windows.cdf_encode`
+
+`windows.cdf_encode(document) -> bytes`
+
+Serializes the exact nine-field dictionary returned by cdf_decode, preserving blob/index IDs and opaque data. Four-byte aligns payloads and recomputes IHA8; padding, physical ordering and shared extents need not match input. Validates integer ranges, extents and outer references, not nested payload semantics or FileMap servicing policy. Bounds match cdf_decode. Returns bytes without image mutation or host intermediates.
+
+### `windows.cdf_filemap`
+
+`windows.cdf_filemap(data) -> dict`
+
+Decodes the observed version-one CSI FileMap no-hash schema from CDF bytes. Returns path, root_selector, identities (ordered lists of namespace/name/value tuples), and entries (name, display_name, flags, identity index). Validates container checksum, schema GUID, table framing, key hashes, string/blob/identity references and duplicate keys. Preserves native flags without authorizing filesystem effects. Unsupported compact tables, hashed records, unknown field bits, non-ASCII lookup keys or other schema variants fail closed. Bound to 64 MiB container/expanded payload, 1048576 records/total attributes, and 1024 attributes per identity. Does not decide ownership transitions, apply updates or authenticate contents.
+
+### `windows.cdf_filemap_encode`
+
+`windows.cdf_filemap_encode(document) -> bytes`
+
+Rebuilds the supported no-hash FileMap dictionary returned by cdf_filemap. Interns UTF-8 strings, prunes unused identities and remaps references, preserves resolved flags/names/attributes, sorts native 32-bit name hashes while preserving equal-hash input order, and emits a checksummed CDF. IDs and physical bytes may differ from input. Uses the same bounds and rejected variants as cdf_filemap; empty maps fail rather than implying deletion. No ownership selection, root-path normalization, image mutation or authentication is performed; callers must supply the complete intended records and correct root selector.
+
+### `windows.cdf_filemap_name`
+
+`windows.cdf_filemap_name(path, windows_root="/Windows") -> string`
+
+Derives the native CSI FileMaps leaf filename from a canonical absolute image path with slash separators. windows_root defaults to /Windows and must be a non-root canonical image directory. Supports printable ASCII paths of at most 32767 bytes; rejects drive prefixes, backslashes, empty/dot components, trailing separators and Unicode rather than approximating Windows folding. Uses the Windows-relative $$ prefix, native filtering/collapse and 100-character bound, and uppercase CSI hashing when required. Drive root maps to _0000000000000000.cdf-ms. Does not inspect the image, choose ownership or mutate any files.
+
+### `windows.cdf_filemap_path`
+
+`windows.cdf_filemap_path(path, volume, windows_root="/Windows") -> dict`
+
+Computes native FileMap path/root_selector metadata for a canonical ASCII image path and an explicit drive designator such as C:. Windows-root matching uses the native case-insensitive literal prefix, not a path-component boundary. Image root emits an absolute NT path with selector 0; Windows-relative paths use 1 and other volume-relative paths use 2. Shares cdf_filemap_name path bounds and rejects noncanonical paths. Does not mutate a map or image.
+
+### `windows.cdf_filemap_transition`
+
+`windows.cdf_filemap_transition(document, nodes) -> dict`
+
+Computes a bounded no-hash FileMap ownership transition without mutating inputs. document has the cdf_filemap schema (empty entries/identities represent a new map). Each node requires name, operation, state, directory_flags, file_flags, before_identity and after_identity; identities are None or lists of namespace/name/value tuples. Names are immediate ASCII leaves; dot denotes the directory. States must be post-preliminary-file-pass native states, not raw manifest declarations. Files compare existing ownership against the new family ignoring version; dot uses the old family. Unmentioned entries survive. Returns document and directory_collisions (retained_identity/requested_identity pairs). A duplicate dot retains the resident owner and is reported, not silently overwritten; transaction-level diagnostic handling remains separate. Unsupported identities and unresolved file-family conflicts fail closed. Empty documents do not authorize deletion and cannot be encoded. Does not select dirty directories, normalize root paths, mutate image files/security, authenticate packages or commit servicing.
 
 ### `windows.certificate`
 
@@ -4116,7 +6546,13 @@ Reads CLI metadata and selected managed method bodies without executing them. Ac
 
 `windows.clone_file_entries(entries) -> dict`
 
-Copies a path-to-metadata dictionary and each entry dictionary, preserving insertion order. The two dictionary layers are independently mutable; file sources and other field values remain shared and are not read.
+Copies a path-to-metadata dictionary and each distinct entry dictionary, preserving insertion order and alias groups: names sharing one entry share one new entry in the clone. The cloned dictionaries are independently mutable from the source; equal-valued but distinct entries remain distinct. File sources and other field values remain shared and are not read.
+
+### `windows.compile_sddl`
+
+`windows.compile_sddl(text, account_domain_sid=None) -> bytes`
+
+Compiles a bounded SDDL subset to revision-1 self-relative descriptor bytes, without host identity lookup, defaulting, generic-right mapping or inheritance. Supports O/G/D/S sections; fixed SY, BA, BU, WD, AC, LU, AU, BO, CO, IU, LS, LW, ME, NO, NS, RC, SU, UD, AN, BG, CG, OW, SO and numeric revision-1 SIDs; P/AR/AI ACL flags; absent, empty and NO_ACCESS_CONTROL ACLs; A/D/AU ACEs, SACL mandatory-label ACEs with integrity SIDs and masks 0..7 (including NW/NR/NX policy tokens), and XA local-attribute Contains-string, exists, or parenthesized local-attribute NOT conditions. Optional account_domain_sid must be a canonical S-1-5-21-a-b-c SID and enables LA (RID 500); no account domain is guessed. Symbolic and base-zero numeric rights may be concatenated and are ORed; numeric overflow is rejected. Unsupported syntax (including CSI (inherit), other domain-relative aliases, object GUIDs, compound conditions and escaped literals) fails closed. This is format construction, not an access decision or a complete file-security policy.
 
 ### `windows.container_index`
 
@@ -4126,6 +6562,12 @@ Returns compact CIX statistics and explicitly selected file records. Names and
 source type select their union; optional `target_hash` (64 hexadecimal SHA-256
 digits) narrows that selection, or selects equal-content aliases by itself.
 At most `limit` records are returned (0–1000); input remains in memory.
+
+### `windows.copy_explicit_file_acl`
+
+`windows.copy_explicit_file_acl(source, owner, group, directory=False) -> bytes`
+
+Constructs effective and propagation ACEs from an explicit file ACL under auto-inheritance. Source is a bounded ACL; owner and group are binary SIDs. Maps and clips file rights, substitutes creator owner/group, preserves callback data, and splits directory propagation when needed. Supports allow/deny/audit/alarm and callback-allow layouts; inherited ACEs, other creator identities, reserved flags and unsupported layouts fail closed. Does not select or merge parent ACLs, supply descriptor defaults, represent absent/NULL ACLs, or change a filesystem.
 
 ### `windows.creg_compare`
 
@@ -4151,11 +6593,89 @@ Returns the key paths represented by a Windows 9x CREG registry file as lists of
 
 Converts values in a Windows 9x CREG registry file into declarative registry patch dictionaries. Use creg_keys as well when reconstructing empty keys.
 
+### `windows.csi_composition`
+
+`windows.csi_composition(root, resolve, work_limit=1048576) -> list`
+
+Calculates a bounded exact CSI composition, following only explicit install dependencies. resolve(identity_bytes) must return the exact decoded component manifest as a file, string, bytes or immutable cbs_manifest value; None or a foreign identity fails. Parsed values can be shared across compositions without bypassing identity, dependency or work-limit checks. Returns records with canonical identity bytes and disposition (1 patch, 2 install). Omitted dependency types, prerequisites and runtime bindings do not introduce owners. Preserves native breadth-first impact propagation and rejects missing install edges, cycles exceeding native depth 128 and work-limit exhaustion. Manifest reads are bounded at 64 MiB; work_limit ranges from 1 to 4194304. Does not decide package applicability, source activation, final installed marks, winners or driver-store effects, and does not write state.
+
+### `windows.csi_deployment_key`
+
+`windows.csi_deployment_key(data) -> string`
+
+Encodes complete bounded CSI identity bytes as the native canonical COMPONENTS deployment key, preserving architecture, culture, type and version-scope hash distinctions. Not a WinSxS directory name; malformed or unsupported identities fail instead of approximating.
+
+### `windows.csi_file_attributes`
+
+`windows.csi_file_attributes(attributes=None) -> int`
+
+Parses the native manifest file attribute mask. None retains the 0xa0 constructor default; an explicit value replaces it, including an empty string yielding zero. Accepts case-insensitive readOnly, hidden, system, archive, temporary, offline and notContentIndexed separated by XML whitespace. Rejects unsupported tokens. This is not the final commit-time filesystem mask.
+
+### `windows.csi_file_destination_name`
+
+`windows.csi_file_destination_name(name, destination_name=None) -> string`
+
+Selects the shallow CSI destination name: an explicitly supplied destination_name (including an empty string) overrides name; otherwise selects the suffix after the last backslash, or the preceding path when the last backslash is trailing. Forward slashes are not separators here. None means no override. Does not expand macros, validate a final path or authorize a projection.
+
+### `windows.csi_file_directory_macro`
+
+`windows.csi_file_directory_macro(target, architecture, name) -> int`
+
+Returns the WCP IRtlUserProfile directory identifier for an unwrapped runtime macro name. Only the observed amd64 target policy is supported. MSIL/data/absent component architecture use native directories; x86/wow64/amd64.x86 use redirected directories. ASCII macro names are case-insensitive. Unknown macros and unsupported architectures fail closed. The identifier is not a path: image registry/profile lookup, environment expansion and offline drive mapping remain caller responsibilities. This read-only lookup does not authorize or apply file effects.
+
+### `windows.csi_identity`
+
+`windows.csi_identity(data) -> record`
+
+Decodes bounded canonical COMPONENTS identity/appid bytes, preserving name, version, language, processor_architecture, public_key_token, type and version_scope. Rejects malformed, unknown or repeated attributes; does not infer identity from a lossy registry key or activate components.
+
+### `windows.csi_identity_hash`
+
+`windows.csi_identity_hash(data, omit_version=False) -> int`
+
+Hashes bounded full COMPONENTS identity/appid bytes using the native non-cryptographic CSI identity discriminator, returning an unsigned 64-bit integer. omit_version=True selects the version-independent family hash used by component-family and SOFTWARE winner key suffixes; type, versionScope, architecture and culture remain significant. This differs from CBS update-analyzer family matching. Only the validated ASCII identity alphabet is supported. Does not reconstruct an identity from an abbreviated path, select a winning version, infer activation or write registry state.
+
+### `windows.csi_mof_equivalent`
+
+`windows.csi_mof_equivalent(left, right) -> bool`
+
+Compares ordered CSI MOF declarations and referenced primary-file hashes using the observed WCP MofDiffer predicate. Inputs are XML file/string/bytes, at most 16 MiB each. Supports ASCII file lookup, SHA1/SHA256 nested hashes with zero or one Identity transform and legacy SHA1; unsupported policy and ambiguous file names fail closed. Declaration strings are case-sensitive, file lookup is case-insensitive, and either comparable hash mismatch vetoes equality. The native uninstallmof branch compares its declaration string but rechecks the primary file hash. True is only predicate equivalence: it does not derive installer queue/inspection policy, execute MOF registration, verify payload authenticity or apply state.
+
+### `windows.csi_source_plan`
+
+`windows.csi_source_plan(before, changes) -> record`
+
+Plans ordered value-only CBS p!/i!/s! source edits for one deployment. before is the complete source inventory as dicts (name, type, data); changes contains dicts (kind, delete, data), with native kind 1 pinned, 2 installed, or 4 staged. Data must be exact serialized bytes. Existing adds preserve their opaque payload even when the requested secondary differs; deletion requires presence. Returns edits (name, delete, type, data), before and after counts (pinned, installed, staged). Rejects non-CBS sources, mismatched names, malformed data and invalid masks atomically. Bounds: one million entries per list, 64 KiB per payload, 64 MiB total payload. Does not choose operations or apply writes: staged marks require successful staging or the separate native pending-content protocol, not merely a queued stage action. Counts do not authorize backlink deletion or activation.
+
+### `windows.csi_winner_change`
+
+`windows.csi_winner_change(identity, current, installed, changes) -> record`
+
+Analyzes one exact CSI servicing family after installed-mark updates. identity is full canonical CSI bytes; current is the effective winning version or an empty string. installed is complete final installed version membership. changes is a list of dict(version, installed, impactful_install) for affected versions. Returns winner and shadowed strings; both empty means unchanged, an empty winner with a shadowed version means clear the effective winner. Preserves surviving winners unless a strictly higher impactful install replaces them, and falls back to the highest remaining installed member only on removal. Ordinary SxS identities are restricted to their major/minor branch; NonSxS and policy identities span branches. Does not rebuild untouched branch defaults or write state.
+
+### `windows.csi_winner_family_key`
+
+`windows.csi_winner_family_key(data) -> str`
+
+Formats a SOFTWARE SideBySide/Winners family key from bounded full CSI identity bytes. Native abbreviation scans both ends; type and versionScope affect the hash but not the readable prefix. Validates ASCII identities, canonical named architectures and 16-hex-digit tokens; rejects unsupported typeName and Unicode rather than guessing. Does not choose winners or write state.
+
+### `windows.csi_winner_plan`
+
+`windows.csi_winner_plan(identity, current, before, changes) -> record`
+
+Plans value-only SOFTWARE Winners edits from a full CSI identity, actual current winner, complete baseline membership before, and affected-version dicts (version, installed, impactful_install). Derives final membership and winner choice using native semantics. Returns family, winner, shadowed, edits; each edit has branch, name, delete, type and data. Empty branch means family root; empty name means default. Nondelete data is raw REG_SZ or REG_BINARY. Deletions remove individual values only, never keys or unrelated branch defaults. This is not complete servicing and applies no writes.
+
 ### `windows.csp_registrations`
 
 `windows.csp_registrations(file, strict=True)`
 
 Derives CryptoAPI provider-registration arguments from a 32-bit provider DLL without assigning registry paths or defaults. strict=False returns an empty list for unrecognized registration code; malformed input still fails. The provider is not executed.
+
+### `windows.decode_file_eas`
+
+`windows.decode_file_eas(data) -> list`
+
+Decodes a bounded FILE_FULL_EA_INFORMATION chain (at most 64 KiB) to name/flags/value dictionaries. Validates lengths, alignment, terminators, supported flags and unique case-insensitive names. Values are opaque bytes; this is not a trust decision or WIM EA decoding.
 
 ### `windows.delta_apply`
 
@@ -4355,6 +6875,12 @@ Visits raw records from a finalized sequential uncompressed kernel ETL in file o
 
 Parses legacy EVT or supported EVTX event-log input into event records. The format is detected from the file; this does not query the host's event-log service.
 
+### `windows.event_template_providers`
+
+`windows.event_template_providers(source) -> list`
+
+Reads a CRIM 5.1 WEVT_TEMPLATE resource (bytes/file, at most 16 MiB) and returns canonical lowercase braced provider GUIDs in directory order. Validates bounded directory counts, GUID uniqueness, WEVT block extents/non-overlap and up to three trailing zero bytes. Event schemas, message/channel metadata, resource trust and registration policy are not interpreted.
+
 ### `windows.font_names`
 
 `windows.font_names(file) -> list[string]`
@@ -4369,22 +6895,22 @@ Parses a textual GUID into the 16-byte mixed-endian representation used by Windo
 
 ### `windows.hive`
 
-`windows.hive(file) -> registry hive`
+`windows.hive(file, snapshot=False) -> registry hive`
 
-Parses an NT REGF registry hive and returns a read-only key/value inspection object. Use hive_from_patches to construct a hive and patch_hive to produce an edited copy.
+Parses an NT REGF registry hive and returns a read-only key/value inspection object. Keys expose security as the bounded raw self-relative descriptor from their SK record, without walking descendants or inferring permissions. path_component_patches(replacements, exclude_keys=[]) returns planned key_parts/name/type/value/before records for REG_SZ, REG_EXPAND_SZ and REG_MULTI_SZ values. Matches complete backslash/NUL-delimited components case-insensitively, preserving all unmatched raw bytes. Excluded key subtrees use literal key parts. Traversal is bounded to 1,048,576 keys, 4,194,304 values, 1 GiB of string data and 65,536 output patches; errors return no partial plan. This never edits the hive. Use hive_from_patches to construct a hive and patch_hive to produce an edited copy.
 
 Large registry values in hive format 1.4 and later use native `db` descriptors
 and segment lists above 16,344 bytes. Every segment, including the final one,
 has at least 16,344 bytes of capacity; unused capacity and alignment padding
 are excluded from decoded values. Complete hive construction and mutable patches preserve
 this representation; older hive formats retain direct large-value cells.
-Malformed segment counts and truncated segments are rejected.
+Malformed segment counts and truncated segments are rejected. snapshot=True copies at most 512 MiB into an immutable owned reader and lazily indexes decoded keys and case-insensitive children. Subsequent input mutations cannot affect this snapshot. Default False retains the borrowed source's live-read behavior and does not cache mutable-source metadata.
 
 ### `windows.hive_from_patches`
 
 `windows.hive_from_patches(name, patches, keys=None, format=None, source=None, source_drive="", target_drive="", exclude_keys=None, exclude_values=None) -> file`
 
-Builds an NT registry hive from declarative value patches and optional key records. With source, imports its raw value types/data, empty keys, security, class and flags natively before applying keys and patches; the source format is inherited unless format overrides it. Optional source_drive/target_drive (both ASCII drive letters with colons) relocate upper/lower drive spellings in key/value names and raw UTF-16 REG_SZ/REG_EXPAND_SZ/REG_MULTI_SZ data only. exclude_keys removes case-insensitive normalized subtrees from the relocated source; exclude_values contains exact key/name dictionaries. Additions are applied after exclusions and are never relocated or filtered. Source options require source. Without source, format controls the generation and metadata is caller-supplied.
+Builds an NT registry hive from declarative value patches and optional key records. With source, imports its raw value types/data, empty keys, security, class and flags natively before applying keys and patches; the source format is inherited unless format overrides it. Optional source_drive/target_drive (both ASCII drive letters with colons) relocate upper/lower drive spellings in key/value names and raw UTF-16 REG_SZ/REG_EXPAND_SZ/REG_MULTI_SZ data only. exclude_keys removes case-insensitive subtrees from the relocated source: legacy strings accept slash/backslash separators, while key/key_parts dictionaries support lossless literal components. exclude_values contains exact key/key_parts and name dictionaries. Component lists never split literal separators; matching occurs after relocation. Additions are applied after exclusions and are never relocated or filtered. Source options require source. Without source, format controls the generation and metadata is caller-supplied.
 
 ### `windows.hive_keys`
 
@@ -4416,17 +6942,41 @@ Builds registry hives from setup INF data with optional TXTSETUP context, extra 
 
 Selects an icon image from an ICO, PE or NE file using its index and requested dimensions. Returns image bytes with actual dimensions, bit depth and resource identity; it does not launch or render the executable.
 
+### `windows.image_digest`
+
+`windows.image_digest(file, algorithm='sha1', maximum_bytes=512MiB) -> bytes`
+
+Computes the CBS HashTransforms.ImageDigest hash, distinct from Authenticode/catalog hashing. Normalizes PE resource/debug layout and hashes the DOS prefix, fixed NT header, rewritten section table and section payloads in table order, excluding resource-directory bytes and .debug payloads. Non-images are hashed verbatim; recognizable malformed or unsupported images fail closed. maximum_bytes (1..512MiB) bounds input, and the transformed stream is capped at 512MiB. No signature or catalog trust is implied.
+
 ### `windows.inf`
 
 `windows.inf(file) -> INF`
 
-Parses a Windows INF file into section and entry data, with helpers for install sections and registry patches. This is declarative inspection, not execution of every installer directive.
+Parses a Windows INF file into section and entry data, with helpers for install sections and registry patches. directives preserves ordered (section, key, fields) logical rows before string expansion or duplicate grouping, including repeated directives; section markers have key/fields None. json remains the expanded section projection. This is declarative inspection, not execution of every installer directive.
 
 ### `windows.inf_patches`
 
 `windows.inf_patches(inf, hive, section='AddReg') -> list[dict]`
 
 Converts a selected INF registry section into patches for the named hive. Returns modifications for later construction rather than changing an existing hive.
+
+### `windows.inherit_file_acl`
+
+`windows.inherit_file_acl(parent, owner, group, directory=False) -> bytes`
+
+Derives auto-inherited ACEs from a bounded parent file ACL and binary owner/group SIDs. Honors OI/CI/NP, adds ID, substitutes creator principals, and prunes ordinary ACEs covered by earlier inherited masks in each effective/object/container domain; callback ACEs are not deduplicated. Supports the layouts of copy_explicit_file_acl plus one mandatory-label ACE with an integrity SID and mask 0..7, preserving even zero policy masks. This does not authorize explicit label assignment or select token-default labels; whole-descriptor inheritance still rejects labels. An empty result means no inherited ACEs, not an instruction to install an empty ACL. Does not select defaults, apply protection, merge explicit ACLs, or construct a security descriptor.
+
+### `windows.inherit_file_security`
+
+`windows.inherit_file_security(source, parent=None, directory=False) -> bytes`
+
+Constructs a bounded self-relative file descriptor with explicit owner/group and auto-inherited ACLs. Selects protected versus unprotected explicit entries, drops old unprotected ID entries, and appends parent inheritance. Preserves absent versus empty ACLs. Matches the token-free RTL flags-0x101b construction path, not access validation or WCP defaulting/final control policy. Source owner/group are required; child NULL ACLs, defaulted controls, unsupported controls and non-revision-2 ACLs fail closed. Parent NULL ACLs contribute no entries and do not create a child NULL ACL. Parent defaults to absent.
+
+### `windows.inherit_registry_security`
+
+`windows.inherit_registry_security(source, parent=None) -> bytes`
+
+Constructs bounded registry-key security with explicit owner/group and container auto-inheritance. Uses key generic rights (read/execute 0x20019, write 0x20006, all 0xf003f), retains generic propagation ACEs, substitutes creator principals, and selects protected versus inherited entries. Shares the file-construction extent and syntax checks; child NULL ACLs, missing principals and unsupported layouts fail closed. Does not select WCP defaults, adjust final request controls, authorize ownership, or assign security to a hive. Parent defaults to absent.
 
 ### `windows.internet_shortcut`
 
@@ -4454,6 +7004,12 @@ one still stored at the start of a guest pagefile. Returns `bugcheck_code`,
 fits inside the input; it does not validate the body or prove that the writer
 completed. Other dump signatures are rejected. No guest execution or host
 debugger is used. This is distinct from the MDMP user-mode minidump reader.
+
+### `windows.map_file_security_rights`
+
+`windows.map_file_security_rights(source) -> bytes`
+
+Maps generic rights in a revision-1 self-relative security descriptor to file-specific masks, preserving all other bytes, ACL states and ordering. Accepts bytes or a file up to 1 MiB. Supports simple allow/deny/audit/alarm and callback-allow ACE layouts; unknown layouts and malformed or overlapping components fail closed. This does not default or inherit security, clear propagation flags, apply filesystem changes, or decide access.
 
 ### `windows.memory_image`
 
@@ -4517,15 +7073,15 @@ Builds an allow, deny, audit or alarm object ACE (types 5..8) from a wire SID, a
 
 ### `windows.patch_hive`
 
-`windows.patch_hive(file, patches, root_name='', keys=[]) -> file`
+`windows.patch_hive(file, patches, root_name='', keys=[], delete_keys=[], delete_values=[], key_flags=[]) -> file`
 
 Applies declarative registry patches to an NT hive and returns a new file, optionally replacing the root name. `keys` lists registry paths to create without adding values; existing keys and their values remain intact. This preserves the source hive's layout, including legacy REGF 1.1 cells. The input hive is not edited in place.
 
 Each value patch has
-`key`, `name`, `type`, and `value`. `type` accepts a registry type name or a raw non-negative 32-bit integer for formats such as SAM indexes that encode counts in the type field. Optional `keys` contains registry key paths
+`key` (normalized path) or `key_parts` (literal component list), plus `name`, `type`, and `value`. Literal components preserve slash and dot names and take precedence over `key`. `type` accepts a registry type name or a raw non-negative 32-bit integer for formats such as SAM indexes that encode counts in the type field. Optional `keys` contains registry key paths
 to create, including missing parents; existing keys are preserved. Empty keys
 remain truly empty, so registry indexes represented by child-key names do not
-need placeholder values. New keys inherit their parent's security descriptor.
+need placeholder values. New keys inherit their parent's security descriptor. keys also accepts key/key_parts dictionaries with optional raw self-relative security bytes; other key metadata is rejected. delete_keys removes strict existing subtrees; delete_values removes strict existing key/key_parts/name values. Deletions precede key creation and value patches. Optional key_flags records contain key/key_parts and user_flags and/or virtualization_flags (integers 0..15), applied last to strictly existing keys. Each replaces only its persistent nibble; virtualization_flags bit 2 also clears NK KEY_VIRTUAL_STORE, as native class-2 SetInformationKey does. No live cache or timestamp is synthesized. Child-index updates and native source imports preserve packed metadata. Hive keys expose raw NK flags, user_flags and virtualization_flags separately. Missing deletions, deleting the root, cyclic metadata or invalid security fail without changing the input. Each edit list is bounded to 1,048,576 entries. Deletion traversals are bounded to 512 levels and 1,048,576 keys. Updates maintain child indexes, segmented value cells and shared SK references; unrelated class/flags and value bytes are retained.
 
 ### `windows.patch_ini`
 
@@ -4639,11 +7195,23 @@ Constructs a Windows 3.1 SHCC3.10 registry file from class-path string entries a
 
 Selects direct children from a self-registration registry-state dictionary. values=True selects direct values; otherwise it derives immediate subkeys, without changing the input or recursively returning descendants.
 
+### `windows.registry_contributions`
+
+`windows.registry_contributions(manifests, resolve_key, expand_string, key_prefix=None, max_records=1048576, max_bytes=268435456, capture_key_records=False) -> dict`
+
+Collects ordinary registry contributions from up to 65536 explicitly admitted manifest rows (dict(root=binary.xml_node, architecture=string, side=before/after, owner=integer 0..2^30)). Traverses asm.v1/v3 registryKeys and validates strict key/value attribute namespaces, keyName, value content, and local security definition/reference uniqueness and presence. Unknown key attributes and unrelated namespaces/children retain the inspection path semantics; this is not a complete manifest schema validator. Supports exact REG_NONE/SZ/EXPAND_SZ/BINARY/DWORD/MULTI_SZ/QWORD spellings, validates mutable/operationHint, ignores IEDownlevelValue data, and preserves raw UTF-16 and unquoted-empty MULTI_SZ provenance. resolve_key(key, architecture) supplies dict(scope, path); expand_string(text, architecture) is called only for macro-bearing names/string data. Both callbacks must be pure for one call, execute on the caller thread, and are memoized only within the call; input rows are captured before callbacks. Architecture policy is checked by the resolver when keys are encountered, not for empty managed assemblies. Returns dict(groups, keys), plus key_records when requested: groups maps (scope, lowercase NT path, lowercase name) to [before, after] lists of (owner, type, raw bytes, mutable, operationHint, unquoted_empty) tuples. Every contributor, duplicate and unchanged value survives in input order; no winner selection. key_prefix=None omits key capture; a string selects a case-insensitive literal NT prefix (empty selects all), with keys mapping (scope, lowercase path) to [first-spelled path, before_present, after_present]. The prefix filters only keys capture, never validation or values. capture_key_records=True separately retains all empty/nonempty key contributions grouped by owner, in input order, as (side, scope, resolved path, key-attribute dict, selected local SDDL or None) tuples. It does not select competing descriptors or interpret their policy. The default omits key_records. max_records defaults/caps at 1048576 processed roots/keys/values/security-path records; max_bytes defaults/caps at 256 MiB of observed attribute/security text, resolved paths and decoded data (including expanded macro text). Each may be lowered, not disabled. Errors return no partial result. No hive/image writes, package admission, profile mounting, security assignment, trust verification, or CBS completion is implied.
+
 ### `windows.registry_partition`
 
 `windows.registry_partition(entries, hive, key, values=False) -> tuple(selected, retained)`
 
 Splits a self-registration registry-state dictionary into selected and retained dictionaries for a hive subtree. values selects the value-identity layout; ordering and payload identity are preserved, and neither result aliases the input dictionary.
+
+### `windows.registry_path_mapper`
+
+`windows.registry_path_mapper(rules) -> callable(key, architecture)`
+
+Compiles an owned, immutable registry redirection table supplied by the recipe. `rules` contains at most 4096 `(canonical_nt_machine_prefix, flags)` tuples; prefixes are at most 32768 bytes, matched case-insensitively at component boundaries. Flags 1 selects redirection and 2 marks an insertion anchor; 0 selects sharing. Longest matching prefix wins, and later equal prefixes replace earlier entries. The returned callable `(key, architecture)` yields a fresh dict with `scope` and canonical NT `path`. Architectures are amd64, x86, wow64. HKLM/HKEY_LOCAL_MACHINE and HKCR/HKEY_CLASSES_ROOT use the table; amd64 preserves their physical paths. HKEY_CURRENT_USER is abstract user scope, not .DEFAULT; explicit HKEY_USERS/.DEFAULT is system scope. Other user roots, macros, NULs, empty interior components, and unsupported explicit WOW placements fail. Trailing declaration separators are removed. No host state or default OS rule table is used; hive mounting, CurrentControlSet resolution, virtualization, security and value expansion remain separate.
 
 ### `windows.sam_alias_members`
 
@@ -4663,11 +7231,23 @@ Returns an NT5 SAM alias C value with its member SID vector replaced, preserving
 
 Plans Windows 3.x SDK disk catalogues from INF declarations, retaining group and environment actions. Sources are decoded natively from supplied media handles.
 
+### `windows.security_descriptor_parts`
+
+`windows.security_descriptor_parts(source) -> dict`
+
+Validates a self-relative Windows security descriptor (at most 1 MiB), including aligned, non-overlapping component extents and ACL entries. Returns `control`, `resource_manager_control`, and binary `owner`, `group`, `sacl`, `dacl` components. Missing components are `None`; ACL presence bits distinguish absent from NULL. Exact same-kind aliases are allowed and unknown ACE bodies remain opaque. This is format inspection, not access checking, inheritance, default selection or a security equivalence predicate.
+
 ### `windows.selfreg_patches`
 
 `windows.selfreg_patches(file, module) -> list[dict]`
 
 Derives registry patches from supported self-registration resources in a PE file or windows.pe object, using module for path substitutions. It does not emulate DllRegisterServer; use the self-registration policy/runner for runtime effects.
+
+### `windows.serialized_certificate`
+
+`windows.serialized_certificate(value) -> record`
+
+Parses one SystemCertificates registry Blob into certificate and properties records. Bounds input to 1 MiB and 256 unique properties; requires encoding 1, complete lengths and exactly one certificate property 32. Validates X.509 DER and optional SHA-1 property 3. Preserves all other properties as integer-to-bytes entries without interpreting their trust policy. This is not a trust decision.
 
 ### `windows.servicing_graph`
 
@@ -4752,15 +7332,34 @@ Generates an ephemeral RSA-2048 key and self-signed code-signing certificate. no
 
 ### `windows.update_catalog`
 
-`windows.update_catalog(device_attributes, caller_attributes, products, locales, user_agent, assume_non_leaf_installed) -> windows_update_catalog`
+`windows.update_catalog(device_attributes, caller_attributes, products, locales, user_agent, assume_non_leaf_installed, background=False, network=False) -> windows_update_catalog or windows_update_catalog_request`
 
-Synchronizes Windows Update once using explicit device_attributes and caller_attributes string dictionaries, products string, locales list, user_agent, and assume_non_leaf_installed policy. No OS, build, architecture, ring, locale, eligibility or product defaults are supplied. Empty attribute dictionaries are allowed; all arguments are required. Returns an immutable windows_update_catalog with offers (all revisions, including non-leaves), rounds, revision_count and leaf_count. Each offer exposes id, revision, server_id, is_leaf, title, product_release, deployment, update_type, files (name, size, sha1, sha256), prerequisites and bundled_updates. Relationship clauses expose alternatives (id/revision) and is_category. There is no hidden result truncation, preview/client filter or ranking. Select an offer in Starlark and pass it with this catalog to update_media. Catalog discovery downloads metadata only, not payloads or disk images.
+Defaults to local-only replay of cached raw catalog responses for the exact caller profile. network=True explicitly synchronizes Windows Update and atomically refreshes this source cache. Missing, damaged or mismatched cached metadata fails without network fallback; cached offers are not a current/latest-offer guarantee. Payload readers inherit the catalog network policy, including lazy reads after boot. Uses explicit device_attributes and caller_attributes string dictionaries, products string, locales list, user_agent, and assume_non_leaf_installed policy. No OS, build, architecture, ring, locale, eligibility or product defaults are supplied. Empty attribute dictionaries are allowed; all arguments are required. Returns an immutable windows_update_catalog with offers (all revisions, including non-leaves), rounds, revision_count and leaf_count. Each offer exposes id, revision, server_id, is_leaf, title, product_release, deployment, update_type, files (name, size, sha1, sha256), prerequisites and bundled_updates. Relationship clauses expose alternatives (id/revision) and is_category. There is no hidden result truncation, preview/client filter or ranking. Select an offer in Starlark and pass it with this catalog to update_media. Catalog discovery downloads metadata only, not payloads or disk images. Optional background=True starts exactly one local replay or explicit synchronization and returns a windows_update_catalog_request; result() waits for the same immutable catalog or original failure without retrying. close() cancels and joins unfinished work; completed results remain readable. Execution cleanup cancels and joins requests automatically. Profile data is copied before launching; no Starlark callbacks run concurrently.
 
 ### `windows.update_media`
 
-`windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, installed_stage_limit=0) -> update_media`
+`windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, servicing_only=False, while_preparing=None, installed_stage_limit=0, base=None, image="", bootsect=None) -> update_media`
 
 Prepares an explicitly selected catalog offer as referenced UUP media, not a complete disk image. catalog must come from update_catalog, and offer must be an original offer from that same catalog. architecture, edition, language, metadata_name (exact aggregated metadata payload name) and target_compdb (composition database name/source) are required caller choices. There is no rescan, fallback offer, ranking or client/preview filter. Dependency closure and signed-location renewal retain the original catalog, request profile, selected revision, declared hashes and sizes. Inspection modes expose metadata or plans without full image construction; servicing uses mandatory reconstructed target hashes. TinyRangeX recipes apply those effects and construct the filesystem, registry and bootable disk.
+
+An optional `base` supplies an existing `archive.wim` instead of downloading a
+new base image. It requires an explicit `/imageN` root and a nonempty `bootsect`
+file; the selected image must contain SOFTWARE, SYSTEM and COMPONENTS hives.
+The returned `image` preserves that selection. This path skips only full-media
+hydration, not update dependency or reconstructed-content validation. It can
+recover pruned checkpoint bases from the installed component's reverse delta,
+expand DCS/LZMS component-store files, and reuse unchanged files from the same
+component family only when their declared length and SHA-256 match.
+
+**External-base support is currently inspection-only.** Supply `index_only`,
+`plan_only`, `metadata_only`, or `state_only`; ordinary construction is rejected.
+Architecture/release compatibility must still be checked by the caller. File
+reconstruction and registry-effect enumeration do not implement the complete
+CBS ownership/installed-state transaction or all component-manifest actions.
+Neither `validate_servicing` nor `servicing_effects` proves that an update is
+installed, that a resulting image boots, or that all security updates are
+present. Do not substitute a build-number patch or first-boot servicing for
+those missing native construction semantics.
 
 The native backend retains downloaded source-media ranges across runs in
 `<os.UserCacheDir()>/tinyrangex/uup` (normally
@@ -4801,13 +7400,18 @@ effects remain in their original order; counts cover only the selected effects.
 With collection enabled, `on_error(record)` optionally receives each retained
 failure immediately (at most `error_limit` calls per stage); callback errors
 abort inspection. It is useful for bounded REPL observations during a long scan.
+`servicing_only=True` with index_only and an explicit base returns only the full servicing_metadata, open_resident_component and open_resident_components interfaces plus source identity fields. The batch `open_resident_components(identities, workers=4)` accepts a list of at most 65536 exact identity bytes, preserves order and unavailable None entries, and validates each manifest exactly as the single-reader method. Workers are bounded to 1..8; errors join all native workers and return no partial list. No Starlark callbacks run on workers. `source.servicing_metadata(feature_id).open_packages(packages, workers=4)` opens at most 4096 exact package names on 1..8 native workers, preserving order and duplicates as fresh owned parsed snapshots. Every MUM receives the same identity and package-declaration validation as open_package. All workers join before an error is returned; the lowest failing input determines the error and no partial list escapes. It does not infer admission or prune unavailable references. `source.servicing_metadata(feature_id).plan_components(identities, manifests=None)` plans exact store-only components. Optional `manifests` is an equally sized list of immutable files previously returned by that same metadata index's `open_component`; it reuses their validated snapshots rather than reopening/reparsing source metadata. A foreign index, ordinary equal-byte file, mismatched identity, duplicate component, or wrong length fails without a partial plan. This carries source provenance, not admission, catalog trust or installation authorization. No additional parsed-manifest cache is retained. The returned staging plan exposes `cache_stats()` for its bounded decoded-payload cache: hits, misses, loads, loaded_bytes, load_nanoseconds, evictions, retained_bytes, peak_retained_bytes and entries. load_nanoseconds sums loader wall time (including failures); concurrent loads overlap, while hits and single-flight waits are excluded. Each call returns an independent read-only snapshot; observing it does not reconstruct files, evict content or authorize installation. Retaining only this callable does not retain the staging inventories. It binds the same ordered reconstruction stages but omits preliminary CSI ownership/effect plans that authoritative recipe admission replaces. It cannot combine with other inspection modes or a stage limit, does not prune metadata, and does not provide installed-state or boot-media proof. Optional `while_preparing` (servicing_only only) runs once with no arguments on the caller interpreter thread beside native source preparation. It must not mutate the shared immutable WIM, source readers, or catalog. Its return is ignored; callback errors and native failures return no source, after joining the worker. Progress is bounded and delivered on the caller thread after joining. This is overlapping construction, not deferred integrity verification.
+
 `index_only=True` skips canonical CAB resource hydration. Missing bases in
 that mode are not by themselves decoder failures; complete image validation
-requires fully hydrated media (`index_only=False`).
+requires fully hydrated media (`index_only=False`). An external WIM already
+contains its own base resources, but its inspection result is still not
+production boot media.
 
 `source.servicing_effects(include_files=False)` inspects planned registry values and key declarations
 without reconstructing or retaining servicing files. Its `files` list is empty;
-the default `include_files=True` retains full construction semantics.
+the default `include_files=True` also returns verified file effects. These are
+construction primitives, not a completed CBS transaction.
 `registry_keys` contains ordered records with `key`, `architecture`, and
 `feature_id`, independently of `registry_values`. Empty CBS index keys must
 be created as keys, not as invented default values.
@@ -4827,6 +7431,45 @@ normalize slash direction, and form a union. Results preserve stage/plan order.
 `files` contains feature ID, architecture, source name/mode, store path and
 destinations; `total` counts all matches and `truncated` reports omitted matches.
 `limit` is 0–1000. This is placement inspection, not reconstruction or hash proof.
+
+`source.inspect_servicing_packages(feature_id="", offset=0, limit=100)`
+returns selected package manifest metadata in stage/file-plan order. Records in
+`packages` contain feature_id, package (canonical CBS identity), source_name and
+store_path; the latter opens with `open_servicing_file`. Aggregate update.mum
+transport names are not CBS identities. Optional feature matching is
+case-insensitive; unknown features are errors. `total`, `next_offset` and
+`has_more` support pagination, with nonnegative offset and limit 0–1000. This
+lists the selected closure, not final CBS states or all transport MUMs.
+
+`source.inspect_servicing_components(feature_id="", name_prefix="", offset=0, limit=100)`
+returns selected component metadata without opening payloads. Optional feature
+and component-name prefix filters are case-insensitive and intersect. Unknown
+features are errors. `components` records contain feature_id, name, version,
+architecture, language, stem, previous_stem, store_path, staged_only and selected_by.
+`store_path` is usable with `open_servicing_file`. A nonempty `previous_stem`
+identifies the planner's latest known predecessor, possibly from an earlier
+stage; it does not by itself prove that predecessor is the active runtime winner.
+Results preserve stage/plan order. `total` counts matches, `next_offset` and
+`has_more` support pagination. Offset must be nonnegative; limit is 0–1000.
+A zero limit counts matches without advancing. This is inspection only, not
+proof of installed ownership, completed actions or successful servicing.
+
+`source.inspect_servicing_ownership(feature_id="", deployment_name="", offset=0, limit=100)`
+returns planned deployment/component ownership edges, including unchanged resident
+components. Optional exact deployment-name and feature filters intersect and are
+case-insensitive. Unknown features are errors. `edges` records contain feature_id,
+deployment, deployment_version, deployment_architecture, active, source_count,
+component and component_stem. `active` describes the deployment's sources, not
+whether a shared component is active through another deployment. Pagination is
+over edges, so large deployments remain bounded; `total`, `next_offset`,
+`has_more`, and offset/limit semantics match component inspection. This is an
+ownership plan, not proof that CBS registry changes or component actions ran.
+
+`source.servicing_plan` also reports csi_component_count, csi_deployment_count and
+csi_owner_count. These count exact component/owner records and catalog-backed
+canonical deployment descriptions. Every deployment root hash must occur in
+every source package catalog. This verifies membership, not certificate trust,
+and does not apply the planned CBS records or complete servicing.
 
 ### `windows.utf16_strings`
 
@@ -4976,9 +7619,9 @@ Methods and attributes: `index_entries(table, index, maximum=100000)`, `info`, `
 
 ### `directory` value
 
-A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
+A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. path_names(lower=False, include_empty=True, readonly=False) returns an independent dictionary of all file and directory paths (including root and empty directories), without reading file contents. Values retain exact spelling; lower=True lowercases lookup keys and rejects colliding file names. Directory spelling follows the first sorted descendant file; empty directories fill remaining names in sorted order. include_empty=False returns only files and their ancestors. readonly=True returns a shared frozen dictionary for the current namespace generation. Content or metadata updates do not invalidate that generation; structural edits do. Later namespace changes do not alter any returned snapshot. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
-Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_security(name)`, `list_dir(path)`, `mkdir(name)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_reparse(name, tag, data)`, `set_security(name, descriptor)`, `write(name, value)`.
+Methods and attributes: `fat_short_path(name)`, `files`, `find(path)`, `get_security(name)`, `list_dir(path)`, `mkdir(name)`, `path_names(lower=False, include_empty=True, readonly=False)`, `remove(name)`, `set_attributes(name, readonly=False, hidden=False, system=False, archive=False)`, `set_reparse(name, tag, data)`, `set_security(name, descriptor)`, `write(name, value)`.
 
 ### `emulator.execution` value
 
@@ -4990,7 +7633,7 @@ Methods and attributes: `close()`, `closed`, `done`, `run(instruction_limit=0)`.
 
 The AMD64 execution context returned by emulator.machine for a 64-bit target; x86 targets use the emulator.x86 value. Calls marshal Windows x64 integer arguments, while hooks and provided exports model APIs. imports_named filters import records and provide_exports binds an ordered name-to-argument-count table. Memory/register methods affect guest state; snapshot copies the context, but callback closure state is not independently forked. See [emulation](../emulation.md) for architecture-specific behavior.
 
-Methods and attributes: `allocate(size=0, value=None, address=None, alignment=16, name='allocation', readable=True, writable=True, executable=False)`, `architecture`, `arguments(count)`, `call(address, args=[])`, `call_export(name, args=[])`, `entry`, `free(address)`, `get_register(name)`, `hook(callback, module='', name='', ordinal=0, address=0, argc=0, convention='win64')`, `imports`, `imports_named(names)`, `invoke(address, args=[])`, `load_module(image, name)`, `local_unwind(frame, target)`, `mappings`, `modules`, `pointer_size`, `profile(limit=256, reset=False)`, `protect(address, size, readable=True, writable=False, executable=False)`, `provide_export(callback=None, module, name|ordinal, argc=0, convention='win64', value=None, writable=True)`, `provide_exports(callback, module, signatures, convention='stdcall')`, `read(address, size)`, `read_cbytes(address, maximum=32KiB, require_terminator=True, unit_width=1)`, `read_cstring(address, maximum=32KiB, encoding='ascii')`, `read_f32be(address)`, `read_f32le(address)`, `read_f64be(address)`, `read_f64le(address)`, `read_i16be(address)`, `read_i16le(address)`, `read_i32be(address)`, `read_i32le(address)`, `read_i64be(address)`, `read_i64le(address)`, `read_i8(address)`, `read_pointer(address)`, `read_u16be(address)`, `read_u16le(address)`, `read_u32be(address)`, `read_u32le(address)`, `read_u64be(address)`, `read_u64le(address)`, `read_u8(address)`, `resolve_export(module, name='', ordinal=0)`, `run(entry=None, instruction_limit=current, until=None)`, `segment_base(segment)`, `set_register(name, value)`, `snapshot()`, `stack`, `stop(reason, detail='', value=None)`, `transfer(address, stack_pointer=current_rsp)`, `use(plugins)`, `write(address, value)`, `write_f32be(address, value)`, `write_f32le(address, value)`, `write_f64be(address, value)`, `write_f64le(address, value)`, `write_i16be(address, value)`, `write_i16le(address, value)`, `write_i32be(address, value)`, `write_i32le(address, value)`, `write_i64be(address, value)`, `write_i64le(address, value)`, `write_i8(address, value)`, `write_pointer(address, value)`, `write_u16be(address, value)`, `write_u16le(address, value)`, `write_u32be(address, value)`, `write_u32le(address, value)`, `write_u64be(address, value)`, `write_u64le(address, value)`, `write_u8(address, value)`.
+Methods and attributes: `allocate(size=0, value=None, address=None, alignment=16, name='allocation', readable=True, writable=True, executable=False)`, `architecture`, `arguments(count)`, `call(address, args=[])`, `call_export(name, args=[])`, `entry`, `free(address)`, `get_register(name)`, `hook(callback, module='', name='', ordinal=0, address=0, argc=0, convention='win64')`, `imports`, `imports_named(names)`, `invoke(address, args=[])`, `load_module(image, name)`, `local_unwind(frame, target)`, `mappings`, `modules`, `pointer_size`, `profile(limit=256, reset=False, calls=None)`, `protect(address, size, readable=True, writable=False, executable=False)`, `provide_export(callback=None, module, name|ordinal, argc=0, convention='win64', value=None, writable=True)`, `provide_exports(callback, module, signatures, convention='stdcall')`, `read(address, size)`, `read_cbytes(address, maximum=32KiB, require_terminator=True, unit_width=1)`, `read_cstring(address, maximum=32KiB, encoding='ascii')`, `read_f32be(address)`, `read_f32le(address)`, `read_f64be(address)`, `read_f64le(address)`, `read_i16be(address)`, `read_i16le(address)`, `read_i32be(address)`, `read_i32le(address)`, `read_i64be(address)`, `read_i64le(address)`, `read_i8(address)`, `read_pointer(address)`, `read_u16be(address)`, `read_u16le(address)`, `read_u32be(address)`, `read_u32le(address)`, `read_u64be(address)`, `read_u64le(address)`, `read_u8(address)`, `resolve_export(module, name='', ordinal=0)`, `run(entry=None, instruction_limit=current, until=None)`, `segment_base(segment)`, `set_register(name, value)`, `snapshot()`, `stack`, `stop(reason, detail='', value=None)`, `transfer(address, stack_pointer=current_rsp)`, `use(plugins)`, `write(address, value)`, `write_f32be(address, value)`, `write_f32le(address, value)`, `write_f64be(address, value)`, `write_f64le(address, value)`, `write_i16be(address, value)`, `write_i16le(address, value)`, `write_i32be(address, value)`, `write_i32le(address, value)`, `write_i64be(address, value)`, `write_i64le(address, value)`, `write_i8(address, value)`, `write_pointer(address, value)`, `write_u16be(address, value)`, `write_u16le(address, value)`, `write_u32be(address, value)`, `write_u32le(address, value)`, `write_u64be(address, value)`, `write_u64le(address, value)`, `write_u8(address, value)`.
 
 ### `emulator.plugin` value
 
@@ -5248,7 +7891,7 @@ Methods and attributes: `kind`, `name`, `rva`.
 
 A lazy PE32/PE32+ inspection value. Metadata attributes expose headers, sections, imports, exports, resources, strings and debug/type-library data from an owned snapshot. Type-library registration metadata supports MSFT and SLTG resources. read/disasm use RVAs; patch returns modified file bytes without changing the original. data provides the shared immutable source snapshot.
 
-Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `typelibs`, `version`, `with_resources(resources)`.
+Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `strings`, `typelibs`, `version`, `with_resources(resources)`.
 
 ### `windows.signing_identity` value
 

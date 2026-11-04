@@ -1,11 +1,14 @@
 """Composable execution of Windows PE modules with semantic system APIs."""
 
+load("@stdlib//windows/selfreg:transactions.star", "registry_transactions_plugin")
+load("@stdlib//windows/selfreg:objects.star", "object_directories_plugin")
+
 load(":rpc.star", "rpc_plugin")
 load(":abi.star", "teb_layout")
-load("@stdlib//windows/selfreg:registry.star", "registry_plugin")
+load("@stdlib//windows/selfreg:registry.star", "registry_plugin", "registry_handles_plugin")
 load("@stdlib//windows/selfreg:cabinet.star", "cabinet_plugin")
 load("@stdlib//windows/selfreg:exception.star", "exception_plugin")
-load("@stdlib//windows/selfreg:crypto.star", "crypto_registration_plugin", "cryptoapi_plugin")
+load("@stdlib//windows/selfreg:crypto.star", "crypto_registration_plugin", "cryptoapi_plugin", "bcrypt_hash_plugin")
 load("@stdlib//windows/selfreg:service.star", "service_manager_plugin")
 load("@stdlib//windows/selfreg:setupapi.star", "setupapi_plugin")
 load("@stdlib//windows/selfreg:advpack.star", "advpack_plugin")
@@ -17,7 +20,7 @@ load("@stdlib//windows/selfreg:comcat.star", "component_categories_provider")
 load("@stdlib//windows/selfreg:wer.star", "wer_plugin")
 load("@stdlib//windows/selfreg:appmodel.star", "appmodel_plugin")
 
-def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, process_create_provider = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800, network_hosts = {}, network_connect = None, stack_size = 1 << 20, virtual_modules = []):
+def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, process_create_provider = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800, network_hosts = {}, network_connect = None, stack_size = 1 << 20, virtual_modules = [], token_privileges = {}, api_set_namespace = None, loader_lookup_observer = None, module_paths = {}, object_directories = {}, object_security_module = "ntdll.dll", token_facts = {}, registry_creation_provider = None, registry_hive_mounts = []):
     """Runs one target export or executable using semantic system-DLL plugins.
 
     `prepare(machine)` may allocate target memory and return the integer
@@ -35,16 +38,51 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     any of its values. `process_create_provider(machine, request)` supplies a
     bounded semantic result for child-process creation. Each `plugin_factories`
     callback runs after the core
-    runtime plugins are constructed and receives a record containing `crt` and
-    `module_files`; it must return one emulator plugin. This lets callers add
+    runtime plugins are constructed and receives a record containing `crt`,
+    `cryptoapi`, `kernel`, and `module_files`; it must return one emulator plugin. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
+    `object_directories` maps exact NT directory names to explicit allowed access
+    masks (or records with access and explicit self-relative security bytes).
+    Queries execute RtlQuerySecurityObject in the explicit `object_security_module`.
+    This grants no host namespace access or synthetic security descriptors.
+    `module_paths` supplies explicit guest filenames for module-handle filename
+    queries; it does not load images or infer paths from host file objects.
     `virtual_modules` explicitly adds semantic DLL names to LoadLibrary lookup;
     callers must supply their exports through plugins. No native DLL is loaded. Keys
     missing from those plugins still fail on resolution or invocation.
+    `api_set_namespace` supplies the parsed target Windows API-set schema to
+    loader lookup, including importer-specific hosts. It neither admits host
+    modules nor supplies exports: use explicit virtual_modules or actual module
+    sources. `loader_lookup_observer(machine, query)` observes module/procedure
+    lookup before return, and may stop a missing required capability before a
+    native delay-loader exception. No exception is suppressed or handled for it.
+    `token_privileges` is an explicit LUID-to-attribute inventory for the
+    modeled caller's primary token (enabled bit 2, enabled-by-default bit 1).
+    Native backup/restore registry opens consult the current effective token,
+    including subsequent privilege changes and thread impersonation.
+    It defaults empty: AdjustTokenPrivileges cannot grant an unowned privilege.
+    This is emulator caller policy, not a change to the offline target image.
+    `registry_key_deletions` retains successful key-removal events, including
+    empty keys and names later recreated. Reconcile them with final registry
+    keys and value patches; they are effects, not a committed hive image.
+    `registry_effects` additionally captures only surviving touched value bytes,
+    final key metadata and removals. Use it rather than replaying historical
+    sets after key deletion. Missing key-creation security remains explicit.
+    `registry_hive_mounts` supplies explicit static source-hive namespace mounts
+    to registry_plugin. It does not emulate hive loading or infer user profiles;
+    effects preserve namespace paths for caller-directed hive publication.
+    `registry_creation_provider(machine, request)` is passed to registry_plugin's
+    on_create_key boundary, including the exact view's existing parent security.
+    It must supply all missing descriptors before any key mutation; the runner
+    never infers inheritance policy or falls back to copying a parent ACL.
     `generated_entries` retains newly created or changed files and directories
     as path-keyed records with `directory`, file `data`, and optional DOS
-    `attributes` and owned self-relative `security` bytes. `generated_files`
+    `attributes`, raw file times, `extended_attributes` name/flags/value dictionaries,
+    and owned self-relative `security` bytes. EA records are copied, not shared
+    with mutable execution state. `generated_files`
     is the content-only compatibility view; use entries to preserve metadata.
+    A `hardlink_to` entry names the canonical generated path of the same file
+    object. Content-only consumers deliberately lose this identity information.
     """
     if target_instruction_limit < 0 or target_instruction_limit > instruction_limit:
         fail("target_instruction_limit must not exceed instruction_limit")
@@ -97,6 +135,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     virtual_system_modules = [
         "advapi32.dll", "advapi32_vista.dll", "advpack.dll", "api-ms-win-core-com-l1-1-0.dll", "api-ms-win-core-com-l1-1-1.dll", "api-ms-win-core-processthreads-l1-1-0.dll", "cabinet.dll", "comctl32.dll", "crypt32.dll", "gdi32.dll",
         "kernel32.dll", "loadperf.dll", "lz32.dll", "msvcrt.dll", "netapi32.dll", "ntdll.dll",
+        "api-ms-win-core-registry-l1-1-0.dll",
         "ole32.dll", "oleaut32.dll", "rpcrt4.dll", "setupapi.dll", "api-ms-win-crt-private-l1-1-0.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "api-ms-win-crt-string-l1-1-0.dll", "api-ms-win-security-base-l1-1-0.dll",
         "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll", "version.dll",
         "api-ms-win-core-shlwapi-legacy-l1-1-0.dll", "api-ms-win-core-shlwapi-obsolete-l1-1-0.dll",
@@ -106,6 +145,12 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     module_images = dict(modules)
     module_images[module] = file
     module_sources = windows.module_sources(files, exclude = virtual_system_modules)
+    # Use the same first-match selection as the file-backed loader. These are
+    # declared guest paths, not filesystem names attached to host file objects.
+    source_paths = windows.module_sources({path: path for path in files}, exclude = virtual_system_modules)
+    source_paths.update({canonical_module_name(name): name for name in modules})
+    source_paths.update({canonical_module_name(name): path for name, path in module_paths.items()})
+    source_paths[canonical_module_name(module)] = module
     module_records = {}
     for loaded in machine.modules:
         if loaded.entry != 0:
@@ -175,6 +220,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
             source = windows.pe(module_sources[name]).data
             loaded = machine.load_module(image = source, name = name)
             module_records[name] = loaded
+            process_environment_plugin.state["refresh_modules"](machine)
             module_images[name] = source
             module_dependencies[name] = target_module_dependencies(source, name)
         if loaded == None:
@@ -206,6 +252,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
             source = windows.pe(module_sources[canonical]).data
             loaded = machine.load_module(image = source, name = canonical)
             module_records[canonical] = loaded
+            process_environment_plugin.state["refresh_modules"](machine)
             module_images[canonical] = source
             module_dependencies[canonical] = target_module_dependencies(source, canonical)
         return loaded.base if loaded != None else None
@@ -230,9 +277,11 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "windir": "C:\\Windows",
     }
     process_environment.update(environment)
-    registry = registry_plugin(values = registry_values, keys = registry_keys, hives = registry_hives, user_sid = user_sid, output_key_case = registry_output_key_case, prepared_state = prepared_registry_state, environment = process_environment)
+    def effective_registry_privileges():
+        return security.effective_privileges()
+    registry = registry_plugin(effective_token_privileges = effective_registry_privileges, values = registry_values, keys = registry_keys, hives = registry_hives, mounts = registry_hive_mounts, user_sid = user_sid, output_key_case = registry_output_key_case, prepared_state = prepared_registry_state, environment = process_environment, on_create_key = registry_creation_provider)
     versions = version_plugin(file, module_path = module, module_files = module_images)
-    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, on_module_map = map_target_module, on_process_create = process_create_provider, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time, tls_slots = tls_slots)
+    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, on_module_map = map_target_module, on_process_create = process_create_provider, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time, tls_slots = tls_slots, api_set_namespace = api_set_namespace, on_loader_lookup = loader_lookup_observer, module_paths = source_paths)
     setup = setupapi_plugin(infs = setup_infs, directories = setup_directories, registry = registry, kernel = kernel)
     advpack = advpack_plugin(registry, module_images, kernel = kernel, setup = setup)
     performance = loadperf_plugin(registry, kernel)
@@ -243,15 +292,22 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         return {path: entry["data"] for path, entry in entries.items() if not entry["directory"]}
     def generated_entries():
         output = {}
-        for path, entry in kernel.state["paths"].items():
+        link_targets = {}
+        for path, entry in sorted(kernel.state["paths"].items()):
             if entry.get("initial", False) and not entry.get("dirty", False):
                 continue
             value = {"directory": entry.get("directory", False)}
             if not value["directory"]:
-                value["data"] = entry.get("data", b"")
-            for key in ["security", "attributes"]:
+                value["data"] = kernel.state["file_data"](entry)
+                identity = entry.get("file_id")
+                if identity != None:
+                    if identity in link_targets:
+                        value["hardlink_to"] = link_targets[identity]
+                    else:
+                        link_targets[identity] = path
+            for key in ["security", "attributes", "creation_time", "access_time", "write_time", "extended_attributes"]:
                 if key in entry:
-                    value[key] = entry[key]
+                    value[key] = [dict(ea) for ea in entry[key]] if key == "extended_attributes" else entry[key]
             output[path] = value
         return output
     available_type_libraries = dict(type_libraries)
@@ -272,6 +328,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     crt = msvcrt_plugin(kernel = kernel)
     exceptions = exception_plugin(kernel = kernel)
     cryptoapi = cryptoapi_plugin(kernel = kernel)
+    bcrypt = bcrypt_hash_plugin()
     server_classes = {}
     for name, image in module_images.items():
         classes = class_ids(image)
@@ -315,7 +372,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         kernel = kernel,
     )
     accounts = {}
-    security = security_plugin(user_name = user_name, user_sid = [int(part) for part in user_sid.split("-")[3:]], kernel = kernel, object_security = registry.set_security, accounts = accounts, computer_name = environment.get("COMPUTERNAME", environment.get("ComputerName", "TREX")))
+    security = security_plugin(user_name = user_name, user_sid = [int(part) for part in user_sid.split("-")[3:]], kernel = kernel, object_security = registry.set_security, accounts = accounts, token_privileges = token_privileges, token_facts = token_facts, computer_name = environment.get("COMPUTERNAME", environment.get("ComputerName", "TREX")))
     network = netapi_plugin(
         user_name = user_name,
         user_sid = [int(part) for part in user_sid.split("-")[3:]],
@@ -325,6 +382,9 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     )
     extension_plugins = [factory({
         "crt": crt,
+        "cryptoapi": cryptoapi,
+        "bcrypt": bcrypt,
+        "kernel": kernel,
         "module_files": modules,
     }) for factory in plugin_factories]
     # `module_images` is extended by load_target_module. Resource lookup keeps
@@ -358,6 +418,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
             "target_slices": rpc.state["target_slices"],
             "target_steps": rpc.state["target_steps"],
         }
+    process_environment_plugin=environment_plugin(process_environment, system_time=system_time, module_paths=source_paths)
     machine.use([
         registry,
         services,
@@ -365,9 +426,12 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         advpack,
         exceptions,
         kernel,
+        registry_handles_plugin(registry, kernel),
+        registry_transactions_plugin(registry, kernel),
+        object_directories_plugin(kernel, object_directories, security_module = object_security_module),
         lz32_plugin(kernel),
         cabinet,
-        environment_plugin(process_environment, system_time = system_time),
+        process_environment_plugin,
         event_log_plugin(),
         performance,
         ole,
@@ -375,6 +439,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         com_plugin(registry),
         crypto,
         cryptoapi,
+        bcrypt,
         rpc,
         crt,
         security,
@@ -421,6 +486,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                     "registry_opens": registry.opens(),
                     "registry_transactions": registry.transactions(),
                     "registry_keys": registry.keys(),
+                    "registry_key_deletions": registry.key_deletions(),
+                    "registry_effects": registry.effects(),
                     "result": current,
                     "initialization": current,
                     "module_initializations": module_initializations,
@@ -475,6 +542,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
                 "registry_opens": registry.opens(),
                 "registry_transactions": registry.transactions(),
                 "registry_keys": registry.keys(),
+                "registry_key_deletions": registry.key_deletions(),
+                "registry_effects": registry.effects(),
                 "result": initialization,
                 "initialization": initialization,
                 "module_initializations": module_initializations,
@@ -537,6 +606,8 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "registry_opens": registry.opens(),
         "registry_transactions": registry.transactions(),
         "registry_keys": registry.keys(),
+        "registry_key_deletions": registry.key_deletions(),
+        "registry_effects": registry.effects(),
         "result": result,
         "initialization": initialization,
         "module_initializations": module_initializations,

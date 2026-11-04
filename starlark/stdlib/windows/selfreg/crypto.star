@@ -46,6 +46,8 @@ _CRYPTOAPI_SIGNATURES = {
     "systemfunction041": 3,
 }
 
+_CATALOG_SIGNATURES = {"cryptcatadmincalchashfromfilehandle": 4}
+
 _SHA_SIGNATURES = {"a_shainit": 1, "a_shaupdate": 3, "a_shafinal": 2}
 _SHA_INITIAL_WORDS = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
 
@@ -125,7 +127,7 @@ _HASH_ALGORITHMS = {
 
 def _cryptoapi_provider_module(name):
     normalized = name.replace("/", "\\").split("\\")[-1].lower()
-    return normalized == "advapi32.dll" or normalized.startswith("api-ms-win-security-cryptoapi-") or normalized.startswith("ext-ms-win-security-cryptoapi-")
+    return normalized in ["advapi32.dll", "cryptsp.dll"] or normalized.startswith("api-ms-win-security-cryptoapi-") or normalized.startswith("ext-ms-win-security-cryptoapi-")
 
 def _reversed_bytes(value):
     value = binary.view(value)
@@ -147,6 +149,100 @@ def _checked_memory_key(key):
     if key != None and (type(key) != "bytes" or len(key) != 16):
         fail("memory_protection_key must contain 16 bytes")
     return key
+
+def bcrypt_hash_plugin():
+    """CNG SHA-1/SHA-256 pseudo-algorithm handles and owned ordinary hashes.
+
+    Uses the documented Windows 10 SHA pseudo handles. Unkeyed non-reusable hashes use an owned opaque object. The 256-byte
+    caller-object footprint matches measured target primitive-provider queries
+    and successful native creation; no private Microsoft object layout is exposed. Other algorithms and flags stop explicitly;
+    hashing never establishes certificate, catalog or signature trust.
+    """
+    state = {"hashes": {}, "objects": {}, "next_handle": 0x78000000}
+    algorithms = {0x31: ("sha1", "SHA1", 20, 256), 0x41: ("sha256", "SHA256", 32, 256)}
+    signatures = {"bcryptcreatehash": 7, "bcryptdestroyhash": 1, "bcryptfinishhash": 4, "bcryptgetproperty": 6, "bcrypthashdata": 4}
+    def callback(event):
+        m, args, name = event.machine, event.args, event.name.lower()
+        if name == "bcryptcreatehash":
+            algorithm, output, buffer, size, secret, secret_size, flags = args
+            specification = algorithms.get(algorithm)
+            if specification == None:
+                fail("BCryptCreateHash: unmodeled algorithm handle " + hex(algorithm))
+            if secret or secret_size & 0xffffffff or flags & 0xffffffff:
+                fail("BCryptCreateHash: keyed or reusable hashes are not modeled")
+            size &= 0xffffffff
+            if not output or not buffer and size:
+                return 0xc000000d
+            if buffer:
+                required = specification[3]
+                if size < required:
+                    return 0xc0000023
+                for address,owner in state["objects"].items():
+                    if buffer < address+owner["size"] and address < buffer+required:
+                        fail("BCryptCreateHash: object buffer overlaps a live owned hash")
+                # The bytes are opaque to callers. Validate the whole measured
+                # region before publishing either the handle or its ownership.
+                m.write(buffer, b"\x00" * required)
+            handle = state["next_handle"]
+            current = {"specification": specification, "hasher": crypto.hasher(specification[0]), "finished": False, "object_buffer": buffer}
+            m.write_pointer(output, handle)
+            state["next_handle"] = handle + 1
+            state["hashes"][handle] = current
+            if buffer:
+                state["objects"][buffer] = {"size": specification[3], "handle": handle}
+            return 0
+        if name == "bcryptgetproperty":
+            current = state["hashes"].get(args[0])
+            specification = current["specification"] if current != None else algorithms.get(args[0])
+            if specification == None:
+                return 0xc0000008
+            if not args[1] or not args[4] or args[5] & 0xffffffff:
+                return 0xc000000d
+            property = m.read_cstring(args[1], encoding="utf16le")
+            if property == "HashDigestLength":
+                data = binary.u32le(specification[2])
+            elif property == "ObjectLength":
+                data = binary.u32le(specification[3])
+            elif property == "AlgorithmName":
+                data = binary.encode(specification[1], encoding="utf16le", nul=True)
+            else:
+                fail("BCryptGetProperty: unmodeled hash property " + property)
+            m.write_u32le(args[4], len(data))
+            if args[2]:
+                if args[3] & 0xffffffff < len(data):
+                    return 0xc0000023
+                m.write(args[2], data)
+            return 0
+        current = state["hashes"].get(args[0])
+        if current == None:
+            return 0xc0000008
+        if name == "bcryptdestroyhash":
+            state["hashes"].pop(args[0])
+            if current["object_buffer"]:
+                state["objects"].pop(current["object_buffer"])
+            return 0
+        if current["finished"]:
+            return 0xc0000008
+        if name == "bcrypthashdata":
+            size, flags = args[2] & 0xffffffff, args[3] & 0xffffffff
+            if flags or size and not args[1]:
+                return 0xc000000d
+            current["hasher"].update(m.read(args[1], size) if size else b"")
+            return 0
+        if name == "bcryptfinishhash":
+            if args[3] & 0xffffffff or not args[1] or args[2] & 0xffffffff != current["specification"][2]:
+                return 0xc000000d
+            m.write(args[1], current["hasher"].sum())
+            current["finished"] = True
+            return 0
+        fail("unmodeled CNG hash operation")
+    def install(machine):
+        machine.provide_exports(callback, module="bcrypt.dll", signatures=signatures)
+        for imported in machine.imports_named(signatures):
+            if imported.module.lower() == "bcrypt.dll":
+                machine.hook(callback, address=imported.address, argc=signatures[imported.name.lower()])
+    return emulator.plugin(install, name="windows.bcrypt.hash", state=state)
+
 
 def cryptoapi_plugin(kernel = None, memory_protection_key = None):
     """Models bounded legacy CryptoAPI provider contexts.
@@ -181,6 +277,36 @@ def cryptoapi_plugin(kernel = None, memory_protection_key = None):
         name = event.name.lower()
         args = event.args
         machine = event.machine
+        if name == "cryptcatadmincalchashfromfilehandle":
+            handle, size_pointer, output, flags = args
+            if flags & 0xffffffff or not size_pointer or handle in [0, 0xffffffff, 0xffffffffffffffff]:
+                return fail(87)
+            capacity = machine.read_u32le(size_pointer)
+            machine.write_u32le(size_pointer, 20)
+            # Native WinTrust 8fe0 -> 8b64: a NULL output is a successful
+            # size query even when capacity is too small (LastError 122).
+            if capacity < 20:
+                fail(122)
+            if not output:
+                return 1
+            if capacity < 20:
+                return 0
+            if kernel == None:
+                return fail(6)
+            opened = kernel.state["handles"].get(handle)
+            if type(opened) != "dict" or opened.get("kind") != "file":
+                return fail(6)
+            path = opened["value"]["path"]
+            entry = opened["value"].get("file", kernel.state["paths"].get(path))
+            if entry == None or entry.get("directory", False):
+                return fail(6)
+            data = kernel.state["file_data"](entry)
+            buffer = binary.builder(capacity = max(1, len(data)))
+            buffer.append(data)
+            digest = windows.catalog_hash(buffer.file(), algorithm = "sha1")
+            machine.write(output, digest)
+            state["actions"].append({"operation": "catalog-hash", "path": path, "algorithm": "sha1", "size": len(data), "digest": digest})
+            return 1  # Hash calculation is not catalog membership or trust.
         if name in ["systemfunction040", "systemfunction041"]:
             address, size, options = args
             # NTSecAPI.h: RTL_ENCRYPT_MEMORY_SIZE is 8. The key and cipher
@@ -439,10 +565,17 @@ def cryptoapi_plugin(kernel = None, memory_protection_key = None):
             for name, argc in _SHA_SIGNATURES.items():
                 machine.provide_export(_sha_callback, module = module, name = name, argc = argc)
         machine.provide_exports(callback, module = "advapi32.dll", signatures = _CRYPTOAPI_SIGNATURES)
-        for imported in machine.imports_named(list(_SHA_SIGNATURES) + list(_CRYPTOAPI_SIGNATURES)):
+        machine.provide_exports(callback, module = "cryptsp.dll", signatures = _CRYPTOAPI_SIGNATURES)
+        # The observed driver-store delay imports resolve these two exports
+        # through this API-set contract, sharing the Advapi32 provider state.
+        machine.provide_exports(callback, module = "api-ms-win-security-cryptoapi-l1-1-0.dll", signatures = {"cryptacquirecontextw": 5, "cryptreleasecontext": 2})
+        machine.provide_exports(callback, module = "wintrust.dll", signatures = _CATALOG_SIGNATURES)
+        for imported in machine.imports_named(list(_SHA_SIGNATURES) + list(_CRYPTOAPI_SIGNATURES) + list(_CATALOG_SIGNATURES)):
             name = imported.name.lower()
             if name in _SHA_SIGNATURES and imported.module.lower() in ["advapi32.dll", "ntdll.dll"]:
                 machine.hook(_sha_callback, address = imported.address, argc = _SHA_SIGNATURES[name])
+            if name in _CATALOG_SIGNATURES and imported.module.lower() == "wintrust.dll":
+                machine.hook(callback, address = imported.address, argc = _CATALOG_SIGNATURES[name])
             if name in _CRYPTOAPI_SIGNATURES and _cryptoapi_provider_module(imported.module):
                 machine.hook(callback, address = imported.address, argc = _CRYPTOAPI_SIGNATURES[name])
 

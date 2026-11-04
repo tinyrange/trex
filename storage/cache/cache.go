@@ -6,6 +6,7 @@ package bytecache
 import (
 	"container/list"
 	"sync"
+	"time"
 )
 
 // A single-folder cabinet, notably the 315 MiB Windows XP driver.cab, must be
@@ -36,9 +37,12 @@ type Stats struct {
 	Evictions   uint64
 	Loads       uint64
 	LoadedBytes uint64
-	Bytes       int64
-	PeakBytes   int64
-	Entries     int
+	// LoadNanoseconds sums wall time inside loaders, including failed loads.
+	// Concurrent loaders overlap; cache hits and single-flight waits are excluded.
+	LoadNanoseconds uint64
+	Bytes           int64
+	PeakBytes       int64
+	Entries         int
 }
 
 type Cache struct {
@@ -52,6 +56,7 @@ type Cache struct {
 	evictions uint64
 	loads     uint64
 	loaded    uint64
+	loadNanos uint64
 	peakBytes int64
 	onLoad    func(uint64)
 }
@@ -92,9 +97,12 @@ func (c *Cache) Get(key Key, load func() ([]byte, error)) ([]byte, error) {
 	c.entries[key] = entry
 	c.mu.Unlock()
 
+	started := time.Now()
 	data, err := load()
+	elapsed := uint64(time.Since(started))
 
 	c.mu.Lock()
+	c.loadNanos += elapsed
 	if err == nil {
 		c.loads++
 		c.loaded += uint64(len(data))
@@ -133,13 +141,14 @@ func (c *Cache) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return Stats{
-		Hits:        c.hits,
-		Misses:      c.misses,
-		Evictions:   c.evictions,
-		Loads:       c.loads,
-		LoadedBytes: c.loaded,
-		Bytes:       c.bytes,
-		PeakBytes:   c.peakBytes,
-		Entries:     len(c.entries),
+		Hits:            c.hits,
+		Misses:          c.misses,
+		Evictions:       c.evictions,
+		Loads:           c.loads,
+		LoadedBytes:     c.loaded,
+		LoadNanoseconds: c.loadNanos,
+		Bytes:           c.bytes,
+		PeakBytes:       c.peakBytes,
+		Entries:         len(c.entries),
 	}
 }

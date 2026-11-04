@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -85,11 +86,16 @@ func (b *sharedByteBudget) Release(size int64) {
 // source-range caching does not persist parsed or constructed intermediates.
 func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var catalogArg, offerArg starlark.Value
+	var whilePreparing starlark.Value = starlark.None
 	var architecture, edition, language, metadataName, targetCompDB string
+	var baseArg starlark.Value = starlark.None
+	var bootsectArg starlark.Value = starlark.None
+	var imagePath string
 	indexOnly := false
 	planOnly := false
 	metadataOnly := false
 	stateOnly := false
+	servicingOnly := false
 	installedStageLimit := 0
 	if err := starlark.UnpackArgs("update_media", args, kwargs,
 		"catalog", &catalogArg, "offer", &offerArg,
@@ -99,15 +105,35 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		"plan_only?", &planOnly,
 		"metadata_only?", &metadataOnly,
 		"state_only?", &stateOnly,
+		"servicing_only?", &servicingOnly,
+		"while_preparing?", &whilePreparing,
 		"installed_stage_limit?", &installedStageLimit,
+		"base?", &baseArg, "image?", &imagePath, "bootsect?", &bootsectArg,
 	); err != nil {
 		return nil, err
+	}
+	install, err := externalServicingBase(baseArg, imagePath, bootsectArg)
+	if err != nil {
+		return nil, err
+	}
+	externalBase := install != nil
+	// External-base reconstruction is an inspection boundary until native CBS
+	// ownership/state transitions and manifest actions are implemented. Never
+	// expose a partially serviced source as production boot media.
+	if externalBase && !indexOnly && !planOnly && !metadataOnly && !stateOnly {
+		return nil, fmt.Errorf("update_media: external base currently requires an inspection mode; complete native CBS transaction application is not implemented")
+	}
+	if !externalBase {
+		imagePath = "/image3"
 	}
 	if installedStageLimit < 0 {
 		return nil, fmt.Errorf("update_media: installed_stage_limit must not be negative")
 	}
 	if metadataOnly && (indexOnly || planOnly || stateOnly || installedStageLimit != 0) {
 		return nil, fmt.Errorf("update_media: metadata_only cannot be combined with image/planning modes")
+	}
+	if servicingOnly && (!externalBase || !indexOnly || planOnly || metadataOnly || stateOnly || installedStageLimit != 0) {
+		return nil, fmt.Errorf("update_media: servicing_only requires an explicit base, index_only and no other inspection mode/stage limit")
 	}
 	catalog, offer, err := selectedOffer(catalogArg, offerArg)
 	if err != nil {
@@ -118,29 +144,67 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 			return nil, fmt.Errorf("update_media: explicit %s is required", name)
 		}
 	}
-	mediaStarted := time.Now()
-	progress := func(message string) {
-		if !indexOnly {
-			return
-		}
-		if thread.Print != nil {
-			thread.Print(thread, message)
-		} else {
-			fmt.Println(message)
+	var callback starlark.Callable
+	if whilePreparing != starlark.None {
+		var ok bool
+		callback, ok = whilePreparing.(starlark.Callable)
+		if !ok || !servicingOnly {
+			return nil, fmt.Errorf("update_media: while_preparing requires a callable and servicing_only")
 		}
 	}
 	resources, err := lifecycle.ForThread(thread)
 	if err != nil {
 		return nil, fmt.Errorf("update_media: %w", err)
 	}
-	httpClient, err := microsoftUpdateHTTPClient()
-	if err != nil {
-		return nil, fmt.Errorf("update_media: initialize Microsoft transport: %w", err)
+	options := mediaPreparationOptions{
+		architecture: architecture, edition: edition, language: language,
+		metadataName: metadataName, targetCompDB: targetCompDB, imagePath: imagePath,
+		bootsect: bootsectArg, indexOnly: indexOnly, planOnly: planOnly,
+		metadataOnly: metadataOnly, stateOnly: stateOnly, servicingOnly: servicingOnly,
+		installedStageLimit: installedStageLimit,
 	}
-	closure, files, err := catalog.resolveFiles(resources.Context(), offer)
+	return runMediaPreparation(thread, callback, func(progress func(string)) (starlark.Value, error) {
+		return prepareSelectedMedia(resources, catalog, offer, install, options, progress)
+	})
+}
+
+type mediaPreparationOptions struct {
+	architecture, edition, language, metadataName, targetCompDB, imagePath string
+	bootsect                                                               starlark.Value
+	indexOnly, planOnly, metadataOnly, stateOnly, servicingOnly            bool
+	installedStageLimit                                                    int
+}
+
+// Only native immutable inputs cross the worker boundary. This function must
+// not evaluate caller Starlark values or use the caller interpreter thread.
+func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue, offer windowsupdate.Offer, install *wim.Archive, options mediaPreparationOptions, observe func(string)) (starlark.Value, error) {
+	architecture, edition, language := options.architecture, options.edition, options.language
+	metadataName, targetCompDB, imagePath := options.metadataName, options.targetCompDB, options.imagePath
+	bootsectArg := options.bootsect
+	indexOnly, planOnly, metadataOnly := options.indexOnly, options.planOnly, options.metadataOnly
+	stateOnly, servicingOnly, installedStageLimit := options.stateOnly, options.servicingOnly, options.installedStageLimit
+	externalBase := install != nil
+	mediaStarted := time.Now()
+	progress := func(message string) {
+		if indexOnly {
+			observe(message)
+		}
+	}
+	var httpClient *http.Client
+	if catalog.allowNetwork {
+		var err error
+		httpClient, err = microsoftUpdateHTTPClient()
+		if err != nil {
+			return nil, fmt.Errorf("update_media: initialize Microsoft transport: %w", err)
+		}
+	}
+	closure, err := catalog.catalog.ResolveBundleClosure(offer)
 	if err != nil {
 		return nil, fmt.Errorf("update_media: resolve %q: %w", offer.Title, err)
 	}
+	// Declared digests and sizes are sufficient for cached source ranges.
+	// Obtain expiring locations only if a reader actually needs network bytes.
+	files := declaredPayloadFiles(closure)
 	cacheRoot, err := os.UserCacheDir()
 	if err != nil {
 		return nil, fmt.Errorf("update_media: locate persistent UUP cache: %w", err)
@@ -149,10 +213,18 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if err != nil {
 		return nil, fmt.Errorf("update_media: initialize persistent UUP cache: %w", err)
 	}
-	rangePool, err := storagenative.NewPersistentHTTPRangePool(0, maximumHTTPRangeCache, httpClient,
-		payloadLocationResolver(files, func(ctx context.Context) ([]windowsupdate.File, error) {
-			return catalog.protocol.ResolveFilesForOffers(ctx, catalog.options, closure)
-		}), diskCache)
+	var rangePool *storagenative.HTTPRangePool
+	if !catalog.allowNetwork {
+		rangePool, err = storagenative.NewOfflineHTTPRangePool(0, maximumHTTPRangeCache, diskCache)
+	} else {
+		rangePool, err = storagenative.NewPersistentHTTPRangePool(0, maximumHTTPRangeCache, httpClient,
+			payloadLocationResolver(files, func(ctx context.Context) ([]windowsupdate.File, error) {
+				started := time.Now()
+				resolved, err := catalog.protocol.ResolveFilesForOffers(ctx, catalog.options, closure)
+				progress(fmt.Sprintf("update_media: payload location lookup took %s", time.Since(started).Round(time.Millisecond)))
+				return resolved, err
+			}), diskCache)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("update_media: initialize bounded HTTP reader: %w", err)
 	}
@@ -166,7 +238,8 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if err != nil {
 		return nil, fmt.Errorf("update_media: aggregated metadata: %w", err)
 	}
-	aggregatedCAB, err := cab.Open(aggregatedFile, false)
+	compositionCabinets := newCompositionCabinets()
+	aggregatedCAB, err := compositionCabinets.open(aggregatedFile)
 	if err != nil {
 		return nil, fmt.Errorf("update_media: open aggregated metadata: %w", err)
 	}
@@ -174,7 +247,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	for _, member := range aggregatedCAB.Files() {
 		compositionMetadata = append(compositionMetadata, starlark.String(member.Name))
 	}
-	databases, err := compositionDatabases(aggregatedCAB)
+	databases, err := compositionDatabases(aggregatedCAB, compositionCabinets)
 	if err != nil {
 		return nil, fmt.Errorf("update_media: composition catalog: %w", err)
 	}
@@ -207,9 +280,15 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if err != nil {
 		return nil, fmt.Errorf("update_media: %w", err)
 	}
-	plan, err := uup.PlanEditionCatalog(database, databases, files, edition, language)
-	if err != nil {
-		return nil, fmt.Errorf("update_media: offer %q revision %d (%s), metadata %q SHA256 %s: %w", offer.ID, offer.Revision, offer.Title, aggregated.Name, aggregated.DigestSHA256, err)
+	var plan uup.EditionPlan
+	if !externalBase {
+		// Building new installation media requires the complete edition graph.
+		// Servicing an existing WIM uses its CBS inventory instead; unrelated
+		// media-creation application dependencies are not update prerequisites.
+		plan, err = uup.PlanEditionCatalog(database, databases, files, edition, language)
+		if err != nil {
+			return nil, fmt.Errorf("update_media: offer %q revision %d (%s), metadata %q SHA256 %s: %w", offer.ID, offer.Revision, offer.Title, aggregated.Name, aggregated.DigestSHA256, err)
+		}
 	}
 	updateSources, updateContainers, err := indexUpdatePayloadSources(resources, rangePool, files)
 	if err != nil {
@@ -330,24 +409,26 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 			"update_total_bytes":    starlark.MakeInt64(updateBytes),
 		}), nil
 	}
-	metadataFile, err := openPayload(resources, rangePool, plan.Metadata, maximumEditionMetadata)
-	if err != nil {
-		return nil, fmt.Errorf("update_media: edition metadata: %w", err)
-	}
-	referenceReaders := make([]storage.Reader, 0, len(plan.References))
-	for index, reference := range plan.References {
-		file, err := openPayload(resources, rangePool, reference, maximumReferencePayload)
+	if !externalBase {
+		metadataFile, err := openPayload(resources, rangePool, plan.Metadata, maximumEditionMetadata)
 		if err != nil {
-			return nil, fmt.Errorf("update_media: reference %d/%d %q: %w", index+1, len(plan.References), reference.Name, err)
+			return nil, fmt.Errorf("update_media: edition metadata: %w", err)
 		}
-		referenceReaders = append(referenceReaders, file)
+		referenceReaders := make([]storage.Reader, 0, len(plan.References))
+		for index, reference := range plan.References {
+			file, err := openPayload(resources, rangePool, reference, maximumReferencePayload)
+			if err != nil {
+				return nil, fmt.Errorf("update_media: reference %d/%d %q: %w", index+1, len(plan.References), reference.Name, err)
+			}
+			referenceReaders = append(referenceReaders, file)
+		}
+		progress(fmt.Sprintf("update_media: opening base WIM with %d references after %s", len(referenceReaders), time.Since(mediaStarted).Round(time.Millisecond)))
+		install, err = wim.OpenWithReferencesCache(metadataFile, referenceReaders, maximumWIMChunkCache)
+		if err != nil {
+			return nil, fmt.Errorf("update_media: open referenced edition ESD: %w", err)
+		}
+		progress(fmt.Sprintf("update_media: base WIM open after %s", time.Since(mediaStarted).Round(time.Millisecond)))
 	}
-	progress(fmt.Sprintf("update_media: opening base WIM with %d references after %s", len(referenceReaders), time.Since(mediaStarted).Round(time.Millisecond)))
-	install, err := wim.OpenWithReferencesCache(metadataFile, referenceReaders, maximumWIMChunkCache)
-	if err != nil {
-		return nil, fmt.Errorf("update_media: open referenced edition ESD: %w", err)
-	}
-	progress(fmt.Sprintf("update_media: base WIM open after %s", time.Since(mediaStarted).Round(time.Millisecond)))
 	if stateOnly {
 		return starvalue.NewRecord(starlark.StringDict{
 			"architecture": starlark.String(database.Architecture),
@@ -362,15 +443,30 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if err != nil {
 		return nil, fmt.Errorf("update_media: servicing cache: %w", err)
 	}
-	assemblyPlanner, err := uup.NewAssemblyPlanner(install, "/image3")
+	assemblyPlanner, err := uup.NewAssemblyPlanner(install, imagePath)
 	if err != nil {
 		return nil, fmt.Errorf("update_media: initialize installed-OS package planner: %w", err)
 	}
+	var deploymentPlanner *uup.CSIDeploymentPlanner
+	if !servicingOnly {
+		deploymentPlanner, err = uup.NewCSIDeploymentPlanner(install, imagePath)
+		if err != nil {
+			return nil, fmt.Errorf("update_media: initialize CSI deployment planner: %w", err)
+		}
+	}
+	var servicingDeploymentPlans [][]uup.CSIDeploymentRecord
 	var installedStages []*uup.CumulativeStage
 	var installedStageMetadata []uup.UpdateStagePlan
 	var assemblyPlans []uup.StageAssemblyPlan
 	var servicingEffectPlans []uup.StageEffectPlan
-	for _, updateStage := range updateStages {
+	var servicingComponentStatePlans []uup.CSIComponentStatePlan
+	lastInstalledStage := -1
+	for i, stage := range updateStages {
+		if stage.Scope == "installed-os" {
+			lastInstalledStage = i
+		}
+	}
+	for stageIndex, updateStage := range updateStages {
 		if updateStage.Scope != "installed-os" {
 			continue
 		}
@@ -386,6 +482,19 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		if len(opened) != 1 || len(metadata) != 1 {
 			return nil, fmt.Errorf("update_media: stage %q did not open exactly once", updateStage.FeatureID)
 		}
+		if servicingOnly {
+			bind := assemblyPlanner.BindStageContent
+			if stageIndex == lastInstalledStage {
+				bind = assemblyPlanner.BindFinalStageContent
+			}
+			if err := bind(opened[0]); err != nil {
+				return nil, fmt.Errorf("update_media: stage %q content bindings: %w", updateStage.FeatureID, err)
+			}
+			installedStages = append(installedStages, opened[0])
+			installedStageMetadata = append(installedStageMetadata, metadata[0])
+			progress(fmt.Sprintf("update_media: bound stage %s source metadata after %s", updateStage.FeatureID, time.Since(started).Round(time.Millisecond)))
+			continue
+		}
 		assemblyPlan, err := assemblyPlanner.PlanStage(opened[0])
 		if err != nil {
 			return nil, fmt.Errorf("update_media: installed-OS stage %q package closure: %w", updateStage.FeatureID, err)
@@ -394,11 +503,35 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		if err != nil {
 			return nil, fmt.Errorf("update_media: analyze installed-OS stage %q: %w", updateStage.FeatureID, err)
 		}
+		componentState, err := uup.PlanCSIComponentState(opened[0], assemblyPlan)
+		if err != nil {
+			return nil, fmt.Errorf("update_media: CSI component state for stage %q: %w", updateStage.FeatureID, err)
+		}
+		deploymentState, err := deploymentPlanner.PlanStage(opened[0], assemblyPlan, effectPlan, componentState)
+		if err != nil {
+			return nil, fmt.Errorf("update_media: canonical deployment state for stage %q: %w", updateStage.FeatureID, err)
+		}
+		servicingDeploymentPlans = append(servicingDeploymentPlans, deploymentState)
+		servicingComponentStatePlans = append(servicingComponentStatePlans, componentState)
 		installedStages = append(installedStages, opened[0])
 		installedStageMetadata = append(installedStageMetadata, metadata[0])
 		assemblyPlans = append(assemblyPlans, assemblyPlan)
 		servicingEffectPlans = append(servicingEffectPlans, effectPlan)
 		progress(fmt.Sprintf("update_media: closed stage %s after %s (%d packages, %d components)", updateStage.FeatureID, time.Since(started).Round(time.Millisecond), len(assemblyPlan.Packages), len(assemblyPlan.Components)))
+	}
+	openResident, openResidents := residentComponentMetadataBuiltins(install, imagePath)
+	if servicingOnly {
+		return starvalue.NewRecord(starlark.StringDict{
+			"kind":         starlark.String("windows-servicing-source"),
+			"architecture": starlark.String(database.Architecture),
+			"edition":      starlark.String(strings.ToLower(edition)),
+			"language":     starlark.String(strings.ToLower(language)),
+			"install":      install, "image": starlark.String(imagePath), "bootsect": bootsectArg,
+			"offer_id": starlark.String(offer.ID), "offer_revision": starlark.MakeInt(offer.Revision),
+			"servicing_metadata":       servicingMetadataBuiltin(installedStages, installedStageMetadata),
+			"open_resident_component":  openResident,
+			"open_resident_components": openResidents,
+		}), nil
 	}
 	if len(assemblyPlans) != len(installedStageMetadata) || len(servicingEffectPlans) != len(assemblyPlans) {
 		return nil, fmt.Errorf("update_media: planner returned %d assembly and %d effect stages for %d installed-OS updates", len(assemblyPlans), len(servicingEffectPlans), len(installedStageMetadata))
@@ -424,6 +557,9 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		}
 		servicingPlanValues = append(servicingPlanValues, starvalue.NewRecord(starlark.StringDict{
 			"component_count":          starlark.MakeInt(len(assemblyPlan.Components)),
+			"csi_component_count":      starlark.MakeInt(len(servicingComponentStatePlans[index].Components)),
+			"csi_deployment_count":     starlark.MakeInt(len(servicingDeploymentPlans[index])),
+			"csi_owner_count":          starlark.MakeInt(len(servicingComponentStatePlans[index].Owners)),
 			"destination_roots":        stringCountDict(effects.DestinationRoots),
 			"effect_types":             starlark.NewList(effectValues),
 			"feature_id":               starlark.String(installedStageMetadata[index].FeatureID),
@@ -685,6 +821,42 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 			"registry_values": starlark.NewList(registryValues),
 		}), nil
 	})
+	inspectOwnership := starlark.NewBuiltin("inspect_servicing_ownership", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var featureID, name string
+		offset, limit := 0, 100
+		if err := starlark.UnpackArgs("inspect_servicing_ownership", args, kwargs, "feature_id?", &featureID, "deployment_name?", &name, "offset?", &offset, "limit?", &limit); err != nil {
+			return nil, err
+		}
+		features := make([]string, len(installedStageMetadata))
+		for i, metadata := range installedStageMetadata {
+			features[i] = metadata.FeatureID
+		}
+		return inspectServicingOwnership(assemblyPlans, features, featureID, name, offset, limit)
+	})
+	inspectComponents := starlark.NewBuiltin("inspect_servicing_components", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var featureID, prefix string
+		offset, limit := 0, 100
+		if err := starlark.UnpackArgs("inspect_servicing_components", args, kwargs, "feature_id?", &featureID, "name_prefix?", &prefix, "offset?", &offset, "limit?", &limit); err != nil {
+			return nil, err
+		}
+		features := make([]string, len(installedStageMetadata))
+		for index, stage := range installedStageMetadata {
+			features[index] = stage.FeatureID
+		}
+		return inspectServicingComponents(assemblyPlans, features, featureID, prefix, offset, limit)
+	})
+	inspectPackages := starlark.NewBuiltin("inspect_servicing_packages", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var featureID string
+		offset, limit := 0, 100
+		if err := starlark.UnpackArgs("inspect_servicing_packages", args, kwargs, "feature_id?", &featureID, "offset?", &offset, "limit?", &limit); err != nil {
+			return nil, err
+		}
+		features := make([]string, len(installedStageMetadata))
+		for index, stage := range installedStageMetadata {
+			features[index] = stage.FeatureID
+		}
+		return inspectServicingPackages(servicingEffectPlans, features, featureID, offset, limit)
+	})
 	inspectFiles := starlark.NewBuiltin("inspect_servicing_files", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var name, prefix string
 		limit := 100
@@ -697,13 +869,13 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		}
 		return inspectServicingFiles(servicingEffectPlans, features, name, prefix, limit)
 	})
-	if !indexOnly {
+	if !indexOnly && !externalBase {
 		if err := addCanonicalCabinetResources(resources, rangePool, plan.Cabinets, install); err != nil {
 			return nil, fmt.Errorf("update_media: canonical cabinets: %w", err)
 		}
 	}
-	bootsect := starlark.Value(starlark.None)
-	if !indexOnly {
+	bootsect := bootsectArg
+	if !indexOnly && !externalBase {
 		bootsect, err = install.OpenFile("/image1/boot/bootsect.exe")
 		if err != nil {
 			return nil, fmt.Errorf("update_media: image 1 boot helper: %w", err)
@@ -755,45 +927,52 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		return openPayload(resources, rangePool, file, maximumReferencePayload)
 	})
 	return starvalue.NewRecord(starlark.StringDict{
-		"architecture":              starlark.String(database.Architecture),
-		"application_count":         starlark.MakeInt(len(plan.Applications)),
-		"application_payloads":      starlark.NewList(applicationPayloads),
-		"available_payloads":        starlark.NewList(available),
-		"bootsect":                  bootsect,
-		"build_info":                starlark.String(database.BuildInfo),
-		"cabinet_count":             starlark.MakeInt(len(plan.Cabinets)),
-		"composition_packages":      starlark.NewList(composition),
-		"composition_features":      starlark.NewList(features),
-		"composition_metadata":      starlark.NewList(compositionMetadata),
-		"edition":                   starlark.String(strings.ToLower(edition)),
-		"install":                   install,
-		"index_only":                starlark.Bool(indexOnly),
-		"kind":                      starlark.String("windows-update-media"),
-		"language":                  starlark.String(strings.ToLower(language)),
-		"offer_id":                  starlark.String(offer.ID),
-		"offer_revision":            starlark.MakeInt(offer.Revision),
-		"offer_title":               starlark.String(offer.Title),
-		"sync_rounds":               starlark.MakeInt(catalog.catalog.Rounds),
-		"update_revision_count":     starlark.MakeInt(len(catalog.catalog.Revisions)),
-		"update_closure_count":      starlark.MakeInt(len(closure)),
-		"update_stage_count":        starlark.MakeInt(len(updateStages)),
-		"update_stages":             starlark.NewList(updateStageValues),
-		"update_total_bytes":        starlark.MakeInt64(updateBytes),
-		"os_version":                starlark.String(database.OSVersion),
-		"target_build_info":         starlark.String(database.TargetBuildInfo),
-		"target_os_version":         starlark.String(database.TargetOSVersion),
-		"validate_servicing":        validateServicing,
-		"open_composition":          openComposition,
-		"open_payload":              openOfferPayload,
-		"servicing_effects":         servicingEffects,
-		"inspect_servicing_files":   inspectFiles,
-		"open_servicing_target":     openServicingTarget,
-		"open_servicing_file":       openServicingFile,
-		"diagnose_servicing_target": diagnoseServicingTarget,
-		"reference_count":           starlark.MakeInt(len(plan.References)),
-		"servicing_plan":            starlark.NewList(servicingPlanValues),
-		"servicing_stage_count":     starlark.MakeInt(len(servicingPlanValues)),
-		"total_bytes":               starlark.MakeInt64(plan.TotalSize),
+		"architecture":                 starlark.String(database.Architecture),
+		"application_count":            starlark.MakeInt(len(plan.Applications)),
+		"application_payloads":         starlark.NewList(applicationPayloads),
+		"available_payloads":           starlark.NewList(available),
+		"bootsect":                     bootsect,
+		"build_info":                   starlark.String(database.BuildInfo),
+		"cabinet_count":                starlark.MakeInt(len(plan.Cabinets)),
+		"composition_packages":         starlark.NewList(composition),
+		"composition_features":         starlark.NewList(features),
+		"composition_metadata":         starlark.NewList(compositionMetadata),
+		"edition":                      starlark.String(strings.ToLower(edition)),
+		"install":                      install,
+		"image":                        starlark.String(imagePath),
+		"index_only":                   starlark.Bool(indexOnly),
+		"kind":                         starlark.String("windows-update-media"),
+		"language":                     starlark.String(strings.ToLower(language)),
+		"offer_id":                     starlark.String(offer.ID),
+		"offer_revision":               starlark.MakeInt(offer.Revision),
+		"offer_title":                  starlark.String(offer.Title),
+		"sync_rounds":                  starlark.MakeInt(catalog.catalog.Rounds),
+		"update_revision_count":        starlark.MakeInt(len(catalog.catalog.Revisions)),
+		"update_closure_count":         starlark.MakeInt(len(closure)),
+		"update_stage_count":           starlark.MakeInt(len(updateStages)),
+		"update_stages":                starlark.NewList(updateStageValues),
+		"update_total_bytes":           starlark.MakeInt64(updateBytes),
+		"os_version":                   starlark.String(database.OSVersion),
+		"target_build_info":            starlark.String(database.TargetBuildInfo),
+		"target_os_version":            starlark.String(database.TargetOSVersion),
+		"validate_servicing":           validateServicing,
+		"open_composition":             openComposition,
+		"open_payload":                 openOfferPayload,
+		"servicing_effects":            servicingEffects,
+		"servicing_metadata":           servicingMetadataBuiltin(installedStages, installedStageMetadata),
+		"open_resident_component":      openResident,
+		"open_resident_components":     openResidents,
+		"inspect_servicing_files":      inspectFiles,
+		"inspect_servicing_packages":   inspectPackages,
+		"inspect_servicing_components": inspectComponents,
+		"inspect_servicing_ownership":  inspectOwnership,
+		"open_servicing_target":        openServicingTarget,
+		"open_servicing_file":          openServicingFile,
+		"diagnose_servicing_target":    diagnoseServicingTarget,
+		"reference_count":              starlark.MakeInt(len(plan.References)),
+		"servicing_plan":               starlark.NewList(servicingPlanValues),
+		"servicing_stage_count":        starlark.MakeInt(len(servicingPlanValues)),
+		"total_bytes":                  starlark.MakeInt64(plan.TotalSize),
 	}), nil
 }
 
@@ -1303,13 +1482,17 @@ func findOfferFile(files []windowsupdate.File, match func(string) bool) (windows
 }
 
 func openPayload(resources *lifecycle.Resources, rangePool *storagenative.HTTPRangePool, file windowsupdate.File, maximum int64) (*storagenative.HTTPRangeFile, error) {
-	if file.DownloadURL == "" || file.DigestSHA256 == "" || file.Size <= 0 {
-		return nil, fmt.Errorf("payload %q lacks a URL, SHA-256 digest, or positive size", file.Name)
+	if file.DigestSHA256 == "" || file.Size <= 0 {
+		return nil, fmt.Errorf("payload %q lacks a SHA-256 digest or positive size", file.Name)
 	}
 	if file.Size > maximum {
 		return nil, fmt.Errorf("payload %q size %d exceeds %d-byte bound", file.Name, file.Size, maximum)
 	}
-	result, err := rangePool.OpenSHA256(resources.Context(), file.Name, []string{file.DownloadURL}, file.Size, file.DigestSHA256)
+	var urls []string
+	if file.DownloadURL != "" {
+		urls = []string{file.DownloadURL}
+	}
+	result, err := rangePool.OpenSHA256(resources.Context(), file.Name, urls, file.Size, file.DigestSHA256)
 	if err != nil {
 		return nil, err
 	}
@@ -1331,7 +1514,7 @@ const (
 // cabinet, while edition metadata is normally a CompDB XML cabinet. Treating
 // only top-level *.xml.cab members as the catalog silently loses the LCU/SSU
 // dependency graph.
-func compositionDatabases(aggregated *cab.Archive) ([]*uup.Database, error) {
+func compositionDatabases(aggregated *cab.Archive, cabinets *compositionCabinets) ([]*uup.Database, error) {
 	if aggregated == nil {
 		return nil, fmt.Errorf("composition catalog requires an archive")
 	}
@@ -1350,7 +1533,7 @@ func compositionDatabases(aggregated *cab.Archive) ([]*uup.Database, error) {
 				if err != nil {
 					return err
 				}
-				inner, err := cab.Open(entry, false)
+				inner, err := cabinets.open(entry)
 				if err != nil {
 					return fmt.Errorf("open CompDB cabinet %q: %w", source, err)
 				}
@@ -1370,7 +1553,7 @@ func compositionDatabases(aggregated *cab.Archive) ([]*uup.Database, error) {
 				if err != nil {
 					return err
 				}
-				inner, err := cab.Open(entry, false)
+				inner, err := cabinets.open(entry)
 				if err != nil {
 					return fmt.Errorf("open nested composition cabinet %q: %w", source, err)
 				}

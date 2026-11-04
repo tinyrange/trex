@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"runtime/pprof"
+	"sync"
+	"time"
 
 	archiveweb "github.com/tinyrange/trex/frontend/archiveweb"
 	"go.starlark.net/starlark"
@@ -33,6 +35,7 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	stdlibDocs := fs.Bool("stdlib-docs", false, "write embedded Starlark API documentation to stdout")
 	replMode := fs.Bool("repl", false, "start an interactive Starlark session without a script")
 	cpuProfile := fs.String("cpuprofile", "", "write a Go CPU profile to this path")
+	cpuProfileDuration := fs.Duration("cpuprofile-duration", 0, "finish CPU capture after this duration while execution continues (zero captures until exit)")
 	memProfile := fs.String("memprofile", "", "write a Go allocation profile to this path")
 	starlarkProfile := fs.String("starlarkprofile", "", "write a Starlark execution profile to this path")
 	fs.Usage = func() {
@@ -56,6 +59,10 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Select one mode; -repl does not accept a script or arguments")
 		return 1
 	}
+	if *cpuProfileDuration < 0 || (*cpuProfileDuration > 0 && *cpuProfile == "") {
+		fmt.Fprintln(stderr, "-cpuprofile-duration must be nonnegative and requires -cpuprofile")
+		return 1
+	}
 	if *cpuProfile != "" {
 		profile, err := os.Create(*cpuProfile)
 		if err != nil {
@@ -67,12 +74,20 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "Error starting CPU profile: %v\n", err)
 			return 1
 		}
-		defer func() {
-			pprof.StopCPUProfile()
-			if err := profile.Close(); err != nil {
-				fmt.Fprintf(stderr, "Error closing CPU profile: %v\n", err)
-			}
-		}()
+		var stopOnce sync.Once
+		stop := func() {
+			stopOnce.Do(func() {
+				pprof.StopCPUProfile()
+				if err := profile.Close(); err != nil {
+					fmt.Fprintf(stderr, "Error closing CPU profile: %v\n", err)
+				}
+			})
+		}
+		defer stop()
+		if *cpuProfileDuration > 0 {
+			timer := time.AfterFunc(*cpuProfileDuration, stop)
+			defer timer.Stop()
+		}
 	}
 	if *memProfile != "" {
 		defer func() {

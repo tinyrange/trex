@@ -19,6 +19,12 @@ import (
 const maximumAssemblyManifestSize = int64(64 << 20)
 
 type PlannedComponent struct {
+	// Exact metadata plans retain their validated immutable manifest through
+	// effect and CSI planning. Ordinary plans continue to open their source.
+	preparedManifest *ParsedAssemblyFile
+	preparedPath     string
+	// StagedOnly retains store content but suppresses runtime links and registry effects.
+	StagedOnly   bool
 	Path         string
 	Identity     AssemblyIdentity
 	Stem         string
@@ -27,11 +33,27 @@ type PlannedComponent struct {
 	// that made this component part of the stage closure. It is diagnostic
 	// provenance, not an additional applicability rule.
 	SelectedBy string
+	// InstallDependencies preserves the exact resolved install edges, including
+	// unchanged assemblies supplied by the image. Prerequisites are applicability
+	// tests, not ownership edges. Wildcard resource selectors are not instances.
+	InstallDependencies []AssemblyIdentity
+}
+
+// PlannedDeploymentSource is one package update's reference to a deployment.
+// Multiple sources can own the same deployment and must not be collapsed to
+// SelectedBy, which deliberately records only the first diagnostic origin.
+type PlannedDeploymentSource struct {
+	Package    AssemblyIdentity
+	UpdateName string
+	Deployment AssemblyIdentity
+	StagedOnly bool
 }
 
 type StageAssemblyPlan struct {
-	Packages   []NamedAssemblyManifest
-	Components []PlannedComponent
+	Packages          []NamedAssemblyManifest
+	Components        []PlannedComponent
+	DeploymentSources []PlannedDeploymentSource
+	Deployments       []DeploymentOwnership
 }
 
 type manifestPath struct {
@@ -55,24 +77,32 @@ type stageManifestCatalog struct {
 }
 
 type assemblyImageState struct {
-	packagesByExact         map[string]AssemblyIdentity
-	latestPackageByStable   map[string]AssemblyIdentity
-	componentCandidates     []manifestPath
-	componentsByName        map[string][]manifestPath
-	abbreviatedByShape      map[string][]manifestPath
-	abbreviatedByLocale     map[string][]manifestPath
-	componentsByCore        map[string][]manifestPath
-	installedComponentExact map[string]struct{}
-	componentFamilies       map[string]struct{}
-	latestComponentByFamily map[string]manifestPath
-	absentComponentFamilies map[string]struct{}
-	familyAbbreviated       map[string][]manifestPath
-	familyAbbreviatedLocale map[string][]manifestPath
+	activation                   *deploymentActivation
+	exactComponentInventory      bool
+	exactComponents              map[string]manifestPath
+	latestExactComponentByStable map[string]manifestPath
+	packagesByExact              map[string]AssemblyIdentity
+	latestPackageByStable        map[string]AssemblyIdentity
+	packagesByStable             map[string][]AssemblyIdentity
+	componentCandidates          []manifestPath
+	componentsByName             map[string][]manifestPath
+	abbreviatedByShape           map[string][]manifestPath
+	abbreviatedByLocale          map[string][]manifestPath
+	componentsByCore             map[string][]manifestPath
+	installedComponentExact      map[string]struct{}
+	componentFamilies            map[string]struct{}
+	latestComponentByFamily      map[string]manifestPath
+	absentComponentFamilies      map[string]struct{}
+	familyAbbreviated            map[string][]manifestPath
+	familyAbbreviatedLocale      map[string][]manifestPath
 }
 
-// PlanAssemblyStages evaluates update package applicability against the
-// installed package/component identities and follows every package reference
-// in stage order. Later stages see the identities installed by earlier ones.
+// PlanAssemblyStages performs preliminary payload selection against package/
+// component inventory in stage order. Later stages see identities selected by
+// earlier ones. This is not CBS ordinary admission: its legacy parent-policy
+// filter can omit MUMs needed by a resolved execution population. Do not use its
+// selected Packages as the complete metadata inventory or its activation flags
+// as authorization for a servicing transaction.
 func PlanAssemblyStages(base *wim.Archive, imagePath string, stages []*CumulativeStage) ([]StageAssemblyPlan, error) {
 	return PlanAssemblyStagesObserved(base, imagePath, stages, nil)
 }
@@ -102,8 +132,10 @@ func PlanAssemblyStagesObserved(base *wim.Archive, imagePath string, stages []*C
 // can resolve content only from the base image and stages already passed to
 // PlanStage; unopened future stages are neither visible nor retained.
 type AssemblyPlanner struct {
-	state   *assemblyImageState
-	content *assemblyContentState
+	sealed              bool
+	state               *assemblyImageState
+	content             *assemblyContentState
+	ownershipComponents map[string]PlannedComponent
 }
 
 func NewAssemblyPlanner(base *wim.Archive, imagePath string) (*AssemblyPlanner, error) {
@@ -115,13 +147,17 @@ func NewAssemblyPlanner(base *wim.Archive, imagePath string) (*AssemblyPlanner, 
 	if err != nil {
 		return nil, err
 	}
-	componentNames, err := installedComponentManifestNames(base, imagePath)
+	components, err := installedComponentIdentities(base, imagePath)
 	if err != nil {
 		return nil, err
 	}
-	state, err := newAssemblyImageState(packageNames, componentNames)
+	state, err := newExactAssemblyImageState(packageNames, components)
 	if err != nil {
 		return nil, err
+	}
+	state.activation, err = loadDeploymentActivation(base, imagePath)
+	if err != nil {
+		return nil, fmt.Errorf("uup servicing: deployment activation: %w", err)
 	}
 	return &AssemblyPlanner{state: state, content: &assemblyContentState{base: base, imagePath: imagePath}}, nil
 }
@@ -175,29 +211,6 @@ func installedPackageManifestNames(base *wim.Archive, imagePath string) ([]strin
 	return result, nil
 }
 
-func installedComponentManifestNames(base *wim.Archive, imagePath string) ([]string, error) {
-	hive, err := openOfflineHive(base, strings.TrimSuffix(imagePath, "/")+"/Windows/System32/config/COMPONENTS", "COMPONENTS")
-	if err != nil {
-		return nil, err
-	}
-	names, err := hive.Subkeys(cbsComponentsKey)
-	if err != nil {
-		return nil, fmt.Errorf("uup servicing: enumerate CBS component state: %w", err)
-	}
-	result := make([]string, 0, len(names))
-	for _, name := range names {
-		manifestName := name + ".manifest"
-		if _, err := ParseComponentManifestName(manifestName); err != nil {
-			continue
-		}
-		result = append(result, manifestName)
-	}
-	if len(result) == 0 {
-		return nil, fmt.Errorf("uup servicing: COMPONENTS hive contains no parseable installed component identities")
-	}
-	return result, nil
-}
-
 func cbsPackageStateInstalled(state uint32) bool {
 	// CBS persists the DISM install-state enum in the high nibble. Staged (4)
 	// is not installed; superseded (5), install-pending (6), installed (7),
@@ -206,10 +219,64 @@ func cbsPackageStateInstalled(state uint32) bool {
 }
 
 func (planner *AssemblyPlanner) PlanStage(stage *CumulativeStage) (StageAssemblyPlan, error) {
+	return planner.planStage(stage, true)
+}
+
+// BindStageContent retains predecessor-name and hash/DAG reconstruction inputs
+// without computing discarded CSI ownership or effect plans. This is NOT CBS
+// admission or an installed-state projection. Exact metadata callers still
+// enumerate the complete stage namespace and authorize their own components.
+func (planner *AssemblyPlanner) BindStageContent(stage *CumulativeStage) error {
+	_, err := planner.planStage(stage, false)
+	return err
+}
+
+// BindFinalStageContent binds only predecessor reconstruction for a terminal
+// metadata stage. Exact component resolution supplies name hints lazily. No
+// package closure or installed-state projection is evaluated; callers must do
+// their own servicing admission. The planner is sealed because advancing its
+// inventory would change the meaning of those delayed predecessor lookups.
+func (planner *AssemblyPlanner) BindFinalStageContent(stage *CumulativeStage) error {
+	if planner == nil || planner.state == nil || planner.content == nil || stage == nil {
+		return fmt.Errorf("uup servicing: assembly planner and stage are required")
+	}
+	if planner.sealed {
+		return fmt.Errorf("uup servicing: assembly planner is sealed")
+	}
+	stage.assemblyResolver = planner.content.snapshotResolver()
+	stage.baseRecovery = planner.content.reverse
+	stage.assemblyNameResolver = planner.content.snapshotNameResolver()
+	stage.assemblyReadOrder = planner.content.snapshotReadOrder()
+	stage.assemblyNameReadOrder = planner.content.snapshotNameReadOrder()
+	stage.assemblyDictionary = planner.content.dictionaryResolver()
+	state := planner.state
+	var mu sync.Mutex // latestInstalledComponent may memoize abbreviated families.
+	stage.bindComponentPredecessor = func(identity AssemblyIdentity, stem string) {
+		mu.Lock()
+		previous, found := state.latestInstalledComponent(identity)
+		mu.Unlock()
+		if found {
+			stage.predecessorMu.Lock()
+			if stage.predecessorByStem == nil {
+				stage.predecessorByStem = make(map[string]string)
+			}
+			stage.predecessorByStem[normalizeCIXName(stem)] = previous.Component.Stem
+			stage.predecessorMu.Unlock()
+		}
+	}
+	planner.sealed = true
+	return nil
+}
+
+func (planner *AssemblyPlanner) planStage(stage *CumulativeStage, ownership bool) (StageAssemblyPlan, error) {
 	if planner == nil || planner.state == nil || planner.content == nil {
 		return StageAssemblyPlan{}, fmt.Errorf("uup servicing: assembly planner is required")
 	}
+	if planner.sealed {
+		return StageAssemblyPlan{}, fmt.Errorf("uup servicing: assembly planner is sealed")
+	}
 	stage.assemblyResolver = planner.content.snapshotResolver()
+	stage.baseRecovery = planner.content.reverse
 	stage.assemblyNameResolver = planner.content.snapshotNameResolver()
 	stage.assemblyReadOrder = planner.content.snapshotReadOrder()
 	stage.assemblyNameReadOrder = planner.content.snapshotNameReadOrder()
@@ -221,6 +288,18 @@ func (planner *AssemblyPlanner) PlanStage(stage *CumulativeStage) (StageAssembly
 	plan, err := catalog.plan(planner.state)
 	if err != nil {
 		return StageAssemblyPlan{}, err
+	}
+	if ownership {
+		plan.Deployments, err = planner.resolveStageOwnership(stage, plan)
+		if err != nil {
+			return StageAssemblyPlan{}, fmt.Errorf("deployment ownership: %w", err)
+		}
+		if planner.ownershipComponents == nil {
+			planner.ownershipComponents = make(map[string]PlannedComponent)
+		}
+		for _, component := range plan.Components {
+			planner.ownershipComponents[component.Identity.ExactKey()] = component
+		}
 	}
 	completed := newCompletedAssemblyStage(stage, plan)
 	stage.predecessorByStem = completed.predecessorByStem
@@ -244,6 +323,7 @@ func planAssemblyStagesFromInventory(packageNames, componentNames []string, stag
 	for index, stage := range stages {
 		if content != nil {
 			stage.assemblyResolver = content.snapshotResolver()
+			stage.baseRecovery = content.reverse
 			stage.assemblyNameResolver = content.snapshotNameResolver()
 			stage.assemblyReadOrder = content.snapshotReadOrder()
 			stage.assemblyNameReadOrder = content.snapshotNameReadOrder()
@@ -277,6 +357,7 @@ type assemblyContentState struct {
 	base      *wim.Archive
 	imagePath string
 	prior     []completedAssemblyStage
+	reverse   *reverseAssemblyResolver
 	dictOnce  sync.Once
 	dict      storage.Reader
 	dictErr   error
@@ -300,9 +381,29 @@ func newCompletedAssemblyStage(stage *CumulativeStage, plan StageAssemblyPlan) c
 
 func (state *assemblyContentState) snapshotResolver() func(ContentDescriptor) (storage.Reader, error) {
 	base, imagePath := state.base, state.imagePath
+	if state.reverse == nil && base != nil {
+		state.reverse = &reverseAssemblyResolver{base: base, imagePath: imagePath}
+	}
+	reverse := state.reverse
 	prior := append([]completedAssemblyStage(nil), state.prior...)
 	return func(descriptor ContentDescriptor) (storage.Reader, error) {
+		if file, ok, err := reverse.resolve(descriptor); ok || err != nil {
+			return file, err
+		}
 		for index := len(prior) - 1; index >= 0; index-- {
+			// A hash-only edge may name a target in an older stage whose
+			// original forward basis was pruned. Recover that exact target
+			// from the installed reverse delta before replaying the old LCU.
+			stage := prior[index].stage
+			if reverse != nil && stage != nil && stage.Graph != nil {
+				for _, payload := range stage.Graph.Payloads {
+					if payload.Target.Length == descriptor.Length && payload.Target.SHA256 == descriptor.SHA256 {
+						if file, ok, err := reverse.resolve(payload.Target); ok || err != nil {
+							return file, err
+						}
+					}
+				}
+			}
 			file, ok, err := prior[index].stage.openTargetDescriptor(descriptor)
 			if err != nil {
 				return nil, fmt.Errorf("predecessor stage %d: %w", index+1, err)
@@ -453,6 +554,7 @@ func baseAssemblyContentPath(imagePath, name string) (string, error) {
 func newAssemblyImageState(packageNames, componentNames []string) (*assemblyImageState, error) {
 	state := &assemblyImageState{
 		packagesByExact: make(map[string]AssemblyIdentity), latestPackageByStable: make(map[string]AssemblyIdentity),
+		packagesByStable: make(map[string][]AssemblyIdentity),
 		componentsByName: make(map[string][]manifestPath), abbreviatedByShape: make(map[string][]manifestPath),
 		abbreviatedByLocale: make(map[string][]manifestPath), componentsByCore: make(map[string][]manifestPath),
 		installedComponentExact: make(map[string]struct{}), componentFamilies: make(map[string]struct{}),
@@ -465,7 +567,7 @@ func newAssemblyImageState(packageNames, componentNames []string) (*assemblyImag
 		if err != nil {
 			return nil, err
 		}
-		state.packagesByExact[identity.ExactKey()] = identity
+		state.rememberPackage(identity)
 		stable := identity.StableKey()
 		if current, found := state.latestPackageByStable[stable]; !found || compareVersions(identity.Version, current.Version) > 0 {
 			state.latestPackageByStable[stable] = identity
@@ -542,6 +644,9 @@ func newStageManifestCatalog(stage *CumulativeStage) (*stageManifestCatalog, err
 				if parseErr != nil {
 					return nil, fmt.Errorf("parse aggregate package manifest %q: %w", entry.Path, parseErr)
 				}
+				if err := validateParentComparisons(manifest); err != nil {
+					return nil, fmt.Errorf("aggregate package manifest %q: %w", entry.Path, err)
+				}
 				catalog.aggregateRoot = &NamedAssemblyManifest{Path: entry.Path, Manifest: manifest}
 				catalog.parsedPackages[strings.ToLower(entry.Path)] = manifest
 				continue
@@ -591,25 +696,19 @@ func newStageManifestCatalog(stage *CumulativeStage) (*stageManifestCatalog, err
 func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssemblyPlan, error) {
 	var plan StageAssemblyPlan
 	var queue []manifestPath
-	queued := make(map[string]struct{})
+	queued := make(map[string]AssemblyIdentity)
 	for stable, installed := range state.latestPackageByStable {
 		candidates := catalog.packagesByStable[stable]
 		if len(candidates) == 0 || compareVersions(candidates[0].Identity.Version, installed.Version) <= 0 {
 			continue
 		}
 		queue = append(queue, candidates[0])
-		queued[candidates[0].Identity.ExactKey()] = struct{}{}
+		queued[candidates[0].Identity.ExactKey()] = candidates[0].Identity
 	}
-	if catalog.aggregateRoot != nil {
-		applicable := false
-		for _, reference := range catalog.aggregateRoot.Manifest.References {
-			if reference.Kind == "parent" && state.hasInstalledIdentity(reference.Identity) {
-				applicable = true
-				break
-			}
-		}
+	if catalog.aggregateRoot != nil && !state.hasSupersedingAggregate(catalog.aggregateRoot.Manifest.Identity) {
+		applicable := packageManifestApplicable(catalog.aggregateRoot.Manifest, state, nil)
 		if applicable {
-			plan.Packages = append(plan.Packages, NamedAssemblyManifest{Path: catalog.aggregateRoot.Path, Manifest: &AssemblyManifest{Identity: catalog.aggregateRoot.Manifest.Identity}})
+			plan.Packages = append(plan.Packages, NamedAssemblyManifest{Path: catalog.aggregateRoot.Path, Manifest: packagePlanMetadata(catalog.aggregateRoot.Manifest)})
 			var pendingApplicability []manifestPath
 			for _, reference := range catalog.aggregateRoot.Manifest.References {
 				if reference.Kind != "package" {
@@ -626,7 +725,7 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 				}
 				exact := candidate.Identity.ExactKey()
 				if _, exists := queued[exact]; !exists {
-					queued[exact] = struct{}{}
+					queued[exact] = candidate.Identity
 					queue = append(queue, candidate)
 				}
 			}
@@ -636,20 +735,14 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 				if err != nil {
 					return StageAssemblyPlan{}, err
 				}
-				applicable := false
-				for _, childReference := range manifest.References {
-					if childReference.Kind == "parent" && state.hasInstalledIdentity(childReference.Identity) {
-						applicable = true
-						break
-					}
-				}
+				applicable := packageManifestApplicable(manifest, state, nil)
 				if !applicable {
 					delete(catalog.parsedPackages, strings.ToLower(candidate.Path))
 					continue
 				}
 				exact := candidate.Identity.ExactKey()
 				if _, exists := queued[exact]; !exists {
-					queued[exact] = struct{}{}
+					queued[exact] = candidate.Identity
 					queue = append(queue, candidate)
 				}
 			}
@@ -665,6 +758,7 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 	componentOrigins := make(map[string]string)
 	componentPredecessors := make(map[string]string)
 	componentRoots := make(map[string]struct{})
+	activeRoots := make(map[string]struct{})
 	componentDependencies := make(map[string][]string)
 	componentPrerequisites := make(map[string][]AssemblyIdentity)
 	queueComponent := func(candidate manifestPath, identity AssemblyIdentity, selectedBy string) {
@@ -690,7 +784,7 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 		if err != nil {
 			return StageAssemblyPlan{}, err
 		}
-		plan.Packages = append(plan.Packages, NamedAssemblyManifest{Path: candidate.Path, Manifest: &AssemblyManifest{Identity: manifest.Identity}})
+		plan.Packages = append(plan.Packages, NamedAssemblyManifest{Path: candidate.Path, Manifest: packagePlanMetadata(manifest)})
 		for _, reference := range manifest.References {
 			switch reference.Kind {
 			case "package":
@@ -705,7 +799,7 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 							delete(catalog.parsedPackages, strings.ToLower(next.Path))
 							continue
 						}
-						queued[exact] = struct{}{}
+						queued[exact] = next.Identity
 						queue = append(queue, next)
 					}
 					continue
@@ -727,6 +821,17 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 					return StageAssemblyPlan{}, err
 				}
 				if found {
+					active, err := state.activation.rootActive(manifest, reference, component.Identity)
+					if err != nil {
+						return StageAssemblyPlan{}, err
+					}
+					plan.DeploymentSources = append(plan.DeploymentSources, PlannedDeploymentSource{
+						Package: manifest.Identity, UpdateName: reference.UpdateName,
+						Deployment: component.Identity, StagedOnly: !active,
+					})
+					if active {
+						activeRoots[component.Identity.ExactKey()] = struct{}{}
+					}
 					queueComponentRoot(component, component.Identity, formatComponentSelection("package", manifest.Identity, reference))
 					continue
 				}
@@ -736,6 +841,17 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 					}
 					return StageAssemblyPlan{}, fmt.Errorf("package %q references unresolved component %q version %q", manifest.Identity.Name, reference.Identity.Name, reference.Identity.Version)
 				}
+				resident, err := state.resolveInstalledComponent(reference.Identity)
+				if err != nil {
+					return StageAssemblyPlan{}, err
+				}
+				active, err := state.activation.rootActive(manifest, reference, resident.Identity)
+				if err != nil {
+					return StageAssemblyPlan{}, err
+				}
+				plan.DeploymentSources = append(plan.DeploymentSources, PlannedDeploymentSource{
+					Package: manifest.Identity, UpdateName: reference.UpdateName, Deployment: resident.Identity, StagedOnly: !active,
+				})
 			}
 		}
 		delete(catalog.parsedPackages, strings.ToLower(candidate.Path))
@@ -754,8 +870,12 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 			Path: current.candidate.Path, Identity: current.identity, Stem: current.candidate.Component.Stem,
 			PreviousStem: componentPredecessors[current.identity.ExactKey()], SelectedBy: componentOrigins[current.identity.ExactKey()],
 		})
+		planned := &plan.Components[len(plan.Components)-1]
 		currentKey := current.identity.ExactKey()
 		for _, reference := range manifest.References {
+			if len(reference.BindingRedirects) != 0 {
+				continue
+			}
 			if reference.Kind != "dependentAssembly" && reference.Kind != "component" {
 				continue
 			}
@@ -786,6 +906,7 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 				return StageAssemblyPlan{}, err
 			}
 			if found {
+				planned.InstallDependencies = append(planned.InstallDependencies, component.Identity)
 				queueComponent(component, component.Identity, formatComponentSelection("component", manifest.Identity, reference))
 				componentDependencies[currentKey] = append(componentDependencies[currentKey], component.Identity.ExactKey())
 				continue
@@ -801,23 +922,66 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 				return StageAssemblyPlan{}, fmt.Errorf("component %q references unresolved component %s; stage candidates: %s; base candidates: %s",
 					manifest.Identity.Name, formatAssemblyIdentity(reference.Identity), summarizeComponentCandidates(catalog.componentCandidates, reference.Identity), summarizeComponentCandidates(state.componentCandidates, reference.Identity))
 			}
+			resident, err := state.resolveInstalledComponent(reference.Identity)
+			if err != nil {
+				return StageAssemblyPlan{}, err
+			}
+			planned.InstallDependencies = append(planned.InstallDependencies, resident.Identity)
 		}
 		delete(catalog.parsedComponents, strings.ToLower(current.candidate.Path))
 	}
 	applicableComponents := resolveApplicableComponents(componentRoots, componentDependencies, componentPrerequisites, selectedComponents, state)
+	activeComponents := activeComponentClosure(activeRoots, componentDependencies, applicableComponents)
 	filteredComponents := plan.Components[:0]
 	for _, component := range plan.Components {
 		if _, applicable := applicableComponents[component.Identity.ExactKey()]; applicable {
+			_, active := activeComponents[component.Identity.ExactKey()]
+			component.StagedOnly = !active
+			dependencies := component.InstallDependencies[:0]
+			for _, dependency := range component.InstallDependencies {
+				key := dependency.ExactKey()
+				if _, selected := selectedComponents[key]; selected {
+					if _, applicable := applicableComponents[key]; !applicable {
+						continue
+					}
+				}
+				dependencies = append(dependencies, dependency)
+			}
+			component.InstallDependencies = dependencies
 			filteredComponents = append(filteredComponents, component)
 		}
 	}
 	plan.Components = filteredComponents
+	filteredSources := plan.DeploymentSources[:0]
+	for _, source := range plan.DeploymentSources {
+		key := source.Deployment.ExactKey()
+		_, selected := selectedComponents[key]
+		_, applicable := applicableComponents[key]
+		if !selected || applicable {
+			filteredSources = append(filteredSources, source)
+		}
+	}
+	plan.DeploymentSources = filteredSources
+	if state.activation != nil {
+		// Publish activation only after the whole stage has closed successfully.
+		// Later stages can depend on a deployment introduced in this stage.
+		for _, source := range plan.DeploymentSources {
+			family := source.Deployment.StableKey()
+			state.activation.deployments[family] = state.activation.deployments[family] || !source.StagedOnly
+			update := strings.ToLower(source.UpdateName)
+			state.activation.updates[update] = state.activation.updates[update] || !source.StagedOnly
+		}
+	}
 	for _, pack := range plan.Packages {
 		identity := pack.Manifest.Identity
-		state.packagesByExact[identity.ExactKey()] = identity
+		state.rememberPackage(identity)
 		state.latestPackageByStable[identity.StableKey()] = identity
 	}
 	for _, component := range plan.Components {
+		if state.exactComponentInventory {
+			state.rememberExactComponent(manifestPath{Path: component.Path, Identity: component.Identity, Component: ComponentPathIdentity{Identity: component.Identity, Stem: component.Stem}})
+			continue
+		}
 		state.installedComponentExact[component.Identity.ExactKey()] = struct{}{}
 		family := componentFamilyKey(component.Identity)
 		state.componentFamilies[family] = struct{}{}
@@ -829,6 +993,16 @@ func (catalog *stageManifestCatalog) plan(state *assemblyImageState) (StageAssem
 	}
 	sort.Slice(plan.Packages, func(i, j int) bool {
 		return strings.ToLower(plan.Packages[i].Path) < strings.ToLower(plan.Packages[j].Path)
+	})
+	sort.SliceStable(plan.DeploymentSources, func(i, j int) bool {
+		a, b := plan.DeploymentSources[i], plan.DeploymentSources[j]
+		if a.Package.ExactKey() != b.Package.ExactKey() {
+			return a.Package.ExactKey() < b.Package.ExactKey()
+		}
+		if a.UpdateName != b.UpdateName {
+			return a.UpdateName < b.UpdateName
+		}
+		return a.Deployment.ExactKey() < b.Deployment.ExactKey()
 	})
 	sort.Slice(plan.Components, func(i, j int) bool {
 		return strings.ToLower(plan.Components[i].Path) < strings.ToLower(plan.Components[j].Path)
@@ -970,6 +1144,9 @@ func (catalog *stageManifestCatalog) parsePackage(candidate manifestPath) (*Asse
 	}
 	if manifest.Identity.ExactKey() != candidate.Identity.ExactKey() {
 		return nil, fmt.Errorf("package manifest %q identity does not match its filename", candidate.Path)
+	}
+	if err := validateParentComparisons(manifest); err != nil {
+		return nil, fmt.Errorf("package manifest %q: %w", candidate.Path, err)
 	}
 	catalog.parsedPackages[key] = manifest
 	return manifest, nil
@@ -1123,6 +1300,16 @@ func (state *assemblyImageState) hasInstalledComponent(identity AssemblyIdentity
 	if _, found := state.installedComponentExact[identity.ExactKey()]; found {
 		return true
 	}
+	if state.exactComponentInventory {
+		if strings.TrimSpace(identity.Language) == "*" {
+			for _, candidate := range state.componentCandidates {
+				if assemblyIdentityMatches(candidate.Identity, identity) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	matches := func(candidates []manifestPath) bool {
 		for _, candidate := range candidates {
 			if componentPathMayMatch(candidate.Component, identity) {
@@ -1153,6 +1340,10 @@ func (state *assemblyImageState) hasInstalledComponentFamily(identity AssemblyId
 }
 
 func (state *assemblyImageState) latestInstalledComponent(identity AssemblyIdentity) (manifestPath, bool) {
+	if state.exactComponentInventory {
+		component, found := state.latestExactComponentByStable[identity.StableKey()]
+		return component, found
+	}
 	family := componentFamilyKey(identity)
 	if current, found := state.latestComponentByFamily[family]; found {
 		return current, true
@@ -1201,21 +1392,68 @@ func (state *assemblyImageState) hasInstalledPackageFamily(identity AssemblyIden
 	return found
 }
 
-func packageManifestApplicable(manifest *AssemblyManifest, state *assemblyImageState, selected map[string]struct{}) bool {
-	hasParent := false
+func packageManifestApplicable(manifest *AssemblyManifest, state *assemblyImageState, selected map[string]AssemblyIdentity) bool {
+	return packageParentsMatch(manifest, func(reference AssemblyReference) bool {
+		if state.hasInstalledParent(reference) {
+			return true
+		}
+		for _, identity := range selected {
+			if parentIdentityMatches(reference, identity) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// Identities in a parent block are alternatives. A block with nested parents
+// additionally requires one of those nested blocks: direct alternatives AND
+// nested alternatives. Root blocks are alternatives. Flattening the references
+// loses the language prerequisite of MediaPlayer's language-pack wrapper.
+// CBS 26100.9441 EvaluateIndividualParentBlock uses maximum states for each
+// alternative list and the minimum of the direct and nested results.
+func packageParentsMatch(manifest *AssemblyManifest, matches func(AssemblyReference) bool) bool {
+	if len(manifest.PackageParents) == 0 {
+		// Preserve support for programmatically constructed flat manifests.
+		hasParent := false
+		for _, reference := range manifest.References {
+			if reference.Kind == "parent" {
+				hasParent = true
+				if matches(reference) {
+					return true
+				}
+			}
+		}
+		return !hasParent
+	}
+	direct := make([]bool, len(manifest.PackageParents))
+	hasNested := make([]bool, len(direct))
+	nested := make([]bool, len(direct))
 	for _, reference := range manifest.References {
 		if reference.Kind != "parent" {
 			continue
 		}
-		hasParent = true
-		if state.hasInstalledIdentity(reference.Identity) {
-			return true
+		if reference.ParentGroup < 1 || reference.ParentGroup > len(direct) {
+			return false
 		}
-		if _, found := selected[reference.Identity.ExactKey()]; found {
-			return true
+		direct[reference.ParentGroup-1] = direct[reference.ParentGroup-1] || matches(reference)
+	}
+	result := false
+	// Parsing produces preorder, so every child is reduced before its parent.
+	for i := len(direct) - 1; i >= 0; i-- {
+		parent := manifest.PackageParents[i].ParentGroup
+		if parent < 0 || parent > i {
+			return false
+		}
+		active := direct[i] && (!hasNested[i] || nested[i])
+		if parent == 0 {
+			result = result || active
+		} else {
+			hasNested[parent-1] = true
+			nested[parent-1] = nested[parent-1] || active
 		}
 	}
-	return !hasParent
+	return result
 }
 
 func isWildcardResourceReference(reference AssemblyReference) bool {

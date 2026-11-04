@@ -15,6 +15,17 @@ type Reader interface {
 	Size() int64
 }
 
+// VerifiedSHA256Reader is an immutable, content-addressed reader that has
+// already verified its entire logical payload. The returned identity is not
+// merely declared metadata: false is required until byte verification succeeds.
+// Every subsequent successful read must return that same content; reopening
+// corrupted backing storage must fail, never expose different bytes. A cached
+// digest describes content identity, not current backing-store availability.
+// Implementations must be concurrency-safe.
+type VerifiedSHA256Reader interface {
+	VerifiedSHA256() ([32]byte, bool)
+}
+
 func Align(value, alignment int64) int64 {
 	if alignment <= 0 {
 		return value

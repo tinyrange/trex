@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 
 	"github.com/tinyrange/trex/storage"
@@ -21,6 +20,9 @@ type ContentDescriptor struct {
 }
 
 type DeltaPayload struct {
+	// DirectDelta reconstructs a final CIX file from a ranged PA30 stream,
+	// without a PSFX history edge or the inner four-byte PSF-record wrapper.
+	DirectDelta bool
 	// Literal means the indexed RAW range is already the final file, rather
 	// than a PSFX patch referenced by the history index.
 	Literal      bool
@@ -129,9 +131,7 @@ func BuildCumulativeGraph(psf, history *ContainerIndex) (*CumulativeGraph, error
 			return nil, fmt.Errorf("uup servicing: unsupported history source type %q for %q", source.Type, file.Name)
 		}
 	}
-	sort.Slice(graph.Sources, func(i, j int) bool {
-		return normalizeCIXName(graph.Sources[i].Name) < normalizeCIXName(graph.Sources[j].Name)
-	})
+	sortCIXNames(graph.Sources, func(value ContentDescriptor) string { return value.Name })
 	// Some final component files (for example SecureBoot firmware cabinets)
 	// are stored directly in the main PSF index, without a history edge.
 	// Do not mistake container metadata or unreferenced f/r delta records for
@@ -159,12 +159,8 @@ func BuildCumulativeGraph(psf, history *ContainerIndex) (*CumulativeGraph, error
 		graph.Payloads = append(graph.Payloads, DeltaPayload{Literal: true, Target: descriptor, Record: descriptor, RecordOffset: source.Offset, RecordType: "RAW"})
 		seenTargetNames[key] = struct{}{}
 	}
-	sort.Slice(graph.Carries, func(i, j int) bool {
-		return normalizeCIXName(graph.Carries[i].Target.Name) < normalizeCIXName(graph.Carries[j].Target.Name)
-	})
-	sort.Slice(graph.Payloads, func(i, j int) bool {
-		return normalizeCIXName(graph.Payloads[i].Target.Name) < normalizeCIXName(graph.Payloads[j].Target.Name)
-	})
+	sortCIXNames(graph.Carries, func(value CarryPayload) string { return value.Target.Name })
+	sortCIXNames(graph.Payloads, func(value DeltaPayload) string { return value.Target.Name })
 	return graph, nil
 }
 
@@ -224,8 +220,42 @@ func BuildCumulativeGraphWithRecords(psf, history *ContainerIndex, payload stora
 		}
 		historyTarget, found := historyByRecordName[normalizeCIXName(file.Name)]
 		if !found {
-			// The main CIX may retain record-generating deltas for source
-			// revisions which are not targets of this history index.
+			// Direct final component targets need no PSFX history edge. In
+			// contrast, unreferenced f/r/n records are patch intermediates.
+			_, relative, err := ParseComponentContentName(file.Name)
+			lower := strings.ToLower(relative)
+			if err != nil || strings.HasPrefix(lower, `f\`) || strings.HasPrefix(lower, `r\`) || strings.HasPrefix(lower, `n\`) {
+				continue
+			}
+			if len(file.Bases) != 0 || header.TargetSize != uint64(file.Length) || len(header.TargetHash) != 32 || !equalHashBytes(file.Hash, header.TargetHash) {
+				return nil, fmt.Errorf("uup servicing: direct PA30 target identity mismatch for %q", file.Name)
+			}
+			key := normalizeCIXName(file.Name)
+			if _, exists := seenTargets[key]; exists {
+				return nil, fmt.Errorf("uup servicing: duplicate direct target %q", file.Name)
+			}
+			item := DeltaPayload{
+				DirectDelta: true, Target: ContentDescriptor{Name: file.Name, Length: file.Length, SHA256: file.Hash},
+				Record:       ContentDescriptor{Name: file.Name, Length: source.Length, SHA256: source.Hash},
+				RecordOffset: source.Offset, RecordType: "PA30",
+			}
+			if len(header.ExtensionHash) != 0 {
+				if len(header.ExtensionHash) != 32 {
+					return nil, fmt.Errorf("uup servicing: direct PA30 target %q uses a non-SHA-256 basis", file.Name)
+				}
+				var hash [32]byte
+				copy(hash[:], header.ExtensionHash)
+				basis, found, err := graph.FindSourceByHash(hash)
+				if err != nil {
+					return nil, err
+				}
+				if !found {
+					return nil, fmt.Errorf("uup servicing: direct PA30 target %q has unresolved basis", file.Name)
+				}
+				item.Basis = &basis
+			}
+			seenTargets[key] = struct{}{}
+			graph.Payloads = append(graph.Payloads, item)
 			continue
 		}
 		if len(historyTarget.Sources) != 1 || historyTarget.Sources[0].Hash != file.Hash {
@@ -270,9 +300,7 @@ func BuildCumulativeGraphWithRecords(psf, history *ContainerIndex, payload stora
 		seenTargets[key] = struct{}{}
 		graph.Payloads = append(graph.Payloads, item)
 	}
-	sort.Slice(graph.Payloads, func(i, j int) bool {
-		return normalizeCIXName(graph.Payloads[i].Target.Name) < normalizeCIXName(graph.Payloads[j].Target.Name)
-	})
+	sortCIXNames(graph.Payloads, func(value DeltaPayload) string { return value.Target.Name })
 	return graph, nil
 }
 

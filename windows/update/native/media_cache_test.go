@@ -2,6 +2,7 @@ package native
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -20,6 +21,7 @@ func TestUUPPayloadCacheRetainsSourceAcrossRuns(t *testing.T) {
 	payload := []byte("uup source media")
 	digest := sha256.Sum256(payload)
 	var requests atomic.Int32
+	var resolutions atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		var start, end int
@@ -33,14 +35,23 @@ func TestUUPPayloadCacheRetainsSourceAcrossRuns(t *testing.T) {
 	}))
 	defer server.Close()
 	root := t.TempDir()
-	file := windowsupdate.File{Name: "payload.esd", Size: int64(len(payload)), DigestSHA256: hex.EncodeToString(digest[:]), DownloadURL: server.URL}
+	file := windowsupdate.File{Name: "payload.esd", Size: int64(len(payload)), DigestSHA256: hex.EncodeToString(digest[:])}
 	for run := range 2 {
 		resources := lifecycle.New()
 		disk, err := storagenative.NewHTTPRangeDiskCache(root)
 		if err != nil {
 			t.Fatal(err)
 		}
-		pool, err := storagenative.NewPersistentHTTPRangePool(4, 4, server.Client(), nil, disk)
+		resolve := payloadLocationResolver([]windowsupdate.File{file}, func(context.Context) ([]windowsupdate.File, error) {
+			resolutions.Add(1)
+			if run != 0 {
+				return nil, fmt.Errorf("cached source must not resolve locations")
+			}
+			located := file
+			located.DownloadURL = server.URL
+			return []windowsupdate.File{located}, nil
+		})
+		pool, err := storagenative.NewPersistentHTTPRangePool(4, 4, server.Client(), resolve, disk)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +67,9 @@ func TestUUPPayloadCacheRetainsSourceAcrossRuns(t *testing.T) {
 			t.Fatal(err)
 		}
 		server.Close()
-		file.DownloadURL = server.URL + "/expired-location"
+	}
+	if resolutions.Load() != 1 {
+		t.Fatalf("location resolutions = %d, want one initial lookup only", resolutions.Load())
 	}
 	if requests.Load() != 4 {
 		t.Fatalf("payload requests = %d, want four initial ranges only", requests.Load())

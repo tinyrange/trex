@@ -1,0 +1,196 @@
+"""Guarded refresh of existing CLR4 GAC assemblies from CSI declarations.
+
+This is not Fusion registration or NGEN completion. New cache directories,
+assembly identity changes and removals require their own installer phases and
+are rejected. No oracle paths, hashes or registry results enter this planner.
+"""
+load("@stdlib//windows/servicing:runtime.star", "select_servicing_file_hash")
+load("@stdlib//windows/servicing:registry_effects.star", "plan_update_registry_effects", "apply_update_registry_effects")
+
+_NS = "urn:schemas-microsoft-com:asm.v3"
+
+def _attrs(node):
+    result = {}
+    for a in node.attributes:
+        if a["namespace"] or a["name"] in result:
+            fail("unsupported managed declaration attributes")
+        result[a["name"]] = a["value"]
+    return result
+
+def _leaf(value):
+    if not value or value in [".", ".."] or any([c in value for c in ["/", "\\", ":", "\x00"]]):
+        fail("managed declaration requires a safe path leaf")
+    return value
+
+def _managed_declaration(document):
+    tree = binary.xml(document, discard_whitespace=True).root
+    managed = []
+    for node in tree.children:
+        if node.namespace == _NS and node.name == "file":
+            for child in node.children:
+                if child.namespace == _NS and child.name == "gac":
+                    if child.children:
+                        fail("unsupported nested GAC declaration")
+                    managed.append((_attrs(node), _attrs(child)))
+    if not managed:
+        return None
+    if len(managed) != 1:
+        fail("multiple GAC assemblies in one component require Fusion selection")
+    manifest = windows.assembly_manifest(document)
+    ids = [n for n in tree.children if n.namespace == _NS and n.name == "assemblyIdentity"]
+    if len(ids) != 1:
+        fail("managed component requires one identity")
+    identity = _attrs(ids[0])
+    file, gac = managed[0]
+    if any([k not in ["clrversion", "managedversion", "managedculture"] for k in gac]):
+        fail("unsupported GAC identity override")
+    if gac.get("clrversion") != "4.0":
+        fail("only CLR4 GAC refresh is supported")
+    version = gac.get("managedversion", "")
+    if len(version.split(".")) != 4 or any([not p or not all([c in "0123456789" for c in p.elems()]) for p in version.split(".")]):
+        fail("invalid managed version")
+    culture = gac.get("managedculture", "")
+    if culture:
+        _leaf(culture)
+    token = identity.get("publicKeyToken", "").lower()
+    if len(token) != 16 or any([c not in "0123456789abcdef" for c in token.elems()]):
+        fail("invalid managed public key token")
+    architecture = {"amd64":"64", "wow64":"32", "x86":"32", "msil":"MSIL"}.get(identity.get("processorArchitecture", ""))
+    if architecture == None:
+        fail("unsupported managed component architecture")
+    name = _leaf(file["name"])
+    if not name.lower().endswith(".dll"):
+        fail("managed cache refresh requires a DLL assembly")
+    assembly = _leaf(name[:-4])
+    path = "/Windows/Microsoft.NET/assembly/GAC_" + architecture + "/" + assembly + "/v4.0_" + version + "_" + culture + "_" + token
+    # Fusion caches the component's companion files as well as the marked DLL.
+    files = {}
+    for item in manifest.files:
+        name = _leaf(item.name)
+        if name.lower() in files:
+            fail("duplicate managed companion file")
+        files[name.lower()] = dict(name=name, hash=select_servicing_file_hash(item)["digest"])
+    return dict(path=path, files=files, assembly_file=_leaf(file["name"]), notification=identity["name"]+","+version+","+culture+","+token+","+{"64":"amd64","32":"x86","MSIL":"msil"}[architecture], architecture=architecture)
+
+def plan_update_gac(root, runtime, component_stems):
+    """Plan qualified Fusion cache refreshes from runtime transitions and exact component stems; retain source/destination guards."""
+    names = root.path_names(lower=True)
+    plans = []
+    destinations = {}
+    for transition in runtime["transitions"]:
+        before = _managed_declaration(transition["before"]) if transition["before"] != None else None
+        after = _managed_declaration(transition["after"]) if transition["after"] != None else None
+        if before == None and after == None:
+            continue
+        if before == None or after == None or before["path"].lower() != after["path"].lower():
+            fail("GAC addition/removal or identity change requires Fusion lifecycle")
+        if set(before["files"]) != set(after["files"]):
+            fail("GAC companion addition/removal requires Fusion lifecycle")
+        parent = names.get(after["path"].lower())
+        if parent == None:
+            fail("managed cache directory is absent")
+        identity = transition["component_identities"]["after"]
+        stem = component_stems.get(identity)
+        if stem == None:
+            fail("managed component lacks exact staged source identity")
+        _leaf(stem)
+        for key, item in after["files"].items():
+            destination = names.get((after["path"] + "/" + item["name"]).lower())
+            source = names.get(("/Windows/WinSxS/" + stem + "/" + item["name"]).lower())
+            if source == None or destination == None:
+                fail("managed refresh requires existing cache and staged source files")
+            if destination.lower() in destinations:
+                fail("conflicting managed destination")
+            destinations[destination.lower()] = True
+            current = digest(root.find(destination), algorithm="sha256")
+            if current not in [before["files"][key]["hash"], item["hash"]]:
+                fail("managed cache content differs from declared baseline")
+            if digest(root.find(source), algorithm="sha256") != item["hash"]:
+                fail("managed source hash mismatch")
+            security = root.get_security(source)
+            if security == None:
+                fail("managed source has no security descriptor")
+            windows.security_descriptor_parts(security)
+            plans.append(dict(path=destination, source=source, before=current, after=item["hash"], security=security, source_order=root.get_metadata(source).write_order, destination_order=root.get_metadata(destination).write_order))
+    return plans
+
+def apply_update_gac(root, plans):
+    """Validate the full GAC batch before refreshing files; runtime Fusion/NGen validation is not implied."""
+    # Validate the entire batch before unlinking any destination.
+    for p in plans:
+        source = root.find(p["source"])
+        destination = root.find(p["path"])
+        if source == None or destination == None:
+            fail("managed refresh path disappeared after planning")
+        if root.get_metadata(p["source"]).write_order != p["source_order"] or root.get_metadata(p["path"]).write_order != p["destination_order"]:
+            fail("managed refresh path changed after planning")
+        if root.get_security(p["source"]) != p["security"] or digest(source, algorithm="sha256") != p["after"] or digest(destination, algorithm="sha256") != p["before"]:
+            fail("managed refresh content/security changed after planning")
+    for p in plans:
+        root.remove(p["path"])
+        root.hardlink(p["source"], p["path"])
+        if not root.get_metadata(p["path"]).hard_link_id or root.get_metadata(p["path"]).hard_link_id != root.get_metadata(p["source"]).hard_link_id:
+            fail("managed cache is not the staged file object")
+    return dict(refreshed_files=len(plans), validation="runtime Fusion/NGen validation not performed by this file-publication helper")
+
+
+def plan_update_gac_notifications(root, runtime):
+    """Notify Fusion using the installed assembly's last-write FILETIME.
+
+    This is NOT a wall clock and must agree with the file Fusion will inspect.
+    Existing cache identities only: lifecycle changes are rejected by the same
+    guarded cache planner. Reference counting is unchanged for these replacements.
+    """
+    path='/Windows/System32/config/SOFTWARE'
+    key='/Microsoft/Fusion/GACChangeNotification/Default'
+    source=root.find(path)
+    if source==None: fail('Fusion notifications require SOFTWARE')
+    hive=windows.hive(source)
+    parent=hive.find(key)
+    if parent==None: fail('Fusion notification parent is missing')
+    names=root.path_names(lower=True)
+    notifications={}
+    inputs=[]
+    architectures={}
+    for transition in runtime['transitions']:
+        before=_managed_declaration(transition['before']) if transition['before']!=None else None
+        after=_managed_declaration(transition['after']) if transition['after']!=None else None
+        if before==None and after==None: continue
+        if before==None or after==None or before['notification'].lower()!=after['notification'].lower():
+            fail('Fusion notification requires stable managed identity')
+        target=names.get((after['path']+'/'+after['assembly_file']).lower())
+        if target==None: fail('Fusion notification cache file is missing')
+        file=root.find(target)
+        if digest(file,algorithm='sha256')!=after['files'][after['assembly_file'].lower()]['hash']:
+            fail('Fusion notification cache file is not refreshed')
+        metadata=root.get_metadata(target)
+        stamp=metadata.last_write_time
+        if type(stamp)!='int' or stamp<0 or stamp>0xffffffffffffffff: fail('invalid Fusion notification file time')
+        name=after['notification'].lower()
+        if name in notifications and notifications[name]!=stamp: fail('conflicting Fusion notification timestamps')
+        notifications[name]=stamp
+        architectures[after['architecture']]=True
+        inputs.append((target,metadata.write_order,stamp))
+    effects=dict(keys=[],values=[],key_deletions=[],value_deletions=[])
+    for name,stamp in notifications.items():
+        effects['values'].append(dict(hive='SOFTWARE',key=key,name=name,type=3,value=binary.u64le(stamp)))
+    counters=[]
+    if architectures:
+        counters.append('StoreChangeId')
+        if '32' in architectures or 'MSIL' in architectures: counters.append('StoreChangeIdFor32BitProcesses')
+        if '64' in architectures or 'MSIL' in architectures: counters.append('StoreChangeIdFor64BitProcesses')
+    values={name.lower():v for name,v in parent.value_records.items()}
+    for name in counters:
+        old=values.get(name.lower())
+        if old==None or old.type!=4 or len(old.raw)!=4: fail('Fusion counter must be an existing DWORD')
+        value=binary.read_u32le(old.raw)
+        effects['values'].append(dict(hive='SOFTWARE',key=key,name=name,type=4,value=binary.u32le((value+1)&0xffffffff)))
+    plans=plan_update_registry_effects(root,effects,[dict(hive='SOFTWARE',target='SOFTWARE',prefix='/',path=path,source=source)])
+    return dict(plans=plans,inputs=inputs,notifications=len(notifications),counters=len(counters))
+
+def apply_update_gac_notifications(root, plan):
+    """Check file epochs/timestamps before publishing prepared Fusion counters and notifications."""
+    for path,order,stamp in plan['inputs']:
+        if root.find(path)==None or root.get_metadata(path).write_order!=order or root.get_metadata(path).last_write_time!=stamp:
+            fail('Fusion cache file changed before notification')
+    return dict(notifications=plan['notifications'],counters=plan['counters'],publication=apply_update_registry_effects(root,plan['plans']))

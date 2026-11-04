@@ -2,9 +2,13 @@ package starlarkfrontend
 
 import (
 	"bytes"
+	"compress/gzip"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCLIUsageAndREPL(t *testing.T) {
@@ -52,5 +56,57 @@ func TestGettingStartedExamples(t *testing.T) {
 				t.Fatalf("stdout=%s stderr=%s", &out, &stderr)
 			}
 		})
+	}
+}
+
+func TestCLIBoundedCPUProfileFinishesBeforeScript(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cpu.pprof")
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	// The script is blocked on input. Capture must finish independently rather
+	// than waiting for script completion (or losing the profile on termination).
+	done := make(chan int, 1)
+	go func() {
+		done <- RunCLI([]string{"trex", "-cpuprofile", path, "-cpuprofile-duration", "10ms", "-"}, reader, io.Discard, io.Discard)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	complete := false
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil && len(data) > 0 {
+			z, err := gzip.NewReader(bytes.NewReader(data))
+			if err == nil {
+				_, readErr := io.ReadAll(z)
+				z.Close()
+				if readErr == nil {
+					complete = true
+					break
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("script exited before its input was supplied")
+	default:
+	}
+	_, _ = io.WriteString(writer, "def main(args):\n    pass\n")
+	writer.Close()
+	if code := <-done; code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	if !complete {
+		t.Fatal("CPU profile was not finalized while script was running")
+	}
+}
+
+func TestCLIBoundedCPUProfileRejectsInvalidFlags(t *testing.T) {
+	for _, args := range [][]string{{"trex", "-cpuprofile-duration", "-1s", "-"}, {"trex", "-cpuprofile-duration", "1s", "-"}} {
+		var diagnostics bytes.Buffer
+		if code := RunCLI(args, strings.NewReader(""), io.Discard, &diagnostics); code != 1 || !strings.Contains(diagnostics.String(), "requires -cpuprofile") {
+			t.Fatal(code, diagnostics.String())
+		}
 	}
 }

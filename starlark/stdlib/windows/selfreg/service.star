@@ -431,6 +431,7 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
     def install(machine):
         for name, argc in _SIGNATURES.items():
             machine.provide_export(callback, module = "advapi32.dll", name = name, argc = argc)
+            machine.provide_export(callback, module = "sechost.dll", name = name, argc = argc)
 
     return emulator.plugin(
         install,

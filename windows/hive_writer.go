@@ -70,6 +70,7 @@ type registryTree struct {
 	valueNames map[string]string
 	flags      uint16
 	flagsSet   bool
+	nameFlags  uint16
 	class      []byte
 	security   []byte
 	cell       uint32
@@ -754,9 +755,14 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	var value starlark.Value
 	var patches *starlark.List
 	rootName := ""
-	var keys *starlark.List
-	if err := starlark.UnpackArgs("patch_hive", args, kwargs, "file", &value, "patches", &patches, "root_name?", &rootName, "keys?", &keys); err != nil {
+	var keys, deleteKeys, deleteValues, keyFlags *starlark.List
+	if err := starlark.UnpackArgs("patch_hive", args, kwargs, "file", &value, "patches", &patches, "root_name?", &rootName, "keys?", &keys, "delete_keys?", &deleteKeys, "delete_values?", &deleteValues, "key_flags?", &keyFlags); err != nil {
 		return nil, err
+	}
+	for _, edits := range []*starlark.List{patches, keys, deleteKeys, deleteValues, keyFlags} {
+		if edits != nil && edits.Len() > 1<<20 {
+			return nil, fmt.Errorf("patch_hive: too many edits")
+		}
 	}
 	file, ok := value.(starfile.File)
 	if !ok {
@@ -774,6 +780,7 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		return nil, fmt.Errorf("patch_hive: invalid hive bins size")
 	}
 	hive := mutableHive{
+		childBatches:     make(map[uint32]*hiveChildBatch),
 		data:             data[:hiveBaseBlockSize+hiveSize],
 		legacyCellPrefix: binary.LittleEndian.Uint32(data[0x14:0x18]) == 1 && binary.LittleEndian.Uint32(data[0x18:0x1c]) == 1,
 	}
@@ -782,16 +789,42 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 			return nil, err
 		}
 	}
+	if deleteKeys != nil {
+		for value := range deleteKeys.Elements() {
+			parts, err := hiveEditParts(value)
+			if err != nil {
+				return nil, err
+			}
+			if err := hive.deleteKeyParts(parts); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if deleteValues != nil {
+		for value := range deleteValues.Elements() {
+			record, ok := value.(*starlark.Dict)
+			if !ok {
+				return nil, fmt.Errorf("patch_hive: deleted value must be a dict")
+			}
+			parts, err := hiveEditParts(record)
+			if err != nil {
+				return nil, err
+			}
+			name, err := requiredPatchString(record, "name")
+			if err != nil {
+				return nil, err
+			}
+			if err := hive.deleteValueParts(parts, name); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// Some registry indexes encode records as empty child keys. Creating a
 	// placeholder value would change their meaning; preserve truly empty keys.
 	if keys != nil {
 		for i := 0; i < keys.Len(); i++ {
-			keyPath, ok := starlark.AsString(keys.Index(i))
-			if !ok || keyPath == "" {
-				return nil, fmt.Errorf("patch_hive: keys[%d] must be a non-empty string", i)
-			}
-			if _, err := hive.ensureKey(keyPath); err != nil {
-				return nil, fmt.Errorf("patch_hive: keys[%d] %s: %w", i, keyPath, err)
+			if err := hive.applyKeyRecord(keys.Index(i)); err != nil {
+				return nil, fmt.Errorf("patch_hive: keys[%d]: %w", i, err)
 			}
 		}
 	}
@@ -800,7 +833,7 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		if !ok {
 			return nil, fmt.Errorf("patch_hive: patch %d is %s, want dict", i, patches.Index(i).Type())
 		}
-		keyPath, err := requiredPatchString(patch, "key")
+		keyParts, keyPath, err := registryPathFromDict(patch)
 		if err != nil {
 			return nil, err
 		}
@@ -845,9 +878,19 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		if err != nil {
 			return nil, err
 		}
-		if err := hive.applyValue(keyPath, name, registryValue, addRegFlags); err != nil {
+		if err := hive.applyValueParts(keyParts, name, registryValue, addRegFlags); err != nil {
 			return nil, fmt.Errorf("patch_hive: patch %d %s/%s: %w", i, keyPath, name, err)
 		}
+	}
+	if keyFlags != nil {
+		for i := 0; i < keyFlags.Len(); i++ {
+			if err := hive.applyKeyFlags(keyFlags.Index(i)); err != nil {
+				return nil, fmt.Errorf("patch_hive: key_flags[%d]: %w", i, err)
+			}
+		}
+	}
+	if err := hive.finishChildBatches(); err != nil {
+		return nil, err
 	}
 	return &starfile.Bytes{Name: "patched.hiv", Data: hive.data}, nil
 }
@@ -913,6 +956,8 @@ type mutableHive struct {
 	data             []byte
 	legacyCellPrefix bool
 	freeCells        *hiveFreeIndex
+	childBatches     map[uint32]*hiveChildBatch
+	securityCells    map[string]uint32
 }
 
 func (h *mutableHive) cellBodyOffset() int {
@@ -1190,7 +1235,11 @@ func (h *mutableHive) rootCell() uint32 {
 }
 
 func (h *mutableHive) patchValue(keyPath, valueName string, value registryData) error {
-	key, err := h.lookupKey(keyPath)
+	return h.patchValueParts(mutableHivePathParts(keyPath), valueName, value)
+}
+
+func (h *mutableHive) patchValueParts(parts []string, valueName string, value registryData) error {
+	key, err := h.lookupKeyParts(parts)
 	if err != nil {
 		return err
 	}
@@ -1273,12 +1322,16 @@ func (h *mutableHive) patchValue(keyPath, valueName string, value registryData) 
 }
 
 func (h *mutableHive) setValue(keyPath, valueName string, value registryData) error {
-	key, err := h.ensureKey(keyPath)
+	return h.setValueParts(mutableHivePathParts(keyPath), valueName, value)
+}
+
+func (h *mutableHive) setValueParts(parts []string, valueName string, value registryData) error {
+	key, err := h.ensureKeyParts(parts)
 	if err != nil {
 		return err
 	}
 	if _, err := h.findValueCell(key, valueName); err == nil {
-		return h.patchValue(keyPath, valueName, value)
+		return h.patchValueParts(parts, valueName, value)
 	}
 	valueCell, err := h.writeValue(valueName, value)
 	if err != nil {
@@ -1288,10 +1341,14 @@ func (h *mutableHive) setValue(keyPath, valueName string, value registryData) er
 }
 
 func (h *mutableHive) applyValue(keyPath, valueName string, value registryData, flags uint64) error {
+	return h.applyValueParts(mutableHivePathParts(keyPath), valueName, value, flags)
+}
+
+func (h *mutableHive) applyValueParts(parts []string, valueName string, value registryData, flags uint64) error {
 	if flags&registryPrepend != 0 && value.typ != regMultiSZ {
 		return fmt.Errorf("prepend requires REG_MULTI_SZ values")
 	}
-	key, lookupErr := h.lookupKey(keyPath)
+	key, lookupErr := h.lookupKeyParts(parts)
 	valueExists := false
 	if lookupErr == nil {
 		_, valueErr := h.findValueCell(key, valueName)
@@ -1302,12 +1359,12 @@ func (h *mutableHive) applyValue(keyPath, valueName string, value registryData, 
 		if !valueExists {
 			return nil
 		}
-		return h.deleteValue(keyPath, valueName)
+		return h.deleteValueParts(parts, valueName)
 	case flags&(infAddRegAppend|registryPrepend) != 0:
 		if !valueExists {
-			return h.setValue(keyPath, valueName, value)
+			return h.setValueParts(parts, valueName, value)
 		}
-		existing, err := h.readValue(keyPath, valueName)
+		existing, err := h.readValueParts(parts, valueName)
 		if err != nil {
 			return err
 		}
@@ -1315,24 +1372,28 @@ func (h *mutableHive) applyValue(keyPath, valueName string, value registryData, 
 		if err != nil {
 			return err
 		}
-		return h.setValue(keyPath, valueName, merged)
+		return h.setValueParts(parts, valueName, merged)
 	case flags&infAddRegNoClobber != 0:
 		if valueExists {
 			return nil
 		}
-		return h.setValue(keyPath, valueName, value)
+		return h.setValueParts(parts, valueName, value)
 	case flags&infAddRegOverwriteOnly != 0:
 		if !valueExists {
 			return nil
 		}
-		return h.setValue(keyPath, valueName, value)
+		return h.setValueParts(parts, valueName, value)
 	default:
-		return h.setValue(keyPath, valueName, value)
+		return h.setValueParts(parts, valueName, value)
 	}
 }
 
 func (h *mutableHive) readValue(keyPath, valueName string) (registryData, error) {
-	key, err := h.lookupKey(keyPath)
+	return h.readValueParts(mutableHivePathParts(keyPath), valueName)
+}
+
+func (h *mutableHive) readValueParts(parts []string, valueName string) (registryData, error) {
+	key, err := h.lookupKeyParts(parts)
 	if err != nil {
 		return registryData{}, err
 	}
@@ -1370,7 +1431,11 @@ func (h *mutableHive) readValue(keyPath, valueName string) (registryData, error)
 }
 
 func (h *mutableHive) deleteValue(keyPath, valueName string) error {
-	keyCell, err := h.lookupKey(keyPath)
+	return h.deleteValueParts(mutableHivePathParts(keyPath), valueName)
+}
+
+func (h *mutableHive) deleteValueParts(parts []string, valueName string) error {
+	keyCell, err := h.lookupKeyParts(parts)
 	if err != nil {
 		return err
 	}
@@ -1413,28 +1478,22 @@ func (h *mutableHive) deleteValue(keyPath, valueName string) error {
 		binary.LittleEndian.PutUint32(key[0x24:0x28], uint32(len(remaining)))
 		binary.LittleEndian.PutUint32(key[0x28:0x2c], newList)
 	}
-	value, err := h.cellBody(valueCell)
-	if err != nil {
-		return err
-	}
-	lengthRaw := binary.LittleEndian.Uint32(value[0x04:0x08])
-	if lengthRaw&0x80000000 == 0 && lengthRaw != 0 {
-		if err := h.freeCell(binary.LittleEndian.Uint32(value[0x08:0x0c])); err != nil {
-			return err
-		}
-	}
-	if err := h.freeCell(valueCell); err != nil {
+	if err := h.freeValue(valueCell); err != nil {
 		return err
 	}
 	return h.freeCell(listCell)
 }
 
 func (h *mutableHive) ensureKey(keyPath string) (uint32, error) {
+	return h.ensureKeyParts(mutableHivePathParts(keyPath))
+}
+
+func (h *mutableHive) ensureKeyParts(parts []string) (uint32, error) {
 	current := h.rootCell()
-	if keyPath == "/" {
+	if len(parts) == 0 {
 		return current, nil
 	}
-	for _, part := range strings.Split(strings.Trim(storage.CleanPath(keyPath), "/"), "/") {
+	for _, part := range parts {
 		next, err := h.findSubkeyCell(current, part)
 		if err == nil {
 			current = next
@@ -1453,11 +1512,15 @@ func (h *mutableHive) ensureKey(keyPath string) (uint32, error) {
 }
 
 func (h *mutableHive) lookupKey(keyPath string) (uint32, error) {
+	return h.lookupKeyParts(mutableHivePathParts(keyPath))
+}
+
+func (h *mutableHive) lookupKeyParts(parts []string) (uint32, error) {
 	current := h.rootCell()
-	if keyPath == "/" {
+	if len(parts) == 0 {
 		return current, nil
 	}
-	for _, part := range strings.Split(strings.Trim(storage.CleanPath(keyPath), "/"), "/") {
+	for _, part := range parts {
 		next, err := h.findSubkeyCell(current, part)
 		if err != nil {
 			return 0, err
@@ -1468,6 +1531,9 @@ func (h *mutableHive) lookupKey(keyPath string) (uint32, error) {
 }
 
 func (h *mutableHive) addSubkeyCell(parentCell, childCell uint32) error {
+	if h.childBatches != nil {
+		return h.addBatchedSubkey(parentCell, childCell)
+	}
 	parent, err := h.cellBody(parentCell)
 	if err != nil {
 		return err
@@ -1578,6 +1644,16 @@ func (h *mutableHive) addValueCell(keyCell, valueCell uint32) error {
 }
 
 func (h *mutableHive) findSubkeyCell(keyCell uint32, name string) (uint32, error) {
+	if h.childBatches != nil {
+		batch, err := h.childBatch(keyCell)
+		if err != nil {
+			return 0, err
+		}
+		if cell, ok := batch.cells[foldHiveBatchName(name)]; ok {
+			return cell, nil
+		}
+		return 0, fmt.Errorf("patch_hive: subkey %q not found", name)
+	}
 	key, err := h.cellBody(keyCell)
 	if err != nil {
 		return 0, err
@@ -1673,6 +1749,14 @@ func (h *mutableHive) valueCells(listCell uint32, count int) ([]uint32, error) {
 }
 
 func (h *mutableHive) subkeyCells(cell uint32) ([]uint32, error) {
+	return h.subkeyCellsVisited(cell, make(map[uint32]bool), 0)
+}
+
+func (h *mutableHive) subkeyCellsVisited(cell uint32, seen map[uint32]bool, depth int) ([]uint32, error) {
+	if depth > 32 || len(seen) >= 1<<20 || seen[cell] {
+		return nil, fmt.Errorf("patch_hive: cyclic or oversized subkey index")
+	}
+	seen[cell] = true
 	list, err := h.cellBody(cell)
 	if err != nil {
 		return nil, err
@@ -1711,7 +1795,7 @@ func (h *mutableHive) subkeyCells(cell uint32) ([]uint32, error) {
 			if offset+4 > len(list) {
 				return nil, fmt.Errorf("patch_hive: truncated ri list")
 			}
-			more, err := h.subkeyCells(binary.LittleEndian.Uint32(list[offset : offset+4]))
+			more, err := h.subkeyCellsVisited(binary.LittleEndian.Uint32(list[offset:offset+4]), seen, depth+1)
 			if errors.Is(err, errRegistryFreeCell) {
 				continue
 			}
@@ -2944,8 +3028,8 @@ func updateKeyMaxSubkeyName(key, child []byte) {
 		return
 	}
 	nameLen := registryNameUTF16ByteLen(hiveName(child[0x4c:0x4c+nameLength], flags))
-	if nameLen > int(binary.LittleEndian.Uint32(key[0x34:0x38])) {
-		binary.LittleEndian.PutUint32(key[0x34:0x38], uint32(nameLen))
+	if nameLen > int(binary.LittleEndian.Uint16(key[0x34:0x36])) {
+		binary.LittleEndian.PutUint16(key[0x34:0x36], uint16(nameLen))
 	}
 }
 
@@ -3205,7 +3289,8 @@ func (w *hiveWriter) writeKey(node *registryTree, subkeys, values int) uint32 {
 	binary.LittleEndian.PutUint32(body[0x28:0x2c], node.valCell)
 	binary.LittleEndian.PutUint32(body[0x2c:0x30], 0xffffffff)
 	binary.LittleEndian.PutUint32(body[0x30:0x34], 0xffffffff)
-	binary.LittleEndian.PutUint32(body[0x34:0x38], uint32(maxRegistrySubkeyNameLen(node)))
+	binary.LittleEndian.PutUint16(body[0x34:0x36], uint16(maxRegistrySubkeyNameLen(node)))
+	binary.LittleEndian.PutUint16(body[0x36:0x38], node.nameFlags)
 	binary.LittleEndian.PutUint32(body[0x38:0x3c], uint32(maxRegistrySubkeyClassLen(node)))
 	binary.LittleEndian.PutUint32(body[0x3c:0x40], uint32(maxRegistryValueNameLen(node)))
 	binary.LittleEndian.PutUint32(body[0x40:0x44], uint32(maxRegistryValueDataLen(node)))
@@ -3527,3 +3612,13 @@ func utf16Nul(s string) []byte {
 }
 
 var _ = crc32.ChecksumIEEE
+
+// The string-path API retains its historical filesystem-style normalization.
+// Literal key_parts bypass this helper and are validated by registryPathParts.
+func mutableHivePathParts(path string) []string {
+	cleaned := strings.Trim(storage.CleanPath(path), "/")
+	if cleaned == "" {
+		return nil
+	}
+	return strings.Split(cleaned, "/")
+}

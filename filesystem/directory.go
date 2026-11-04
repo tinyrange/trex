@@ -25,14 +25,19 @@ func DirectoryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 }
 
 type Directory struct {
-	dirs             map[string]struct{}
-	files            map[string]FileRecord
-	attributes       map[string]Attributes
-	metadata         map[string]Metadata
-	hardLinkRefs     map[uint64]uint64
-	nextHardLink     uint64
-	nextWriteOrder   uint64
+	dirs           map[string]struct{}
+	files          map[string]FileRecord
+	attributes     map[string]Attributes
+	metadata       map[string]Metadata
+	hardLinkRefs   map[uint64]uint64
+	hardLinkNames  map[uint64][]string
+	nextHardLink   uint64
+	nextWriteOrder uint64
+	// revision tracks namespace changes, not content writes (see WriteOrder).
 	revision         uint64
+	pathNames        [4]*starlark.Dict
+	sortedFiles      []string
+	fileValues       []starlark.Value
 	children         map[string][]string
 	childrenRevision uint64
 	fatShortIndex    map[string]string
@@ -146,6 +151,8 @@ func (d *Directory) Hash() (uint32, error) {
 }
 func (d *Directory) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "clone":
+		return starlark.NewBuiltin("clone", d.cloneBuiltin), nil
 	case "mkdir":
 		return starlark.NewBuiltin("mkdir", d.mkdirBuiltin), nil
 	case "write":
@@ -156,6 +163,8 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("find", d.findBuiltin), nil
 	case "list_dir":
 		return starlark.NewBuiltin("list_dir", d.listDirBuiltin), nil
+	case "rmdir":
+		return starlark.NewBuiltin("rmdir", d.rmdirBuiltin), nil
 	case "remove":
 		return starlark.NewBuiltin("remove", d.removeBuiltin), nil
 	case "set_reparse":
@@ -164,8 +173,18 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("set_attributes", d.setAttributesBuiltin), nil
 	case "set_security":
 		return starlark.NewBuiltin("set_security", d.setSecurityBuiltin), nil
+	case "set_extended_attributes":
+		return starlark.NewBuiltin("set_extended_attributes", d.setExtendedAttributesBuiltin), nil
+	case "set_file_attributes":
+		return starlark.NewBuiltin("set_file_attributes", d.setFileAttributesBuiltin), nil
+	case "get_metadata":
+		return starlark.NewBuiltin("get_metadata", d.getMetadataBuiltin), nil
+	case "set_times":
+		return starlark.NewBuiltin("set_times", d.setTimesBuiltin), nil
 	case "get_security":
 		return starlark.NewBuiltin("get_security", d.getSecurityBuiltin), nil
+	case "path_names":
+		return starlark.NewBuiltin("path_names", d.pathNamesBuiltin), nil
 	case "files":
 		return d.fileList(), nil
 	case "fat_short_path":
@@ -174,7 +193,7 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (d *Directory) AttrNames() []string {
-	return []string{"fat_short_path", "files", "find", "get_security", "hardlink", "list_dir", "mkdir", "remove", "set_attributes", "set_reparse", "set_security", "write"}
+	return []string{"clone", "fat_short_path", "files", "find", "get_metadata", "get_security", "hardlink", "list_dir", "mkdir", "path_names", "remove", "rmdir", "set_attributes", "set_extended_attributes", "set_file_attributes", "set_reparse", "set_security", "set_times", "write"}
 }
 
 func (d *Directory) hardlinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -215,19 +234,25 @@ func (d *Directory) HardLink(source, destination string) error {
 		d.SetMetadata(source, metadata)
 	}
 	d.PutFile(destination, file)
-	destinationMetadata := d.metadata[destination]
-	destinationMetadata.HardLink = metadata.HardLink
-	d.SetMetadata(destination, destinationMetadata)
+	// Object metadata follows the source identity; only the short name belongs
+	// to the destination directory entry. Keeping destination timestamps/SD
+	// would make serialized metadata depend on which alias sorts first.
+	shortName := d.metadata[destination].ShortName
+	metadata.ShortName = shortName
+	d.SetMetadata(destination, metadata)
+	if attrs, ok := d.attributes[source]; ok {
+		d.attributes[destination] = attrs
+	} else {
+		delete(d.attributes, destination)
+	}
 	return nil
 }
 
 // listDirBuiltin enumerates only immediate children, without allocating and
 // sorting the entire tree's file list per call. Missing paths return an empty list.
-func (d *Directory) listDirBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var name string
-	if err := starlark.UnpackArgs("list_dir", args, kwargs, "path", &name); err != nil {
-		return nil, err
-	}
+// ensureChildren builds lazily. Subsequent namespace edits maintain the
+// sorted immediate-child index in place.
+func (d *Directory) ensureChildren() {
 	if d.children == nil || d.childrenRevision != d.revision {
 		children := make(map[string][]string)
 		for candidate := range d.dirs {
@@ -245,6 +270,14 @@ func (d *Directory) listDirBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args
 		}
 		d.children, d.childrenRevision = children, d.revision
 	}
+}
+
+func (d *Directory) listDirBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs("list_dir", args, kwargs, "path", &name); err != nil {
+		return nil, err
+	}
+	d.ensureChildren()
 	names := d.children[storage.CleanPath(name)]
 	result := make([]starlark.Value, len(names))
 	for i, child := range names {
@@ -280,7 +313,9 @@ func (d *Directory) removeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args 
 	delete(d.files, cleaned)
 	d.SetMetadata(cleaned, Metadata{})
 	delete(d.metadata, cleaned)
-	d.revision++
+	delete(d.attributes, cleaned)
+	_, remainsDirectory := d.dirs[cleaned]
+	d.namespaceEntryChanged(cleaned, remainsDirectory)
 	d.fatShortValid = false
 	return starlark.None, nil
 }
@@ -483,8 +518,10 @@ func (d *Directory) PutFile(name string, file FileRecord) {
 	d.Mkdir(path.Dir(cleaned))
 	d.nextWriteOrder++
 	file.WriteOrder = d.nextWriteOrder
+	if _, exists := d.files[cleaned]; !exists {
+		d.namespaceEntryChanged(cleaned, true)
+	}
 	d.files[cleaned] = file
-	d.revision++
 }
 
 // SetMetadata associates filesystem metadata with a path.
@@ -496,6 +533,26 @@ func (d *Directory) SetMetadata(name string, metadata Metadata) {
 	oldID := d.metadata[cleaned].HardLink
 	newID := metadata.HardLink
 	if oldID != newID {
+		if oldID != 0 {
+			aliases := d.hardLinkNames[oldID]
+			for i, alias := range aliases {
+				if alias == cleaned {
+					aliases = append(aliases[:i], aliases[i+1:]...)
+					break
+				}
+			}
+			if len(aliases) == 0 {
+				delete(d.hardLinkNames, oldID)
+			} else {
+				d.hardLinkNames[oldID] = aliases
+			}
+		}
+		if newID != 0 {
+			if d.hardLinkNames == nil {
+				d.hardLinkNames = make(map[uint64][]string)
+			}
+			d.hardLinkNames[newID] = append(d.hardLinkNames[newID], cleaned)
+		}
 		// Track imported as well as locally allocated identities. Reference
 		// counts allow a released identity to be reused without aliasing a
 		// surviving link, and avoid scanning the whole tree for each new link.
@@ -638,7 +695,8 @@ func (d *Directory) SetSecurity(name string, descriptor []byte) error {
 	if metadata.HardLink != 0 && d.hardLinkRefs[metadata.HardLink] > 1 {
 		// Security belongs to the file identity, not a directory entry. Keep
 		// link-local metadata (such as short names) while sharing the new SD.
-		for alias, other := range d.metadata {
+		for _, alias := range d.hardLinkNames[metadata.HardLink] {
+			other := d.metadata[alias]
 			if other.HardLink == metadata.HardLink {
 				other.SecurityDescriptor = metadata.SecurityDescriptor
 				d.metadata[alias] = other
@@ -651,33 +709,72 @@ func (d *Directory) SetSecurity(name string, descriptor []byte) error {
 // Mkdir creates a directory and any missing parents.
 func (d *Directory) Mkdir(name string) {
 	cleaned := storage.CleanPath(name)
-	changed := false
 	for {
 		if _, ok := d.dirs[cleaned]; !ok {
 			d.dirs[cleaned] = struct{}{}
-			changed = true
+			d.namespaceEntryChanged(cleaned, true)
 		}
 		if cleaned == "/" {
-			if changed {
-				d.revision++
-			}
 			return
 		}
 		cleaned = path.Dir(cleaned)
 	}
 }
 
+// namespaceEntryChanged keeps an already materialized children index current.
+// present describes the union of files and directories at this exact path.
+func (d *Directory) namespaceEntryChanged(name string, present bool) {
+	current := d.children != nil && d.childrenRevision == d.revision
+	if current && name != "/" {
+		parent := path.Dir(name)
+		names := d.children[parent]
+		i := sort.SearchStrings(names, name)
+		exists := i < len(names) && names[i] == name
+		if present && !exists {
+			names = append(names, "")
+			copy(names[i+1:], names[i:])
+			names[i] = name
+		} else if !present && exists {
+			copy(names[i:], names[i+1:])
+			names[len(names)-1] = ""
+			names = names[:len(names)-1]
+		}
+		d.children[parent] = names
+	}
+	d.invalidateNamespace()
+	if current {
+		d.childrenRevision = d.revision
+	}
+}
+
+func (d *Directory) invalidateNamespace() {
+	d.revision++
+	d.pathNames = [4]*starlark.Dict{}
+	d.sortedFiles = nil
+	d.fileValues = nil
+}
+
+func (d *Directory) sortedFileNames() []string {
+	if d.sortedFiles == nil {
+		d.sortedFiles = make([]string, 0, len(d.files))
+		for name := range d.files {
+			d.sortedFiles = append(d.sortedFiles, name)
+		}
+		sort.Strings(d.sortedFiles)
+	}
+	return d.sortedFiles
+}
+
 func (d *Directory) fileList() *starlark.List {
-	names := make([]string, 0, len(d.files))
-	for name := range d.files {
-		names = append(names, name)
+	if d.fileValues == nil {
+		names := d.sortedFileNames()
+		d.fileValues = make([]starlark.Value, len(names))
+		for i, name := range names {
+			d.fileValues[i] = starlark.String(name)
+		}
 	}
-	sort.Strings(names)
-	values := make([]starlark.Value, len(names))
-	for i, name := range names {
-		values[i] = starlark.String(name)
-	}
-	return starlark.NewList(values)
+	// The public list stays independently mutable; only immutable names are shared.
+	return starlark.NewList(append([]starlark.Value(nil), d.fileValues...))
 }
 
 func PathFromWindowsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

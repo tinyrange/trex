@@ -62,6 +62,15 @@ func TestRegistryPortableAndStarlarkReaderParity(t *testing.T) {
 			if err != nil || !bytes.Equal(ps, key.security) || !bytes.Equal(ps, ss) {
 				t.Fatalf("security mismatch: %v", err)
 			}
+			view := &registryKey{hive: scripting, key: sk, parts: parts, path: registryDisplayPath(parts)}
+			security, err := view.Attr("security")
+			if err != nil {
+				t.Fatal(err)
+			}
+			owned, ok := security.(starlark.Bytes)
+			if !ok || !bytes.Equal([]byte(owned), ps) {
+				t.Fatalf("Starlark security differs from portable SK reader: %v", security)
+			}
 			cells, err := portable.ValueCells(pk)
 			if err != nil {
 				t.Fatal(err)

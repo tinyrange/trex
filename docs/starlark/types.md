@@ -30,6 +30,29 @@ Paths inside these values are logical paths. They are not permission to create
 an extracted host tree. Windows path policy belongs in Starlark modules; format
 parsing and construction belong in Go implementations.
 
+## Owned Windows metadata views
+
+`windows.hive(file, snapshot=True)` owns a bounded immutable copy and lazily
+indexes decoded keys and child names. The default borrowed reader does not cache
+metadata across changes to its source. Returned key/value projections do not
+permit edits to the snapshot; use `windows.patch_hive` for a separate transaction.
+
+`windows.catalog(file)` returns a read-only file with an owned parsed catalog
+index. Signature integrity can be reused for those exact bytes, but certificate
+trust, policy, time and revocation remain separate caller decisions. Returned
+index/signature lists are independent of the cached native facts.
+
+`windows.assembly_manifest(value)` returns an `assembly_manifest` value with lazy
+`identity`, `files`, `references`, `registry_keys` and `deployment` attributes.
+Each view owns its projections; freezing the view also freezes future lazy
+projections. `windows.assembly_declarations(root)` instead extracts a frozen
+raw-declaration record from `binary.xml_node`, retaining duplicates and qualified
+attributes for policy validation rather than expanding macros or choosing winners.
+
+`windows.cbs_update_index(...)` returns an immutable `cbs_update_index` snapshot.
+Publication methods return new snapshots; batched `package_state_vector` queries
+read the receiver's state, never a memo from a different population step.
+
 ## Block values
 
 | Type | Purpose |
@@ -137,3 +160,16 @@ checkpoint is reusable and machine-local; restoring it preserves the identities
 of plugin dictionaries and lists so installed callbacks continue to observe the
 restored state. Use `snapshot()` only when an independent machine clone is
 needed and no mutable plugin callback state will be resumed.
+
+### Directory construction generations
+
+`directory.get_metadata(path).write_order` is a read-only, directory-local
+path-binding generation. Each file write/replacement or new hardlink destination
+gets a new value; metadata-only edits and writes to other paths leave it unchanged.
+Directories return zero; missing paths raise an error. A clone initially preserves
+these values, but independently mutated trees must not compare generations.
+
+This allows a planner to reject replaced sources without reading lazy payloads.
+It is not a content digest, a persisted filesystem timestamp, or proof that an
+external reader's bytes have not changed. Reader integrity remains the decoder's
+responsibility; exhaustive byte audits must be requested separately.
