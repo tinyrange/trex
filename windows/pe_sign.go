@@ -224,15 +224,21 @@ func signAuthenticodeDigest(digest []byte, identity *peSigningIdentity, pageHash
 		imageData = pePageHashImageData(pageHashes[0])
 	}
 	indirect := signingSequence(signingSequence(signingOID(spcPEImageOID), imageData), signingSequence(signingAlgorithm(sha256OID), signingTLV(4, digest)))
+	return signPKCS7Content(indirect, spcIndirectOID, identity)
+}
+
+// Both Authenticode images and Microsoft catalogs use PKCS #7 content whose
+// value octets (rather than its outer SEQUENCE encoding) are authenticated.
+func signPKCS7Content(content []byte, contentType asn1.ObjectIdentifier, identity *peSigningIdentity) ([]byte, error) {
 	var raw asn1.RawValue
-	if _, err := asn1.Unmarshal(indirect, &raw); err != nil {
+	if _, err := asn1.Unmarshal(content, &raw); err != nil {
 		return nil, err
 	}
 	// RFC 2315 section 9.3: hash the content's value octets, excluding its
 	// enclosing SEQUENCE tag and length. Authenticated attributes use SET OF.
 	contentHash := sha256.Sum256(raw.Bytes)
 	attrs := signingSet(
-		signingAttribute(pkcsContentTypeOID, signingOID(spcIndirectOID)),
+		signingAttribute(pkcsContentTypeOID, signingOID(contentType)),
 		signingAttribute(pkcsMessageDigestOID, signingTLV(4, contentHash[:])),
 		signingAttribute(spcStatementOID, signingSequence(signingOID(spcIndividualOID))),
 		signingAttribute(spcOpusOID, signingSequence()),
@@ -255,7 +261,7 @@ func signAuthenticodeDigest(digest []byte, identity *peSigningIdentity, pageHash
 	}
 	certSet := signingSet(certs...)
 	certSet[0] = 0xa0
-	signedData := signingSequence(version, signingSet(signingAlgorithm(sha256OID)), signingSequence(signingOID(spcIndirectOID), signingTLV(0xa0, indirect)), certSet, signingSet(signer))
+	signedData := signingSequence(version, signingSet(signingAlgorithm(sha256OID)), signingSequence(signingOID(contentType), signingTLV(0xa0, content)), certSet, signingSet(signer))
 	return signingSequence(signingOID(pkcs7SignedDataOID), signingTLV(0xa0, signedData)), nil
 }
 

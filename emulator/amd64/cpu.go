@@ -833,7 +833,7 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			c.resultFlags(value, width)
 			err = write(value)
-		case x86asm.XORPS, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PADDD, x86asm.PUNPCKLDQ, x86asm.PUNPCKLQDQ, x86asm.UNPCKLPD, x86asm.UNPCKHPD, x86asm.PSHUFLW, x86asm.PSHUFD:
+		case x86asm.XORPS, x86asm.PXOR, x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PADDD, x86asm.PUNPCKLDQ, x86asm.PUNPCKLQDQ, x86asm.UNPCKLPD, x86asm.UNPCKHPD, x86asm.PSHUFLW, x86asm.PSHUFD:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
 				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
@@ -874,6 +874,21 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 					for i := 0; i < 4; i++ {
 						lane := int((uint8(immediate) >> uint(2*i)) & 3)
 						copy(result[laneWidth*i:laneWidth*(i+1)], value[laneWidth*lane:laneWidth*(lane+1)])
+					}
+					c.xmm[destination-x86asm.X0] = result
+				} else if inst.Op == x86asm.PUNPCKLBW {
+					left := c.xmm[destination-x86asm.X0]
+					var result [16]byte
+					for i := 0; i < 8; i++ {
+						result[2*i], result[2*i+1] = left[i], value[i]
+					}
+					c.xmm[destination-x86asm.X0] = result
+				} else if inst.Op == x86asm.PUNPCKLWD {
+					left := c.xmm[destination-x86asm.X0]
+					var result [16]byte
+					for i := 0; i < 4; i++ {
+						copy(result[i*4:i*4+2], left[i*2:i*2+2])
+						copy(result[i*4+2:i*4+4], value[i*2:i*2+2])
 					}
 					c.xmm[destination-x86asm.X0] = result
 				} else if inst.Op == x86asm.PADDD {
@@ -977,6 +992,44 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				} else {
 					result, err = c.arithmeticSingle(binary.LittleEndian.Uint32(c.xmm[destination-x86asm.X0][:4]), uint32(value), inst.Op == x86asm.MULSS)
 				}
+				if err == nil {
+					binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
+				}
+			}
+		case x86asm.CVTSS2SD:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid CVTSS2SD destination")
+				break
+			}
+			var value uint64
+			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				value = uint64(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]))
+			} else {
+				value, err = read(inst.Args[1], 4)
+			}
+			if err == nil {
+				var result [16]byte
+				result, err = c.packedSinglesToDoubles(value)
+				if err == nil {
+					copy(c.xmm[destination-x86asm.X0][:8], result[:8])
+				}
+			}
+		case x86asm.CVTSD2SS:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid CVTSD2SS destination")
+				break
+			}
+			var value uint64
+			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				value = binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8])
+			} else {
+				value, err = read(inst.Args[1], 8)
+			}
+			if err == nil {
+				var result uint32
+				result, err = c.doubleToSingle(value)
 				if err == nil {
 					binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
 				}
@@ -1085,6 +1138,26 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			// Legacy MOVLHPS copies the low source quadword to the high
 			// destination quadword, preserving its low quadword and flags.
 			copy(c.xmm[destination-x86asm.X0][8:], c.xmm[source-x86asm.X0][:8])
+		case x86asm.MOVHPS:
+			if destination, ok := inst.Args[0].(x86asm.Reg); ok && destination >= x86asm.X0 && destination <= x86asm.X15 {
+				if _, ok := inst.Args[1].(x86asm.Mem); !ok {
+					err = fmt.Errorf("MOVHPS requires memory source")
+					break
+				}
+				var value uint64
+				value, err = read(inst.Args[1], 8)
+				if err == nil {
+					binary.LittleEndian.PutUint64(c.xmm[destination-x86asm.X0][8:], value)
+				}
+			} else if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				if _, ok := inst.Args[0].(x86asm.Mem); !ok {
+					err = fmt.Errorf("MOVHPS requires memory destination")
+					break
+				}
+				err = c.writeOperand(memory, inst.Args[0], inst, next, 8, binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][8:]))
+			} else {
+				err = fmt.Errorf("invalid MOVHPS operands")
+			}
 		case x86asm.MOVSD_XMM, x86asm.MOVSS:
 			scalarWidth := 8
 			if inst.Op == x86asm.MOVSS {
@@ -1180,12 +1253,12 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				copy(register[:], register[shift:])
 				clear(register[len(register)-shift:])
 			}
-		case x86asm.LFENCE, x86asm.SFENCE:
+		case x86asm.MFENCE, x86asm.LFENCE, x86asm.SFENCE:
 			// Guest memory operations are completed synchronously by the
 			// portable address space, so no load or store remains to order.
-		case x86asm.MOVDQA, x86asm.MOVDQU, x86asm.MOVAPS, x86asm.MOVUPS, x86asm.MOVNTPS:
+		case x86asm.MOVDQA, x86asm.MOVDQU, x86asm.MOVAPS, x86asm.MOVUPS, x86asm.MOVNTPS, x86asm.MOVAPD:
 			var value [16]byte
-			aligned := inst.Op == x86asm.MOVDQA || inst.Op == x86asm.MOVAPS || inst.Op == x86asm.MOVNTPS
+			aligned := inst.Op == x86asm.MOVAPD || inst.Op == x86asm.MOVDQA || inst.Op == x86asm.MOVAPS || inst.Op == x86asm.MOVNTPS
 			if inst.Op == x86asm.MOVNTPS {
 				if _, ok := inst.Args[0].(x86asm.Mem); !ok {
 					err = fmt.Errorf("invalid MOVNTPS destination %v", inst.Args[0])

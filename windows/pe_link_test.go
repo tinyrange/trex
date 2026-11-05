@@ -78,6 +78,24 @@ func TestPE32ExecutableHeader(t *testing.T) {
 	}
 }
 
+func TestPE32GUIExecutableHeader(t *testing.T) {
+	options := linkFixtureOptions()
+	options.Subsystem, options.Executable, options.Entry = 2, true, "Callback"
+	data, err := LinkPE32(linkObjectFixture(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := pe.NewFile(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer image.Close()
+	header := image.OptionalHeader.(*pe.OptionalHeader32)
+	if header.Subsystem != 2 || header.AddressOfEntryPoint == 0 || image.Characteristics&pe.IMAGE_FILE_DLL != 0 {
+		t.Fatal("GUI helper must be an executable with a Windows GUI subsystem and entry point")
+	}
+}
+
 func TestPE32LinkRelocationsAndABIBoundaries(t *testing.T) {
 	object, options := linkObjectFixture(), linkFixtureOptions()
 	out, err := LinkPE32(object, options)

@@ -52,9 +52,49 @@ authenticated content-type/message-digest/statement/opus attributes, and the
 signer's certificate plus any supplied chain. `page_hashes=True` additionally
 embeds SHA-256 Authenticode page hashes; the RAMFB test driver loads without
 this optional feature. It is not timestamped and has no nested signatures.
-This API does not implement catalog signing,
-PFX decryption, ECDSA signing, certificate-chain trust verification, or Microsoft
+This API does not implement PFX decryption, ECDSA signing, certificate-chain trust verification, or Microsoft
 driver certification.
+
+## Catalog packages
+
+`windows.catalog_sign(members, identity, created_at, os_attributes="")` creates
+a signed catalog entirely in memory. `members` maps simple filenames to files
+or bytes. Add `CatalogFile` to the INF before passing it to the catalog signer:
+
+```starlark
+catalog = windows.catalog_sign(
+    {"example.inf": inf, "example.sys": signed}, identity,
+    created_at = int(clock.unix()), os_attributes = "2:10.0",
+)
+```
+
+The catalog contains a version 1 CTL with SHA-256 indirect-data member digests,
+uppercase hexadecimal UTF-16 subject tags, file and SIP type attributes, and
+optional OSAttr attributes. It uses the same PKCS#7 signing infrastructure as
+PE signatures. Filename and OSAttr strings use the catalog's prescribed
+BMPString and UTF-16LE encodings. The CTL update time comes from the caller;
+the list identifier is derived from its entries. Catalog construction is
+deterministic for a given identity, inputs, and time.
+
+This builder supports ordinary flat files and the headers-and-sections PE
+catalog digest exposed by `catalog_hash`; it does not implement specialized
+MSI or other SIP hashing. Member names are case insensitive simple filenames.
+Input is bounded to 4096 members, 64 MiB per member, and 256 MiB in total.
+Package selection and trust remain separate guest integration checks.
+
+The CTL layout follows Microsoft's
+[CTL_INFO](https://learn.microsoft.com/en-us/windows/win32/api/wincrypt/ns-wincrypt-ctl_info)
+and [CRYPTCATATTRIBUTE](https://learn.microsoft.com/en-us/windows/win32/api/mscat/ns-mscat-cryptcatattribute)
+definitions. Attribute wire encodings were checked against the small original
+MakeCat fixture published in Wine's `dlls/wintrust/tests/crypt.c`; no host
+catalog builder is invoked. Tests independently decode the CTL and PKCS#7,
+verify RSA signatures, reject changed signed attributes, check member digests
+and subject types, and round-trip through the bounded catalog index parser.
+A fresh Windows 11 Validation OS 26100.8521 x64 guest also accepted the generated
+CC display catalog and signed driver through native `WinVerifyTrust`, both with
+status zero. That check used the Authenticode policy, the installed development
+certificate, no UI, and local-cache-only retrieval. The optional native PE guest
+endpoint exposes the same read-only check as `verify_trust(path)`.
 
 For modern ARM64 Windows kernel drivers, a locally generated certificate in
 the trust store does not replace production kernel signing requirements.

@@ -228,6 +228,11 @@ func arGNUFilename(table []byte, offset int64) (string, error) {
 	}
 	rest := table[offset:]
 	end := strings.IndexByte(string(rest), '\n')
+	// Microsoft COFF libraries use the same // table and /offset member
+	// references as GNU ar, but terminate long names with NUL instead of /\n.
+	if nul := strings.IndexByte(string(rest), 0); nul >= 0 && (end < 0 || nul < end) {
+		return string(rest[:nul]), nil
+	}
 	if end < 0 {
 		return "", fmt.Errorf("ar: unterminated GNU filename at table offset %d", offset)
 	}

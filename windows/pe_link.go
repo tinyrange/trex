@@ -38,7 +38,7 @@ func LinkPE32(object []byte, options PE32LinkOptions) ([]byte, error) {
 	if len(object) > 16<<20 {
 		return nil, fmt.Errorf("ELF object exceeds link bounds")
 	}
-	if options.Subsystem != 1 && options.Subsystem != 3 {
+	if options.Subsystem != 1 && options.Subsystem != 2 && options.Subsystem != 3 {
 		return nil, fmt.Errorf("unsupported PE subsystem")
 	}
 	for name := range options.Exports {

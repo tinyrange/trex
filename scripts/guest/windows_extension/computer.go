@@ -2,10 +2,7 @@
 
 package main
 
-const manifest = "API\t1\t1024\nABOUT\tsWindows 1.01 native journal playback; complete bounded gestures; host captures display; no file APIs\nFN\tping\tstr\tsReadiness\nEND\nFN\tlaunch\tmap\tsLaunch native Windows application\nARG\tpath\tstr\ts\nARG\ttail\tstr\ts\nEND\nFN\tinput_events\tnone\ts1..40 hex records: LE16 message,paramL,paramH; mouse pixels or key vk,scan; release all buttons/keys within batch\nARG\tevents\tstr\ts\nEND\nDONE\n"
-
-// renvo:linkstatic USER,GetSystemMetrics
-func getSystemMetrics(index uint16) uint16 { return 0 }
+const manifest = "API\t1\t1024\nABOUT\tsWindows 1.01 native journal playback; complete bounded gestures; host captures display; no file APIs\nFN\tping\tstr\tsReadiness\nEND\nFN\tdisplay_geometry\tmap\tsUSER desktop size and GDI device extent in pixels\nEND\nFN\tlaunch\tmap\tsLaunch native Windows application\nARG\tpath\tstr\ts\nARG\ttail\tstr\ts\nEND\nFN\tinput_events\tnone\ts1..40 hex records: LE16 message,paramL,paramH; mouse pixels or key vk,scan; release all buttons/keys within batch\nARG\tevents\tstr\ts\nEND\nDONE\n"
 
 // renvo:linkstatic USER,GetTickCount
 func getTicks() uint16 { return 0 }
@@ -60,6 +57,8 @@ func dispatchCall() {
 	}
 	if fields == 2 && equalField(1, "ping") {
 		send(pingReply)
+	} else if fields == 2 && equalField(1, "display_geometry") {
+		displayGeometry()
 	} else if equalField(1, "launch") {
 		runProgram()
 	} else if equalField(1, "input_events") {

@@ -6,14 +6,22 @@ implementation. Format references used for implementation:
 * Microsoft PerfView (MIT), `src/TraceEvent/TraceEventNativeMethods.cs` and
   `Parsers/KernelTraceEventParser.cs`: TRACE_LOGFILE_HEADER and kernel payloads.
 * Airbus CERT etl-parser (Apache-2.0), `etl/wmi.py`, `system.py`, `trace.py`,
-  `parsers/kernel/header.py`: on-disk buffer and record structure definitions.
+  `parsers/kernel/header.py`, `wintrace.py`, `event.py`: on-disk buffer and record structure definitions.
+* Microsoft Windows SDK `um/evntcons.h`: EVENT_HEADER flags, extended-item types,
+  and 32/64-bit stack trace data (MatchId followed by addresses).
+* Microsoft Windows SDK `shared/evntrace.h`: ordered TRACE_MESSAGE flag fields
+  and provider pointer-size flags for WPP TraceMessage records (marker 0x9000).
 
 The applicable reference licenses are included alongside this document. No
 Python/C# implementation or runtime dependency is imported. Earlier investigation
 consulted another parser; that implementation was not used to implement this reader.
 
 Scope: finalized sequential, uncompressed ETL, 32/64-bit kernel system, compact,
-and perfinfo framing, classic and manifest framing. Unsupported record framing,
+and perfinfo framing, classic, manifest and WPP TraceMessage framing. Default
+log-file mode zero and explicit sequential mode one are accepted. WPP optional
+sequence/GUID/component-ID/timestamp/system fields are bounded before access;
+obsolete performance-timestamp and unknown flags are rejected. Raw event IDs,
+GUID bytes and message flags are exposed; WPP payload schemas are not inferred. Unsupported record framing,
 clock modes, compression, malformed lengths and truncated logs fail explicitly.
 Generic non-kernel payloads are counted, not guessed. Payload schema support is
 version-gated. Buffer and event loss must be surfaced in every report.
@@ -31,7 +39,14 @@ PerfInfo DPC/ISR 15/50,66–69 version 2 (QPC event clock only). Other payloads,
 outside those schemas, remain counted but are not attributed by Analyze. Non-kernel providers
 are grouped as 255; the report does not decode arbitrary manifest providers.
 
-The first/last observed events bound CPU capacity. No CPU is inferred before the
+The first observed event and last activity event bound CPU capacity.
+Kernel EventTrace (group 0) and SysConfig (group 11) records are session/static
+configuration metadata and do not extend the activity endpoint during logger
+finalization. Raw `first_tick`/`last_tick` still include every record;
+`capacity_last_tick` and `metadata_trailer_seconds` expose the distinction.
+`observed_seconds`, timelines and uncovered CPU use that activity endpoint.
+Unsupported activity in any other group still extends capacity, even when its
+payload is not decoded: this is not a trim to the last observed switch. No CPU is inferred before the
 first or after the last observed switch on a processor. A mismatched old thread
 invalidates the span. Unknown thread ownership remains separate from idle.
 Only complete switch-out-to-ready and ready-to-switch-in pairs are counted as
@@ -41,6 +56,24 @@ causal chain or distinguish host vCPU descheduling from guest execution.
 QPC durations are converted after integer subtraction to avoid FILETIME-sized
 floating-point cancellation. Disk response durations always use QPC frequency,
 even when event timestamps use FILETIME. No symbol queries/downloads are made.
+
+## Modern event extensions
+
+For modern EVENT_HEADER records, flag bit 0 marks inline extended data after
+its 80-byte header. Each serialized item has an eight-byte header (type at
++2, linkage at +4, data length at +6), followed by data and eight-byte alignment.
+This is not the SDK's in-memory descriptor containing a DataPtr. Linkage bit 0
+continues the chain; bounds, alignment and a maximum of 128 items are enforced.
+Padding bytes are not required to be zero. Unknown types retain opaque bytes;
+they are not misidentified as user payload. Stack types 5 and 6 contain a
+64-bit MatchId followed by 32-bit or 64-bit address values respectively. Their
+lengths are validated. Header flags and the 16-byte activity GUID are exposed
+without inferring activity relationships. User payload begins after the chain.
+
+Stacks alone do not identify images or establish error values. Address mapping
+requires native image epochs for the same process lifetime, compatible trace
+clocks and boot identity, and matching PE/PDB identities. Return addresses may
+need call-site attribution; unknown or ambiguous frames must remain explicit.
 
 ## Per-process phase attribution
 
@@ -63,7 +96,10 @@ thread/process lifetimes and load/unload address ranges. Kernel images share
 the high canonical address space. Image identity includes path, size, checksum
 and PE timestamp (a build identity, not necessarily a civil date). PID/TID and
 image-base reuse must not relabel earlier samples. End rundown never invents
-an earlier lifetime. Unmapped/ambiguous addresses and unknown threads stay
+an earlier lifetime. The profile also exposes timestamp-sorted `image_events`
+with tick, PID, opcode, base and original module identity for explicit cross-trace
+correlation. All observed load, unload and rundown events are retained, even
+without IP samples; callers must respect PID and address reuse. Unmapped/ambiguous addresses and unknown threads stay
 explicit. DPC/ISR-marked samples are tagged, not silently blamed on the
 interrupted thread. The event Count field is not a duration or weight; each
 supported IP event contributes one sample. No assumed sampling frequency is

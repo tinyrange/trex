@@ -3,7 +3,7 @@
 load("//tests:testing.star", "case", "equal", "raises", "suite")
 load("@stdlib//windows/emulation:conformance.star", conformance_call = "call", "buffer", "c_memory_bindings", "output", "pointer", "resolve", "run", "sequence", conformance_session = "session", "size_of")
 load("@stdlib//windows/selfreg:plugins.star", "override_plugin")
-load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin")
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "msvcrt_plugin")
 
 def _u32(value):
     encoded = binary.builder(capacity = 4)
@@ -133,7 +133,73 @@ def test_c_memory_bindings_are_explicit_and_bounded():
     )
     equal(result["buffers"]["value"], b"AAAAA")
 
+def test_locale_validation_is_explicit():
+    session = conformance_session(code = b"\xc3", plugins = [kernel32_plugin()])
+    for locale in [0x007f, 0x0409]:
+        for flags in [1, 2]:
+            conformance_call(session, module = "kernel32", name = "IsValidLocale", arguments = [locale, flags], expected_return = 1)
+    conformance_call(session, module = "kernel32", name = "IsValidLocale", arguments = [0x0411, 1], expected_return = 0)
+    conformance_call(session, module = "kernel32", name = "IsValidLocale", arguments = [0x0409, 0], expected_return = 0)
+    conformance_call(session, module = "kernel32", name = "GetLastError", expected_return = 87)
+
+def test_wide_stream_output_and_invalid_handle():
+    kernel = kernel32_plugin()
+    crt = msvcrt_plugin(kernel = kernel)
+    session = conformance_session(code = b"\xc3", plugins = [kernel, crt])
+    handle = conformance_call(session, module = "msvcrt", name = "fopen", buffers = {
+        "path": buffer(b"C:\\output.txt\x00"), "mode": buffer(b"w\x00"),
+    }, arguments = [pointer("path"), pointer("mode")])["result"].value
+    equal(handle != 0, True)
+    conformance_call(session, module = "msvcrt", name = "fputws", buffers = {
+        "text": buffer(binary.encode("AppVerifier", encoding = "utf16le", nul = True)),
+    }, arguments = [pointer("text"), handle], expected_return = 0)
+    equal(kernel.state["file_data"](r"c:\output.txt"), b"AppVerifier")
+    conformance_call(session, module = "msvcrt", name = "fclose", arguments = [handle], expected_return = 0)
+    conformance_call(session, module = "msvcrt", name = "fputws", buffers = {
+        "text": buffer(binary.encode("not written", encoding = "utf16le", nul = True)),
+    }, arguments = [pointer("text"), handle], expected_return = 0xffffffff)
+    equal(kernel.state["file_data"](r"c:\output.txt"), b"AppVerifier")
+
+def test_global_atoms_are_case_insensitive_and_scoped():
+    session = conformance_session(code = b"\xc3", plugins = [kernel32_plugin()])
+    def atom(api, text):
+        return conformance_call(session, module = "kernel32", name = api, buffers = {
+            "name": buffer(binary.encode(text, encoding = "utf16le", nul = True)),
+        }, arguments = [pointer("name")])["result"].value
+    equal(atom("GlobalFindAtomW", "WcaVerboseLogging"), 0)
+    conformance_call(session, module = "kernel32", name = "GetLastError", expected_return = 2)
+    equal(atom("AddAtomW", "WcaVerboseLogging"), 0xc000)
+    equal(atom("GlobalFindAtomW", "WcaVerboseLogging"), 0)
+    first = atom("GlobalAddAtomW", "WcaVerboseLogging")
+    equal(atom("GlobalFindAtomW", "wcaverboselogging"), first)
+    equal(atom("GlobalAddAtomW", "WCAVERBOSELOGGING"), first)
+    equal(atom("GlobalAddAtomW", "another"), first + 1)
+    equal(atom("GlobalFindAtomW", "#123"), 123)
+    equal(atom("GlobalAddAtomW", "x" * 256), 0)
+    conformance_call(session, module = "kernel32", name = "GetLastError", expected_return = 87)
+
+def test_wow64_uses_explicit_target_architecture():
+    for native in [0x14c, 0x8664]:
+        session = conformance_session(code = b"\xc3", plugins = [kernel32_plugin(version = {"native_machine": native})])
+        conformance_call(session, module = "kernel32", name = "IsWow64Process2", buffers = {
+            "process": output(2, expected = binary.u16le(0x14c if native == 0x8664 else 0)),
+            "native": output(2, expected = binary.u16le(native)),
+        }, arguments = [0xffffffff, pointer("process"), pointer("native")], expected_return = 1)
+        conformance_call(session, module = "kernel32", name = "IsWow64Process", buffers = {
+            "wow": output(4, expected = binary.u32le(int(native == 0x8664))),
+        }, arguments = [0xffffffff, pointer("wow")], expected_return = 1)
+        result = conformance_call(session, module = "kernel32", name = "GetNativeSystemInfo", buffers = {"info": output(36)}, arguments = [pointer("info")])
+        equal(result["buffers"]["info"][:2], binary.u16le(9 if native == 0x8664 else 0))
+        result = conformance_call(session, module = "kernel32", name = "GetSystemInfo", buffers = {"info": output(36)}, arguments = [pointer("info")])
+        equal(result["buffers"]["info"][:2], binary.u16le(0))
+        conformance_call(session, module = "kernel32", name = "IsWow64Process2", arguments = [0xffffffff, 0, 0], expected_return = 0)
+        conformance_call(session, module = "kernel32", name = "GetLastError", expected_return = 87)
+
 TEST_SUITE = suite("windows/emulation/conformance", [
+    case("wow64_uses_explicit_target_architecture", test_wow64_uses_explicit_target_architecture),
+    case("global_atoms_are_case_insensitive_and_scoped", test_global_atoms_are_case_insensitive_and_scoped),
+    case("wide_stream_output_and_invalid_handle", test_wide_stream_output_and_invalid_handle),
+    case("locale_validation_is_explicit", test_locale_validation_is_explicit),
     case("base_plugin_wrapping", test_base_plugin_wrapping),
     case("call_selectors", test_call_selectors),
     case("override_validation_and_replacement", test_override_validation_and_replacement),

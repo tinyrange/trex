@@ -38,7 +38,7 @@ func (b *Backend) validateARM64(m vmm.Machine) []vmm.ValidationIssue {
 	} else if err := m.ARM64Boot.Validate(m.Memory); err != nil {
 		add("boot", err.Error())
 	}
-	if b.ACPI || b.PCIIDE || b.HPET || b.UEFI || b.USB || b.PIOOnly || b.IDEModel != "" && b.IDEModel != "synthetic" {
+	if b.ACPI || b.PCIIDE || b.PCIDisplay || b.HPET || b.UEFI || b.USB || b.PIOOnly || b.IDEModel != "" && b.IDEModel != "synthetic" {
 		add("backend", "PC device options do not apply to ARM64")
 	}
 	if len(m.Networks) != 0 {

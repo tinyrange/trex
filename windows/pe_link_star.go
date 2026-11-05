@@ -18,7 +18,7 @@ func pe32LinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 		"entry?", &entry, "subsystem?", &subsystem, "version_major?", &major, "version_minor?", &minor, "image_base?", &imageBase, "executable?", &executable, "native_dll?", &nativeDLL); err != nil {
 		return nil, err
 	}
-	if subsystem != 1 && subsystem != 3 || major > 65535 || minor > 65535 {
+	if subsystem != 1 && subsystem != 2 && subsystem != 3 || major > 65535 || minor > 65535 {
 		return nil, fmt.Errorf("invalid PE subsystem/version")
 	}
 	data, err := bytesForBinaryValue(object)

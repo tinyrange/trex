@@ -13,9 +13,22 @@ application installs or runs in a guest.
 - `archive.cfb(file)` reads OLE compound files, including mini streams and
   chained FAT/DIFAT storage. Its files remain native, lazy file handles.
 - `database.msi(file)` exposes `tables`, `schema`, `table(name)`, and
-  `plan(properties={}, features=[], media={})`. Omit `features` for the default
+  `plan(properties={}, features=[], feature_states={}, media={}, cabinet_cache_bytes=0)`. Omit `features` for the default
   install level; pass `["ALL"]` for all enabled features. Supply target-machine
   properties explicitly. `media` maps package-relative names to files.
+  `feature_states` supplies post-costing states from caller-modeled custom
+  actions: 2 (absent) or 3 (local). FollowParent descendants inherit changed
+  states unless explicitly overridden; unrelated defaults remain unchanged.
+  State overrides affect component selection and subsequent conditions, but do
+  not execute a custom action. Unknown features/states are rejected.
+  `cabinet_cache_bytes` is one shared decoded-folder LRU budget for this plan's
+  CABs, not a per-CAB multiplier. Zero selects the 384 MiB default; explicit
+  budgets must be positive and at most 8 GiB. Large solid folders need a budget
+  large enough to retain a folder or each read must decompress it again.
+  The budget bounds retained decoded cache data, not total execution memory.
+  CAB LZX decoding applies its Intel-address transform only to the first
+  32,768 frames (1 GiB); later bytes in large solid folders remain unchanged.
+  This CAB cutoff is separate from WIM's independent-chunk transform.
 - MSI plans retain the `database`, declared `registry_writes`, resolved
   `definitive_registry_writes`, file metadata, other table `effects`, and custom
   actions with conditions and sequence information. They describe a fresh
@@ -419,3 +432,16 @@ keys and string values. Section/key matching is case-insensitive, existing
 unmodified lines are retained, and changed keys are emitted once even if the
 source repeats a section. Commas and quotation marks in values are preserved.
 The result is a portable Windows-1252 file using CRLF line endings.
+
+## WiX Burn attached containers
+
+`archive.burn_containers(file)` reads the version-2 `.wixburn` section used by
+WiX v3 bundles. It returns portable file slices in container-index order: the
+UX cabinet first, then attached payload cabinets. Pass a slice to `archive.cab`
+and read the UX `0` BurnManifest to map payload identities to cabinet members.
+The directory honors the original engine signature boundary; it does not assume
+payload cabinets immediately follow the UX cabinet. Missing/truncated containers,
+unsupported versions/formats, and mismatched CAB boundaries fail closed. No
+bootstrapper is executed, no host extraction occurs, and no external/detached
+payload is downloaded implicitly. This operation discovers containers, not a
+completed bundle installation or a certificate-authenticity verdict.

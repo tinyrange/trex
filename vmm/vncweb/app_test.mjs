@@ -9,6 +9,7 @@ test('viewer switches consoles, releases held input and ignores stale socket eve
   const elements = new Map();
   const element = () => ({style: {}, children: [], addEventListener() {}, setAttribute() {}, replaceChildren(...items) {this.children = items;}, getContext() {return {clearRect() {}, putImageData() {}};}, focus() {}, getBoundingClientRect() {return {left: 10, top: 20, width: 100, height: 100};}});
   for (const id of ['screen', 'status', 'connect', 'cad', 'tabs', 'create', 'vm-name']) elements.set('#' + id, element());
+  elements.get('#screen').parentElement = {...element(), clientWidth: 800};
   const listeners = {}, sockets = [], storage = new Map();
   class Socket {
     static OPEN = 1; static CLOSING = 2;
@@ -19,7 +20,8 @@ test('viewer switches consoles, releases held input and ignores stale socket eve
   }
   const context = {RFB, keySym, Uint8Array, Uint8ClampedArray, ImageData: class {}, WebSocket: Socket,
     document: {querySelector: id => elements.get(id), createElement: element, addEventListener() {}},
-    window: {addEventListener: (name, fn) => {listeners[name] = fn;}},
+    window: {innerHeight: 600, addEventListener: (name, fn) => {listeners[name] = fn;}},
+    ResizeObserver: class {observe() {}}, getComputedStyle: () => ({paddingLeft:'0',paddingRight:'0',paddingTop:'0',paddingBottom:'0'}),
     location: {hash: '#test-token', pathname: '/', protocol: 'http:', host: 'localhost'},
     sessionStorage: {getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v)}, history: {replaceState() {}},
     setTimeout, clearTimeout,
@@ -33,6 +35,12 @@ test('viewer switches consoles, releases held input and ignores stale socket eve
   }
   handshake(sockets[0]);
   assert.equal(elements.get('#status').textContent, 'Connected');
+  const layout = Buffer.alloc(36); layout.writeUInt16BE(1, 2); layout.writeUInt16BE(2, 8); layout.writeUInt16BE(2, 10);
+  layout.writeInt32BE(-308, 12); layout[16] = 1; layout.writeUInt16BE(2, 28); layout.writeUInt16BE(2, 30);
+  sockets[0].feed(layout);
+  await new Promise(resolve => setTimeout(resolve, 220));
+  const resize = Buffer.from(sockets[0].sent.find(b => b[0] === 251));
+  assert.equal(resize.readUInt16BE(2), 800); assert.equal(resize.readUInt16BE(4), 580);
   elements.get('#screen').onkeydown({code: 'ControlLeft', preventDefault() {}});
   listeners.blur(); assert.deepEqual(sockets[0].sent.at(-2), [4, 0, 0, 0, 0, 0, 255, 227]);
   elements.get('#tabs').children[1].onclick();
@@ -54,6 +62,7 @@ test('tabs release input, ignore stale sockets, and select successfully created 
     setAttribute(k,v){this.attributes[k]=v;}, replaceChildren(...children){this.children=children;},
     getContext(){return {clearRect(){},putImageData(){}};}, focus(){}, requestPointerLock(){}});
   for (const id of ['screen','status','connect','cad','tabs','create','vm-name']) nodes.set(`#${id}`,element());
+  nodes.get('#screen').parentElement = {...element(), clientWidth: 800};
   const sockets=[];
   class Socket {
     static OPEN=1; static CLOSING=2;
@@ -70,7 +79,8 @@ test('tabs release input, ignore stale sockets, and select successfully created 
   const previous=new Map();
   const globals={
     document:{querySelector:id=>nodes.get(id),createElement:element,addEventListener(){},pointerLockElement:null},
-    window:{addEventListener(){}},location:{hash:'#session',pathname:'/',protocol:'http:',host:'localhost'},
+    window:{innerHeight:600,addEventListener(){}},location:{hash:'#session',pathname:'/',protocol:'http:',host:'localhost'},
+    ResizeObserver:class{observe(){}},getComputedStyle:()=>({paddingLeft:'0',paddingRight:'0',paddingTop:'0',paddingBottom:'0'}),
     history:{replaceState(){}},sessionStorage:{getItem(){return null;},setItem(){}},WebSocket:Socket,
     fetch:async (url,options)=>{
       assert.equal(url,'/api/vms');assert.equal(options.headers.Authorization,'Bearer session');

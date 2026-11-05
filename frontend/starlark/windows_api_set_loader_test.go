@@ -35,6 +35,18 @@ def exercise(architecture):
     schema_data.patch(80,encoded)
     schema_data.patch(160,host)
     namespace=windows.api_set_namespace(schema_data.bytes())
+    inspected=windows.api_set_namespace(file=binary.concat([schema_data.bytes()]))
+    if inspected["version"] != namespace.version or inspected["flags"] != namespace.flags or inspected["hash_factor"] != namespace.hash_factor:
+        fail("API-set inspection and loader headers disagree")
+    if inspected["contracts"] != namespace.contracts or dict(inspected)["contracts"] != namespace.contracts:
+        fail("API-set inspection mapping lost contracts")
+    binding=inspected["contracts"][0]
+    if binding["name"] != contract or binding["hosts"] != [{"flags":0,"alias":"","host":"sechost.dll"}]:
+        fail("API-set inspection lost host binding")
+    if inspected.resolve(contract) != "sechost.dll": fail("file keyword lost resolver")
+    duplicate=testing.attempt(windows.api_set_namespace,args=[schema_data.bytes()],kwargs={"file":schema_data.bytes()})
+    missing=testing.attempt(windows.api_set_namespace)
+    if duplicate.ok or missing.ok: fail("API-set input ambiguity accepted")
     controls={"stop":True}
     def observe(machine,query):
         if query["kind"]=="procedure" and not query["found"] and controls["stop"]:

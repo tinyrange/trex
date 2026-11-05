@@ -22,7 +22,7 @@ func cregFromPatchesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starla
 	if state < 0 || state > 0xffff {
 		return nil, fmt.Errorf("creg_from_patches: state %d exceeds 16-bit limits", state)
 	}
-	if generation != "windows95" && generation != "windows95_rtm" && generation != "windows_nashville" && generation != "windows98" && generation != "windowsme" {
+	if generation != "windows95" && generation != "windows95_rtm" && generation != "windows_nashville" && generation != "windows98" && generation != "windows98_fe" && generation != "windowsme" {
 		return nil, fmt.Errorf("creg_from_patches: unsupported generation %q", generation)
 	}
 	root := newRegistryTree("")
@@ -133,7 +133,7 @@ func buildCREGWithLayout(root *registryTree, state uint16, windows98 bool) ([]by
 func buildCREGWithGeneration(root *registryTree, state uint16, generation string) ([]byte, error) {
 	windows95RTM := generation == "windows95_rtm"
 	nashville := generation == "windows_nashville"
-	if generation != "windows95" && !windows95RTM && !nashville && generation != "windows98" && generation != "windowsme" {
+	if generation != "windows95" && !windows95RTM && !nashville && generation != "windows98" && generation != "windows98_fe" && generation != "windowsme" {
 		return nil, fmt.Errorf("creg: unsupported generation %q", generation)
 	}
 	records := make([]cregKeyRecord, 0)
@@ -143,7 +143,7 @@ func buildCREGWithGeneration(root *registryTree, state uint16, generation string
 		if nashville {
 			minimumValueCapacity = 13
 		}
-		encoded, err := encodeCREGKey(tree, windows95RTM || nashville, windows95RTM, minimumValueCapacity)
+		encoded, err := encodeCREGKey(tree, windows95RTM || nashville, minimumValueCapacity)
 		if err != nil {
 			return 0, err
 		}
@@ -189,7 +189,8 @@ func buildCREGWithGeneration(root *registryTree, state uint16, generation string
 	// native multi-page writer also persists opaque live-memory descriptors in
 	// RGDB; a newly assembled hive must not invent those. Keep the portable
 	// compact layout and reproduce Nashville's per-key growth reserve instead.
-	modern := generation == "windows98" || generation == "windowsme"
+	windows98 := generation == "windows98" || generation == "windows98_fe"
+	modern := windows98 || generation == "windowsme"
 	// The empty hierarchy root exists only in RGKN. Windows-created CREG hives
 	// use the absent identity sentinel for it and begin RGDB identities with the
 	// first named key.
@@ -285,13 +286,12 @@ func buildCREGWithGeneration(root *registryTree, state uint16, generation string
 
 	navCursor := 32
 	for index := range records {
-		// Windows 98 navigation records are addressed in 4 KiB pages and do
-		// not straddle a page boundary.  Windows 95's writer uses a dense
-		// navigation table instead.
-		pageGap := modern && navCursor%0x1000+28 > 0x1000
-		// ME's initial RGKN allocation includes the leading navigation header;
-		// page-straddle avoidance begins with the second 4 KiB page.
-		if generation == "windowsme" && navCursor < 0x1000 {
+		// Nashville and later readers convert navigation records in 4 KiB
+		// pages, skipping records that straddle a boundary. Windows 95 uses
+		// a dense table. Nashville, 98 FE and ME exempt the first page, which starts
+		// with the navigation header, from the boundary check.
+		pageGap := (modern || generation == "windows_nashville") && navCursor%0x1000+28 > 0x1000
+		if (generation == "windowsme" || generation == "windows_nashville" || generation == "windows98_fe") && navCursor < 0x1000 {
 			pageGap = false
 		}
 		if pageGap {
@@ -369,7 +369,7 @@ func buildCREGWithGeneration(root *registryTree, state uint16, generation string
 			// record; pre-seeding offset 4 is only tolerated by later loaders.
 			classReference = 0xffffffff
 		} else if index == 0 {
-			if generation == "windows98" {
+			if windows98 {
 				classReference = 0x3b000123
 			} else {
 				classReference = 0
@@ -458,7 +458,7 @@ func buildCREGWithGeneration(root *registryTree, state uint16, generation string
 	return output, nil
 }
 
-func encodeCREGKey(tree *registryTree, clearedValueCache, terminateStrings bool, minimumValueCapacity int) ([]byte, error) {
+func encodeCREGKey(tree *registryTree, clearedValueCache bool, minimumValueCapacity int) ([]byte, error) {
 	name, err := encodeWindows1252(tree.name)
 	if err != nil {
 		return nil, fmt.Errorf("creg: key name %q: %w", tree.name, err)
@@ -483,7 +483,7 @@ func encodeCREGKey(tree *registryTree, clearedValueCache, terminateStrings bool,
 			}
 		}
 		value := tree.values[valueName]
-		encodedData, err := encodeCREGValueData(value, terminateStrings)
+		encodedData, err := encodeCREGValueData(value)
 		if err != nil {
 			return nil, fmt.Errorf("creg: key %q value %q type %d data %x: %w", tree.name, valueName, value.typ, value.data, err)
 		}
@@ -522,20 +522,17 @@ func encodeCREGKey(tree *registryTree, clearedValueCache, terminateStrings bool,
 	return record, nil
 }
 
-func encodeCREGValueData(value registryData, terminateStrings bool) ([]byte, error) {
+func encodeCREGValueData(value registryData) ([]byte, error) {
 	switch value.typ {
 	case regSZ, regExpandSZ:
 		encoded, err := encodeWindows1252(strings.TrimSuffix(decodeUTF16LE(value.data), "\x00"))
 		if err != nil {
 			return nil, err
 		}
-		if terminateStrings {
-			// The original Windows 95 writer terminates every REG_SZ payload in
-			// CREG. Later 9x writers tolerate or deliberately emit unterminated
-			// strings, but RTM's loader uses the terminator while populating its
-			// value cache and can reject a multi-block machine hive without it.
-			encoded = append(encoded, 0)
-		}
+		// CREG's stored size excludes the API terminator, including in RTM.
+		// RegQueryValueEx adds that byte to its reported size. Including it
+		// here makes KRNL386's WinDir length include a NUL, so relative INI
+		// lookup constructs "C:\\WINDOWS\x00\\SYSTEM.INI" and silently fails.
 		return encoded, nil
 	case regMultiSZ:
 		return encodeWindows1252(decodeUTF16LE(value.data))

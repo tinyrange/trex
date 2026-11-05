@@ -90,6 +90,11 @@ type Archive struct {
 	boot            wimResource
 	images          []image
 	cacheStore      *bytecache.Cache
+	blobCache       *bytecache.Cache
+	blobHotCache    *bytecache.Cache
+	missMu          sync.Mutex
+	recentMisses    [64]string
+	missCount       uint64
 	cacheSource     uint64
 }
 
@@ -236,6 +241,7 @@ func OpenWithReferencesCache(file storage.Reader, references []storage.Reader, m
 	if err := archive.addReferenceIndexes(store, references); err != nil {
 		return nil, err
 	}
+	archive.configureSolidBlobCache(maximumCacheBytes)
 	return archive, nil
 }
 
@@ -659,6 +665,8 @@ func (w *Archive) Get(key starlark.Value) (starlark.Value, bool, error) {
 }
 func (w *Archive) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "prefetch":
+		return starlark.NewBuiltin("prefetch", w.prefetchBuiltin), nil
 	case "apply":
 		return starlark.NewBuiltin("apply", w.applyBuiltin), nil
 	case "entry":
@@ -671,7 +679,30 @@ func (w *Archive) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("missing_resources", w.missingResourcesBuiltin), nil
 	case "cache_stats":
 		stats := w.cacheStore.Stats()
+		var blobs bytecache.Stats
+		if w.blobCache != nil {
+			blobs = w.blobCache.Stats()
+			stats.Bytes += blobs.Bytes
+			stats.PeakBytes += blobs.PeakBytes
+			stats.Entries += blobs.Entries
+		}
+		if w.blobHotCache != nil {
+			hot := w.blobHotCache.Stats()
+			stats.Bytes += hot.Bytes
+			stats.PeakBytes += hot.PeakBytes
+			stats.Entries += hot.Entries
+		}
+		w.missMu.Lock()
+		recent := make([]starlark.Value, 0, min(w.missCount, 64))
+		for i := w.missCount - min(w.missCount, 64); i < w.missCount; i++ {
+			recent = append(recent, starlark.String(w.recentMisses[i%64]))
+		}
+		w.missMu.Unlock()
 		return starfile.NewRecord(starlark.StringDict{
+			"recent_files": starlark.NewList(recent),
+			"blob_bytes":   starlark.MakeInt64(blobs.Bytes),
+			"blob_hits":    starlark.MakeUint64(blobs.Hits),
+			"blob_loads":   starlark.MakeUint64(blobs.Loads),
 			"bytes":        starlark.MakeInt64(stats.Bytes),
 			"entries":      starlark.MakeInt(stats.Entries),
 			"evictions":    starlark.MakeUint64(stats.Evictions),
@@ -691,7 +722,7 @@ func (w *Archive) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (w *Archive) AttrNames() []string {
-	return []string{"apply", "cache_stats", "entry", "files", "missing_resources", "resource_entries", "resource_locations"}
+	return []string{"prefetch", "apply", "cache_stats", "entry", "files", "missing_resources", "resource_entries", "resource_locations"}
 }
 
 func (w *Archive) missingResourcesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -870,20 +901,20 @@ func (w *Archive) readImages() error {
 	}
 	metadata := make([]imageMetadata, 0, min(w.imageCount, len(w.lookup)))
 	for _, entry := range w.lookup {
-		if entry.resource.flags&wimResourceMetadata == 0 || entry.resource.originalSize == 0 {
+		if entry.resource.flags&wimResourceMetadata == 0 {
 			continue
 		}
-		if entry.resource.originalSize > 0 && entry.resource.originalSize < 128*1024*1024 {
-			data, err := w.readResource(entry.resource)
-			if err != nil {
-				continue
-			}
-			if len(data) >= 120 && plausibleWIMMetadata(data) {
-				metadata = append(metadata, imageMetadata{entry.resource, data})
-				if len(metadata) >= w.imageCount {
-					break
-				}
-			}
+		index := len(metadata) + 1
+		if entry.resource.originalSize <= 0 || entry.resource.originalSize >= 128*1024*1024 {
+			return fmt.Errorf("wim image %d: invalid metadata size %d", index, entry.resource.originalSize)
+		}
+		data, err := w.readResource(entry.resource)
+		if err != nil {
+			return fmt.Errorf("wim image %d metadata: %w", index, err)
+		}
+		metadata = append(metadata, imageMetadata{entry.resource, data})
+		if len(metadata) >= w.imageCount {
+			break
 		}
 	}
 	if len(metadata) == 0 && w.boot.originalSize > 0 {
@@ -893,6 +924,9 @@ func (w *Archive) readImages() error {
 		}
 		metadata = append(metadata, imageMetadata{w.boot, data})
 	}
+	if w.imageCount > 0 && len(metadata) != w.imageCount {
+		return fmt.Errorf("wim: header declares %d images, found %d metadata resources", w.imageCount, len(metadata))
+	}
 	// Validate every image now, but retain decoded directory metadata only in
 	// the bounded archive cache. Product selection touches every edition; that
 	// must not pin them all alongside the running guest. Small
@@ -901,7 +935,7 @@ func (w *Archive) readImages() error {
 		resource, data := item.resource, item.data
 		root, err := parseWIMRoot(data, idx+1)
 		if err != nil {
-			return err
+			return fmt.Errorf("wim image %d root: %w", idx+1, err)
 		}
 		security, err := parseWIMSecurity(data)
 		if err != nil {
@@ -930,6 +964,11 @@ func parseWIMSecurity(data []byte) ([][]byte, error) {
 	}
 	size := int(binary.LittleEndian.Uint32(data[0:4]))
 	count := int(binary.LittleEndian.Uint32(data[4:8]))
+	// Setup-media images can encode an empty security table as two zero
+	// DWORDs. The root still follows the eight-byte table header.
+	if size == 0 && count == 0 {
+		return nil, nil
+	}
 	if size < 8 || size > len(data) || count > (size-8)/8 {
 		return nil, fmt.Errorf("invalid security block size or descriptor count")
 	}
@@ -950,27 +989,14 @@ func parseWIMSecurity(data []byte) ([][]byte, error) {
 	return descriptors, nil
 }
 
-func plausibleWIMMetadata(data []byte) bool {
-	if len(data) < 120 {
-		return false
-	}
-	securitySize := int(binary.LittleEndian.Uint32(data[0:4]))
-	if securitySize < 8 || securitySize >= len(data) {
-		return false
-	}
-	off := align8(securitySize)
-	if off+wimMetadataEntryBaseLen > len(data) {
-		return false
-	}
-	nameLen := int(binary.LittleEndian.Uint16(data[off+100 : off+102]))
-	return nameLen <= 520 && off+wimMetadataEntryBaseLen+nameLen <= len(data)
-}
-
 func parseWIMRoot(data []byte, imageIndex int) (entry, error) {
-	if len(data) < 4 {
+	if len(data) < 8 {
 		return entry{}, fmt.Errorf("wim: truncated security block")
 	}
 	securitySize := int(binary.LittleEndian.Uint32(data[0:4]))
+	if securitySize == 0 && binary.LittleEndian.Uint32(data[4:8]) == 0 {
+		securitySize = 8
+	}
 	if securitySize < 8 || securitySize >= len(data) {
 		return entry{}, fmt.Errorf("wim: invalid security block")
 	}
@@ -986,7 +1012,14 @@ func parseWIMRoot(data []byte, imageIndex int) (entry, error) {
 }
 
 func parseWIMEntry(data []byte, off int, base string) (entry, error) {
-	length := int(binary.LittleEndian.Uint64(data[off : off+8]))
+	if off < 0 || off > len(data)-8 {
+		return entry{}, fmt.Errorf("wim: truncated directory entry at metadata offset %#x", off)
+	}
+	length64 := binary.LittleEndian.Uint64(data[off : off+8])
+	if length64 > uint64(len(data)-off) {
+		return entry{}, fmt.Errorf("wim: directory entry exceeds metadata at offset %#x", off)
+	}
+	length := int(length64)
 	if length == 0 {
 		return entry{}, nil
 	}
@@ -1523,6 +1556,13 @@ func (w *Archive) resourceChunks(resource wimResource) ([]wimChunk, error) {
 }
 
 func (w *Archive) readChunk(resource wimResource, chunk wimChunk) ([]byte, error) {
+	return w.readChunkPrefix(resource, chunk, chunk.outputSize)
+}
+
+func (w *Archive) readChunkPrefix(resource wimResource, chunk wimChunk, prefixSize int) ([]byte, error) {
+	if prefixSize <= 0 || prefixSize > chunk.outputSize {
+		return nil, fmt.Errorf("wim: invalid chunk prefix %d", prefixSize)
+	}
 	if err := w.resourceBounds(resource); err != nil {
 		return nil, err
 	}
@@ -1537,7 +1577,7 @@ func (w *Archive) readChunk(resource wimResource, chunk wimChunk) ([]byte, error
 		if len(data) > chunk.outputSize {
 			data = data[:chunk.outputSize]
 		}
-		return data, nil
+		return data[:prefixSize], nil
 	}
 	var out []byte
 	var err error
@@ -1553,7 +1593,11 @@ func (w *Archive) readChunk(resource wimResource, chunk wimChunk) ([]byte, error
 	case resource.flags&wimResourceSolid != 0 && resource.compression == 2:
 		out, err = lzx.DecompressWIMChunk(data, 15, chunk.outputSize)
 	case resource.flags&wimResourceSolid != 0 && resource.compression == 3:
-		out, err = lzms.Decompress(data, chunk.outputSize)
+		if prefixSize < chunk.outputSize {
+			out, err = lzms.DecompressPrefix(data, chunk.outputSize, prefixSize)
+		} else {
+			out, err = lzms.Decompress(data, chunk.outputSize)
+		}
 	case w.flags&wimFlagLZMS != 0:
 		out, err = lzms.Decompress(data, chunk.outputSize)
 	case w.flags&wimFlagLZX != 0:
@@ -1566,7 +1610,7 @@ func (w *Archive) readChunk(resource wimResource, chunk wimChunk) ([]byte, error
 	if err != nil {
 		return nil, fmt.Errorf("chunk %d offset %#x size %#x out %d: %w", chunk.index, resource.offset+chunk.inOffset, chunk.inSize, chunk.outputSize, err)
 	}
-	if len(out) != chunk.outputSize {
+	if len(out) != prefixSize {
 		return nil, fmt.Errorf("wim: chunk %d decoded %d bytes, want %d", chunk.index, len(out), chunk.outputSize)
 	}
 	return out, nil
@@ -1581,9 +1625,7 @@ func (w *Archive) cachedResourceChunk(resource wimResource, chunk wimChunk) ([]b
 		OriginalSize: resource.originalSize,
 		Index:        chunk.index,
 	}
-	return w.cacheStore.Get(key, func() ([]byte, error) {
-		return w.readChunk(resource, chunk)
-	})
+	return w.cacheStore.Get(key, func() ([]byte, error) { return w.readChunk(resource, chunk) })
 }
 
 func (w *Archive) virtualFile(name string) starfile.File {
@@ -1716,11 +1758,78 @@ func readerForLocation(name string, location wimResourceLocation) storage.Reader
 	return newResourceFileRange(name, location.archive, location.resource, location.blobOffset, location.blobSize)
 }
 
+const solidBlobSegmentSize int64 = 32 << 20
+
 func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	if f.reader == nil {
 		return 0, fmt.Errorf("wim: resource for %q not found", f.entry.path)
 	}
-	return f.reader.ReadAt(p, off)
+	if f.archive.blobCache == nil || f.location == nil || f.location.resource.flags&wimResourceSolid == 0 || f.location.resource.compression != 3 || f.entry.size <= 0 || off < 0 || off >= f.entry.size || len(p) == 0 {
+		return f.reader.ReadAt(p, off)
+	}
+	// Keep small files whole and large files in bounded segments. In particular,
+	// a resource just above the segment size must not fall back to decoding a
+	// whole solid chunk for each tiny paging read.
+	n := 0
+	for len(p) != 0 && off < f.entry.size {
+		start := off / solidBlobSegmentSize * solidBlobSegmentSize
+		size := min(solidBlobSegmentSize, f.entry.size-start)
+		data, err := f.cachedBlobSegment(start, size)
+		if err != nil {
+			return n, err
+		}
+		copied := copy(p, data[off-start:])
+		n += copied
+		off += int64(copied)
+		p = p[copied:]
+	}
+	if len(p) != 0 {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (f *File) cachedBlobSegment(start, size int64) ([]byte, error) {
+	// WIM addresses blobs by their complete SHA-1. Preserve all 160 bits and
+	// separately key the segment ordinal, without host paths or truncated hashes.
+	key := bytecache.Key{Kind: 3, Offset: int64(binary.LittleEndian.Uint64(f.entry.hash[:8])), Size: int64(binary.LittleEndian.Uint64(f.entry.hash[8:16])), OriginalSize: int64(binary.LittleEndian.Uint32(f.entry.hash[16:]))}
+	if f.entry.size > solidBlobSegmentSize {
+		key.Kind = 5
+		key.Source = uint64(start / solidBlobSegmentSize)
+	}
+	load := func() ([]byte, error) {
+		var fresh []byte
+		encoded, err := f.archive.blobCache.Get(key, func() ([]byte, error) {
+			f.archive.noteBlobMiss(f.entry.path)
+			data := make([]byte, int(size))
+			n, err := f.reader.ReadAt(data, start)
+			if err != nil {
+				return nil, err
+			}
+			if n != len(data) {
+				return nil, io.ErrUnexpectedEOF
+			}
+			encoded, err := encodeCachedBlob(data)
+			if err == nil {
+				// Only this loader owns the expanded source buffer. Keep the
+				// encoded cache entry, but do not immediately decode our own
+				// just-encoded bytes. Waiters/hits still use the stored encoding.
+				fresh = data
+			}
+			return encoded, err
+		})
+		if err != nil {
+			return nil, err
+		}
+		if fresh != nil {
+			return fresh, nil
+		}
+		return decodeCachedBlob(encoded, size)
+	}
+	if f.archive.blobHotCache != nil {
+		return f.archive.blobHotCache.Get(key, load)
+	}
+	return load()
 }
 func (f *File) WriteAt(_ []byte, _ int64) (int, error) {
 	return 0, fmt.Errorf("wim entry %q is read-only", f.entry.path)
@@ -2006,11 +2115,12 @@ func (f *ResourceFile) readChunksAt(p []byte, absoluteOffset int64, chunks []wim
 		if index < 0 || index >= len(chunks) {
 			break
 		}
-		chunk, err := f.archive.cachedResourceChunk(f.resource, chunks[index])
+		chunkOffset := int(absoluteOffset % int64(chunkSize))
+		end := chunkOffset + min(len(p), chunks[index].outputSize-chunkOffset)
+		chunk, err := f.archive.cachedResourceChunkRange(f.resource, chunks[index], end)
 		if err != nil {
 			return n, fmt.Errorf("wim resource %q: %w", f.name, err)
 		}
-		chunkOffset := int(absoluteOffset % int64(chunkSize))
 		copied := copy(p, chunk[chunkOffset:])
 		n += copied
 		absoluteOffset += int64(copied)

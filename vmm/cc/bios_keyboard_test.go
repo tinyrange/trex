@@ -2,14 +2,84 @@ package cc
 
 import (
 	"encoding/binary"
-	"j5.nz/cc/hypervisor/x86state"
 	"testing"
+
+	"j5.nz/cc/hypervisor"
+	"j5.nz/cc/hypervisor/x86state"
 )
 
 func keyboardFirmwarePC() *pc {
 	p := &pc{ram: make([]byte, 1<<20)}
 	p.installKeyboardFirmware()
 	return p
+}
+
+func TestDisabledKeyboardControllerResponseDoesNotLatchIRQ(t *testing.T) {
+	var level bool
+	var edges int
+	k := newKeyboard(func(irq uint32, active bool) error {
+		if irq == 1 {
+			if active && !level {
+				edges++
+			}
+			level = active
+		}
+		return nil
+	})
+	command := func(value byte) {
+		t.Helper()
+		if err := k.io(hypervisor.X86Exit{Port: 0x64, Size: 1, Write: true, Data: []byte{value}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() byte {
+		t.Helper()
+		data := []byte{0}
+		if err := k.io(hypervisor.X86Exit{Port: 0x60, Size: 1, Data: data}); err != nil {
+			t.Fatal(err)
+		}
+		return data[0]
+	}
+	// VKD masks the PIC and polls the controller while the interface is
+	// disabled. A spurious edge would survive the poll in the PIC's IRR.
+	command(0xad)
+	command(0x20)
+	if level || edges != 0 || read() != 0x55 {
+		t.Fatal("disabled controller response raised an interrupt or lost its data")
+	}
+	command(0xae)
+	if level || edges != 0 {
+		t.Fatal("consumed controller response became a phantom interrupt")
+	}
+	if err := k.key("a", true); err != nil {
+		t.Fatal(err)
+	}
+	if !level || edges != 1 || read() != 0x1e || level {
+		t.Fatal("reenabled interface did not deliver the next scan code")
+	}
+	command(0xad)
+	command(0x20)
+	command(0xae)
+	if !level || edges != 2 || read() != 0x55 {
+		t.Fatal("reenabling with an unread response did not assert IRQ1")
+	}
+}
+func TestBIOSKeyboardIdentityMatchesController(t *testing.T) {
+	p := keyboardFirmwarePC()
+	// NTDETECT uses this firmware identity before the PnP keyboard driver
+	// initializes the controller. Omitting it leaves XP's i8042 port idle.
+	if p.ram[0x496]&0x10 == 0 {
+		t.Fatal("firmware does not advertise the enhanced keyboard")
+	}
+	k := newKeyboard(func(uint32, bool) error { return nil })
+	if err := k.io(hypervisor.X86Exit{Port: 0x60, Size: 1, Write: true, Data: []byte{0xf2}}); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []byte{0xfa, 0xab, 0x83} {
+		if len(k.queue) <= i || k.queue[i].value != want || k.queue[i].mouse {
+			t.Fatalf("enhanced keyboard ID response = %+v", k.queue)
+		}
+	}
 }
 func TestBIOSKeyboardTranslationAndStatus(t *testing.T) {
 	p := keyboardFirmwarePC()

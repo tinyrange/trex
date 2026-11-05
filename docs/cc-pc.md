@@ -101,6 +101,11 @@ asynchronous IRQ delivery, with register state serialized before guest access.
 selects a PIO-only disk. This allows a guest profile to choose the transfer
 mode independently of its bus topology.
 
+`cc.backend(pci_display=True)` exposes the TRF1 aperture as PCI display
+device `1234:cc02` at bus 0, device 2. Its fixed 8 MiB memory BAR starts at
+`0xe0000000`; a compatible guest display driver owns mode selection.
+Direct Darwin boot continues to expose this device automatically.
+
 `cc.backend(pci_ide=True)` enables ACPI and a generic PCI IDE controller at
 00:01.0 (1234:cc01). It retains compatibility-mode ports and IRQ14/15 and
 provides the standard 16-byte bus-master register block in BAR4. PIO and
@@ -188,6 +193,8 @@ not conceal data written to the wrong RAM backing.
 `vm.extension("cc.v1").state()` returns a serialized observation containing
 PC, CR0/CR3, last BIOS service, ATA task registers and command count, VGA
 access count, PIC/PIT state, and bounded keyboard/CMOS transaction tails.
+Serial inspection reports the divisor, interrupt/line/modem registers, pending
+cause and byte counts without consuming input or acknowledging interrupts.
 PCI inspection includes the configuration-address latch, controller header,
 and bitmaps of configuration dwords read and written.
 It also exposes integer registers, CR2/CR4, the IDT base, CS/DS/ES/SS selectors
@@ -207,6 +214,13 @@ and guest failure. Devices use the same bus routing as ordinary execution.
 Reading a screenshot or state serializes with execution. Closing the VM
 releases KVM and RAM and is idempotent; stopping preserves inspection until
 close. Events support `debug.select` and the portable automation helpers.
+
+`descriptors(table="ldt", start=0, count=64)` reads up to 256 entries from the
+current GDT or LDT in 16/32-bit protected mode. Each entry reports its selector,
+base, effective limit, type, privilege level, present bit and operand-size flags.
+The range is clipped at the descriptor-table limit; an offset beyond that limit
+is an error. Reads use the current page tables and do not change guest state.
+IA-32e tables and absent LDTs are rejected explicitly.
 
 This platform supports one IDE disk (or one NVMe disk with x86_64 UEFI), BIOS modes 03h/06h/10h/12h, UEFI GOP, PNG capture,
 keyboard transitions, chords and relative PS/2 pointer input. Text injection,
@@ -274,6 +288,22 @@ input and screenshot caption checks, and are not general application speedups.
 aperture path. VGA tests cover masked writes and latches; native CPU tests check
 repeated cancellation followed by resumed IO.
 
+### Serial byte channel
+
+`vmm.channel("serial", name="agent")` attaches COM1 at I/O 3f8h, IRQ 4,
+with BIOS data-area and ACPI enumeration. `vm.channel("agent")` provides the
+portable bidirectional byte-channel interface. One named endpoint is allowed:
+either serial or shared memory. Raw bytes are preserved; a full receive FIFO
+applies host backpressure instead of dropping input.
+
+The UART implements divisor latches, 1/16-byte receive buffering, FIFO interrupt
+thresholds, the four-character receive timeout, line/modem status, loopback,
+and OUT2-gated IRQ delivery. Receive deadlines use the VM clock. Transmit output
+has a bounded queue and also remains visible in the existing console capture.
+Fresh native USER communication smokes pass on Windows 1.01, 2.03 and 3.11.
+BIOS INT14 initialization and status operate on the same advertised COM1;
+absent ports and unimplemented BIOS functions retain explicit failure status.
+
 ### Shared-memory byte channel
 
 `vmm.channel("shared-memory", name="agent")` attaches one optional 4 KiB
@@ -295,15 +325,51 @@ protocols remain in their owning recipes.
 ### RAM framebuffer protocol
 
 The host maps an additional 8 MiB of ordinary RAM at physical `0xe0000000`,
-outside the RAM advertised by the BIOS. Six little-endian words describe the
+outside the RAM advertised by the BIOS. Six little-endian uint32 fields describe the
 TRF1 protocol: magic `0x31465254`, active, width, height, stride, and format
-(`1` = BGRX). Pixels begin at offset 4096. A guest driver activates a mode
+(`1` = BGRX; `2` = monochrome, most-significant bit first, zero black and one white). Stride is measured in bytes, including any row padding. Pixels begin at offset 4096. An optional `CUR1` cursor record at offset 512 supplies signed location and hotspot coordinates plus 32×32 AND/XOR masks; capture composites it without modifying guest pixels. The guest publishes cursor activation only after the shape is complete. A guest driver activates a mode
 and renders into this allocation. Captures validate its dimensions and stride,
 copy pixels while the guest CPU is stopped, and fall back to emulated VGA
 before mode activation. The protocol and decoder live in `vmm/ramfb`.
 
+Real-mode drivers can select a smaller aperture with one DWORD write of the
+TRF1 magic to I/O port `0x514`. This replaces VGA/option-ROM memory routing at
+`0xa0000..0xe0fff` with ordinary RAM: a 4 KiB header followed by 256 KiB of
+pixels at `0xa1000`. Conventional RAM below 640 KiB and the system BIOS at
+`0xf0000` remain intact. First activation clears this allocation; repeating
+activation preserves its contents. A DWORD zero write disables it and restores
+normal routing. Capture and resize use the selected aperture. Unmodified
+guests retain VGA behavior. Monochrome rows are word-aligned and fit
+1920×1080 pixels in this smaller allocation.
+
+Live resolution changes require a guest driver and helper implementing the
+optional RSZ1 mailbox in the same header. All entries are little-endian uint32:
+
+| Byte offset | Owner | Meaning |
+| --- | --- | --- |
+| 24 | Guest | `0x315a5352` (`RSZ1`) |
+| 28 | Guest | `1` only while the mode-switch endpoint is ready |
+| 32, 36 | Host | Requested width and height |
+| 40 | Host | Nonzero request sequence, published after dimensions |
+| 44 | Guest | Completed request sequence, published last |
+| 48 | Guest | Signed mode-switch result: zero means applied successfully |
+| 52, 56 | Guest | Maximum supported width and height |
+
+The host never rewrites the active framebuffer dimensions. The guest switches
+Windows' mode, commits its new TRF1 layout, and only then acknowledges success.
+Restart-required results count as failures. Old completions cannot satisfy newer
+requests. Limits must fit the selected aperture and pixel format; the current
+drivers advertise at most 1920×1080. Fixed
+drivers and firmware GOP leave RSZ1 inactive, preserving their existing modes.
+Host mailbox accesses use the same all-vCPU pause barrier as capture; the CPUs
+run while waiting for the guest. `vm.resize_ready` observes readiness and
+`vm.resize(width, height, timeout=60)` waits for acknowledgement and verifies the
+committed layout. Cancellation stops waiting; it does not roll back a guest
+mode switch that has already begun.
+
 Guest-specific driver implementations and installation policy belong to the
-image recipe. TinyRangeX provides the NT 3.1 implementation. Trex supplies
+image recipe. TinyRangeX provides implementations for its Win16, Win9x and NT
+profiles. Trex supplies
 `windows.pe32_link` for in-memory i386 object linking and stdcall adapters,
 and `windows.pe(...).with_resources` for PE resource construction.
 

@@ -44,6 +44,9 @@ func TestProfileLifetimesImagesAndInterrupts(t *testing.T) {
 	if p.Samples != 7 || p.UnknownProcess != 1 || p.UnknownImage != 3 {
 		t.Fatalf("samples=%d unknown process=%d image=%d", p.Samples, p.UnknownProcess, p.UnknownImage)
 	}
+	if len(p.ImageEvents) != 6 || p.ImageEvents[0].Base != 0x10000 || p.ImageEvents[1].Opcode != 2 || p.ImageEvents[2].Path != "b.dll" || p.ImageEvents[5].Opcode != 4 || p.ImageEvents[5].Tick != 1020 {
+		t.Fatalf("lost image load/unload/rundown epochs: %+v", p.ImageEvents)
+	}
 	seen := map[string]uint32{}
 	interrupts := 0
 	for _, s := range p.Points {

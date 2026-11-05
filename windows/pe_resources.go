@@ -619,6 +619,10 @@ func peImportsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if err != nil {
 		return nil, err
 	}
+	return peImportsValue(imports)
+}
+
+func peImportsValue(imports []peImport) (starlark.Value, error) {
 	out := make([]starlark.Value, 0, len(imports))
 	for _, imp := range imports {
 		dict := starlark.NewDict(4)
@@ -645,7 +649,7 @@ func peImportsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 				return nil, err
 			}
 		}
-		if imp.ordinal != 0 {
+		if imp.name == "" {
 			if err := dict.SetKey(starlark.String("ordinal"), starlark.MakeInt(int(imp.ordinal))); err != nil {
 				return nil, err
 			}

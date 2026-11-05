@@ -30,10 +30,29 @@ go run ./cmd/trex scripts/guest/windows_extension/check.star
 go test ./scripts/guest/dos_extension
 ```
 
-The image check compiles both variants and checks loader-sensitive headers,
+The image check compiles the file, display and computer-use variants and checks loader-sensitive headers,
 segment/stack bounds, import-name resolution, and native-call relocations.
 Fresh guest integration remains necessary. The private repository supplies
 `scripts/smoke/windows_extension.star` and `windows_extension_client.star`.
+
+`compile_win16(display_agent=True)` builds a compact native display observation
+endpoint with `ping`, `launch`, and `display_geometry`. The latter reports
+`width`/`height` from USER.GetSystemMetrics and `device_width`/`device_height`
+from GDI.GetDeviceCaps on a temporarily acquired desktop DC. This separate
+build keeps both it and the file-service build within the 64 KiB code-segment
+limit. The computer-use build also advertises `display_geometry`.
+Fresh CrumbleCracker COM1 smokes verify all four values against framebuffer
+capture on Windows 1.01 (640×350), 2.03 (640×480), and 3.11 (640×480).
+These checks observe native geometry; they do not demonstrate a live mode change.
+
+`compile_win16(resize_helper=True)` builds a separate windowless task for the
+recipe's native framebuffer driver and USER geometry extension. It polls the
+TRF1/RSZ1 mailbox through GDI Escape, applies geometry through the USER entry,
+and acknowledges success only when both USER and GDI report the requested size.
+It needs no serial connection. Real-mode Windows may compact its data segment,
+so it refreshes DS before forming far pointers. Each loop explicitly yields to
+other cooperative tasks. The private fresh-image resize smokes cover Windows
+1.01, 2.03, 3.11 and Workgroups 3.11 with the same live Notepad instance.
 
 ## Windows 1.01 computer use
 
@@ -56,6 +75,24 @@ explicit handle release. A completed process may legitimately have exit code
 259: inspect the wait result before GetExitCodeProcess. Process slots are reused
 and are not durable identifiers. Output capture and Unicode are not implemented.
 Paths support ASCII long filenames within the 259-byte bound, not extended paths.
+`display_geometry()` returns USER's screen dimensions and GDI's device extent,
+using a freshly acquired and released desktop DC on every call.
+`read_ini(path, section, key)` returns the native profile API's value as hex,
+bounded to 255 bytes. An absent key returns an empty string; this observes
+Windows' profile resolution, which can differ from the file's contents.
+`read_registry(root, key, name)` reads one native value from `HKLM`, `HKCC`,
+`HKCU`, or `HKU`; its result contains the numeric `type` and `data_hex`.
+Keys are opened read-only and closed after both successful and failed queries.
+Values over 256 bytes are rejected. The native x86/x64 ABI and bounds are checked
+by `registry_check.star`.
+
+`compile_pe(trust=True)` adds `verify_trust(path)` on Windows XP and later.
+It asks the native Authenticode provider to verify the file, suppresses UI and
+network retrieval, and always releases verification state. The result contains
+`trusted` (true only for status zero) and the unsigned 32-bit native `status`.
+This observes the guest's certificate stores and local revocation cache; it
+does not perform an online revocation check. The default build retains its
+older Windows imports and does not advertise this command.
 
 The `early_nt=True` 386 backend targets NT 3.1's PE version and baseline imports.
 It distinguishes PC-relative x86 data references from absolute IAT calls and
@@ -70,6 +107,15 @@ on Windows 2000 Professional SP1, Advanced Server SP4 and Datacenter SP1;
 XP Professional SP3 x86 and x64 SP2; Server 2003 R2 Standard SP2; Vista Ultimate SP2 x86;
 and Windows 7 Ultimate SP1 x86. XP x64 uses a native AMD64 endpoint; the other
 listed targets use 386.
+`window_visible(class_name, title)` queries `FindWindowA` and `IsWindowVisible` on
+the endpoint's desktop. Supply an ASCII class, title, or both; one empty
+argument is a wildcard. It returns false for absent or hidden windows and
+does not activate or alter a window. GUI automation can use this to distinguish
+endpoint readiness from shell or application visibility during first logon.
+`window_active(class_name, title)` additionally requires that the matching
+window is foreground, using `GetForegroundWindow`. This prevents input from
+going to another visible window; the query itself does not change focus.
+
 The private repository supplies `windows_pe_extension.star` and
 `windows_pe_extension_client.star`: 4096-byte binary I/O, long-name enumeration,
 rename/remove, native GUI launch, input-idle synchronization, process

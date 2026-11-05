@@ -1,11 +1,17 @@
 """Build a native PE endpoint entirely in memory."""
-def compile_pe(trex_root = ".", architecture = "386", early_nt = False):
+def compile_pe(trex_root = ".", architecture = "386", early_nt = False, trust = False):
     if architecture not in ["386", "amd64", "arm64"]:
         fail("unsupported Windows agent architecture " + architecture)
     source = directory()
     source.write("/go.mod", "module winext\n\ngo 1.25\n")
-    for name in ["main.go", "manifest.go"]:
+    for name in ["main.go", "manifest.go", "registry.go"]:
         source.write("/agent/" + name, open(trex_root + "/scripts/guest/windows_extension/win32/" + name))
+    if trust:
+        if early_nt:
+            fail("native trust verification requires Windows XP or later")
+        source.write("/agent/extra.go",open(trex_root+"/scripts/guest/windows_extension/win32/trust.go"))
+    else:
+        source.write("/agent/extra.go","package main\nconst extraManifest = \"\"\nfunc dispatchExtra() bool { return false }\n")
     source.write("/agent/protocol.go", open(trex_root + "/scripts/guest/dos_extension/protocol.go"))
     target = "windows/" + architecture
     backend = ""

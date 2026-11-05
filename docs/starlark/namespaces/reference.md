@@ -2149,6 +2149,9 @@ Models deterministic allocation, strings, paths, files, and OS facts.
     their return; queries include kind, module and found, plus procedure or API
     fields. A capability guard may raise there; machine.run can retry the same
     pending lookup after the required implementation has been installed.
+    `version.native_machine` may explicitly select IMAGE_FILE_MACHINE_I386
+    (0x14c) or AMD64 (0x8664) for native-system/WOW64 queries. Omission preserves
+    a native process of the emulated image architecture; it never uses the host.
     `files` maps guest paths to bytes or trex files. They are made
     available directly to target file APIs without host filesystem staging.
     `directories` supplies empty or otherwise implicit guest directories.
@@ -4436,9 +4439,9 @@ Performs one sequential HTTP(S) GET into an in-memory file, with normal redirect
 
 ### `http_post_json`
 
-`http_post_json(url, body, maximum=8MiB, timeout=60, tls_roots=None) -> file`
+`http_post_json(url, body, maximum=8MiB, timeout=60, tls_roots=None, response=False, headers=None, http_version='auto') -> file or response dict`
 
-Sends a UTF-8 JSON string (or empty body) as application/json, returning a bounded in-memory file. Request body is limited to 1MiB; response maximum is 1..128MiB after transfer decompression. Requires HTTP 200, never follows redirects or retries, honors lifecycle cancellation and a 1..3600 second deadline. Does not add authentication headers. tls_roots optionally supplies 1..16 DER/PEM CA files or bytes (up to 1MiB each); an isolated per-request root pool replaces system roots while preserving hostname, validity and chain verification. No global trust changes, implicit certificate fetching or insecure fallback. Intended for metadata; payloads should use file APIs.
+Sends a UTF-8 JSON string (or empty body) as application/json, returning a bounded in-memory file. Request body is limited to 1MiB; response maximum is 1..128MiB after transfer decompression. By default requires HTTP 200 and rejects oversized responses. response=True instead returns a frozen dictionary for any HTTP status with status, status_code, protocol, headers, trailers, content_length, transfer_encoding, uncompressed, body (file), body_truncated, read_error and complete. Header/trailer values are lists, preserving repeated fields. It reads at most maximum+1 decoded body bytes and retains a maximum-byte prefix; complete is false on truncation or read failure. Trailers may be incomplete unless complete is true. TLS responses additionally expose tls_alpn, tls_version and tls_server_name. http_version defaults to auto; 1.1 creates an isolated HTTP/1-only transport with HTTP/2 disabled and hostname/certificate verification unchanged. The returned protocol and TLS ALPN expose what was actually used. Transport/TLS failures still raise. Never follows redirects or retries; honors lifecycle cancellation and a 1..3600 second deadline. Response bodies may be gzip-decoded by HTTP; uncompressed identifies that transformation. headers optionally supplies at most 64 string-to-string fields, bounded to 64KiB. Names/control characters and case-insensitive duplicates are checked; Host, Content-Length, Transfer-Encoding, Connection, Content-Type and idempotency-key overrides are rejected. Empty User-Agent suppresses the generated header entirely rather than sending an empty value. No token acquisition or credential lookup is performed. tls_roots optionally supplies 1..16 DER/PEM CA files or bytes (up to 1MiB each); an isolated per-request root pool replaces system roots while preserving hostname, validity and chain verification. No global trust changes, implicit certificate fetching or insecure fallback. Intended for metadata; payloads should use file APIs.
 
 ### `mirror_file`
 
@@ -4504,7 +4507,7 @@ Reads unencrypted APPX/MSIX packages and bundles through portable files. identit
 
 `archive.ar(file, maximum_entries=1M, maximum_metadata=64MiB) -> ar`
 
-Parses Unix ar or AIX small indexed ar into ordered member metadata and borrowed file views. find(name, occurrence) distinguishes duplicate names. AIX archives follow double-linked member order rather than physical order, validating first/last endpoints, member-table names and offsets, optional symbol references, free-list links and non-overlapping ranges. Deleted members are not active files. maximum_entries and maximum_metadata bound indexing; no linking, object loading or installation is performed. AIX big indexed archives remain unsupported.
+Parses Unix ar (including Microsoft COFF-library NUL-terminated long names) or AIX small indexed ar into ordered member metadata and borrowed file views. find(name, occurrence) distinguishes duplicate names. AIX archives follow double-linked member order rather than physical order, validating first/last endpoints, member-table names and offsets, optional symbol references, free-list links and non-overlapping ranges. Deleted members are not active files. maximum_entries and maximum_metadata bound indexing; no linking, object loading or installation is performed. AIX big indexed archives remain unsupported.
 
 ### `archive.arsenic`
 
@@ -4542,11 +4545,29 @@ Reads classic uncompressed BRU backups, validating each 2 KiB record's signed-by
 
 Reads full, single-volume historical BSD dumps with 1024-byte records, magic60012 and old 128-byte UFS inodes, in either byte order. Validates header checksums, tape positions, record identity, address flags, complete inode payloads and directory structure. Returns entries, paths in files, find(path), dump date and raw allocated_map/dumped_map file views. Entries expose the same inode metadata and data views as filesystem.ufs; holes read as zeroes, hard links share data, symlinks are not followed and device nodes are metadata only. maximum_entries bounds both inode records and reachable paths; maximum_decoded_bytes bounds input size and cumulative logical inode bytes. Incremental dumps require a base image and are rejected, as are other dump generations and multi-volume streams. Dumped inode bitmap membership is checked against recovered records and the allocation map. Nested payloads require separate decoders.
 
+### `archive.burn_containers`
+
+`archive.burn_containers(file) -> list[file]`
+
+Reads WiX v3 Burn attached CAB container boundaries from PE metadata, returning portable file slices in UX-first order. Rejects unsupported, detached, or truncated layouts without executing the bootstrapper.
+
 ### `archive.bzip2`
 
 `archive.bzip2(file, maximum_bytes=<unlimited>, cache=False) -> file`
 
 Opens concatenated bzip2 streams, including legacy randomized blocks, as a lazy read-only file with a bounded decoded block cache. Block and stream checksums are checked during reads; size scans the complete stream. Omitted maximum_bytes has no decoded-length ceiling; an explicit positive maximum is enforced. cache=True requires explicit positive maximum_bytes, eagerly validates every member to EOF, and returns an immutable paged RAM snapshot supporting random access without replay or host files; integrity or overflow failures return no partial result. Does not interpret an archive inside the stream.
+
+### `archive.c2r`
+
+`archive.c2r(database, stream) -> entries/find`
+
+Indexes an Office Click-to-Run full stream using a schema-5 UnityDB. Entries expose package-relative path, size, packages, data and verify(); find is case-insensitive. Lazy reads verify stored-block SHA256 and bounded zlib decoding. verify() also checks the complete logical-file SHA256. Metadata references, block coverage, source extents and paths are validated before returning. Uses one shared decoded-block cache; keep both sources unchanged. Does not apply deltas, install Office, interpret App-V manifests, activate products, or authenticate catalog signatures. Pin or authenticate metadata separately.
+
+### `archive.c2r_database`
+
+`archive.c2r_database(file) -> frozen dict[str, list[tuple]]`
+
+Decodes a bounded version-0x30 Office UnityDB into frozen literal tables. Checks declared extents, zlib framing and decoded SQL SHA-256; SQL statements are never executed. Supports the emitted integer/string INSERT subset, not arbitrary SQLite. Integrity checks do not authenticate the publisher.
 
 ### `archive.cab`
 
@@ -4728,6 +4749,12 @@ Reads level-0 LHA headers and stored lh0 or Huffman/LZSS lh5 payloads. Checks he
 
 Opens Apple LZFSE v1/v2, LZVN and stored-block streams as a read-only file. Bounds block size/count and retains a 64 MiB decoded cache plus 256 KiB match history. Backward reads outside cache replay preceding dependent blocks. Validates entropy states, source/output lengths, match distances and end marker; LZFSE has no content checksum. Explicit maximum_bytes bounds total decoded bytes. No host or C decoder is used.
 
+### `archive.lzma`
+
+`archive.lzma(file, maximum_bytes=512MiB, max_dictionary=64MiB) -> file`
+
+Decodes one standalone LZMA stream into a bounded in-memory file. Checks header size, dictionary limit, decoded length, stream termination and trailing data. LZMA has no checksum; callers must authenticate the enclosing payload. This does not interpret the decoded archive.
+
 ### `archive.mac_resource`
 
 `archive.mac_resource(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
@@ -4745,6 +4772,12 @@ Decodes NSIS 2 ANSI non-solid stored/DEFLATE metadata and file payloads natively
 `archive.nsis_list(file, maximum_scan=16MiB, maximum_metadata=64MiB, maximum_instructions=1000000) -> record`
 
 Lists File instructions from the NSIS 2 ANSI non-solid stored/NSIS-DEFLATE metadata layout without executing the installer or reading member contents. Returns format, header_offset, data_offset, header_size, header_compression, instruction_count and ordered entries. Entries retain name, raw_name bytes, instruction index, output_directory_hint, directory_instruction, relative data_offset, absolute offset of the member length word, packed_size, compressed and filetime. Repeated names and payload references are preserved. Directory hints are only the nearest preceding SetOutPath in bytecode order, not resolved installation destinations; variables, shell folders and language references remain symbolic, and literal dollars are doubled. Version-dependent variables remain numeric. This is a listing, not an installation plan or readable file view: no decoded sizes, CRC verification or extraction are claimed. Solid streams, other codecs and Unicode metadata are not supported. Zero limits select defaults; limits bound signature scanning, packed/decoded metadata, rendered text and instruction count.
+
+### `archive.omaha_payload`
+
+`archive.omaha_payload(file, maximum_bytes=512MiB, max_dictionary=64MiB) -> file`
+
+Decodes an Omaha metainstaller LZMA/BCJ2 payload resource into a portable file, normally a tar archive. Bounds both expanded stages, validates all four stream extents and complete BCJ2 termination. Does not select PE resources, execute installer code, authenticate publishers or apply installation effects.
 
 ### `archive.pack`
 
@@ -4834,7 +4867,7 @@ Reads a complete single-volume VMS BACKUP block stream, validating header CRC-16
 
 `archive.wim(file, references=[], cache_bytes=384MiB) -> wim`
 
-Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image. Nonnegative cache_bytes bounds retained decoded chunks shared with reference archives; zero disables retention. Large multi-chunk reads use bounded parallel decoding and join all workers before returning. Entry and file metadata expose tagged_items as ordered tag/data records, retaining unknown extensions. apply preserves Windows tag-2 extended attributes (names, flags and value bytes) for supporting filesystem builders; it does not synthesize trust verdicts or apply unknown tags.
+Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image. Nonnegative cache_bytes bounds retained buffers shared with reference archives; zero disables retention. Large solid LZMS archives split that same budget between decoded chunks, a small decoded hot-file tier and compressed in-memory blobs (whole small files and at most 32MiB per segment of large files), keyed by the complete WIM SHA-1 and segment ordinal. No decoded data is persisted. cache_stats.bytes/entries/peak_bytes aggregate these tiers; blob_bytes counts encoded retained bytes, blob_hits/blob_loads count compressed-tier accesses, and recent_files is a bounded chronological window of the last 64 cold file reads. prefetch(paths) validates at most 200000 explicit file paths before payload reads, deduplicates content, and prepares eligible solid files in physical chunk order with at most four joined workers; returns the unique source byte count. Prefetch does not pin entries or exceed the cache budget, and ordinary non-solid files are not eagerly read. Large multi-chunk reads use bounded parallel decoding and join all workers before returning. Entry and file metadata expose tagged_items as ordered tag/data records, retaining unknown extensions. apply preserves Windows tag-2 extended attributes (names, flags and value bytes) for supporting filesystem builders; it does not synthesize trust verdicts or apply unknown tags.
 
 ### `archive.xar`
 
@@ -5318,9 +5351,9 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 ### `cc.backend`
 
-`cc.backend(acpi=False, pci_ide=False, hpet=False, uefi=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
+`cc.backend(acpi=False, pci_ide=False, pci_display=False, hpet=False, uefi=False, usb=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
 
-Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. Native UEFI PCs accept cpus=1..4 as one package without SMT; other PC profiles remain single-CPU. All-core pause/stop/capture barriers precede inspection and teardown. cc.v1.cpus() returns per-core register summaries; state/read_virtual use CPU0, and breakpoint/step require one CPU. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 16 GiB with uefi=True. usb=True on x86_64 enables a UHCI keyboard and absolute pointer with wheel; PS/2 keyboard fallback remains until USB enumeration. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. Native UEFI PCs accept cpus=1..4 as one package without SMT; other PC profiles remain single-CPU. All-core pause/stop/capture barriers precede inspection and teardown. cc.v1.cpus() returns per-core register summaries; state/read_virtual use CPU0, and breakpoint/step require one CPU. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 16 GiB with uefi=True. usb=True on x86_64 enables a UHCI keyboard and absolute pointer with wheel; PS/2 keyboard fallback remains until USB enumeration. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_display=True exposes the 1234:cc02 TRF1 PCI framebuffer at bus 0 device 2, with an 8 MiB BAR at 0xe0000000; it requires a compatible guest display driver. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
 ### `cc.boot_bsd`
 
@@ -6328,9 +6361,9 @@ Converts a wire-format SID to AD's stored form by reversing only the final subau
 
 ### `windows.api_set_namespace`
 
-`Decodes a raw v6 API-set namespace (.apiset section bytes or a file slice), limited to 16 MiB. Returns version, flags, hash_factor, entries and resolve(contract, importer=""). Entries preserve flags, UTF-16 hashed_length and ordered importer/host records. resolve uses the validated hashed prefix excluding the final revision, then selects an exact importer override or value-zero fallback; it does not guess nearest versions. Names are bounded ASCII UTF-16 module basenames; unresolved or empty hosts return None. Rejects unsupported versions, malformed offsets/counts/names, duplicate contracts/importers and ambiguous or inconsistent hash indexes. The result owns its parsed data. Does not load DLLs, invent hosts, initialize modules, implement their exports or confer trust.`
+`windows.api_set_namespace(data=None, file=None) -> namespace`
 
-Decodes a raw v6 API-set namespace (.apiset section bytes or a file slice), limited to 16 MiB. Returns version, flags, hash_factor, entries and resolve(contract, importer=""). Entries preserve flags, UTF-16 hashed_length and ordered importer/host records. resolve uses the validated hashed prefix excluding the final revision, then selects an exact importer override or value-zero fallback; it does not guess nearest versions. Names are bounded ASCII UTF-16 module basenames; unresolved or empty hosts return None. Rejects unsupported versions, malformed offsets/counts/names, duplicate contracts/importers and ambiguous or inconsistent hash indexes. The result owns its parsed data. Does not load DLLs, invent hosts, initialize modules, implement their exports or confer trust.
+Decodes a raw v6 API-set namespace (.apiset section bytes or a file slice), limited to 16 MiB. Accepts exactly one positional/data or file argument. Also supports the immutable inspection mapping keys version, flags, hash_factor and contracts (with ordered alias/host dictionaries), and a contracts attribute. Returns version, flags, hash_factor, entries and resolve(contract, importer=""). Entries preserve flags, UTF-16 hashed_length and ordered importer/host records. resolve uses the validated hashed prefix excluding the final revision, then selects an exact importer override or value-zero fallback; it does not guess nearest versions. Names are bounded ASCII UTF-16 module basenames; unresolved or empty hosts return None. Rejects unsupported versions, malformed offsets/counts/names, duplicate contracts/importers and ambiguous or inconsistent hash indexes. The result owns its parsed data. Does not load DLLs, invent hosts, initialize modules, implement their exports or confer trust.
 
 ### `windows.appx_package_acl`
 
@@ -6421,6 +6454,12 @@ Parses signed-catalog CTL lookup entries into `sha1` and `sha256` byte lists. Ve
 `windows.catalog_members(value)`
 
 Reads a PKCS#7 catalog and returns its member digest byte strings. Extracting membership does not verify the catalog signature or establish certificate trust.
+
+### `windows.catalog_sign`
+
+`windows.catalog_sign(members, identity, created_at, os_attributes="") -> bytes`
+
+Builds a native RSA/SHA-256 signed CTL catalog from a dictionary of simple filenames to files or bytes. PE members use the catalog image digest; ordinary files use their full byte digest. Includes File, SIP member information, and optional OSAttr attributes. Creation time is explicit Unix seconds. Supports 1–4096 members, at most 64 MiB each and 256 MiB total. Returns bytes; does not install trust or change guest signing policy.
 
 ### `windows.catalog_signature`
 
@@ -6540,13 +6579,19 @@ Validates X.509 paths using only explicit roots (at most 64), intermediates (at 
 
 `windows.cli_inspect(value, method='') -> record`
 
-Reads CLI metadata and selected managed method bodies without executing them. Accepts a portable file or bytes, at most 32 MiB. Returns entry_point (raw COR header entry field), rows (token, columns in ECMA-335 table order), strings (user-string token to text), and methods (token, name, instructions). String/blob columns are decoded; coded references and table indexes become tokens, except null remains zero; list-end sentinels are preserved as token-shaped indexes. Other columns retain their integer value, including GUID heap indexes. method is a case-sensitive method-name substring; empty selects all IL bodies. Each instruction has offset relative to IL code, numeric opcode, raw operand bytes and token (zero for non-token operands). Bounds tables/heaps/bodies, limits rows to 100000, decoded row heaps to 64 MiB and instructions to 1000000, and rejects unknown opcodes. Does not verify IL stack/control flow, resolve external assemblies, decode signatures or exception clauses, evaluate feature gates, or claim observed runtime effects.
+Reads CLI metadata and selected managed method bodies without executing them. Accepts a portable file or bytes, at most 32 MiB. Returns runtime_version (metadata version string without trailing NUL padding), cor_flags (raw COR header flags), entry_point (raw COR header entry field), rows (token, columns in ECMA-335 table order), strings (user-string token to text), and methods (token, name, instructions). String/blob columns are decoded; coded references and table indexes become tokens, except null remains zero; list-end sentinels are preserved as token-shaped indexes. Other columns retain their integer value, including GUID heap indexes. method is a case-sensitive method-name substring; empty selects all IL bodies. Each instruction has offset relative to IL code, numeric opcode, raw operand bytes and token (zero for non-token operands). Bounds tables/heaps/bodies, limits rows to 100000, decoded row heaps to 64 MiB and instructions to 1000000, and rejects unknown opcodes. Does not verify IL stack/control flow, resolve external assemblies, decode signatures or exception clauses, evaluate feature gates, or claim observed runtime effects.
 
 ### `windows.clone_file_entries`
 
 `windows.clone_file_entries(entries) -> dict`
 
 Copies a path-to-metadata dictionary and each distinct entry dictionary, preserving insertion order and alias groups: names sharing one entry share one new entry in the clone. The cloned dictionaries are independently mutable from the source; equal-valued but distinct entries remain distinct. File sources and other field values remain shared and are not read.
+
+### `windows.coff`
+
+`windows.coff(source, maximum=64MiB) -> record`
+
+Inspects a bounded standard COFF object in memory. Returns machine, sections (index, name, bytes data, size, characteristics, relocations) and primary symbols (index including auxiliary slots, name, value, section, type, storage_class, aux_count). Relocations retain offset, numeric type, symbol_index and resolved symbol. Rejects PE images, bigobj and overflow relocation tables. maximum defaults to 64MiB.
 
 ### `windows.compile_sddl`
 
@@ -6579,7 +6624,7 @@ Compares two Windows 9x CREG registry files structurally and returns a differenc
 
 `windows.creg_from_patches(name, patches, keys=[], state=1, generation='windows95') -> file`
 
-Constructs a Windows 9x CREG registry file from a name, value patches and optional key records. generation selects the intended Windows 9x layout; this is not an NT REGF hive writer.
+Constructs a Windows 9x CREG registry file from a name, value patches and optional key records. generation selects windows95, windows95_rtm, windows_nashville, windows98_fe, windows98 (SE), or windowsme, including their navigation page and allocator layouts; this is not an NT REGF hive writer.
 
 ### `windows.creg_keys`
 
@@ -6803,7 +6848,7 @@ and event limits. Returns image identities, process lifetimes, aggregated
 `points` (process/module indices, RVA, interrupt flag, sample count), loss
 metadata and explicit unknown counts. Index -1 means unknown; an unmapped
 RVA retains the absolute IP. Counts are self samples, not elapsed time or
-inclusive stacks. End rundown is not treated as an earlier image load.
+inclusive stacks. Also returns timestamp-sorted `image_events` (tick, pid, opcode, base, path, size, timestamp, checksum) from native load/unload/rundown records for explicit cross-trace address correlation. Callers must compare trace clocks and boot identity, respect process/address reuse, and retain ambiguous mappings. End rundown is not treated as an earlier image load.
 No symbols or network requests are implicit.
 
 `windows.pe(file).symbolize(pdb, rvas, timestamp, image_size, checksum)` resolves
@@ -6867,7 +6912,7 @@ fail rather than silently truncating. No symbols or network access is implicit.
 
 `windows.etl_walk(file, visit, group=-1, opcode=-1, min_tick=0, max_tick=0, max_events=4000000) -> dict`
 
-Visits raw records from a finalized sequential uncompressed kernel ETL in file order, NOT timestamp order. Calls visit(record); callback return values are ignored and errors stop traversal. Records contain offset, tick, cpu, header_type, group, opcode, version, pid, tid and owned payload bytes. Unavailable PID/TID are 0xffffffff; non-kernel group is 255. Optional group/opcode (-1 or 0..255) and inclusive raw min_tick/max_tick filters select callbacks; max_tick=0 is unbounded. The entire file is still validated and all records count toward max_events (1..4000000); input is bounded to 1 GiB and buffers to 1 MiB. Returns logfile header and loss counters. Callers must check loss, interpret clocks and schemas, account for lifecycle reuse and sort selected records before scheduler attribution. A thread running on the ReadyThread CPU is not proof of the wake source: interrupts may intervene. No symbols, inferred dependency claims, guest execution or network access.
+Visits raw records from a finalized sequential uncompressed kernel ETL in file order, NOT timestamp order. Calls visit(record); callback return values are ignored and errors stop traversal. Records contain offset, tick, cpu, header_type, group, opcode, version, pid, tid and owned payload bytes. Also exposes marker, provider_id (16 GUID bytes in Windows byte order), event_id, message_flags, header_flags and activity_id (16 GUID bytes). Modern event extensions are separated from user payload: extensions contains type, linkage, owned data bytes, match_id, pointer_size and stack address values. Stack types 5/6 decode 32/64-bit addresses; unknown types remain opaque. Extension chains are limited to 128 items and malformed bounds fail. Supports bounded WPP TraceMessage framing (marker 0x9000); its optional timestamp/TID/PID fields follow message_flags. Missing timestamps are zero; payload schemas are not inferred. Unavailable PID/TID are 0xffffffff; non-kernel group is 255. Optional group/opcode (-1 or 0..255) and inclusive raw min_tick/max_tick filters select callbacks; max_tick=0 is unbounded. The entire file is still validated and all records count toward max_events (1..4000000); input is bounded to 1 GiB and buffers to 1 MiB. Returns logfile header and loss counters. Callers must check loss, interpret clocks and schemas, account for lifecycle reuse and sort selected records before scheduler attribution. A thread running on the ReadyThread CPU is not proof of the wake source: interrupts may intervene. No symbols, inferred dependency claims, guest execution or network access.
 
 ### `windows.event_log`
 
@@ -7059,11 +7104,35 @@ Encodes the native missing-file resource-reference form using a package path and
 
 Extracts snap-in identifiers referenced by an MMC console file. Use the identifiers to select registration metadata; the function does not launch MMC.
 
+### `windows.ne_exports`
+
+`windows.ne_exports(source, maximum=64MiB) -> list`
+
+Inspects named and ordinal exports of a native Windows NE image through its existing bounded parser. Returns ordinal, names, segment, offset, file_offset, available bytes, entry flags, movable and constant metadata. Constant exports have no code bytes; unbacked or iterated segment storage is identified without inventing a file offset. maximum bounds input to 64MiB by default. Does not load or execute the module.
+
+### `windows.ne_extend`
+
+`windows.ne_extend(source, code, data, relocations, exports, aliases={}) -> file`
+
+Extends a Windows NE module with fixed code and data segments while preserving original segment storage, imports, resources, and exports. exports maps ordinal to an offset in the new code. relocations contains (source_type, source_offset, target_segment, target_offset) tuples: type 2 is a selector and type 3 a far pointer; target 0 denotes new code, -1 new data, -2 a movable export ordinal in target_offset, and positive values existing segments. Movable export references retain the loader thunk needed when real-mode segments move or are discarded. Each source begins with the 0xffff chain terminator. aliases maps unused ordinals to original ordinals, retaining the original entries and Windows loader prologue patching when wrappers redirect them. Clears stale fast-load metadata. Returns an in-memory file.
+
 ### `windows.ne_fastboot`
 
 `windows.ne_fastboot(modules, overlay_path='C:\\WINDOWS\\WIN100.OVL', maximum=64MiB) -> {bin, overlay}`
 
 Constructs the Windows NE fast-boot binary and overlay from supplied modules, returning bin and overlay files. overlay_path is the guest-visible location to encode, not a host output path.
+
+### `windows.ne_imports`
+
+`windows.ne_imports(source, maximum=64MiB, maximum_imports=4096) -> list`
+
+Inspects original imported relocation heads of a native Windows NE image. Each record identifies module, name or ordinal, source segment, offset, source_type and additive flag. Validates module/name tables, segment storage, relocation counts and import targets; maximum bounds input bytes and maximum_imports bounds returned records. Iterated segment relocations are explicitly unsupported. Does not apply relocations, follow loader-linked chains, load or execute the module.
+
+### `windows.ne_internal_references`
+
+`windows.ne_internal_references(source, maximum_references=65536) -> list`
+
+Expands internal NE relocation chains without loading or modifying the image. Returns source segment/offset/type, resolved target segment/offset, original entry ordinal when used, and additive status. Validates chain bounds, cycles, targets, and maximum_references. Imported and operating-system fixups are outside this view; iterated relocation storage is rejected.
 
 ### `windows.object_ace`
 
@@ -7115,7 +7184,7 @@ Links a labeled section, fixups and optional imports into a minimal PE32 executa
 
 `windows.pe32_link(object, imports, exports, callbacks=None, import_abi=None, indirect_calls=None, entry='', subsystem=3, version_major=3, version_minor=10, image_base=0x62000000, executable=False, native_dll=False) -> bytes`
 
-Links an in-memory ELF32/i386 cdecl object into a PE32 DLL, executable, or native driver. executable=True requires an entry point; native_dll=True marks a subsystem=1 module as a DLL. Imports map DLLs to symbol/argument-word dictionaries; exports and callbacks map symbols to stack-word counts. import_abi optionally selects fastcall instead of stdcall for named imports. indirect_calls maps synthetic symbols to stdcall argument counts: the cdecl caller supplies a function pointer followed by those arguments. Supports R_386_32 and R_386_PC32 relocations; rejects unresolved symbols and unsupported relocations. No OS runtime is linked.
+Links an in-memory ELF32/i386 cdecl object into a PE32 DLL, executable, or native driver. executable=True requires an entry point; subsystem=2 selects a GUI executable, subsystem=3 a console executable, and subsystem=1 a native driver. native_dll=True marks a subsystem=1 module as a DLL. Imports map DLLs to symbol/argument-word dictionaries; exports and callbacks map symbols to stack-word counts. import_abi optionally selects fastcall instead of stdcall for named imports. indirect_calls maps synthetic symbols to stdcall argument counts: the cdecl caller supplies a function pointer followed by those arguments. Supports R_386_32 and R_386_PC32 relocations; rejects unresolved symbols and unsupported relocations. No OS runtime is linked.
 
 ### `windows.pe_sign`
 
@@ -7330,6 +7399,12 @@ Retrieves a bounded symbol file from a symbol-server layout using its name and i
 
 Generates an ephemeral RSA-2048 key and self-signed code-signing certificate. not_before and not_after are explicit Unix seconds supplied by the caller. Returns an opaque identity with a public certificate attribute; does not install trust or change driver-signing policy.
 
+### `windows.type_library`
+
+`windows.type_library(value) -> dict`
+
+Reads one standalone MSFT or SLTG type library from a file or bytes, bounded to 16 MiB. Returns the same guid/name/description/version/language/lcid/flags/syskind/types fact dictionary as an element of windows.pe(file).typelibs. Rejects PE containers and unknown signatures; does not register or execute the library.
+
 ### `windows.update_catalog`
 
 `windows.update_catalog(device_attributes, caller_attributes, products, locales, user_agent, assume_non_leaf_installed, background=False, network=False) -> windows_update_catalog or windows_update_catalog_request`
@@ -7505,7 +7580,7 @@ Builds a Windows NT Winsock 2 Protocol_Catalog9 PackedCatalogItem from an ASCII 
 
 `windows.wmi_repository(files=None, documents=None, default_namespace='root\cimv2', server_name='')`
 
-Either parses supplied repository files or constructs repository files from parsed MOF documents; exactly one input mode is required. Construction uses default_namespace and server_name to resolve repository identities without running WMI.
+Parses supplied repository files, builds an NT5 repository from MOF documents alone, or appends documents to supplied modern repository files. Modern append preserves the original object store, imports existing class layouts and defaults, rejects replacement identities, and rebuilds a checksummed index with three ordered mapping checkpoints. No WMI service or compiler is executed. Modern repositories expose class_layout(namespace, name) and instances(namespace, name); intrinsic classes resolve through __SYSTEMCLASS. Creating a namespace still requires explicit policy for its __NAMESPACE entry, __thisNAMESPACE security descriptor and __SystemSecurity singleton; parsing or appending MOF does not infer namespace security.
 
 ### `windows.wow64_registry_key`
 
@@ -7793,9 +7868,9 @@ Methods and attributes: `close()`, `stats`, `stop() -> file`.
 
 ### `vm` value
 
-A live virtual machine. Input helpers send guest keys, text or pointer events; screenshot captures the display. pause/resume/reset/powerdown/shutdown/stop control lifecycle, wait observes completion and next_event consumes events. channel and debugger open declared guest endpoints; extensions expose backend-specific features. Check capabilities before using optional operations.
+A live virtual machine. Input helpers send guest keys, text or pointer events; screenshot captures the display. resize(width, height, timeout=60) requests an exact live guest resolution and returns only after it is applied; resize_ready reports current guest-driver readiness. Unsupported modes, guest rejection, and timeout raise errors. Cancellation does not undo a mode change already in progress. pause/resume/reset/powerdown/shutdown/stop control lifecycle, wait observes completion and next_event consumes events. channel and debugger open declared guest endpoints; extensions expose backend-specific features. Check capabilities before using optional operations.
 
-Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `record(width=1440, height=900, fps=30, maximum=64MiB, duration=600, lossless=False)`, `reset(timeout=30)`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
+Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `record(width=1440, height=900, fps=30, maximum=64MiB, duration=600, lossless=False)`, `reset(timeout=30)`, `resize(width, height, timeout=60)`, `resize_ready`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
 
 ### `vmm_arm64_boot` value
 
@@ -7889,9 +7964,9 @@ Methods and attributes: `kind`, `name`, `rva`.
 
 ### `windows.pe` value
 
-A lazy PE32/PE32+ inspection value. Metadata attributes expose headers, sections, imports, exports, resources, strings and debug/type-library data from an owned snapshot. Type-library registration metadata supports MSFT and SLTG resources. read/disasm use RVAs; patch returns modified file bytes without changing the original. data provides the shared immutable source snapshot.
+A lazy PE32/PE32+ inspection value. Metadata attributes expose headers, sections, imports, delay_imports, exports, resources, strings and debug/type-library data from an owned snapshot. delay_imports reports named and ordinal imports with normalized table/IAT RVAs, supporting PE32/PE32+ and legacy VA descriptors. api_set_extension reads version 7 extension contracts, counted hosts/aliases and opaque dispatch metadata without changing their bytes or signatures. Use windows.api_set_namespace for version 6 base namespaces. defender_definition reads the supported RMDX resource header and returns source created_unix/created_filetime metadata, or None when the resource is absent; malformed/ambiguous headers are rejected. It does not decompress definitions or verify signatures, trust, installation or freshness. Type-library registration metadata supports MSFT and SLTG resources. read/disasm use RVAs; patch returns modified file bytes without changing the original. data provides the shared immutable source snapshot.
 
-Methods and attributes: `codeview`, `data`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `strings`, `typelibs`, `version`, `with_resources(resources)`.
+Methods and attributes: `api_set_extension`, `codeview`, `data`, `defender_definition`, `delay_imports`, `disasm(rva, size=256)`, `exports`, `imports`, `info`, `messages`, `patch(rva, data, update_checksum=True)`, `pointer_string_tables(suffix='', minimum=2, maximum=260)`, `read(rva, size)`, `resources`, `sections`, `strings`, `typelibs`, `version`, `with_resources(resources)`.
 
 ### `windows.signing_identity` value
 

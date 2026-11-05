@@ -83,7 +83,7 @@ func (p *windowsPE) Freeze()               {}
 func (p *windowsPE) Truth() starlark.Bool  { return starlark.True }
 func (p *windowsPE) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: %s", p.Type()) }
 func (p *windowsPE) AttrNames() []string {
-	return []string{"symbolize", "amd64_unwind", "codeview", "data", "disasm", "exports", "imports", "info", "messages", "patch", "pointer_string_tables", "read", "resources", "sections", "strings", "typelibs", "version", "with_resources"}
+	return []string{"symbolize", "amd64_unwind", "codeview", "data", "disasm", "exports", "imports", "strings", "delay_imports", "api_set_extension", "defender_definition", "info", "messages", "patch", "pointer_string_tables", "read", "resources", "sections", "typelibs", "version", "with_resources"}
 }
 func (p *windowsPE) Attr(name string) (starlark.Value, error) {
 	if value, ok := p.cache[name]; ok {
@@ -97,6 +97,12 @@ func (p *windowsPE) Attr(name string) (starlark.Value, error) {
 		property = peExportsBuiltin
 	case "imports":
 		property = peImportsBuiltin
+	case "delay_imports":
+		property = peDelayImportsBuiltin
+	case "api_set_extension":
+		property = peAPISetExtensionBuiltin
+	case "defender_definition":
+		property = peDefenderDefinitionBuiltin
 	case "info":
 		property = peInfoBuiltin
 	case "messages":

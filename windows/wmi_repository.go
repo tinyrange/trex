@@ -51,6 +51,7 @@ type wmiRepositoryIndexPage struct {
 }
 
 type wmiRepositoryFile struct {
+	modern  *wmiModernMapping
 	mapping wmiRepositoryMapping
 	records []wmiRepositoryRecord
 	pages   []wmiRepositoryIndexPage
@@ -98,8 +99,8 @@ func wmiRepositoryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark
 	); err != nil {
 		return nil, err
 	}
-	if (files == nil) == (documents == nil) {
-		return nil, fmt.Errorf("wmi_repository: specify exactly one of files or documents")
+	if files == nil && documents == nil {
+		return nil, fmt.Errorf("wmi_repository: specify files, documents, or both for a modern append")
 	}
 	if documents != nil {
 		mofs := make([]*mofDocument, documents.Len())
@@ -110,7 +111,19 @@ func wmiRepositoryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark
 			}
 			mofs[index] = file.document
 		}
+		if files != nil {
+			base, err := readWMIModernRepository(files)
+			if err != nil {
+				return nil, err
+			}
+			return base.appendDocuments(mofs, defaultNamespace, serverName)
+		}
 		return buildWMIRepositoryDocumentsWithOptions(mofs, defaultNamespace, wmiRepositoryOptions{serverName: serverName})
+	}
+	if _, found, err := files.Get(starlark.String("MAPPING3.MAP")); err != nil {
+		return nil, err
+	} else if found {
+		return readWMIModernRepository(files)
 	}
 	required := []string{"MAPPING.VER", "MAPPING1.MAP", "MAPPING2.MAP", "OBJECTS.DATA", "INDEX.BTR"}
 	sources := make(starlark.StringDict, len(required))
@@ -291,9 +304,15 @@ func buildWMIRepositoryDocuments(documents []*mofDocument, defaultNamespace stri
 
 type wmiRepositoryOptions struct {
 	serverName string
+	hash       func(string) string
+	external   map[string]*wmiClassLayout
+	finish     func([]wmiPendingRecord) (*wmiRepositoryFile, error)
 }
 
 func buildWMIRepositoryDocumentsWithOptions(documents []*mofDocument, defaultNamespace string, options wmiRepositoryOptions) (*wmiRepositoryFile, error) {
+	if options.hash == nil {
+		options.hash = wmiUpperUTF16MD5
+	}
 	defaultNamespace = normalizeWMINamespace(defaultNamespace, `ROOT\CIMV2`)
 	type classEntry struct {
 		class     mofClass
@@ -304,6 +323,9 @@ func buildWMIRepositoryDocumentsWithOptions(documents []*mofDocument, defaultNam
 		declaring classEntry
 	}
 	classes := make(map[string]classEntry)
+	for identity, layout := range options.external {
+		classes[identity] = classEntry{class: layout.definition.class, namespace: layout.namespace}
+	}
 	classOrder := make(map[string]int)
 	var ordered []classEntry
 	documentInstances := make([][]mofInstance, len(documents))
@@ -372,6 +394,17 @@ func buildWMIRepositoryDocumentsWithOptions(documents []*mofDocument, defaultNam
 		return chain, nil
 	}
 	classPropertyEntries := func(entry classEntry) ([]propertyEntry, error) {
+		if layout := options.external[entry.namespace+"\x00"+strings.ToUpper(entry.class.Name)]; layout != nil {
+			props := make([]propertyEntry, len(layout.properties))
+			for i, p := range layout.properties {
+				owner, ok := lookupClass(layout.namespace, layout.declaring[i])
+				if !ok {
+					return nil, fmt.Errorf("wmi repository: missing imported property owner")
+				}
+				props[i] = propertyEntry{feature: p.feature, declaring: owner}
+			}
+			return props, nil
+		}
 		chain, err := classChain(entry)
 		if err != nil {
 			return nil, err
@@ -533,6 +566,10 @@ func buildWMIRepositoryDocumentsWithOptions(documents []*mofDocument, defaultNam
 	var pending []wmiPendingRecord
 	classRevisions := make(map[string]uint64, len(ordered))
 	nextRevision := wmiRepositoryRevisionBase
+	for identity, layout := range options.external {
+		classRevisions[identity] = layout.definition.revision
+		nextRevision = max(nextRevision, layout.definition.revision)
+	}
 	for _, entry := range ordered {
 		nextRevision++
 		revision := nextRevision
@@ -639,7 +676,8 @@ func buildWMIRepositoryDocumentsWithOptions(documents []*mofDocument, defaultNam
 			return nil, fmt.Errorf("wmi repository: instance class %s in %s has no revision", instance.Class, namespace)
 		}
 		nextRevision++
-		record, key, err := buildWMIInstanceRecord(
+		record, key, err := buildWMIInstanceRecordWithHash(
+			options.hash,
 			instance,
 			entry.class,
 			properties,
@@ -721,8 +759,8 @@ func buildWMIRepositoryDocumentsWithOptions(documents []*mofDocument, defaultNam
 		if record.kind != "instance" {
 			continue
 		}
-		sourcePath := `\NS_` + wmiUpperUTF16MD5(record.namespace) +
-			`\KI_` + wmiUpperUTF16MD5(record.keyClassName) +
+		sourcePath := `\NS_` + options.hash(record.namespace) +
+			`\KI_` + options.hash(record.keyClassName) +
 			`\I_` + record.instanceKey
 		for _, reference := range record.instanceReferences {
 			targetPath := canonicalWMIReferencePath(reference.targetPath, record.namespace)
@@ -743,13 +781,16 @@ func buildWMIRepositoryDocumentsWithOptions(documents []*mofDocument, defaultNam
 				kind:               "reference",
 				referenceClassName: reference.className,
 				referencedKey:      target.instanceKey,
-				relationKey:        wmiUpperUTF16MD5(sourcePath + "\x00" + reference.propertyName),
+				relationKey:        options.hash(sourcePath + "\x00" + reference.propertyName),
 				data:               projection,
 			})
 		}
 	}
 	pending = append(pending, projections...)
 
+	if options.finish != nil {
+		return options.finish(pending)
+	}
 	recordData := make([][]byte, len(pending))
 	for index := range pending {
 		recordData[index] = pending[index].data
@@ -758,34 +799,7 @@ func buildWMIRepositoryDocumentsWithOptions(documents []*mofDocument, defaultNam
 	if err != nil {
 		return nil, err
 	}
-	var keys []string
-	for index, record := range pending {
-		location := locations[index]
-		namespaceHash := wmiUpperUTF16MD5(record.namespace)
-		classHash := wmiUpperUTF16MD5(record.className)
-		position := fmt.Sprintf("%d.%d.%d", location.logicalPage, location.id, len(record.data))
-		prefix := "NS_" + namespaceHash + `\`
-		switch record.kind {
-		case "class":
-			keys = append(keys, prefix+"CD_"+classHash+"."+position)
-			keys = append(keys, prefix+"CR_"+wmiUpperUTF16MD5(record.superclass)+`\C_`+classHash)
-			for _, reference := range record.references {
-				keys = append(keys, prefix+"CR_"+wmiUpperUTF16MD5(reference)+`\R_`+classHash)
-			}
-		case "instance":
-			location := record.instanceKey + "." + position
-			keys = append(keys,
-				prefix+"CI_"+classHash+`\IL_`+location,
-				prefix+"KI_"+wmiUpperUTF16MD5(record.keyClassName)+`\I_`+location,
-			)
-		case "reference":
-			keys = append(keys,
-				prefix+"KI_"+wmiUpperUTF16MD5(record.referenceClassName)+
-					`\IR_`+record.referencedKey+
-					`\R_`+record.relationKey+"."+position,
-			)
-		}
-	}
+	keys := wmiRepositoryKeys(pending, locations, options.hash)
 	indexData, err := buildWMIRepositoryIndex(keys)
 	if err != nil {
 		return nil, err
@@ -846,10 +860,14 @@ func (r *wmiRepositoryFile) Freeze()               {}
 func (r *wmiRepositoryFile) Truth() starlark.Bool  { return starlark.True }
 func (r *wmiRepositoryFile) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: %s", r.Type()) }
 func (r *wmiRepositoryFile) AttrNames() []string {
-	return []string{"files", "keys", "pages", "records"}
+	return []string{"class_layout", "files", "instances", "keys", "pages", "records"}
 }
 func (r *wmiRepositoryFile) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "instances":
+		return starlark.NewBuiltin("instances", r.instancesBuiltin), nil
+	case "class_layout":
+		return starlark.NewBuiltin("class_layout", r.classLayoutBuiltin), nil
 	case "files":
 		values := starlark.NewDict(len(r.files))
 		for name, file := range r.files {
@@ -1560,4 +1578,36 @@ func readWMIRepositoryFile(file starfile.File, name string) ([]byte, error) {
 		return nil, fmt.Errorf("wmi repository: read %s: %w", name, err)
 	}
 	return data, nil
+}
+
+func wmiRepositoryKeys(pending []wmiPendingRecord, locations []wmiRepositoryRecord, hash func(string) string) []string {
+	var keys []string
+	for index, record := range pending {
+		location := locations[index]
+		namespaceHash := hash(record.namespace)
+		classHash := hash(record.className)
+		position := fmt.Sprintf("%d.%d.%d", location.logicalPage, location.id, len(record.data))
+		prefix := "NS_" + namespaceHash + `\`
+		switch record.kind {
+		case "class":
+			keys = append(keys, prefix+"CD_"+classHash+"."+position)
+			keys = append(keys, prefix+"CR_"+hash(record.superclass)+`\C_`+classHash)
+			for _, reference := range record.references {
+				keys = append(keys, prefix+"CR_"+hash(reference)+`\R_`+classHash)
+			}
+		case "instance":
+			location := record.instanceKey + "." + position
+			keys = append(keys,
+				prefix+"CI_"+classHash+`\IL_`+location,
+				prefix+"KI_"+hash(record.keyClassName)+`\I_`+location,
+			)
+		case "reference":
+			keys = append(keys,
+				prefix+"KI_"+hash(record.referenceClassName)+
+					`\IR_`+record.referencedKey+
+					`\R_`+record.relationKey+"."+position,
+			)
+		}
+	}
+	return keys
 }

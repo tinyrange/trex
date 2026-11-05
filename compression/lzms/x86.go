@@ -10,6 +10,21 @@ func restoreX86Addresses(data []byte) {
 		lastTargetUsage[index] = unseen
 	}
 	for position := 1; position < len(data)-16; {
+		// Most bytes (especially data/zero regions in a solid ESD chunk) are
+		// not instruction prefixes handled by this transform. Reject eight
+		// bytes at once using a conservative opcode filter. False positives
+		// take the ordinary scalar path; no candidate can be skipped.
+		if position+8 <= len(data)-16 {
+			word := binary.LittleEndian.Uint64(data[position : position+8])
+			a := (word & 0x5858585858585858) ^ 0x4848484848484848
+			b := (word & 0xf0f0f0f0f0f0f0f0) ^ 0xf0f0f0f0f0f0f0f0
+			const ones = uint64(0x0101010101010101)
+			const highs = uint64(0x8080808080808080)
+			if ((a-ones)&^a|(b-ones)&^b)&highs == 0 {
+				position += 8
+				continue
+			}
+		}
 		// E9 is scan-only: consume its operand but do not let it participate in
 		// translation or target-recency state.
 		switch data[position] {

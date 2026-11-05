@@ -2,7 +2,6 @@ package nsis
 
 import (
 	"bytes"
-	"compress/flate"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -53,23 +52,7 @@ func fixture(t testing.TB, metadata []byte, compressed bool, stub int) []byte {
 	packed := bytes.Clone(metadata)
 	var bit uint32
 	if compressed {
-		var dst bytes.Buffer
-		w, err := flate.NewWriter(&dst, flate.BestCompression)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := w.Write(metadata); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatal(err)
-		}
-		// Go emits a final empty stored block with NLEN. NSIS omits NLEN.
-		encoded := dst.Bytes()
-		if !bytes.HasSuffix(encoded, []byte{0, 0, 255, 255}) {
-			t.Fatal("unexpected encoder trailer")
-		}
-		packed = encoded[:len(encoded)-2]
+		packed = deflateNSISFixture(t, metadata)
 		bit = 0x80000000
 	}
 	b := make([]byte, stub+28)

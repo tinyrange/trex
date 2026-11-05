@@ -9,6 +9,28 @@ import (
 	"go.starlark.net/starlark"
 )
 
+func TestBuildCREGWindows95RTMProfilePathLength(t *testing.T) {
+	root := newRegistryTree("")
+	setRegistryValue(root, "/Windows", "WinDir", registryString(regSZ, `C:\WINDOWS`))
+	data, err := buildCREGWithGeneration(root, 1, "windows95_rtm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The original RTM RegQueryValueEx reports the stored bytes plus one
+	// terminator. KRNL386 subtracts one and uses that result when prefixing
+	// private INI filenames; a stored NUL inserts an embedded path terminator.
+	block := int(binary.LittleEndian.Uint32(data[8:12]))
+	record := block + 32
+	nameSize := int(binary.LittleEndian.Uint16(data[record+12 : record+14]))
+	value := record + 20 + nameSize
+	valueNameSize := int(binary.LittleEndian.Uint16(data[value+8 : value+10]))
+	valueSize := int(binary.LittleEndian.Uint16(data[value+10 : value+12]))
+	payload := data[value+12+valueNameSize : value+12+valueNameSize+valueSize]
+	if string(payload) != `C:\WINDOWS` || valueSize != 10 {
+		t.Fatalf("RTM WinDir storage = %q (%d bytes), want ten non-NUL bytes", payload, valueSize)
+	}
+}
+
 func TestBuildCREGWindows95Layout(t *testing.T) {
 	root := newRegistryTree("")
 	setRegistryValue(root, "/Software/OracleA", "Alpha", registryString(regSZ, "one"))
@@ -204,6 +226,62 @@ func TestBuildCREGNashvilleUsesPortableGrowthReserve(t *testing.T) {
 	valueData := data[value+12+valueNameSize : value+12+valueNameSize+valueDataSize]
 	if got, want := string(valueData), "data"; got != want {
 		t.Fatalf("Nashville REG_SZ data = %q, want %q", got, want)
+	}
+}
+
+func TestBuildCREGNavigationSurvivesNativePageConversion(t *testing.T) {
+	for _, generation := range []string{"windows_nashville", "windows98_fe", "windowsme"} {
+		t.Run(generation, func(t *testing.T) {
+			root := newRegistryTree("")
+			// Enum follows a large Config subtree, as in SYSTEM.DAT. The native
+			// reader must follow the root sibling link across several RGKN pages.
+			for index := 0; index < 1248; index++ {
+				setRegistryValue(root, fmt.Sprintf("/Config/K%04d", index), "Value", registryString(regSZ, "value"))
+			}
+			ensureRegistryKey(root, "/Enum/Root")
+			data, err := buildCREGWithGeneration(root, 1, generation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := parseCREG(data); err != nil {
+				t.Fatal(err)
+			}
+			used := int(binary.LittleEndian.Uint32(data[44:48]))
+			// Nashville's original VMM converts 28-byte disk records to 16-byte
+			// cache entries. It exempts page zero, then skips any record whose end
+			// lies in another page. Links are converted by integer division by 28.
+			cache := make(map[uint32]int)
+			for cursor := 32; cursor < used; {
+				if cursor >= 0x1000 && cursor>>12 != (cursor+28)>>12 {
+					cursor = (cursor + 0x1000) &^ 0xfff
+					continue
+				}
+				cache[uint32(cursor/28)] = cursor
+				cursor += 28
+			}
+			visited := make(map[uint32]bool)
+			queue := []uint32{32}
+			for len(queue) != 0 {
+				offset := queue[len(queue)-1]
+				queue = queue[:len(queue)-1]
+				if visited[offset] {
+					t.Fatalf("duplicate navigation link %#x", offset)
+				}
+				visited[offset] = true
+				if got, ok := cache[offset/28]; !ok || got != int(offset) {
+					t.Fatalf("native cache cannot resolve RGKN link %#x: slot %d contains %#x", offset, offset/28, got)
+				}
+				entry := data[32+int(offset):]
+				for _, field := range []int{16, 20} { // child and next sibling
+					if link := binary.LittleEndian.Uint32(entry[field:]); link != 0xffffffff {
+						queue = append(queue, link)
+					}
+				}
+			}
+			if got, want := len(visited), 1252; got != want {
+				t.Fatalf("native reachable keys = %d, want %d", got, want)
+			}
+		})
 	}
 }
 

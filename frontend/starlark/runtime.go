@@ -20,6 +20,7 @@ import (
 	"github.com/tinyrange/trex/archive/bru"
 	"github.com/tinyrange/trex/archive/bsddump"
 	"github.com/tinyrange/trex/archive/bzip2"
+	"github.com/tinyrange/trex/archive/c2r"
 	cabarchive "github.com/tinyrange/trex/archive/cab"
 	"github.com/tinyrange/trex/archive/cfb"
 	"github.com/tinyrange/trex/archive/compactpro"
@@ -88,10 +89,12 @@ import (
 	filesystemvhdx "github.com/tinyrange/trex/filesystem/vhdx"
 	filesystemxfs "github.com/tinyrange/trex/filesystem/xfs"
 	acpistar "github.com/tinyrange/trex/firmware/acpi/star"
+	"github.com/tinyrange/trex/installer/burn"
 	"github.com/tinyrange/trex/installer/installshield"
 	"github.com/tinyrange/trex/installer/installshield/installscript"
 	"github.com/tinyrange/trex/installer/msi"
 	"github.com/tinyrange/trex/installer/nsis"
+	"github.com/tinyrange/trex/installer/omaha"
 	imagestar "github.com/tinyrange/trex/media/image/star"
 	"github.com/tinyrange/trex/renvostar"
 	starcrypto "github.com/tinyrange/trex/script/crypto"
@@ -136,6 +139,8 @@ func predeclared() starlark.StringDict {
 				"cfb":              starlark.NewBuiltin("cfb", cfb.Builtin),
 				"cab_set":          starlark.NewBuiltin("cab_set", cabarchive.SetBuiltin),
 				"installer":        starlark.NewBuiltin("installer", installshield.InstallerBuiltin),
+				"burn_containers":  starlark.NewBuiltin("burn_containers", burn.Builtin),
+				"omaha_payload":    starlark.NewBuiltin("omaha_payload", omaha.Builtin),
 				"installer_probe":  starlark.NewBuiltin("installer_probe", installshield.ProbeBuiltin),
 				"nsis_list":        starlark.NewBuiltin("nsis_list", nsis.ListBuiltin),
 				"nsis":             starlark.NewBuiltin("nsis", nsis.Builtin),
@@ -150,6 +155,7 @@ func predeclared() starlark.StringDict {
 				"tar":              starlark.NewBuiltin("tar", filesystemapi.TarBuiltin),
 				"wim":              starlark.NewBuiltin("wim", wim.Builtin),
 				"xz":               starlark.NewBuiltin("xz", xz.Builtin),
+				"lzma":             starlark.NewBuiltin("lzma", compressed.LZMABuiltin),
 				"rar":              starlark.NewBuiltin("rar", rar.Builtin),
 				"zstd":             starlark.NewBuiltin("zstd", zstd.Builtin),
 				"zip":              starlark.NewBuiltin("zip", ziparchive.Builtin),
@@ -172,6 +178,8 @@ func predeclared() starlark.StringDict {
 				"lzfse":            starlark.NewBuiltin("lzfse", lzfse.Builtin),
 				"dcs":              starlark.NewBuiltin("dcs", dcs.Builtin),
 				"xar":              starlark.NewBuiltin("xar", xar.Builtin),
+				"c2r":              starlark.NewBuiltin("c2r", c2r.Builtin),
+				"c2r_database":     starlark.NewBuiltin("c2r_database", c2r.DatabaseBuiltin),
 				"udif":             starlark.NewBuiltin("udif", udif.Builtin),
 				"cpio":             starlark.NewBuiltin("cpio", cpio.Builtin),
 				"cpio_build":       starlark.NewBuiltin("cpio_build", cpio.BuildBuiltin),

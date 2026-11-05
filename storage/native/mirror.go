@@ -271,6 +271,18 @@ func (c *MirrorCache) downloadFrom(ctx context.Context, partial *os.File, rawURL
 	if err != nil {
 		return fmt.Errorf("%s: hash partial file: %w", displayURL, err)
 	}
+	// A previous attempt may have received the complete object but failed
+	// before publishing it (for example, because supplied size metadata was
+	// stale). Do not ask for bytes beyond EOF and get stuck on HTTP 416.
+	// Only a pinned digest proves completeness; size alone is insufficient.
+	if len(digest) != 0 && equalDigest(hasher.Sum(nil), digest) && (request.Size < 0 || offset == request.Size) {
+		if request.Validate != nil {
+			if err := request.Validate(&CachedFile{file: partial, size: offset}); err != nil {
+				return fmt.Errorf("%s: validate completed partial: %w", displayURL, err)
+			}
+		}
+		return nil
+	}
 	hasExisting := offset != 0
 	requestHTTP, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {

@@ -7,6 +7,35 @@ import (
 	"testing"
 )
 
+// deflateNSISFixture encodes these compressible test inputs, which use Huffman
+// data blocks. It is not a converter for arbitrary DEFLATE stored blocks.
+func deflateNSISFixture(t testing.TB, plain []byte) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	w, err := flate.NewWriter(&encoded, flate.BestCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(plain); err != nil {
+		t.Fatal(err)
+	}
+	// Flush supplies a non-final empty stored block and byte-aligns the
+	// stream. Close is free to choose a different final-block encoding.
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	packed := bytes.Clone(encoded.Bytes())
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(packed, []byte{0, 0, 255, 255}) {
+		t.Fatal("unexpected sync-flush marker")
+	}
+	// NSIS stores LEN without NLEN. Keep the flush block non-final and
+	// append an explicit final fixed-Huffman block containing only EOB.
+	return append(packed[:len(packed)-2], 0x03, 0x00)
+}
+
 func TestInflateNSIS(t *testing.T) {
 	// Original hand-authored stored and fixed-Huffman wire fixtures.
 	cases := []struct {
@@ -19,28 +48,14 @@ func TestInflateNSIS(t *testing.T) {
 		{"consecutive stored", []byte{0, 1, 0, 'a', 1, 2, 0, 'b', 'c'}, []byte("abc")},
 	}
 	// Differential check against Go's independent encoder, including long
-	// overlapping back-references and a dynamic tree. Only its final empty
-	// stored block needs conversion to the NSIS LEN-only representation.
+	// overlapping back-references and a dynamic tree. The fixture helper
+	// explicitly terminates the stream without relying on Close's encoding.
 	plain := bytes.Repeat([]byte("aabbbccccdddddeeeeeefffffff"), 4096)
-	var encoded bytes.Buffer
-	w, err := flate.NewWriter(&encoded, flate.BestCompression)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write(plain); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	packed := encoded.Bytes()
-	if !bytes.HasSuffix(packed, []byte{0, 0, 255, 255}) {
-		t.Fatal("unexpected trailer")
-	}
+	packed := deflateNSISFixture(t, plain)
 	cases = append(cases, struct {
 		name          string
 		packed, plain []byte
-	}{"dynamic overlap", packed[:len(packed)-2], plain})
+	}{"dynamic overlap", packed, plain})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := inflateNSIS(tc.packed, int64(len(tc.plain)))

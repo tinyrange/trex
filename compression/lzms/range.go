@@ -67,16 +67,11 @@ func newProbabilityEntry() probabilityEntry {
 func (p *probabilityEntry) observe(bit uint8) {
 	oldest := uint8(p.history >> 63)
 	p.history = p.history<<1 | uint64(bit&1)
-	if oldest == 0 {
-		p.zeros--
-	}
-	if bit&1 == 0 {
-		p.zeros++
-	}
+	p.zeros += oldest - (bit & 1)
 }
 
 type contextModel struct {
-	width   uint
+	mask    uint8
 	state   uint8
 	entries []probabilityEntry
 }
@@ -85,7 +80,7 @@ func newContextModel(width uint) (*contextModel, error) {
 	if width == 0 || width > 6 {
 		return nil, fmt.Errorf("lzms: invalid context width %d", width)
 	}
-	model := &contextModel{width: width, entries: make([]probabilityEntry, 1<<width)}
+	model := &contextModel{mask: uint8((1 << width) - 1), entries: make([]probabilityEntry, 1<<width)}
 	for index := range model.entries {
 		model.entries[index] = newProbabilityEntry()
 	}
@@ -99,6 +94,6 @@ func (m *contextModel) decode(r *rangeDecoder) (uint8, error) {
 		return 0, err
 	}
 	entry.observe(bit)
-	m.state = ((m.state << 1) | bit) & uint8((1<<m.width)-1)
+	m.state = ((m.state << 1) | bit) & m.mask
 	return bit, nil
 }

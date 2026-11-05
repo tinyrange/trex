@@ -241,7 +241,7 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
                     value += "," + parts["options"]
                 value += "]"
             address = allocate_rpc_string(event, value)
-            event.machine.write(event.args[5], binary.u32le(address))
+            event.machine.write_pointer(event.args[5], address)
             state["actions"].append(dict(parts, action = "compose", value = value))
             return 0
         if name == "rpcbindingfromstringbindingw":
@@ -250,7 +250,7 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
             value = read_wstring(event, event.args[0])
             handle = event.machine.allocate(size = 4, name = "RPC binding handle")
             state["bindings"][handle] = {"string": value, "authentication": None}
-            event.machine.write(event.args[1], binary.u32le(handle))
+            event.machine.write_pointer(event.args[1], handle)
             state["actions"].append({"action": "bind", "binding": handle, "value": value})
             return 0
         if name == "rpcbindingsetauthinfoexw":
@@ -275,11 +275,11 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
         if name == "rpcbindingfree":
             if not event.args[0]:
                 return 87
-            handle = event.machine.read_u32le(event.args[0])
+            handle = event.machine.read_pointer(event.args[0])
             state["bindings"].pop(handle, None)
             if handle:
                 event.machine.free(handle)
-            event.machine.write(event.args[0], b"\x00" * 4)
+            event.machine.write_pointer(event.args[0], 0)
             state["actions"].append({"action": "unbind", "binding": handle})
             return 0
         if name == "uuidfromstringw":
@@ -307,16 +307,16 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
             value = binary.encode(_uuid_text(event.machine.read(event.args[0], 16)), encoding = "utf16le", nul = True)
             address = event.machine.allocate(value = value, name = "RPC UUID string")
             state["strings"][address] = True
-            event.machine.write(event.args[1], binary.u32le(address))
+            event.machine.write_pointer(event.args[1], address)
             return 0
         if name == "rpcstringfreew":
             if not event.args[0]:
                 return 87
-            address = event.machine.read_u32le(event.args[0])
+            address = event.machine.read_pointer(event.args[0])
             if address in state["strings"]:
                 state["strings"].pop(address)
                 event.machine.free(address)
-            event.machine.write(event.args[0], b"\x00" * 4)
+            event.machine.write_pointer(event.args[0], 0)
             return 0
         if name == "rpcmgmtsetserverstacksize":
             state["server_stack_size"] = event.args[0]

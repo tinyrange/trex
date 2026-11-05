@@ -19,6 +19,7 @@ func (p *pc) installKeyboardFirmware() {
 		binary.LittleEndian.PutUint16(p.ram[addr:], 0x1e)
 	}
 	binary.LittleEndian.PutUint16(p.ram[0x482:], 0x3e)
+	p.ram[0x496] = 0x10 // Enhanced keyboard, matching the controller's AB83 ID.
 }
 
 func (p *pc) keyboardBounds() (head, tail uint16) {

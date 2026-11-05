@@ -917,12 +917,16 @@ func buildWMIEmbeddedInstanceObject(classPart, instancePart []byte) []byte {
 }
 
 func buildWMIInstanceRecord(instance mofInstance, class mofClass, properties []mofFeature, revision, classRevision uint64, embeddedInstance func(mofInstance) ([]byte, error)) ([]byte, string, error) {
+	return buildWMIInstanceRecordWithHash(wmiUpperUTF16MD5, instance, class, properties, revision, classRevision, embeddedInstance)
+}
+
+func buildWMIInstanceRecordWithHash(hash func(string) string, instance mofInstance, class mofClass, properties []mofFeature, revision, classRevision uint64, embeddedInstance func(mofInstance) ([]byte, error)) ([]byte, string, error) {
 	instancePart, err := buildWMIInstancePart(instance, class, properties, embeddedInstance)
 	if err != nil {
 		return nil, "", err
 	}
 
-	classHash := wmiUpperUTF16MD5(class.Name)
+	classHash := hash(class.Name)
 	var output []byte
 	for _, unit := range utf16.Encode([]rune(classHash)) {
 		output = binary.LittleEndian.AppendUint16(output, unit)
@@ -959,5 +963,5 @@ func buildWMIInstanceRecord(instance mofInstance, class mofClass, properties []m
 	if key.Len() == 0 && hasMOFQualifier(class.Qualifiers, "singleton") {
 		key.WriteByte('@')
 	}
-	return output, wmiUpperUTF16MD5(key.String()), nil
+	return output, hash(key.String()), nil
 }

@@ -12,22 +12,24 @@ import (
 // Report deliberately separates elapsed time, CPU-seconds and overlapping I/O
 // response time. It is not a causal critical-path or sampled-stack profile.
 type Report struct {
-	DPCSeconds            float64    `json:"dpc_seconds_sum"`
-	ISRSeconds            float64    `json:"isr_seconds_sum"`
-	Header                Header     `json:"header"`
-	Events                int        `json:"events"`
-	FirstTick             uint64     `json:"first_tick"`
-	LastTick              uint64     `json:"last_tick"`
-	ElapsedSeconds        float64    `json:"observed_seconds"`
-	ScheduledSeconds      float64    `json:"scheduled_cpu_seconds"`
-	IdleSeconds           float64    `json:"idle_cpu_seconds"`
-	UnknownThreadSeconds  float64    `json:"unknown_thread_cpu_seconds"`
-	UncoveredSeconds      float64    `json:"uncovered_cpu_seconds"`
-	SwitchDiscontinuities int        `json:"switch_discontinuities"`
-	Processes             []*Process `json:"processes"`
-	Timeline              []Bucket   `json:"timeline"`
-	Schemas               []*Schema  `json:"schemas"`
-	Warnings              []string   `json:"warnings"`
+	DPCSeconds             float64    `json:"dpc_seconds_sum"`
+	ISRSeconds             float64    `json:"isr_seconds_sum"`
+	Header                 Header     `json:"header"`
+	Events                 int        `json:"events"`
+	FirstTick              uint64     `json:"first_tick"`
+	LastTick               uint64     `json:"last_tick"`
+	CapacityLastTick       uint64     `json:"capacity_last_tick"`
+	MetadataTrailerSeconds float64    `json:"metadata_trailer_seconds"`
+	ElapsedSeconds         float64    `json:"observed_seconds"`
+	ScheduledSeconds       float64    `json:"scheduled_cpu_seconds"`
+	IdleSeconds            float64    `json:"idle_cpu_seconds"`
+	UnknownThreadSeconds   float64    `json:"unknown_thread_cpu_seconds"`
+	UncoveredSeconds       float64    `json:"uncovered_cpu_seconds"`
+	SwitchDiscontinuities  int        `json:"switch_discontinuities"`
+	Processes              []*Process `json:"processes"`
+	Timeline               []Bucket   `json:"timeline"`
+	Schemas                []*Schema  `json:"schemas"`
+	Warnings               []string   `json:"warnings"`
 }
 type Schema struct {
 	Group      byte   `json:"group"`
@@ -98,6 +100,7 @@ func Analyze(ctx context.Context, r io.ReaderAt, size int64, limits Limits) (*Re
 	var events []item
 	schemas := map[[4]uint16]*Schema{}
 	pointer := 4
+	var capacityLast uint64
 	traceClock := uint32(1)
 	h, err := Walk(ctx, r, size, limits, func(e Event) error {
 		out.Events++
@@ -114,6 +117,14 @@ func Analyze(ctx context.Context, r io.ReaderAt, size int64, limits Limits) (*Re
 		}
 		if e.Timestamp > out.LastTick {
 			out.LastTick = e.Timestamp
+		}
+		// Kernel EventTrace (0) and SysConfig (11) are session/configuration
+		// metadata, emitted during finalization after scheduling is disabled.
+		// Keep their raw timestamps, but do not manufacture CPU capacity for
+		// that trailer. All other events, including unsupported activity,
+		// still extend the coverage window; this is not a last-switch trim.
+		if e.Group != 0 && e.Group != 11 && e.Timestamp > capacityLast {
+			capacityLast = e.Timestamp
 		}
 		key := [4]uint16{uint16(e.Group), uint16(e.Opcode), e.Version, uint16(e.HeaderType)}
 		s := schemas[key]
@@ -147,8 +158,13 @@ func Analyze(ctx context.Context, r io.ReaderAt, size int64, limits Limits) (*Re
 		freq = 10_000_000
 	}
 	seconds := func(t uint64) float64 { return float64(t-out.FirstTick) / freq }
-	out.ElapsedSeconds = seconds(out.LastTick)
-	if out.ElapsedSeconds > 86400 || out.ElapsedSeconds < 0 {
+	if capacityLast < out.FirstTick {
+		capacityLast = out.FirstTick
+	}
+	out.CapacityLastTick = capacityLast
+	out.MetadataTrailerSeconds = float64(out.LastTick-capacityLast) / freq
+	out.ElapsedSeconds = seconds(capacityLast)
+	if seconds(out.LastTick) > 86400 || out.ElapsedSeconds < 0 {
 		return nil, fmt.Errorf("ETL: invalid or excessive timestamp range")
 	}
 	for _, s := range schemas {
