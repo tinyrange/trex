@@ -32,26 +32,66 @@ func importRegistryHive(root *registryTree, source starlark.Value, sourceDrive, 
 		}
 		return relocateDriveText(s, sourceDrive[0], targetDrive[0])
 	}
-	// Policy paths normalize separators; literal key components stay intact.
-	normalize := func(s string) string {
-		return "/" + strings.ToLower(strings.Trim(strings.ReplaceAll(s, "\\", "/"), "/"))
+	// Exclusions are a component trie: display paths are ambiguous when an
+	// actual key name contains a slash. Legacy strings still accept either
+	// separator, while key_parts records preserve every component literally.
+	type exclusion struct {
+		children map[string]*exclusion
+		remove   bool
+		values   map[string]bool
 	}
-	removed := make(map[string]bool)
+	policy := &exclusion{}
+	legacyParts := func(s string) []string {
+		s = strings.Trim(strings.ReplaceAll(s, "\\", "/"), "/")
+		if s == "" {
+			return nil
+		}
+		return strings.Split(s, "/")
+	}
+	parseParts := func(value starlark.Value) ([]string, error) {
+		if s, ok := starlark.AsString(value); ok {
+			return legacyParts(s), nil
+		}
+		item, ok := value.(*starlark.Dict)
+		if !ok {
+			return nil, fmt.Errorf("want string or key/key_parts dict, got %s", value.Type())
+		}
+		if _, found, err := item.Get(starlark.String("key_parts")); err != nil {
+			return nil, err
+		} else if found {
+			parts, _, err := registryPathFromDict(item)
+			return parts, err
+		}
+		s, err := requiredPatchString(item, "key")
+		return legacyParts(s), err
+	}
+	selectPolicy := func(parts []string) *exclusion {
+		node := policy
+		for _, part := range parts {
+			if node.children == nil {
+				node.children = make(map[string]*exclusion)
+			}
+			folded := strings.ToLower(part)
+			if node.children[folded] == nil {
+				node.children[folded] = &exclusion{}
+			}
+			node = node.children[folded]
+		}
+		return node
+	}
 	if excludedKeys != starlark.None {
 		list, ok := excludedKeys.(*starlark.List)
 		if !ok {
 			return fmt.Errorf("hive_from_patches: exclude_keys must be a list")
 		}
 		for i := 0; i < list.Len(); i++ {
-			s, ok := starlark.AsString(list.Index(i))
-			if !ok {
-				return fmt.Errorf("hive_from_patches: exclude_keys[%d] must be a string", i)
+			parts, err := parseParts(list.Index(i))
+			if err != nil {
+				return fmt.Errorf("hive_from_patches: exclude_keys[%d]: %w", i, err)
 			}
-			removed[normalize(s)] = true
+			selectPolicy(parts).remove = true
 		}
 	}
-	type valueID struct{ key, name string }
-	removedValues := make(map[valueID]bool)
 	if excludedValues != starlark.None {
 		list, ok := excludedValues.(*starlark.List)
 		if !ok {
@@ -62,15 +102,19 @@ func importRegistryHive(root *registryTree, source starlark.Value, sourceDrive, 
 			if !ok {
 				return fmt.Errorf("hive_from_patches: exclude_values[%d] must be a dict", i)
 			}
-			key, err := requiredPatchString(item, "key")
+			parts, err := parseParts(item)
 			if err != nil {
-				return err
+				return fmt.Errorf("hive_from_patches: exclude_values[%d]: %w", i, err)
 			}
 			name, err := requiredPatchString(item, "name")
 			if err != nil {
 				return err
 			}
-			removedValues[valueID{normalize(key), strings.ToLower(name)}] = true
+			node := selectPolicy(parts)
+			if node.values == nil {
+				node.values = make(map[string]bool)
+			}
+			node.values[strings.ToLower(name)] = true
 		}
 	}
 	data, err := starfile.ReadAll(file)
@@ -86,27 +130,16 @@ func importRegistryHive(root *registryTree, source starlark.Value, sourceDrive, 
 		return err
 	}
 	seen := make(hiveTraversal)
-	var visit func(hiveKey, []string) error
-	visit = func(key hiveKey, parts []string) error {
+	var visit func(hiveKey, []string, *exclusion, bool) error
+	visit = func(key hiveKey, parts []string, selected *exclusion, skip bool) error {
 		if err := seen.enter(key, len(parts)); err != nil {
 			return err
 		}
-		normalized := normalize(registryDisplayPath(parts))
-		skip := false
-		for candidate := normalized; candidate != ""; {
-			if removed[candidate] {
-				skip = true
-				break
-			}
-			i := strings.LastIndexByte(candidate, '/')
-			if i < 0 {
-				break
-			}
-			candidate = candidate[:i]
-		}
+		skip = skip || selected != nil && selected.remove
 		if !skip {
 			node := ensureRegistryKeyParts(root, parts)
 			node.flags, node.flagsSet = key.flags, true
+			node.nameFlags = key.nameFlags
 			node.class, err = hive.readKeyClass(key)
 			if err != nil {
 				return err
@@ -124,7 +157,7 @@ func importRegistryHive(root *registryTree, source starlark.Value, sourceDrive, 
 			}
 			for _, value := range values {
 				name := text(value.name)
-				if removedValues[valueID{normalized, strings.ToLower(name)}] {
+				if selected != nil && selected.values[strings.ToLower(name)] {
 					continue
 				}
 				raw := value.value
@@ -141,11 +174,16 @@ func importRegistryHive(root *registryTree, source starlark.Value, sourceDrive, 
 			return err
 		}
 		for _, child := range children {
-			if err := visit(child, appendRegistryPathPart(parts, text(child.name))); err != nil {
+			name := text(child.name)
+			var childPolicy *exclusion
+			if selected != nil {
+				childPolicy = selected.children[strings.ToLower(name)]
+			}
+			if err := visit(child, appendRegistryPathPart(parts, name), childPolicy, skip); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	return visit(first, nil)
+	return visit(first, nil, policy, false)
 }

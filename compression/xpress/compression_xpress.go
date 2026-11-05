@@ -34,7 +34,7 @@ func HuffmanDecompress(data []byte, outSize int) ([]byte, error) {
 			blockEnd = outSize
 		}
 		for len(out) < blockEnd {
-			sym := table[br.peek15()]
+			sym := int(table[br.peek15()])
 			if sym < 0 || sym >= len(lens) || lens[sym] == 0 {
 				return nil, fmt.Errorf("xpress: invalid huffman symbol")
 			}
@@ -60,6 +60,16 @@ func HuffmanDecompress(data []byte, outSize int) ([]byte, error) {
 						return nil, err
 					}
 					length = int(v)
+					if length == 0 {
+						v, err := br.readUint32()
+						if err != nil {
+							return nil, err
+						}
+						if uint64(v) > uint64(outSize-len(out)) {
+							return nil, fmt.Errorf("xpress: extended match exceeds output")
+						}
+						length = int(v)
+					}
 					if length < 15 {
 						return nil, fmt.Errorf("xpress: invalid extended match length")
 					}
@@ -79,7 +89,12 @@ func HuffmanDecompress(data []byte, outSize int) ([]byte, error) {
 			if offset <= 0 || offset > len(out) {
 				return nil, fmt.Errorf("xpress: invalid match offset %d", offset)
 			}
-			for i := 0; i < length && len(out) < blockEnd; i++ {
+			if length > outSize-len(out) {
+				return nil, fmt.Errorf("xpress: match exceeds output")
+			}
+			// A match can cross the nominal 64 KiB table boundary. Finish it
+			// before reading the next Huffman block; never silently clip it.
+			for i := 0; i < length; i++ {
 				out = append(out, out[len(out)-offset])
 			}
 		}
@@ -97,11 +112,14 @@ func xpressCodeLengths(data []byte) []byte {
 	return lens
 }
 
-func newXPRESSDecodeTable(lens []byte) ([]int, error) {
-	table := make([]int, xpressTable)
-	for i := range table {
-		table[i] = -1
+func newXPRESSDecodeTable(lens []byte) ([]uint16, error) {
+	if len(lens) != xpressSymbols {
+		return nil, fmt.Errorf("xpress: expected %d code lengths", xpressSymbols)
 	}
+	// Symbols are nine bits. A machine-word table wastes 192 KiB per block
+	// on 64-bit hosts. Every entry is filled before a table is published;
+	// incomplete or oversubscribed codes return an error, not partial state.
+	table := make([]uint16, xpressTable)
 	pos := 0
 	for bits := byte(1); bits <= 15; bits++ {
 		for sym, length := range lens {
@@ -113,7 +131,7 @@ func newXPRESSDecodeTable(lens []byte) ([]int, error) {
 				return nil, fmt.Errorf("xpress: invalid huffman table at symbol %d length %d position %d", sym, bits, pos)
 			}
 			for i := 0; i < count; i++ {
-				table[pos+i] = sym
+				table[pos+i] = uint16(sym)
 			}
 			pos += count
 		}
@@ -192,4 +210,13 @@ func (r *xpressBitReader) remainingData() []byte {
 		return nil
 	}
 	return r.data[r.pos:]
+}
+
+func (r *xpressBitReader) readUint32() (uint32, error) {
+	if len(r.data)-r.pos < 4 {
+		return 0, fmt.Errorf("xpress: truncated byte stream")
+	}
+	v := binary.LittleEndian.Uint32(r.data[r.pos : r.pos+4])
+	r.pos += 4
+	return v, nil
 }

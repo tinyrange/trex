@@ -255,6 +255,11 @@ func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
 	if err := p.completeIDEDMARead(false); err != nil {
 		return time.Time{}, nil, nil, err
 	}
+	if p.nvme != nil {
+		if err := p.nvme.controller.PollIO(false); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
 	now := p.now()
 	if err := p.serial.poll(now); err != nil {
 		return time.Time{}, nil, nil, err

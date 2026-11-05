@@ -233,6 +233,9 @@ Run it with:
 go run ./cmd/trex script.star input.iso
 ```
 
+Windows servicing APIs, phase ownership, support limits and native controls are
+documented in `docs/starlark/windows-servicing.md`.
+
 Embedded modules use `@stdlib` labels:
 
 ```starlark

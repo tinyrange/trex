@@ -21,12 +21,20 @@ const hiveBigDataSegmentSize = registry.BigDataSegmentSize
 
 func hiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
-	if err := starlark.UnpackArgs("hive", args, kwargs, "file", &value); err != nil {
+	var snapshot bool
+	if err := starlark.UnpackArgs("hive", args, kwargs, "file", &value, "snapshot?", &snapshot); err != nil {
 		return nil, err
 	}
 	file, ok := value.(starfile.File)
 	if !ok {
 		return nil, fmt.Errorf("hive: got %s, want file", value.Type())
+	}
+	if snapshot {
+		reader, err := registry.OpenSnapshot(file, 512<<20)
+		if err != nil {
+			return nil, err
+		}
+		return &registryHive{file: starfile.NewReader("hive snapshot", reader), rootCell: reader.RootCell(), reader: reader}, nil
 	}
 	return newRegistryHive(file)
 }
@@ -38,16 +46,18 @@ type registryHive struct {
 }
 
 type hiveKey struct {
-	name       string
-	cell       uint32
-	flags      uint16
-	security   uint32
-	classCell  uint32
-	classLen   uint16
-	subkeyList uint32
-	subkeys    uint32
-	valueList  uint32
-	values     uint32
+	name          string
+	cell          uint32
+	flags         uint16
+	nameFlags     uint16
+	security      uint32
+	classCell     uint32
+	classLen      uint16
+	lastWriteTime uint64
+	subkeyList    uint32
+	subkeys       uint32
+	valueList     uint32
+	values        uint32
 }
 
 func newRegistryHive(file starfile.File) (*registryHive, error) {
@@ -68,14 +78,14 @@ func (h *registryHive) portableReader() (*registry.Hive, error) {
 }
 
 func portableKey(key hiveKey) registry.Key {
-	return registry.Key{Name: key.name, Cell: key.cell, Flags: key.flags,
-		SecurityCell: key.security, ClassCell: key.classCell, ClassLength: key.classLen,
+	return registry.Key{Name: key.name, Cell: key.cell, Flags: key.flags, NameFlags: key.nameFlags,
+		SecurityCell: key.security, ClassCell: key.classCell, ClassLength: key.classLen, LastWriteTime: key.lastWriteTime,
 		SubkeyList: key.subkeyList, SubkeyCount: key.subkeys, ValueList: key.valueList, ValueCount: key.values}
 }
 
 func scriptingKey(key registry.Key) hiveKey {
-	return hiveKey{name: key.Name, cell: key.Cell, flags: key.Flags,
-		security: key.SecurityCell, classCell: key.ClassCell, classLen: key.ClassLength,
+	return hiveKey{name: key.Name, cell: key.Cell, flags: key.Flags, nameFlags: key.NameFlags,
+		security: key.SecurityCell, classCell: key.ClassCell, classLen: key.ClassLength, lastWriteTime: key.LastWriteTime,
 		subkeyList: key.SubkeyList, subkeys: key.SubkeyCount, valueList: key.ValueList, values: key.ValueCount}
 }
 
@@ -86,7 +96,9 @@ func (h *registryHive) Truth() starlark.Bool { return starlark.True }
 func (h *registryHive) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", h.Type())
 }
-func (h *registryHive) AttrNames() []string { return []string{"find", "keys", "patches", "root"} }
+func (h *registryHive) AttrNames() []string {
+	return []string{"find", "keys", "patches", "path_component_patches", "root"}
+}
 func (h *registryHive) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "find":
@@ -113,6 +125,8 @@ func (h *registryHive) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("patches", func(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			return hivePatchesBuiltin(thread, builtin, append(starlark.Tuple{h.file}, args...), kwargs)
 		}), nil
+	case "path_component_patches":
+		return starlark.NewBuiltin("hive.path_component_patches", h.pathComponentPatches), nil
 	case "root":
 		root, err := h.readKey(h.rootCell)
 		if err != nil {
@@ -437,6 +451,12 @@ func (k *registryKey) Attr(name string) (starlark.Value, error) {
 		return k.files()
 	case "name":
 		return starlark.String(k.key.name), nil
+	case "flags":
+		return starlark.MakeUint(uint(k.key.flags)), nil
+	case "virtualization_flags":
+		return starlark.MakeUint(uint((k.key.nameFlags >> 4) & 15)), nil
+	case "user_flags":
+		return starlark.MakeUint(uint(k.key.nameFlags & 15)), nil
 	case "path_parts":
 		values := make([]starlark.Value, len(k.parts))
 		for index, part := range k.parts {
@@ -447,11 +467,25 @@ func (k *registryKey) Attr(name string) (starlark.Value, error) {
 		return k.hive.readValues(k.key)
 	case "value_records":
 		return k.hive.readValueRecords(k.key)
+	case "class_bytes":
+		data, err := k.hive.readKeyClass(k.key)
+		if err != nil {
+			return nil, err
+		}
+		return starlark.Bytes(data), nil
+	case "last_write_time":
+		return starlark.MakeUint64(k.key.lastWriteTime), nil
+	case "security":
+		data, err := k.hive.readKeySecurity(k.key)
+		if err != nil {
+			return nil, err
+		}
+		return starlark.Bytes(data), nil
 	}
 	return nil, nil
 }
 func (k *registryKey) AttrNames() []string {
-	return []string{"children", "files", "name", "path_parts", "value_records", "values"}
+	return []string{"children", "class_bytes", "files", "flags", "last_write_time", "name", "path_parts", "security", "user_flags", "value_records", "values", "virtualization_flags"}
 }
 func (k *registryKey) files() (*starlark.List, error) {
 	children, err := k.hive.readSubkeys(k.key)

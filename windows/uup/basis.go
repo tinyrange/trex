@@ -27,7 +27,11 @@ func resolveBaseAssemblyDescriptor(base assemblyArchive, imagePath string, descr
 		return nil, err
 	}
 	open := func(name string) (storage.Reader, error) {
-		file, err := base.OpenFile(name)
+		stored, err := base.OpenFile(name)
+		if err != nil {
+			return nil, err
+		}
+		file, err := expandAssemblyBasis(stored)
 		if err != nil {
 			return nil, err
 		}

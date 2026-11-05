@@ -1,0 +1,137 @@
+package starlarkfrontend
+
+import "testing"
+
+func TestNativeTokenStatisticsOwnership(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "security_plugin")
+def exercise(arch):
+    m=emulator.machine(architecture=arch,code=b"\xc3")
+    k=kernel32_plugin()
+    m.use([k,security_plugin(kernel=k,token_privileges={19:0})])
+    query=m.resolve_export("ntdll.dll",name="NtQueryInformationToken")
+    winquery=m.resolve_export("advapi32.dll",name="GetTokenInformation")
+    open=m.resolve_export("advapi32.dll",name="OpenProcessToken")
+    duplicate=m.resolve_export("advapi32.dll",name="DuplicateTokenEx")
+    adjust=m.resolve_export("advapi32.dll",name="AdjustTokenPrivileges")
+    close=m.resolve_export("kernel32.dll",name="CloseHandle")
+    handle=m.allocate(size=m.pointer_size)
+    output=m.allocate(value=b"X"*64)
+    required=m.allocate(value=b"Z"*4)
+    def open_token(access):
+        r=m.call(open,args=[0xffffffff if arch=="x86" else 0xffffffffffffffff,access,handle])
+        if r.reason!="return" or r.value!=1: fail("open token")
+        return m.read_pointer(handle)
+    full=open_token(0x2a)
+    other=open_token(8)
+    noquery=open_token(2)
+    for token,status in [(0x123456,0xc0000008),(noquery,0xc0000022)]:
+        r=m.call(query,args=[token,10,output,64,required])
+        if r.reason!="return" or r.value!=status or m.read(output,64)!=b"X"*64 or m.read(required,4)!=b"Z"*4: fail("invalid query mutated output")
+    r=m.call(query,args=[full,10,output,55,required])
+    if r.reason!="return" or r.value!=0xc0000023 or m.read_u32le(required)!=56 or m.read(output,64)!=b"X"*64: fail("statistics short buffer")
+    def stats(token):
+        r=m.call(query,args=[token,10,output,64,required])
+        if r.reason!="return" or r.value or m.read_u32le(required)!=56 or m.read(output+56,8)!=b"X"*8: fail("statistics width")
+        return m.read(output,56)
+    m.write(output,b"X"*64)
+    k.state["last_error"]=123
+    r=m.call(query,args=[full,25,output,0,required])
+    if r.reason!="return" or r.value!=0xc0000023 or k.state["last_error"]!=123 or m.read(output,64)!=b"X"*64: fail("native integrity sizing/last-error")
+    size=m.read_u32le(required)
+    r=m.call(query,args=[full,25,output,size,required])
+    if r.reason!="return" or r.value or m.read_u32le(output+m.pointer_size)!=0x60 or m.read(output+size,64-size)!=b"X"*(64-size): fail("native integrity attributes/guards")
+    principal=m.read_pointer(output)
+    if m.read(principal,12)!=binary.decode("010100000000001000300000","hex"): fail("native integrity SID")
+    r=m.call(query,args=[noquery,25,output,size,required])
+    if r.reason!="return" or r.value!=0xc0000022: fail("native integrity rights")
+    for kind in [4,5]:
+        m.write(output,b"X"*64)
+        r=m.call(query,args=[full,kind,output,0,required])
+        if r.reason!="return" or r.value!=0xc0000023 or m.read(output,64)!=b"X"*64: fail("token SID sizing")
+        size=m.read_u32le(required)
+        r=m.call(query,args=[full,kind,output,size,required])
+        if r.reason!="return" or r.value or m.read_pointer(output)!=output+m.pointer_size or m.read(output+size,64-size)!=b"X"*(64-size): fail("token SID native pointer/guards")
+        sid_data=m.read(output+m.pointer_size,size-m.pointer_size)
+        if sid_data!=binary.decode("010500000000000515000000010000000200000003000000f4010000","hex"): fail("token SID identity")
+        r=m.call(query,args=[noquery,kind,output,size,required])
+        if r.reason!="return" or r.value!=0xc0000022: fail("token SID rights")
+    m.write(output,b"X"*64)
+    first=stats(full)
+    if stats(other)!=first or binary.read_u32le(first,40)!=1 or binary.read_u32le(first,44)!=1 or binary.read_u32le(first,24)!=1: fail("shared token identity/counts")
+    r=m.call(winquery,args=[full,10,output,64,required])
+    if r.reason!="return" or r.value!=1 or m.read(output,56)!=first: fail("Win32/native statistics differ")
+    r=m.call(duplicate,args=[full,8,0,2,2,handle])
+    if r.reason!="return" or r.value!=1: fail("duplicate token")
+    duplicated=stats(m.read_pointer(handle))
+    if binary.read_u64le(duplicated,0)==binary.read_u64le(first,0) or binary.read_u32le(duplicated,24)!=2 or binary.read_u32le(duplicated,28)!=2: fail("duplicate token identity/type/level")
+    requested=m.allocate(size=16)
+    m.write_u32le(requested,1)
+    m.write_u64le(requested+4,19)
+    m.write_u32le(requested+12,2)
+    r=m.call(adjust,args=[full,0,requested,0,0,0])
+    if r.reason!="return" or r.value!=1: fail("adjust owned privilege")
+    changed=stats(full)
+    if binary.read_u64le(changed,0)!=binary.read_u64le(first,0) or binary.read_u64le(changed,48)==binary.read_u64le(first,48): fail("modification identity")
+    m.call(adjust,args=[full,0,requested,0,0,0])
+    if stats(full)!=changed: fail("no-op changed modification id")
+    m.call(close,args=[full])
+    r=m.call(query,args=[full,10,output,64,required])
+    if r.reason!="return" or r.value!=0xc0000008: fail("query accepted closed token")
+    if stats(other)!=changed: fail("closing one handle destroyed shared token")
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestNativeTokenExplicitFacts(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "security_plugin")
+load("@stdlib//windows:security.star", "sid", "acl", "access_allowed_ace")
+def exercise(arch):
+    expected=acl([access_allowed_ace(sid(5,[18]),0x10000000),access_allowed_ace(sid(5,[32,544]),0xa0020000)],size=60)
+    for dacl in [None,b"",expected]:
+        m=emulator.machine(architecture=arch,code=b"\xc3")
+        k=kernel32_plugin()
+        facts={"owner":sid(5,[32,544]),"primary_group":sid(5,[18]),"integrity_level":16384,"process_trust_sid":b""}
+        if dacl!=None: facts["default_dacl"]=dacl
+        m.use([k,security_plugin(kernel=k,user_sid=[18],token_facts=facts)])
+        handle=m.allocate(size=m.pointer_size)
+        r=m.call(m.resolve_export("ntdll.dll",name="NtOpenProcessToken"),args=[0xffffffff if arch=="x86" else 0xffffffffffffffff,8,handle])
+        if r.reason!="return" or r.value: fail("open explicit token")
+        token=m.read_pointer(handle)
+        query=m.resolve_export("ntdll.dll",name="NtQueryInformationToken")
+        output=m.allocate(value=b"X"*128)
+        required=m.allocate(value=b"Z"*4)
+        r=m.call(query,args=[token,6,output,128,required])
+        if dacl==None:
+            if r.reason!="plugin" or m.read(output,128)!=b"X"*128 or m.read(required,4)!=b"Z"*4: fail("unknown default DACL manufactured (class 6 is not statistics)")
+        else:
+            if r.reason!="return" or r.value or m.read_u32le(required)!=m.pointer_size+len(dacl): fail("explicit default DACL")
+            if m.read_pointer(output)!=(output+m.pointer_size if dacl else 0): fail("NULL and absent default DACL conflated")
+            if dacl and m.read(output+m.pointer_size,len(dacl))!=dacl: fail("default DACL bytes changed")
+            m.write(output,b"X"*128)
+            r=m.call(query,args=[token,6,output,m.pointer_size+len(dacl)-1,required])
+            if r.reason!="return" or r.value!=0xc0000023 or m.read(output,128)!=b"X"*128: fail("default DACL short write")
+        m.write(output,b"X"*128)
+        r=m.call(query,args=[token,41,output,128,required])
+        if r.reason!="return" or r.value or m.read_u32le(required)!=m.pointer_size or m.read_pointer(output)!=0 or m.read(output+m.pointer_size,128-m.pointer_size)!=b"X"*(128-m.pointer_size): fail("explicit unprotected token trust")
+        maximum=(1<<(m.pointer_size*8))-1
+        handles=len(k.state["handles"])
+        for pseudo in [maximum-3,maximum-5]:
+            r=m.call(query,args=[pseudo,41,output,128,required])
+            if r.reason!="return" or r.value or m.read_pointer(output)!=0: fail("process/effective pseudo-token query")
+        m.write(output,b"X"*128)
+        r=m.call(query,args=[maximum-4,41,output,128,required])
+        if r.reason!="return" or r.value!=0xc000007c or m.read(output,128)!=b"X"*128: fail("absent thread pseudo-token")
+        if len(k.state["handles"])!=handles: fail("pseudo-token query allocated handles")
+        for kind,principal in [(4,sid(5,[32,544])),(5,sid(5,[18]))]:
+            m.write(output,b"X"*128)
+            r=m.call(query,args=[token,kind,output,128,required])
+            if r.reason!="return" or r.value or m.read(m.read_pointer(output),len(principal))!=principal or m.read_u32le(required)!=m.pointer_size+len(principal): fail("explicit owner/group ignored")
+        r=m.call(query,args=[token,25,output,128,required])
+        if r.reason!="return" or r.value or m.read(m.read_pointer(output),12)!=sid(16,[16384]): fail("explicit integrity ignored")
+exercise("x86")
+exercise("amd64")
+`)
+}

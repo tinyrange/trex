@@ -951,7 +951,7 @@ func (b *ntfsBuild) createNameAttributeExtensions(node *ntfsNode, allNames []ntf
 		b.nextID++
 		used := ntfsExtensionRecordHeaderSize()
 		for len(remaining) > 0 {
-			attributeSize := len(ntfsResidentAttr(ntfsAttrFileName, "", ntfsFileNameAttribute(node, remaining[0])))
+			attributeSize := ntfsResidentAttrSize("", ntfsFileNameSize(remaining[0]))
 			if used+attributeSize+4 > int(ntfsRecordSize) {
 				break
 			}
@@ -1004,7 +1004,7 @@ func ntfsNodeRecordSize(node *ntfsNode, names []ntfsName, attributeList bool) in
 		used += len(ntfsNonResidentAttr(ntfsAttrAttributeList, "", 1<<56, 1))
 	}
 	for _, name := range names {
-		used += len(ntfsResidentAttr(ntfsAttrFileName, "", ntfsFileNameAttribute(node, name)))
+		used += ntfsResidentAttrSize("", ntfsFileNameSize(name))
 	}
 	if node.size > 0 {
 		used += len(ntfsNonResidentAttr(ntfsAttrData, "", 1<<56, node.size))
@@ -1135,7 +1135,7 @@ func ntfsIndexRootLimit(node *ntfsNode, allocated bool, bitmapBytes int, modern 
 		used += len(ntfsNonResidentAttr(ntfsAttrAttributeList, "", 1<<24, int64(len(node.attributeList))))
 	}
 	for _, name := range node.names {
-		used += len(ntfsResidentAttr(ntfsAttrFileName, "", ntfsFileNameAttribute(node, name)))
+		used += ntfsResidentAttrSize("", ntfsFileNameSize(name))
 	}
 	if modern && node.id == 5 {
 		used += len(ntfsNonResidentAttr(ntfsAttrSecurityDescriptor, "", 1<<24, int64(len(ntfsRootSecurityDescriptor()))))
@@ -1144,7 +1144,7 @@ func ntfsIndexRootLimit(node *ntfsNode, allocated bool, bitmapBytes int, modern 
 	}
 	if allocated {
 		used += len(ntfsNonResidentAttr(ntfsAttrIndexAllocation, "$I30", 1<<24, ntfsIndexSize))
-		used += len(ntfsResidentAttr(ntfsAttrBitmap, "$I30", make([]byte, bitmapBytes)))
+		used += ntfsResidentAttrSize("$I30", bitmapBytes)
 	}
 	available := int(ntfsRecordSize) - used - ntfsEARecordSize(node) - 4
 	valueOffset := align8(24 + len(utf16Bytes("$I30")))
@@ -1164,7 +1164,7 @@ type ntfsIndexTreeNode struct {
 func ntfsIndexEntriesSize(items []*ntfsIndexKey, subnodes bool) int {
 	size := 16
 	for _, item := range items {
-		size += len(ntfsIndexEntry(item, subnodes, 0))
+		size += ntfsIndexEntrySize(item, subnodes)
 	}
 	if subnodes {
 		size += 8
@@ -1180,7 +1180,7 @@ func ntfsLeafLevel(items []*ntfsIndexKey) ([]*ntfsIndexTreeNode, []*ntfsIndexKey
 		current := &ntfsIndexTreeNode{}
 		used := 16
 		for index < len(items) {
-			entrySize := len(ntfsIndexEntry(items[index], false, 0))
+			entrySize := ntfsIndexEntrySize(items[index], false)
 			if used+entrySize <= capacity {
 				current.keys = append(current.keys, items[index])
 				used += entrySize
@@ -1239,7 +1239,7 @@ func ntfsParentLevel(children []*ntfsIndexTreeNode, separators []*ntfsIndexKey, 
 		childIndex++
 		used := 24
 		for separatorIndex < len(separators) {
-			entrySize := len(ntfsIndexEntry(separators[separatorIndex], true, 0))
+			entrySize := ntfsIndexEntrySize(separators[separatorIndex], true)
 			if used+entrySize <= capacity {
 				current.keys = append(current.keys, separators[separatorIndex])
 				current.children = append(current.children, children[childIndex])
@@ -1426,21 +1426,26 @@ func ntfsIndexBlock(vcn uint64, entries [][]byte, hasChildren bool) []byte {
 	return block
 }
 
-func ntfsIndexEntry(key *ntfsIndexKey, hasSubnode bool, vcn uint64) []byte {
-	value := ntfsFileNameAttribute(key.node, key.name)
-	length := align8(16 + len(value))
+func ntfsIndexEntrySize(key *ntfsIndexKey, hasSubnode bool) int {
+	length := align8(16 + ntfsFileNameSize(key.name))
 	if hasSubnode {
-		length = align8(length + 8)
+		length += 8
 	}
+	return length
+}
+
+func ntfsIndexEntry(key *ntfsIndexKey, hasSubnode bool, vcn uint64) []byte {
+	length := ntfsIndexEntrySize(key, hasSubnode)
+	valueSize := ntfsFileNameSize(key.name)
 	entry := make([]byte, length)
 	binary.LittleEndian.PutUint64(entry[0:8], ntfsFileReference(key.node.id))
 	binary.LittleEndian.PutUint16(entry[8:10], uint16(length))
-	binary.LittleEndian.PutUint16(entry[10:12], uint16(len(value)))
+	binary.LittleEndian.PutUint16(entry[10:12], uint16(valueSize))
 	if hasSubnode {
 		binary.LittleEndian.PutUint16(entry[12:14], ntfsIndexHasSub)
 		binary.LittleEndian.PutUint64(entry[length-8:length], vcn)
 	}
-	copy(entry[16:], value)
+	putNTFSFileName(entry[16:16+valueSize], key.node, key.name)
 	return entry
 }
 
@@ -1910,12 +1915,41 @@ func ntfsStandardInformation(node *ntfsNode, modern bool) []byte {
 	return data
 }
 
+// Size planning must not serialize records: callers run it repeatedly while
+// partitioning directory indexes and allocating attribute extension records.
+func ntfsUTF16Size(value string) int {
+	size := 0
+	for _, r := range value {
+		size += 2
+		if r > 0xffff {
+			size += 2
+		}
+	}
+	return size
+}
+
+func ntfsResidentAttrSize(name string, valueSize int) int {
+	return align8(align8(24+ntfsUTF16Size(name)) + valueSize)
+}
+
+func ntfsFileNameSize(name ntfsName) int {
+	if name.encoded != nil {
+		return 66 + len(name.encoded)
+	}
+	return 66 + ntfsUTF16Size(name.value)
+}
+
 func ntfsFileNameAttribute(node *ntfsNode, name ntfsName) []byte {
+	data := make([]byte, ntfsFileNameSize(name))
+	putNTFSFileName(data, node, name)
+	return data
+}
+
+func putNTFSFileName(data []byte, node *ntfsNode, name ntfsName) {
 	nameBytes := name.encoded
 	if nameBytes == nil {
 		nameBytes = utf16Bytes(name.value)
 	}
-	data := make([]byte, 66+len(nameBytes))
 	parent := uint64(5)
 	if name.parent != nil {
 		parent = name.parent.id
@@ -1943,7 +1977,6 @@ func ntfsFileNameAttribute(node *ntfsNode, name ntfsName) []byte {
 	data[64] = byte(len(nameBytes) / 2)
 	data[65] = name.namespace
 	copy(data[66:], nameBytes)
-	return data
 }
 
 func newNTFSName(value string, namespace byte, parent *ntfsNode) ntfsName {

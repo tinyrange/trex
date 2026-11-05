@@ -37,6 +37,14 @@ func TestStageEffectsRetainCBSRegistryKeysWithoutInventingValues(t *testing.T) {
 		if len(plan.RegistryValues) != 1 || plan.RegistryValues[0].Value.Name != "Present" {
 			t.Fatalf("invented placeholder value: %#v", plan.RegistryValues)
 		}
+		staged, err := PlanStageEffects(stage, StageAssemblyPlan{Components: []PlannedComponent{{Path: name, Identity: AssemblyIdentity{Name: "Microsoft-UI-Xaml-CBS", Version: "10.0.26100.8328", ProcessorArchitecture: arch}, StagedOnly: true}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(staged.Files) != 1 || len(staged.RegistryKeys) != 0 || len(staged.RegistryValues) != 0 {
+			t.Fatalf("staging activated registry or lost content: %+v", staged)
+		}
+
 	}
 }
 
@@ -52,7 +60,11 @@ func TestPackageCatalogHasNativeCatRootDestination(t *testing.T) {
 				{Target: ContentDescriptor{Name: name + ".cat"}},
 			},
 		}}
-		plan, err := PlanStageEffects(stage, StageAssemblyPlan{Packages: []NamedAssemblyManifest{{Path: name + ".mum"}}})
+		id, err := ParsePackageManifestName(name + ".mum")
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := PlanStageEffects(stage, StageAssemblyPlan{Packages: []NamedAssemblyManifest{{Path: name + ".mum", Manifest: &AssemblyManifest{Identity: id}}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -247,5 +259,39 @@ func TestResolveStageEffectSourceUsesExactPredecessorDescriptor(t *testing.T) {
 	}
 	if got.Mode != "predecessor" || got.Descriptor == nil || *got.Descriptor != descriptor {
 		t.Fatalf("predecessor source = %#v", got)
+	}
+}
+
+func TestStagedComponentRetainsStoreFileWithoutRuntimeProjection(t *testing.T) {
+	data := []byte(`<assembly><assemblyIdentity name="optional" version="1.0" processorArchitecture="amd64"/><file name="optional.dll" destinationPath="$(runtime.system32)"><link destination="$(runtime.windows)\other.dll"/></file><registryKeys><registryKey keyName="HKEY_LOCAL_MACHINE\Software\Optional"><registryValue name="Enabled" valueType="REG_DWORD" value="1"/></registryKey></registryKeys></assembly>`)
+	manifest := ContentDescriptor{Name: "optional.manifest", Length: int64(len(data)), SHA256: sha256.Sum256(data)}
+	payload := DeltaPayload{Target: manifest, Record: manifest, RecordType: "RAW", Literal: true}
+	for _, staged := range []bool{false, true} {
+		stage := &CumulativeStage{metadataCAB: &cab.Archive{}, PSF: &starfile.Bytes{Data: data}, Graph: &CumulativeGraph{Payloads: []DeltaPayload{payload, {Target: ContentDescriptor{Name: `optional\optional.dll`}}}}, expressByTarget: map[string]DeltaPayload{normalizeCIXName(manifest.Name): payload}}
+		effects, err := PlanStageEffects(stage, StageAssemblyPlan{Components: []PlannedComponent{{Path: manifest.Name, Stem: "optional", Identity: AssemblyIdentity{Name: "optional", Version: "1.0", ProcessorArchitecture: "amd64"}, StagedOnly: staged}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(effects.Files) != 2 {
+			t.Fatal("lost staged bytes", effects.Files)
+		}
+		for _, file := range effects.Files {
+			if file.Kind == "component-file" {
+				expected := 2
+				if staged {
+					expected = 0
+				}
+				if len(file.Destinations) != expected || file.StorePath != "/Windows/WinSxS/optional/optional.dll" {
+					t.Fatal("wrong projection", file)
+				}
+			}
+		}
+		expected := 1
+		if staged {
+			expected = 0
+		}
+		if len(effects.RegistryValues) != expected {
+			t.Fatal("wrong staged registry", effects.RegistryValues)
+		}
 	}
 }

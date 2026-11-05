@@ -252,12 +252,20 @@ def _sddl_access_mask(value, generic_mapping):
         return mapped
     return mask
 
-def _sddl_ace(value, aliases, generic_mapping):
+def _sddl_ace(value, aliases, generic_mapping, sacl=False):
     fields = value.split(";")
     if len(fields) != 6:
         fail("invalid SDDL ACE " + value)
     ace_types = {"A": 0, "D": 1, "AU": 2, "OA": 5, "OD": 6, "OU": 7, "OL": 8}
     ace_type = fields[0].upper()
+    if ace_type == "ML":
+        if not sacl:
+            fail("mandatory-label ACE requires a SACL")
+        # Reuse the native format parser's integrity-SID, mask and flag
+        # validation; mandatory policy bits are never generic-right mapped.
+        principal = aliases.get(fields[5].upper(), fields[5].upper())
+        encoded = windows.compile_sddl("S:(ML;" + ";".join([fields[1].upper(), fields[2].upper(), fields[3], fields[4], principal]) + ")")
+        return windows.security_descriptor_parts(encoded)["sacl"][8:]
     if ace_type not in ace_types:
         fail("unsupported SDDL ACE type " + fields[0])
     if ace_types[ace_type] >= 5:
@@ -304,7 +312,7 @@ def _sddl_acl(value, sacl, aliases, generic_mapping):
         end = value.find(")", cursor + 1)
         if end < 0:
             fail("unterminated SDDL ACE")
-        aces.append(_sddl_ace(value[cursor + 1:end], aliases, generic_mapping))
+        aces.append(_sddl_ace(value[cursor + 1:end], aliases, generic_mapping, sacl))
         cursor = end + 1
     revision = 4 if any([binary.read_u8(ace, 0) in [5, 6, 7, 8] for ace in aces]) else 2
     return acl(aces, revision = revision), control

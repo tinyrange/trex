@@ -300,3 +300,96 @@ func TestHTTPRangeFileRetriesTransientResponse(t *testing.T) {
 		t.Fatalf("read %q after %d requests", buffer, requests)
 	}
 }
+
+func TestHTTPRangeDeferredLocationsConcurrentAndRefresh(t *testing.T) {
+	payload := []byte("abcdefghijklmnop")
+	var resolutions atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/expired" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		var start, end int
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			t.Error(err)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload[start : end+1])
+	}))
+	defer server.Close()
+	pool, err := NewRefreshingHTTPRangePool(8, 16, server.Client(), func(ctx context.Context, name string, size int64, previous []string) ([]string, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("unbounded resolution")
+		}
+		if resolutions.Add(1) == 1 {
+			return []string{server.URL + "/expired"}, nil
+		}
+		return []string{server.URL + "/fresh"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := pool.OpenSHA256(context.Background(), "payload", nil, int64(len(payload)), strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolutions.Load() != 0 {
+		t.Fatal("opening file resolved locations")
+	}
+	var wg sync.WaitGroup
+	for _, offset := range []int64{0, 8} {
+		wg.Go(func() {
+			data := make([]byte, 8)
+			if _, err := file.ReadAt(data, offset); err != nil || !bytes.Equal(data, payload[offset:offset+8]) {
+				t.Errorf("read = %q, %v", data, err)
+			}
+		})
+	}
+	wg.Wait()
+	if resolutions.Load() != 2 {
+		t.Fatalf("got %d resolutions; want initial plus expired refresh", resolutions.Load())
+	}
+}
+
+func TestHTTPRangeDeferredLocationsValidationAndCancellation(t *testing.T) {
+	var calls atomic.Int32
+	pool, err := NewRefreshingHTTPRangePool(8, 8, nil, func(ctx context.Context, _ string, _ int64, _ []string) ([]string, error) {
+		calls.Add(1)
+		return []string{"not-a-url"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("ab", 32)
+	if _, err := pool.Open(context.Background(), "no-identity", nil, 8); err == nil {
+		t.Fatal("deferred URL without immutable identity")
+	}
+	if _, err := pool.OpenSHA256(context.Background(), "bad-url", []string{"invalid"}, 8, digest); err == nil {
+		t.Fatal("invalid explicit URL treated as deferred")
+	}
+	plain, _ := NewHTTPRangePool(8, 8, nil)
+	if _, err := plain.OpenSHA256(context.Background(), "no-resolver", nil, 8, digest); err == nil {
+		t.Fatal("empty locations without resolver")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	file, err := pool.OpenSHA256(ctx, "cancelled", nil, 8, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.ReadAt(make([]byte, 8), 0); err == nil || calls.Load() != 0 {
+		t.Fatal("cancellation not respected", err, calls.Load())
+	}
+	file, err = pool.OpenSHA256(context.Background(), "invalid-resolution", nil, 8, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.ReadAt(make([]byte, 8), 0); err == nil || !strings.Contains(err.Error(), "no absolute HTTP(S) URL") {
+		t.Fatal("invalid resolved URL accepted", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatal("failed resolution retried unexpectedly", calls.Load())
+	}
+}

@@ -18,11 +18,16 @@ licences:
 The copyright and licence notices required for compiled trex binaries are
 reproduced in [docs/dependency-licenses.md](docs/dependency-licenses.md).
 
-Some independently implemented binary layouts were checked against permissive
-third-party format implementations. No third-party source or generated output
-is included. The projects, provenance, and conservatively retained licence
-texts are listed in
+Third-party implementation references, adaptations, fixture sources and retained
+licence texts are listed in
 [docs/third-party-format-references.md](docs/third-party-format-references.md).
+
+The MSDelta decoder includes work informed by/adapted from `jlevere/msdelta`
+and PA31 playback framing cross-checked against `CaddyGlow/ms-delta`, whose
+native-oracle fixtures are also included in tests. Both MIT notices are retained
+in the format-reference and binary-distribution documents. The playback notice
+is additionally retained in `windows/msdelta/playback.LICENSE`. See the
+format-reference record for pinned revisions, fixture paths, and hashes.
 
 The Microsoft MS-DOS 4.0 MIT notice retained for the independently assembled
 BIOS MBR is also recorded there.

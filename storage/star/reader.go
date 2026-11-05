@@ -45,3 +45,10 @@ func (v *ReaderValue) WriteRangeTo(w io.Writer, off, size int64) (int64, error) 
 	}
 	return io.Copy(w, io.NewSectionReader(v.reader, off, size))
 }
+
+func (v *ReaderValue) VerifiedSHA256() ([32]byte, bool) {
+	if reader, ok := v.reader.(storage.VerifiedSHA256Reader); ok {
+		return reader.VerifiedSHA256()
+	}
+	return [32]byte{}, false
+}

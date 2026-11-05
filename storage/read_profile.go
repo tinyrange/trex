@@ -72,6 +72,16 @@ type profiledReader struct {
 }
 
 func (r *profiledReader) Size() int64 { return r.source.Size() }
+
+// Profiling never changes bytes or invents a proof. Forward an underlying
+// immutable content identity so observation does not force reconstruction on
+// a later digest query. Ordinary or not-yet-verified readers remain unverified.
+func (r *profiledReader) VerifiedSHA256() ([32]byte, bool) {
+	if source, ok := r.source.(VerifiedSHA256Reader); ok {
+		return source.VerifiedSHA256()
+	}
+	return [32]byte{}, false
+}
 func (r *profiledReader) ReadAt(b []byte, off int64) (int, error) {
 	p := r.profile
 	generation := p.generation.Load()

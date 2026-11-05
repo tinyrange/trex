@@ -57,3 +57,22 @@ func TestPayloadLocationRefreshRejectsUndeclaredAndCancelled(t *testing.T) {
 		t.Fatal("queried new locations for invalid request")
 	}
 }
+
+func TestDeclaredPayloadFilesPreservesIdentityConflicts(t *testing.T) {
+	a := windowsupdate.File{Name: "a.esd", Size: 8, DigestSHA1: "aa", DigestSHA256: "aaa", DownloadURL: "https://example.test/expired"}
+	duplicate := a
+	duplicate.Name = "A.ESD"
+	duplicate.DigestSHA256 = "AAA"
+	conflict := a
+	conflict.DigestSHA256 = "bbb"
+	files := declaredPayloadFiles([]windowsupdate.Offer{{Files: []windowsupdate.File{a}}, {Files: []windowsupdate.File{duplicate, conflict}}})
+	if len(files) != 2 || files[0].DownloadURL != "" || files[1].DownloadURL != "" {
+		t.Fatalf("declarations = %+v", files)
+	}
+	if _, err := findOfferFile(files, func(string) bool { return true }); err == nil {
+		t.Fatal("conflicting content identity was silently collapsed")
+	}
+	if a.DownloadURL == "" {
+		t.Fatal("mutated source declaration")
+	}
+}

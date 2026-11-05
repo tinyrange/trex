@@ -6,17 +6,29 @@ import (
 )
 
 func (c *CPU) compareSingles(a, b uint32) error {
+	return c.compareScalars(uint64(a), uint64(b), 4)
+}
+
+func (c *CPU) compareDoubles(a, b uint64) error {
+	return c.compareScalars(a, b, 8)
+}
+
+func (c *CPU) compareScalars(a, b uint64, width int) error {
+	exponentMask, fractionMask, signMask := uint64(0x7ff0000000000000), uint64(0xfffffffffffff), uint64(1)<<63
+	if width == 4 {
+		exponentMask, fractionMask, signMask = 0x7f800000, 0x7fffff, 0x80000000
+	}
 	control := c.readMXCSR()
 	var exceptions uint64
-	nan := func(v uint32) bool { return v&0x7fffffff > 0x7f800000 }
+	nan := func(v uint64) bool { return v & ^signMask > exponentMask }
 	unordered := nan(a) || nan(b)
 	if unordered {
 		exceptions = 1
 	} else {
-		for _, p := range []*uint32{&a, &b} {
-			if *p&0x7f800000 == 0 && *p&0x7fffff != 0 {
+		for _, p := range []*uint64{&a, &b} {
+			if *p&exponentMask == 0 && *p&fractionMask != 0 {
 				if control&(1<<6) != 0 {
-					*p &= 0x80000000
+					*p &= signMask
 				} else {
 					exceptions |= 2
 				}
@@ -35,7 +47,10 @@ func (c *CPU) compareSingles(a, b uint32) error {
 	if unordered {
 		c.flags |= flagZero | flagParity | flagCarry
 	} else {
-		x, y := math.Float32frombits(a), math.Float32frombits(b)
+		x, y := math.Float64frombits(a), math.Float64frombits(b)
+		if width == 4 {
+			x, y = float64(math.Float32frombits(uint32(a))), float64(math.Float32frombits(uint32(b)))
+		}
 		if x == y {
 			c.flags |= flagZero
 		} else if x < y {

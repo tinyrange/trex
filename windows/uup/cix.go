@@ -4,6 +4,8 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"github.com/tinyrange/trex/internal/xmltoken"
+	"github.com/tinyrange/trex/storage"
 	"io"
 	"strconv"
 	"strings"
@@ -105,7 +107,27 @@ type rawCIXLocation struct {
 // ParseContainerIndex parses a CIX document without loading the XML source as
 // one byte slice. Collection sizes are bounded independently from input size.
 func ParseContainerIndex(reader io.Reader) (*ContainerIndex, error) {
-	decoder := xml.NewDecoder(reader)
+	return parseContainerIndex(xml.NewDecoder(reader))
+}
+
+// Buffer only modest indexes; large indexes retain the streaming API's bounded
+// memory behavior. This buffer is per parse, never a disk or process-wide cache.
+func parseContainerIndexFile(file storage.Reader) (*ContainerIndex, error) {
+	size := file.Size()
+	if size < 0 {
+		return nil, fmt.Errorf("uup CIX: invalid source size")
+	}
+	if size > 64<<20 {
+		return ParseContainerIndex(io.NewSectionReader(file, 0, size))
+	}
+	data := make([]byte, int(size))
+	if _, err := io.ReadFull(io.NewSectionReader(file, 0, size), data); err != nil {
+		return nil, err
+	}
+	return parseContainerIndex(xml.NewTokenDecoder(xmltoken.New(data, false)))
+}
+
+func parseContainerIndex(decoder *xml.Decoder) (*ContainerIndex, error) {
 	var result *ContainerIndex
 	seenIDs := make(map[int64]struct{})
 	for {

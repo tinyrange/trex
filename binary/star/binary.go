@@ -101,6 +101,7 @@ func Builtins() starlark.StringDict {
 		"text":                 starlark.NewBuiltin("text", binaryTextBuiltin),
 		"view":                 starlark.NewBuiltin("view", binaryViewBuiltin),
 		"xml":                  starlark.NewBuiltin("xml", binaryXMLBuiltin),
+		"xml_many":             starlark.NewBuiltin("xml_many", binaryXMLManyBuiltin),
 		"zlib":                 starlark.NewBuiltin("zlib", binaryZlibBuiltin),
 	}
 	for _, codec := range binaryScalarCodecs {

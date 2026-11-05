@@ -115,6 +115,9 @@ func (d *driver) closePlatform() error {
 	}
 	d.platformClosed = true
 	err := d.pc.completeIDEDMARead(true)
+	if d.pc.nvme != nil {
+		d.pc.nvme.controller.CloseIO()
+	}
 	if d.pc.pciNIC != nil {
 		err = errors.Join(err, d.pc.pciNIC.port.Close())
 	}
@@ -297,6 +300,11 @@ func (d *driver) Pause(ctx context.Context) error {
 		if err := d.pc.completeIDEDMARead(true); err != nil {
 			return err
 		}
+		if d.pc.nvme != nil {
+			if err := d.pc.nvme.controller.PollIO(true); err != nil {
+				return err
+			}
+		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		if d.result != nil {
@@ -340,6 +348,11 @@ func (d *driver) Stop(ctx context.Context) error {
 	return d.call(ctx, func() error {
 		if err := d.pc.completeIDEDMARead(true); err != nil {
 			return err
+		}
+		if d.pc.nvme != nil {
+			if err := d.pc.nvme.controller.PollIO(true); err != nil {
+				return err
+			}
 		}
 		d.finish("stopped", "", true)
 		return nil

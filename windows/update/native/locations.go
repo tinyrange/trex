@@ -10,6 +10,30 @@ import (
 	windowsupdate "github.com/tinyrange/trex/windows/update"
 )
 
+// declaredPayloadFiles deduplicates repeated declarations across a bundle.
+// Conflicting identities are not collapsed: normal payload selection and the
+// resolver must still reject ambiguous names rather than choose arbitrary bytes.
+func declaredPayloadFiles(offers []windowsupdate.Offer) []windowsupdate.File {
+	type identity struct {
+		name, sha1, sha256 string
+		size               int64
+	}
+	seen := make(map[identity]bool)
+	var files []windowsupdate.File
+	for _, offer := range offers {
+		for _, file := range offer.Files {
+			key := identity{strings.ToLower(file.Name), strings.ToLower(file.DigestSHA1), strings.ToLower(file.DigestSHA256), file.Size}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			file.DownloadURL = ""
+			files = append(files, file)
+		}
+	}
+	return files
+}
+
 // Renew only locations, never revision selection or payload identity. One
 // response renews the whole media closure so concurrent readers can reuse it.
 func payloadLocationResolver(original []windowsupdate.File, resolve func(context.Context) ([]windowsupdate.File, error)) storagenative.HTTPRangeLocationResolver {

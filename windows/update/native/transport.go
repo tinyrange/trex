@@ -91,6 +91,14 @@ JSKdJFubUTXHkUlJKqP5b08czd2c4bVXyZ7CIkWbBhVwHEW/AjEAxdMo63LHPrCs
 Jwl/Yj1geeWS8UUquaUC5GC7/nornGCntZkU8rC+8LsFllZWj8Fo
 -----END CERTIFICATE-----`
 
+// httpClientSession releases pooled connections with the owning execution.
+type httpClientSession struct{ *http.Client }
+
+func (s *httpClientSession) Close() error {
+	s.CloseIdleConnections()
+	return nil
+}
+
 // Transport sends requests through net/http. Client may be replaced by tests
 // or applications that require custom proxy and TLS policy.
 type Transport struct {

@@ -2,7 +2,6 @@ package uup
 
 import (
 	"fmt"
-	"sort"
 )
 
 // BuildCanonicalGraph validates the logical-file graph embedded in a
@@ -88,8 +87,6 @@ func BuildCanonicalGraph(index *ContainerIndex, memberSizes map[string]int64) (*
 			return nil, err
 		}
 	}
-	sort.Slice(graph.Payloads, func(i, j int) bool {
-		return normalizeCIXName(graph.Payloads[i].Target.Name) < normalizeCIXName(graph.Payloads[j].Target.Name)
-	})
+	sortCIXNames(graph.Payloads, func(value DeltaPayload) string { return value.Target.Name })
 	return graph, nil
 }

@@ -102,6 +102,11 @@ func componentPathMayMatch(candidate ComponentPathIdentity, wanted AssemblyIdent
 // names before applying the middle-run abbreviation used by WinSxS paths.
 // Existing identity separators such as hyphens remain significant.
 func componentPathName(name string) string {
+	// Almost all store names already lack display punctuation. Avoid a second
+	// rune walk on every candidate in the abbreviated-name search buckets.
+	if !strings.ContainsAny(name, " ()") {
+		return strings.ToLower(name)
+	}
 	return strings.Map(func(character rune) rune {
 		switch character {
 		case ' ', '(', ')':

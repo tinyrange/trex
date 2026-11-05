@@ -286,7 +286,7 @@ func signingPELayout(data []byte) (peSigningLayout, error) {
 	}
 	layout.certificate = int(binary.LittleEndian.Uint32(data[layout.security:]))
 	layout.certificateSize = int(binary.LittleEndian.Uint32(data[layout.security+4:]))
-	// The existing catalog helper deliberately hashes only headers/sections.
+	// The mapped-image range helper hashes only headers/sections.
 	// Authenticode_PE.docx's signing algorithm adds a final extra-data range
 	// starting at SizeOfHeaders + sum(SizeOfRawData), excluding certificates.
 	layout.hashedSize = int(binary.LittleEndian.Uint32(data[opt+60:]))

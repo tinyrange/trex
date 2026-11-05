@@ -6,7 +6,6 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
 
@@ -121,20 +120,4 @@ func parseAPISetNamespace(data []byte) (starlark.Value, error) {
 	result.SetKey(starlark.String("contracts"), starlark.NewList(contracts))
 	result.Freeze()
 	return result, nil
-}
-
-func apiSetNamespaceBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var value starlark.Value
-	if err := starlark.UnpackArgs("api_set_namespace", args, kwargs, "file", &value); err != nil {
-		return nil, err
-	}
-	file, ok := value.(starfile.File)
-	if !ok {
-		return nil, fmt.Errorf("api_set_namespace: expected file")
-	}
-	data, err := starfile.ReadAll(file)
-	if err != nil {
-		return nil, err
-	}
-	return parseAPISetNamespace(data)
 }

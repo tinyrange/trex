@@ -223,10 +223,18 @@ func peSignatureBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 	if err != nil {
 		return nil, fmt.Errorf("pe_signature: %w", err)
 	}
+	return signatureIntegrityRecord(result, "pe_signature")
+}
+
+func signatureIntegrityRecord(result *verifiedPEIntegrity, name string) (starlark.Value, error) {
 	timestamp, err := verifySignatureTimestamp(result)
 	if err != nil {
-		return nil, fmt.Errorf("pe_signature timestamp: %w", err)
+		return nil, fmt.Errorf("%s timestamp: %w", name, err)
 	}
+	return signatureIntegrityProjection(result, timestamp), nil
+}
+
+func signatureIntegrityProjection(result *verifiedPEIntegrity, timestamp *verifiedSignatureTimestamp) starlark.Value {
 	var timestampValue starlark.Value = starlark.None
 	if timestamp != nil {
 		chain := make([]starlark.Value, 0, len(timestamp.integrity.certificates))
@@ -250,7 +258,7 @@ func peSignatureBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 		"unsigned_attributes": starlark.Bytes(result.unsigned),
 		"timestamp":           timestampValue,
 		"digest_algorithm":    starlark.String("sha256"),
-	}), nil
+	})
 }
 
 func signatureCertificates(data []byte) ([]*x509.Certificate, error) {

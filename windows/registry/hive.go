@@ -23,6 +23,7 @@ type Hive struct {
 	file     storage.Reader
 	rootCell uint32
 	minor    uint32
+	snapshot *snapshotIndex
 }
 
 type Value struct {
@@ -40,16 +41,20 @@ type NamedValue struct {
 // Key describes an nk cell. Cell references are relative to the hive bins,
 // never host offsets or paths. Use the Hive methods to decode their contents.
 type Key struct {
-	Name         string
-	Cell         uint32
-	Flags        uint16
-	SecurityCell uint32
-	ClassCell    uint32
-	ClassLength  uint16
-	SubkeyList   uint32
-	SubkeyCount  uint32
-	ValueList    uint32
-	ValueCount   uint32
+	Name  string
+	Cell  uint32
+	Flags uint16
+	// NameFlags preserves the packed high half of nk+0x34 (not the name
+	// length). Its low nibble is the persistent key UserFlags.
+	NameFlags     uint16
+	LastWriteTime uint64 // Raw NT FILETIME from the nk cell.
+	SecurityCell  uint32
+	ClassCell     uint32
+	ClassLength   uint16
+	SubkeyList    uint32
+	SubkeyCount   uint32
+	ValueList     uint32
+	ValueCount    uint32
 }
 
 // RootCell returns the cell reference recorded by the base block.
@@ -159,6 +164,18 @@ func (h *Hive) LookupParts(parts []string) (Key, error) {
 		return Key{}, err
 	}
 	for _, part := range parts {
+		if h.snapshot != nil {
+			index, err := h.indexedChildren(current)
+			if err != nil {
+				return Key{}, err
+			}
+			child, found := index.byName[foldedKeyName(part)]
+			if !found {
+				return Key{}, fmt.Errorf("registry hive: key component %q not found", part)
+			}
+			current = child
+			continue
+		}
 		children, err := h.ReadSubkeys(current)
 		if err != nil {
 			return Key{}, err
@@ -179,6 +196,21 @@ func (h *Hive) LookupParts(parts []string) (Key, error) {
 
 // ReadKey decodes an nk cell, including its class and security references.
 func (h *Hive) ReadKey(cell uint32) (Key, error) {
+	if h.snapshot == nil {
+		return h.readKey(cell)
+	}
+	if value, ok := h.snapshot.keys.Load(cell); ok {
+		return value.(Key), nil
+	}
+	key, err := h.readKey(cell)
+	if err != nil {
+		return Key{}, err
+	}
+	value, _ := h.snapshot.keys.LoadOrStore(cell, key)
+	return value.(Key), nil
+}
+
+func (h *Hive) readKey(cell uint32) (Key, error) {
 	data, err := h.ReadCell(cell)
 	if err != nil {
 		return Key{}, err
@@ -193,8 +225,10 @@ func (h *Hive) ReadKey(cell uint32) (Key, error) {
 	return Key{
 		Name: decodeName(data[0x4c:0x4c+nameLength], binary.LittleEndian.Uint16(data[2:4])&0x20 != 0),
 		Cell: cell, Flags: binary.LittleEndian.Uint16(data[2:4]),
-		SecurityCell: binary.LittleEndian.Uint32(data[0x2c:]),
-		ClassCell:    binary.LittleEndian.Uint32(data[0x30:]), ClassLength: binary.LittleEndian.Uint16(data[0x4a:]),
+		NameFlags:     binary.LittleEndian.Uint16(data[0x36:0x38]),
+		LastWriteTime: binary.LittleEndian.Uint64(data[4:12]),
+		SecurityCell:  binary.LittleEndian.Uint32(data[0x2c:]),
+		ClassCell:     binary.LittleEndian.Uint32(data[0x30:]), ClassLength: binary.LittleEndian.Uint16(data[0x4a:]),
 		SubkeyCount: binary.LittleEndian.Uint32(data[0x14:]), SubkeyList: binary.LittleEndian.Uint32(data[0x1c:]),
 		ValueCount: binary.LittleEndian.Uint32(data[0x24:]), ValueList: binary.LittleEndian.Uint32(data[0x28:]),
 	}, nil
@@ -202,6 +236,17 @@ func (h *Hive) ReadKey(cell uint32) (Key, error) {
 
 // ReadSubkeys returns the direct child keys after validating the declared count.
 func (h *Hive) ReadSubkeys(parent Key) ([]Key, error) {
+	if h.snapshot == nil {
+		return h.readSubkeys(parent)
+	}
+	index, err := h.indexedChildren(parent)
+	if err != nil {
+		return nil, err
+	}
+	return append([]Key(nil), index.ordered...), nil
+}
+
+func (h *Hive) readSubkeys(parent Key) ([]Key, error) {
 	if parent.SubkeyCount == 0 || parent.SubkeyList == 0xffffffff {
 		return nil, nil
 	}

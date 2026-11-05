@@ -134,6 +134,58 @@ The upstream MIT licence is retained:
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
+## CaddyGlow/ms-delta PA31 playback and fixtures
+
+Reference for `windows/msdelta/playback.go`: `src/pa30/reverse.rs` in
+[CaddyGlow/ms-delta](https://github.com/CaddyGlow/ms-delta/tree/6f25d63e8a8573015feb2f6a3d3f98861edbb22c).
+Reviewed reference revision: `6f25d63e8a8573015feb2f6a3d3f98861edbb22c`.
+
+The fixtures in `windows/msdelta/playback_test.go` are from that project.
+The following manifests are under `docs/fixtures/pa31-native/` at the reviewed
+revision:
+
+| Manifest | Entry | Delta SHA-256 |
+| --- | --- | --- |
+| `reverse/manifest.json` | `abc-268435456` | `cd1944a825c7c771ea47d085c355b1091f14d21b350fad2fcedae2f89ae6fc70` |
+| `reverse-extended/manifest.json` | `amd64-pointers-forward` | `8aa620478535d07300ae2b4affd28cd917faef9f6bc76136fa875ba350545716` |
+| `reverse-extended/manifest.json` | `managed-x64-forward` | `2bc70243127e483677abcf4ec59c99cd5f0f6ac0e3a51c16adfcb5fae59886fc` |
+| `reverse-extended/manifest.json` | `compressed-delete` | `bf7e0a988d594c2f0fb60ee3c639c043ef543c5530784806eed7319e5139c7a9` |
+
+Generation records: `docs/fixtures/pa31-native/README.md`,
+`docs/fixtures/pa31-native/reverse/generate.ps1`, and
+`docs/fixtures/pa31-native/reverse-extended/generate.ps1`.
+Input-family references: `docs/fixtures/pa30-pe-native/README.md` and
+`docs/fixtures/pa30-cli-native/README.md`. The manifests record the source and
+target roles for reverse application.
+
+The upstream MIT notice is retained in
+[`windows/msdelta/playback.LICENSE`](../windows/msdelta/playback.LICENSE) and
+reproduced in [binary-distribution notices](dependency-licenses.md):
+
+```text
+MIT License
+
+Copyright (c) 2026 windows-uup contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Public CLI instruction definitions
 
 The bounded managed-method token normalizer in `windows/msdelta` uses the

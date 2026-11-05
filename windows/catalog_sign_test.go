@@ -13,6 +13,7 @@ import (
 	"time"
 
 	starfile "github.com/tinyrange/trex/storage/star"
+	"github.com/tinyrange/trex/windows/catalog"
 	"go.starlark.net/starlark"
 )
 
@@ -132,7 +133,7 @@ func TestCatalogSignMembersAndSignature(t *testing.T) {
 			t.Fatal("wrong subject interface")
 		}
 	}
-	index, err := parseCatalogIndex(encoded)
+	index, err := catalog.ParseIndex(encoded)
 	if err != nil || len(index) != 2 || !bytes.Equal(index[0], wants[0]) || !bytes.Equal(index[1], wants[1]) {
 		t.Fatal("catalog index round trip", err)
 	}

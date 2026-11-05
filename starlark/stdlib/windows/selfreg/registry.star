@@ -1,6 +1,7 @@
 """Registry API plugin for deterministic Windows self-registration emulation."""
 
 load(":common.star", "expand_environment")
+load("@stdlib//windows/emulation:abi.star", "counted_string_layout", "object_attributes_layout")
 
 _ROOTS = {
     0x80000000: ("SOFTWARE", "/Classes"),
@@ -62,6 +63,8 @@ _CALLS = {
     "regflushkey": 1,
     "regdeletekeyw": 2,
     "regdeletekeya": 2,
+    "regdeletekeyexw": 4,
+    "regdeletekeyexa": 4,
     "regdeletetreew": 2,
     "regdeletetreea": 2,
     "reggetvaluew": 7,
@@ -86,8 +89,18 @@ _CALLS = {
 }
 
 _NATIVE_CALLS = {
+    "ldrqueryimagefileexecutionoptions": 6,
     "ntenumeratekey": 6,
     "ntopenkey": 3,
+    "ntopenkeyex": 4,
+    "ntqueryvaluekey": 6,
+    "ntquerykey": 5,
+    "ntenumeratevaluekey": 6,
+    "ntsetvaluekey": 6,
+    "ntdeletevaluekey": 2,
+    "ntdeletekey": 1,
+    "ntflushkey": 1,
+    "ntcreatekey": 7,
     # NT 3.x exports private wrappers with one trailing compatibility
     # argument.  Their object and result arguments match NtOpenKey.
     "rtlpntopenkey": 4,
@@ -151,7 +164,7 @@ _SHLWAPI_NAMED_REGISTRY_WRAPPERS = {
 def _registry_provider_module(name):
     """Reports whether a module imports the Win32 registry contract."""
     normalized = name.replace("/", "\\").split("\\")[-1].lower()
-    return normalized in ["advapi32.dll", "advapi32_vista.dll", "kernel32.dll"] or normalized.startswith("api-ms-win-core-registry-") or normalized.startswith("ext-ms-win-advapi32-registry-")
+    return normalized in ["advapi32.dll", "advapi32_vista.dll", "kernel32.dll", "kernelbase.dll"] or normalized.startswith("api-ms-win-core-registry-") or normalized.startswith("ext-ms-win-advapi32-registry-")
 
 def _join(parent, child):
     parent = parent.replace("\\", "/").rstrip("/")
@@ -202,16 +215,17 @@ def _cstring(machine, address, wide):
 def _unicode_string(machine, address):
     if not address:
         return ""
-    descriptor = binary.cursor(machine.read(address, 8))
-    length = descriptor.u16le()
-    descriptor.u16le()
-    data = descriptor.u32le()
+    layout = counted_string_layout(machine.pointer_size)
+    length = machine.read_u16le(address + layout["Length"])
+    data = machine.read_pointer(address + layout["Buffer"])
     if not data or not length:
         return ""
     return binary.text(machine.read(data, length), encoding = "utf16le")
 
 def _native_absolute_key(path):
-    normalized = path.replace("/", "\\").strip("\\")
+    # NT registry names use backslashes only. A forward slash is a valid
+    # literal key-name character (including base64 driver hashes and mounts).
+    normalized = path.strip("\\")
     folded = normalized.lower()
     machine_prefix = "registry\\machine"
     if folded == machine_prefix:
@@ -222,6 +236,9 @@ def _native_absolute_key(path):
         hive = parts[0].upper()
         if hive in ["SYSTEM", "SOFTWARE", "SAM", "SECURITY"]:
             return hive, _key_from_parts(parts[1:])
+        # Other HKLM children, including explicitly loaded offline hives,
+        # share the same modeled namespace as relative predefined-HKLM opens.
+        return "SOFTWARE", _key_from_parts(parts)
     user_prefix = "registry\\user"
     if folded == user_prefix:
         return "DEFAULT", "/@users"
@@ -254,12 +271,20 @@ def _key_identity(hive, key):
     normalized = "/" + key.replace("\\", "/").strip("/").lower()
     return hive.upper() + "\x00" + normalized
 
+def _source_node(state, target):
+    hive,key=target
+    identity=_key_identity(hive,key)
+    for mount in state.get("mounts",[]):
+        prefix=_key_identity(mount["hive"],mount["key"])
+        if identity==prefix or identity.startswith(prefix+"/"):
+            parts=key.strip("/").split("/")[len(mount["key"].strip("/").split("/")):]
+            return mount["source"].find([_decode_key_part(part) for part in parts])
+    source=state.get("sources",{}).get(hive.upper())
+    return source.find([_decode_key_part(part) for part in key.strip("/").split("/") if part]) if source!=None else None
+
 def _source_entry(state, target):
     hive, key = target
     identity = _key_identity(hive, key)
-    sources = state.get("sources", {})
-    if hive.upper() not in sources:
-        return None
     cache = state.get("source_cache")
     if cache == None:
         cache = {}
@@ -267,13 +292,14 @@ def _source_entry(state, target):
     cached = cache.get(identity)
     if cached != None:
         return cached if cached["found"] else None
-    source = sources.get(hive.upper())
-    node = source.find([_decode_key_part(part) for part in key.strip("/").split("/") if part]) if source != None else None
+    node = _source_node(state,target)
     if node == None:
         cache[identity] = {"found": False}
         return None
+    state["source_cache_serial"] = state.get("source_cache_serial", 0) + 1
     entry = {
         "found": True,
+        "cache_id": state["source_cache_serial"],
         "subkeys": [child.name for child in node.children],
         "values": {
             name.lower(): {"name": name, "type": record.type, "raw": record.raw}
@@ -283,10 +309,25 @@ def _source_entry(state, target):
     cache[identity] = entry
     return entry
 
+def _key_metadata(state, target):
+    # Metadata belongs to the source object, not a deleted/recreated pathname.
+    if _key_deleted(state, _key_identity(target[0], target[1])):
+        return {"class": b"", "last_write_time": 0}
+    node = _source_node(state,target)
+    return {"class": node.class_bytes, "last_write_time": node.last_write_time} if node != None else {"class": b"", "last_write_time": 0}
+
 def _key_deleted(state, identity):
-    for deleted in state.get("deleted_keys", {}):
-        if identity == deleted or identity.startswith(deleted.rstrip("/") + "/"):
+    # _delete_tree stores canonical identities without a trailing separator.
+    # Check the key and its component ancestors, not every deleted sibling.
+    # Literal slashes in key names are percent-encoded before this boundary.
+    deleted = state.get("deleted_keys", {})
+    for _ in range(identity.count("/") + 1):
+        if identity in deleted:
             return True
+        separator = identity.rfind("/")
+        if separator < 0:
+            return False
+        identity = identity[:separator]
     return False
 
 def _key_exists(state, target):
@@ -309,17 +350,40 @@ def _lookup_value(state, target, name):
     item = source["values"].get(name.lower()) if source != None else None
     return {"type": item["type"], "raw": item["raw"]} if item != None else None
 
+def _invalidate_key_names(state):
+    state["key_names_revision"] = state.get("key_names_revision", 0) + 1
+
 def _direct_subkeys(state, target):
     hive, key = target
-    output = {}
     source = _source_entry(state, target)
+    identity = _key_identity(hive, key)
+    revision = state.get("key_names_revision", 0)
+    source_id = source.get("cache_id") if source != None else 0
+    cache = state.setdefault("subkeys_cache", {})
+    cached = cache.get(identity)
+    if source_id != None and cached != None and cached["revision"] == revision and cached["source_id"] == source_id:
+        return list(cached["names"])
+    output = {}
     if source != None:
         for name in source["subkeys"]:
             child = _key_identity(hive, _join(key, _encode_key_part(name)))
             if not _key_deleted(state, child):
                 output[name.lower()] = name
     output.update(windows.registry_children(state["keys"], hive, key))
-    return [output[name] for name in sorted(output.keys())]
+    for mount in state.get("mounts",[]):
+        parent=mount["key"].rsplit("/",1)[0] or "/"
+        if _key_identity(mount["hive"],parent)==identity:
+            name=_decode_key_part(mount["key"].rsplit("/",1)[1])
+            output[name.lower()]=name
+    names = [output[name] for name in sorted(output.keys())]
+    if source_id != None:
+        # Source records are immutable for one lazy-source cache incarnation.
+        # Key creation/deletion invalidates names; source-cache clear/reload
+        # supplies a new serial even when the namespace revision is unchanged.
+        if len(cache) >= 256:
+            cache.clear()
+        cache[identity] = dict(revision=revision, source_id=source_id, names=tuple(names))
+    return names
 
 def _direct_values(state, target):
     hive, key = target
@@ -366,10 +430,18 @@ def _api_value_raw(value, wide):
         return binary.encode("\x00".join(decoded) + "\x00\x00", encoding = "ascii")
     return binary.encode(decoded, encoding = "ascii", nul = True)
 
+def _check_delete_mount(state, target):
+    base = _key_identity(target[0], target[1]).rstrip("/")
+    for mount in state.get("mounts", []):
+        mounted = _key_identity(mount["hive"], mount["key"])
+        if mounted == base or mounted.startswith(base + "/"):
+            fail("registry deletion crosses a static hive mount")
+
 def _delete_tree(state, target):
     """Deletes a known registry key tree and records its removed values."""
     hive, key = target
     base = _key_identity(hive, key).rstrip("/")
+    _check_delete_mount(state, target)
     deleted = _key_exists(state, target)
     removed, retained = windows.registry_partition(state["values"], hive, key, values = True)
     for identity, value in removed.items():
@@ -387,7 +459,13 @@ def _delete_tree(state, target):
         })
     state["values"] = retained
     _, state["keys"] = windows.registry_partition(state["keys"], hive, key)
+    _invalidate_key_names(state)
     state.setdefault("deleted_keys", {})[base] = True
+    if deleted:
+        # Retain successful deletion history even when ensure_key later
+        # recreates the name and removes the live tombstone. Value patches
+        # alone cannot describe deletion of an empty source key.
+        state.setdefault("key_deletions", []).append({"hive": hive, "key": key})
     if "created_keys" in state:
         _, state["created_keys"] = windows.registry_partition(state["created_keys"], hive, key)
     if "security" in state:
@@ -414,7 +492,52 @@ def _delete_value(state, target, name):
     })
     return 0
 
-def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_key_case = "preserve", prepared_state = None, environment = {}):
+def _registry_store_native_value(state, target, value_name, registry_type, raw, output_key):
+    """Preserve unknown ULONG registry types and their uninterpreted data bytes."""
+    type_name = _TYPES.get(registry_type)
+    value = _decode_value(raw, registry_type, True)
+    if type_name != None and _encoded_value(type_name, value) != raw:
+        fail("NtSetValueKey: noncanonical raw value requires raw registry patches")
+    identity = _identity(target[0], target[1], value_name)
+    state["deleted_values"].pop(identity, None)
+    state["values"][identity] = dict(type=registry_type, raw=raw)
+    state["patches"].append(dict(hive=target[0],key=output_key(target[1]),name=value_name,type=type_name if type_name != None else registry_type,value=value))
+
+def _registry_create_keys_with_security(state, hive, key, missing, descriptors, output_key):
+    """Materialize a native provider result only after complete SD validation."""
+    if type(descriptors) != "dict" or sorted(descriptors.keys()) != sorted(missing):
+        fail("registry creation provider must cover exactly the missing keys")
+    for descriptor in descriptors.values():
+        if type(descriptor) != "bytes":
+            fail("registry creation provider must return descriptor bytes")
+        windows.security_descriptor_parts(descriptor)
+    _invalidate_key_names(state)
+    prefix = hive.upper() + "\x00"
+    paths = ["/"]
+    current = ""
+    for part in key.strip("/").split("/") if key != "/" else []:
+        current += "/" + part
+        paths.append(current)
+    for path in paths:
+        identity = prefix + path.lower()
+        state["keys"][identity] = True
+        state["deleted_keys"].pop(identity, None)
+    for path in missing:
+        identity = _key_identity(hive, path)
+        item = dict(hive=hive,key=output_key(path))
+        state["created_keys"][identity] = item
+        state["security"][identity] = dict(item,security=descriptors[path])
+
+# Registry forks retain immutable source hives but own every mutable overlay.
+def _clone_registry_overlay(value):
+    if type(value) == "dict": return {key:_clone_registry_overlay(item) for key,item in value.items()}
+    if type(value) == "list": return [_clone_registry_overlay(item) for item in value]
+    if type(value) == "tuple": return tuple([_clone_registry_overlay(item) for item in value])
+    return value
+
+_TRANSACTION_FIELDS = ["keys", "created_keys", "values", "deleted_keys", "deleted_values", "security", "patches", "key_deletions"]
+
+def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_key_case = "preserve", prepared_state = None, environment = {}, on_create_key = None, effective_token_privileges = None, mounts = [], on_open_key = None):
     """Returns a registry plugin initialized from hive-style dictionaries.
 
     Initial values are queryable but are not reported as writes. Each value uses
@@ -422,12 +545,45 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
     Initial keys use `hive` and `key`; they make empty setup-created namespaces
     observable without being reported as writes. `hives` may map hive names to
     parsed `windows.hive` objects; these are consulted lazily and overridden by
-    explicit keys, values, and subsequent writes.
+    explicit keys, values, and subsequent writes. Static `mounts` entries
+    contain hive, key (encoded non-root namespace path), and parsed source hive.
+    Mounts are nonoverlapping immutable inputs, not RegLoadKey/NtLoadKey emulation.
+    Their metadata and values remain source-backed; effects retain mounted
+    namespace paths for caller-directed publication. Removing a mount or an
+    ancestor is unsupported, rather than deleting across hive boundaries.
+    RegDeleteKey(A/W/Ex) deletes only leaves, including lazy source values;
+    open references remain owned and cannot alias a recreated name. Ex accepts
+    default/native views only. Alternate views, empty-name self-deletion and
+    complete NT ACL authorization are not modeled. key_deletions() reports
+    successful key removals, including empty source keys and names later
+    recreated; callers must reconcile those events with final keys/values.
+    effects() captures surviving owned value bytes, final key metadata and
+    removals before hive teardown; unlike patches(), it cannot resurrect a
+    write made to an earlier deleted key object. Neither report supplies
+    missing key-creation security or implies a committed hive image.
+    on_create_key(machine, request) may supply exact final descriptors for
+    every missing key in one native create request. It runs before mutation
+    and must return an encoded-key-to-bytes dictionary covering missing_keys.
+    Request metadata includes API, creator descriptor address, class/options
+    and access. parent_key and parent_security identify the nearest existing
+    ancestor in this exact view, including transacted security; an unknown
+    descriptor stays None. Caller-specific inheritance/identity policy stays outside this
+    registry namespace model. Without a provider, creation security is unknown.
+    on_open_key(machine, request) optionally resolves existing-key opens against
+    the exact overlay/source descriptor. Return concrete granted rights or None
+    for access denied. Unknown descriptors remain None, never a null DACL.
+    This callback does not establish new-key authorization or inheritance.
+    effective_token_privileges() supplies a fresh LUID-to-attributes mapping for
+    backup/restore opens of existing keys. No provider fails closed; no enabled
+    backup/restore privilege returns access denied. New backup/restore keys
+    remain unsupported rather than inventing privileged creation security.
     """
     if output_key_case not in ["preserve", "folded"]:
         fail("registry output_key_case must be preserve or folded")
     state = {
         "handles": dict(_ROOTS),
+        "handle_access": {},
+        "deleted_handles": {},
         "overrides": {},
         "next_handle": 0x10000,
         "patches": [],
@@ -435,8 +591,10 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         "created_keys": {},
         "values": dict(prepared_state.get("values", {})) if prepared_state != None else {},
         "sources": {name.upper(): source for name, source in hives.items()},
+        "mounts": [],
         "source_cache": {},
         "deleted_keys": {},
+        "key_deletions": [],
         "deleted_values": {},
         "queries": [],
         "opens": [],
@@ -447,6 +605,32 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         "transaction_actions": [],
         "us_handles": {},
     }
+
+    if len(mounts)>128: fail("registry static mount bound")
+    for item in mounts:
+        if sorted(item)!=["hive","key","source"]: fail("registry mount requires hive, key and source")
+        hive=item["hive"].upper()
+        key=item["key"]
+        if not hive or chr(0) in hive or not key.startswith("/") or key=="/" or any([part in ["",".",".."] for part in key[1:].split("/")]) or chr(92) in key or chr(0) in key:
+            fail("registry mount requires a canonical non-root key")
+        identity=_key_identity(hive,key)
+        for existing in state["mounts"]:
+            other=_key_identity(existing["hive"],existing["key"])
+            if identity==other or identity.startswith(other+"/") or other.startswith(identity+"/"):
+                fail("overlapping registry static mounts")
+        if item["source"].find([])==None: fail("registry mount has no source root")
+        state["mounts"].append(dict(hive=hive,key=key,source=item["source"]))
+
+    def backup_restore_access():
+        if effective_token_privileges == None:
+            fail("registry backup/restore requires explicit effective token privileges")
+        privileges = effective_token_privileges()
+        access = 0
+        # REG_OPTION_BACKUP_RESTORE ignores DesiredAccess. Only enabled
+        # privileges contribute, and the effective token is queried per call.
+        if privileges.get(17, 0) & 2: access |= 0x1020019  # SeBackupPrivilege
+        if privileges.get(18, 0) & 2: access |= 0x1030006  # SeRestorePrivilege
+        return access
 
     def output_key(key):
         normalized = "/" + key.replace("\\", "/").strip("/")
@@ -459,6 +643,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         # A present leaf proves that its complete parent chain is live.
         if identity in state["keys"] and identity not in state["deleted_keys"]:
             return
+        _invalidate_key_names(state)
         root_identity = hive_prefix + "/"
         state["keys"][root_identity] = True
         state["deleted_keys"].pop(root_identity, None)
@@ -475,6 +660,29 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             "hive": hive,
             "key": output_key(normalized),
         }
+
+    def create_new_key(event, hive, key, request):
+        if on_create_key == None:
+            ensure_key(hive, key)
+            record_created_key(hive, key)
+            return
+        missing = []
+        parts = key.strip("/").split("/") if key != "/" else []
+        for count in range(1, len(parts) + 1):
+            path = "/" + "/".join(parts[:count])
+            if not _key_exists(state, (hive, path)):
+                missing.append(path)
+        request = dict(request)
+        parent = missing[0].rsplit("/",1)[0] or "/" if missing else key
+        identity = _key_identity(hive,parent)
+        supplied = state["security"].get(identity)
+        parent_security = supplied["security"] if supplied!=None else None
+        if parent_security==None and identity not in state["created_keys"] and not _key_deleted(state,identity):
+            node=_source_node(state,(hive,parent))
+            parent_security=node.security if node!=None else None
+        request.update(hive=hive, key=key, missing_keys=missing, parent_key=parent, parent_security=parent_security)
+        descriptors = on_create_key(event.machine, request)
+        _registry_create_keys_with_security(state,hive,key,missing,descriptors,output_key)
 
     def store_value(hive, key, name, registry_type, value, record):
         name = _value_name(name)
@@ -550,14 +758,62 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
     # does not manufacture an output patch.
     for hive, key in _BASELINE_KEYS:
         ensure_key(hive, key)
+    for mount in state["mounts"]: ensure_key(mount["hive"],mount["key"])
     load_keys(keys)
     load_values(values)
 
-    def allocate_handle(hive, key):
+    def open_access(event, target, access):
+        if on_open_key == None or access == None:
+            return access
+        identity = _key_identity(target[0], target[1])
+        supplied = state["security"].get(identity)
+        security = supplied["security"] if supplied != None else None
+        if security == None and identity not in state["created_keys"] and not _key_deleted(state, identity):
+            node = _source_node(state, target)
+            security = node.security if node != None else None
+        granted = on_open_key(event.machine, dict(hive=target[0], key=target[1], security=security, access=access & 0xfffffcff))
+        if granted != None and (type(granted) != "int" or granted < 0 or granted & ~0x10f003f):
+            fail("registry open provider returned non-concrete access")
+        return granted
+
+    def allocate_handle(hive, key, access = None):
         handle = state["next_handle"]
         state["next_handle"] = handle + 1
         state["handles"][handle] = (hive, key)
+        # KEY_WOW64_32KEY/64KEY select a registry view at open time; they
+        # are not granted object rights and must not survive duplication.
+        state["handle_access"][handle] = access & 0xfffffcff if access != None else None
         return handle
+
+    def duplicate_handle(handle, desired_access, inherit, options):
+        # Predefined HKEY constants are not kernel handles. A duplicated key
+        # retains the same object, granted access, and deletion tombstone.
+        if _predefined_handle(handle) in _ROOTS: return (6, 0)
+        if handle not in state["handles"]: return None
+        target=state["handles"][handle]
+        if target==None: return (6, 0)
+        if inherit or options not in [0, 1, 2, 3]:
+            fail("registry handle duplication requires supported non-inheritable options")
+        access=state["handle_access"].get(handle)
+        if not options&2:
+            # Only an explicit subset of already granted concrete rights is
+            # established here. Elevation requires a real access check;
+            # generic/MAXIMUM_ALLOWED and unknown source grants fail closed.
+            if access==None or access&~0x10f003f or desired_access&~0x10f003f or desired_access&~access:
+                fail("registry handle duplication access expansion or unresolved grant is not modeled")
+            access=desired_access
+        duplicate=allocate_handle(target[0],target[1],access)
+        if handle in state["deleted_handles"]: state["deleted_handles"][duplicate]=True
+        if options&1: close_handle(handle)
+        return (0, duplicate)
+
+    def close_handle(handle):
+        if handle in _ROOTS or handle not in state["handles"]: return None
+        if state["handles"][handle]==None: return False
+        state["handles"][handle]=None
+        state["handle_access"].pop(handle,None)
+        state["deleted_handles"].pop(handle,None)
+        return True
 
     def allocate_us_handle(targets):
         handle = state["next_handle"]
@@ -567,6 +823,8 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
 
     def key_for(handle):
         handle = _predefined_handle(handle)
+        if handle in state["deleted_handles"]:
+            return None
         if handle in _ROOTS and handle in state["overrides"]:
             return state["overrides"][handle]
         return state["handles"].get(handle)
@@ -581,6 +839,14 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         hive, key = _join_key(parent, child)
         if hive != "DEFAULT" or not key.lower().startswith("/@users/"):
             return hive, key
+        # Explicit source mounts take precedence over the legacy HKCU alias,
+        # including when the caller omitted user_sid. Relative opens must stay
+        # in the same mounted hive as the parent handle.
+        identity = _key_identity(hive, key)
+        for mount in state["mounts"]:
+            prefix = _key_identity(mount["hive"], mount["key"])
+            if identity == prefix or identity.startswith(prefix + "/"):
+                return hive, key
         relative = key[len("/@users/"):]
         parts = relative.split("/")
         if not parts:
@@ -593,11 +859,11 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
     def native_object_key(machine, object_attributes):
         if not object_attributes:
             return None
-        attributes = binary.cursor(machine.read(object_attributes, 24))
-        if attributes.u32le() < 24:
+        layout = object_attributes_layout(machine.pointer_size)
+        if machine.read_u32le(object_attributes + layout["Length"]) < layout["Size"]:
             return None
-        root = attributes.u32le()
-        name = _unicode_string(machine, attributes.u32le())
+        root = machine.read_pointer(object_attributes + layout["RootDirectory"])
+        name = _unicode_string(machine, machine.read_pointer(object_attributes + layout["ObjectName"]))
         if root:
             parent = key_for(root)
             return join_key(parent, name) if parent != None else None
@@ -616,6 +882,24 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         }
         root = roots.get(mode)
         return join_key(root, path) if root != None else None
+
+    def delete_leaf(target):
+        if not _key_exists(state, target):
+            return 2  # ERROR_FILE_NOT_FOUND
+        if target[1] == "/" or _direct_subkeys(state, target):
+            return 5  # ERROR_ACCESS_DENIED: never recurse
+        identity = _key_identity(target[0], target[1])
+        _check_delete_mount(state, target)
+        # Include lazy source values, not only writes made in this run.
+        for item in _direct_values(state, target):
+            _delete_value(state, target, item["name"])
+        _delete_tree(state, target)
+        # Never resurrect baseline values when this name is recreated.
+        state["source_cache"][identity] = {"found": False}
+        for other, key in state["handles"].items():
+            if other not in _ROOTS and key != None and _key_identity(key[0], key[1]) == identity:
+                state["deleted_handles"][other] = True
+        return 0
 
     def query(machine, target, value_name, type_address, data_address, size_address, wide):
         if target == None:
@@ -659,9 +943,72 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
 
     def callback(event, function = ""):
         name = function or event.name.lower()
+        router = state.get("native_transaction_router")
+        if router != None:
+            result = router(event, name)
+            if result != None: return result
         args = event.args
         wide = name.endswith("w")
-        if name in ["ntopenkey", "rtlpntopenkey"]:
+        # A deleted key object stays owned until close. Its old handles must
+        # never resolve a new key later created at the same path. Keep the
+        # handle-to-path entry for reference accounting, but reject operations
+        # on that object before reading or writing any caller buffers.
+        native_open = name in ["ntopenkey", "ntopenkeyex", "rtlpntopenkey", "ntcreatekey", "rtlpntcreatekey"]
+        if native_open and args[2]:
+            layout = object_attributes_layout(event.machine.pointer_size)
+            if event.machine.read_u32le(args[2]) >= layout["Size"]:
+                root = event.machine.read_pointer(args[2] + layout["RootDirectory"])
+                if root in state["deleted_handles"]:
+                    return 0xc000017c  # STATUS_KEY_DELETED
+        native_handle = name in ["ntenumeratekey", "ntquerykey", "ntqueryvaluekey", "ntenumeratevaluekey", "ntsetvaluekey", "ntdeletevaluekey", "ntflushkey", "rtlpntenumeratesubkey", "rtlpntqueryvaluekey"]
+        if native_handle and args[0] in state["deleted_handles"]:
+            return 0xc000017c
+        native_access = {"ntquerykey": 1, "ntqueryvaluekey": 1, "ntenumeratevaluekey": 1, "ntsetvaluekey": 2, "ntdeletevaluekey": 2, "ntenumeratekey": 8}.get(name)
+        if native_access != None and args[0] in state["handle_access"]:
+            granted = state["handle_access"][args[0]]
+            if granted & 0xf2000000: fail("native registry operation has unresolved handle access")
+            if not granted & native_access: return 0xc0000022
+        win32_handle = name.startswith("reg") and name not in ["regclosekey", "regopencurrentuser", "regdisablepredefinedcache"]
+        if win32_handle and args and _predefined_handle(args[0]) in state["deleted_handles"]:
+            return 1018  # ERROR_KEY_DELETED
+        if name == "ldrqueryimagefileexecutionoptions":
+            if not args[0] or not args[1]: return 0xc000000d
+            image=_unicode_string(event.machine,args[0]).replace(chr(92),"/").split("/")[-1]
+            if not image or image in [".",".."]: return 0xc000000d
+            value_name=_cstring(event.machine,args[1],True)
+            key="/Microsoft/Windows NT/CurrentVersion/Image File Execution Options/"+image
+            current=_lookup_value(state,("SOFTWARE",key),value_name)
+            if len(state["queries"])<4096:
+                state["queries"].append(dict(api=name,hive="SOFTWARE",key=key,name=value_name,found=current!=None))
+            if current==None: return 0xc0000034  # STATUS_OBJECT_NAME_NOT_FOUND
+            if args[2]&0xffffffff!=4 or current["type"]!=4 or len(current["raw"])!=4 or not args[3] or args[4]&0xffffffff<4:
+                fail("IFEO query currently requires a matching DWORD and four-byte output")
+            event.machine.write(args[3],current["raw"])
+            if args[5]: event.machine.write_u32le(args[5],4)
+            return 0
+        if name == "ntdeletekey":
+            handle = args[0]
+            if handle in _ROOTS or state["handles"].get(handle) == None:
+                return 0xc0000008  # STATUS_INVALID_HANDLE
+            access = state["handle_access"].get(handle)
+            if access == None or access & 0xf2000000:
+                fail("NtDeleteKey: unresolved handle access mask")
+            if not access & 0x10000:  # DELETE
+                return 0xc0000022  # STATUS_ACCESS_DENIED
+            if handle in state["deleted_handles"]:
+                return 0  # Deleting the same deleted object is idempotent.
+            target = state["handles"][handle]
+            if target[1] == "/" or _direct_subkeys(state, target):
+                return 0xc0000121  # STATUS_CANNOT_DELETE: not recursive
+            result = delete_leaf(target)
+            return 0 if result == 0 else 0xc0000034  # STATUS_OBJECT_NAME_NOT_FOUND
+        if name in ["ntopenkey", "ntopenkeyex", "rtlpntopenkey"]:
+            if name == "ntopenkeyex" and args[3] & 0xffffffff not in [0, 4, 8, 12]:
+                fail("NtOpenKeyEx: unsupported open options")
+            # REG_OPTION_OPEN_LINK opens the named key object itself, not its
+            # symbolic-link target. That is exactly the path lookup below;
+            # this does not implement ordinary link-following or intermediate
+            # link traversal, nor grant access to a linked target.
             if not args[0]:
                 return 0xc000000d  # STATUS_INVALID_PARAMETER
             target = native_object_key(event.machine, args[2])
@@ -672,30 +1019,54 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
                 state["opens"].append({"api": name, "hive": target[0], "key": target[1], "found": existing})
             if not existing:
                 return 0xc0000034
-            _write_handle(event.machine, args[0], allocate_handle(target[0], target[1]))
+            access = args[1]
+            if name == "ntopenkeyex" and args[3] & 4:
+                access = backup_restore_access()
+                if not access: return 0xc0000022  # STATUS_ACCESS_DENIED
+            else:
+                access = open_access(event, target, access)
+                if access == None: return 0xc0000022
+            _write_handle(event.machine, args[0], allocate_handle(target[0], target[1], access))
             return 0
-        if name == "rtlpntcreatekey":
+        if name in ["ntcreatekey", "rtlpntcreatekey"]:
+            if name == "ntcreatekey" and args[5] & 0xffffffff not in [0, 4]:
+                fail("NtCreateKey: nonzero create options are not implemented")
             if not args[0]:
                 return 0xc000000d
             target = native_object_key(event.machine, args[2])
             if target == None:
                 return 0xc0000034
             existing = _key_exists(state, target)
-            ensure_key(target[0], target[1])
+            access = args[1]
+            backup_restore = name == "ntcreatekey" and args[5] & 4
+            if backup_restore:
+                access = backup_restore_access()
+                if not access: return 0xc0000022
+                if not existing: fail("backup/restore key creation security is not implemented")
+            if existing and not backup_restore:
+                access = open_access(event, target, access)
+                if access == None: return 0xc0000022
             if not existing:
-                record_created_key(target[0], target[1])
-            _write_handle(event.machine, args[0], allocate_handle(target[0], target[1]))
-            if args[5]:
-                event.machine.write(args[5], binary.u32le(2 if existing else 1))
+                if on_open_key != None and access & 0xf2000000:
+                    fail("new registry key requires concrete creation access")
+                layout = object_attributes_layout(event.machine.pointer_size)
+                create_new_key(event, target[0], target[1], dict(api=name, creator_security=event.machine.read_pointer(args[2]+layout["SecurityDescriptor"]), class_address=args[4], options=args[5] & 0xffffffff if name == "ntcreatekey" else 0, access=args[1] & 0xffffffff))
+            _write_handle(event.machine, args[0], allocate_handle(target[0], target[1], access))
+            disposition = args[6] if name == "ntcreatekey" else args[5]
+            if disposition:
+                event.machine.write_u32le(disposition, 2 if existing else 1)
             return 0
         if name == "ntenumeratekey":
             target = key_for(args[0])
             if target == None:
                 return 0xc0000008  # STATUS_INVALID_HANDLE
+            if args[2] & 0xffffffff != 0:
+                fail("NtEnumerateKey: only basic information is implemented")
             subkeys = _direct_subkeys(state, target)
-            if args[1] >= len(subkeys):
+            index = args[1] & 0xffffffff
+            if index >= len(subkeys):
                 return 0x8000001a  # STATUS_NO_MORE_ENTRIES
-            encoded = binary.encode(subkeys[args[1]], encoding = "utf16le")
+            encoded = binary.encode(subkeys[index], encoding = "utf16le")
             # KEY_BASIC_INFORMATION: last-write time, title index, then name.
             result = binary.builder(capacity = 16 + len(encoded))
             result.u64le(0)
@@ -705,10 +1076,153 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             data = result.bytes()
             if args[5]:
                 event.machine.write(args[5], binary.u32le(len(data)))
-            if args[4] < len(data):
-                return 0xc0000023  # STATUS_BUFFER_TOO_SMALL
-            event.machine.write(args[3], data)
+            capacity = args[4] & 0xffffffff
+            if capacity < 16:
+                return 0xc0000023  # STATUS_BUFFER_TOO_SMALL: fixed header does not fit
+            if not args[3]:
+                return 0xc0000005
+            event.machine.write(args[3], data[:min(capacity, len(data))])
+            # Native consumers use the returned NameLength even when the
+            # counted name is partial. Without this header and warning they
+            # can retry the same undersized buffer forever.
+            return 0 if capacity >= len(data) else 0x80000005
+        if name == "ntenumeratevaluekey":
+            target = key_for(args[0])
+            if target == None:
+                return 0xc0000008
+            information_class = args[2] & 0xffffffff
+            if information_class not in [0, 1]:
+                fail("NtEnumerateValueKey: only basic/full information is implemented")
+            values = _direct_values(state, target)
+            index = args[1] & 0xffffffff
+            if index >= len(values):
+                return 0x8000001a
+            if not args[5]:
+                return 0xc000000d
+            machine = event.machine
+            item = values[index]
+            encoded = binary.encode(item["name"], encoding = "utf16le")
+            raw = item["value"]["raw"]
+            header_size = 12 if information_class == 0 else 20
+            offset = (20 + len(encoded) + 3) & ~3
+            required = 12 + len(encoded) if information_class == 0 else offset + len(raw)
+            machine.write_u32le(args[5], required)
+            capacity = args[4] & 0xffffffff
+            if capacity < header_size:
+                return 0xc0000023
+            if not args[3]:
+                return 0xc0000005
+            data = binary.builder(capacity = required)
+            data.u32le(0)
+            data.u32le(item["value"]["type"])
+            if information_class == 1:
+                data.u32le(offset)
+                data.u32le(len(raw))
+            data.u32le(len(encoded))
+            data.append(encoded)
+            if information_class == 1:
+                data.reserve(offset - 20 - len(encoded))
+                data.append(raw)
+            machine.write(args[3], data.bytes()[:min(required, capacity)])
+            return 0 if capacity >= required else 0x80000005
+        if name == "ntquerykey":
+            target = key_for(args[0])
+            if target == None:
+                return 0xc0000008
+            information_class = args[1] & 0xffffffff
+            if information_class not in [2, 4]:
+                fail("NtQueryKey: only KeyFullInformation and KeyCachedInformation are implemented")
+            if not args[4]:
+                return 0xc000000d
+            machine = event.machine
+            subkeys = _direct_subkeys(state, target)
+            values = _direct_values(state, target)
+            metadata = _key_metadata(state, target)
+            class_bytes = metadata["class"]
+            header = 44 if information_class == 2 else 40
+            required = header + (len(class_bytes) if information_class == 2 else 0)
+            machine.write_u32le(args[4], required)
+            capacity = args[3] & 0xffffffff
+            if capacity < header:
+                return 0xc0000023
+            if not args[2]:
+                return 0xc0000005
+            data = binary.builder(capacity = required)
+            # Source timestamps are preserved. Overlay writes have no clock;
+            # newly created keys retain the deterministic zero-time model.
+            data.u64le(metadata["last_write_time"])
+            data.u32le(0)
+            if information_class == 2:
+                data.u32le(44 if class_bytes else 0xffffffff)
+                data.u32le(len(class_bytes))
+            data.u32le(len(subkeys))
+            data.u32le(max([len(binary.encode(s, encoding = "utf16le")) for s in subkeys] or [0]))
+            if information_class == 2:
+                data.u32le(max([len(_key_metadata(state, (target[0], _join(target[1], _encode_key_part(s))))["class"]) for s in subkeys] or [0]))
+            data.u32le(len(values))
+            data.u32le(max([len(binary.encode(v["name"], encoding = "utf16le")) for v in values] or [0]))
+            data.u32le(max([len(v["value"]["raw"]) for v in values] or [0]))
+            if information_class == 2:
+                data.append(class_bytes)
+            else:
+                basename = _decode_key_part(target[1].rstrip("/").rsplit("/", 1)[-1])
+                data.u32le(len(binary.encode(basename, encoding = "utf16le")))
+            machine.write(args[2], data.bytes()[:min(required, capacity)])
+            return 0 if capacity >= required else 0x80000005
+        if name == "ntdeletevaluekey":
+            target = key_for(args[0])
+            if target == None:
+                return 0xc0000008
+            if not args[1] or event.machine.read_u16le(args[1]) & 1:
+                return 0xc000000d
+            value_name = _unicode_string(event.machine, args[1]) or "(default)"
+            result = _delete_value(state, target, value_name)
+            return 0 if result == 0 else 0xc0000034
+        if name == "ntsetvaluekey":
+            target = key_for(args[0])
+            if target == None:
+                return 0xc0000008
+            machine = event.machine
+            if not args[1] or machine.read_u16le(args[1]) & 1:
+                return 0xc000000d
+            value_name = _unicode_string(machine, args[1]) or "(default)"
+            registry_type = args[3] & 0xffffffff
+            size = args[5] & 0xffffffff
+            if size and not args[4]:
+                return 0xc0000005
+            raw = machine.read(args[4], size) if size else b""
+            _registry_store_native_value(state, target, value_name, registry_type, raw, output_key)
             return 0
+        if name == "ntqueryvaluekey":
+            target = key_for(args[0])
+            if target == None:
+                return 0xc0000008  # STATUS_INVALID_HANDLE
+            information_class = args[2] & 0xffffffff
+            if information_class != 2:  # KeyValuePartialInformation
+                fail("NtQueryValueKey: information class " + str(information_class) + " is not implemented")
+            value_name = _unicode_string(event.machine, args[1]) or "(default)"
+            value = _lookup_value(state, target, value_name)
+            if len(state["queries"]) < 4096:
+                state["queries"].append({"api": name, "hive": target[0], "key": target[1], "name": value_name, "found": value != None})
+            if value == None:
+                return 0xc0000034  # STATUS_OBJECT_NAME_NOT_FOUND
+            if not args[5]:
+                return 0xc000000d  # STATUS_INVALID_PARAMETER
+            raw = value["raw"]
+            required = 12 + len(raw)
+            event.machine.write_u32le(args[5], required)
+            capacity = args[4] & 0xffffffff
+            if capacity < 12:
+                return 0xc0000023  # STATUS_BUFFER_TOO_SMALL; no output data
+            if not args[3]:
+                return 0xc0000005  # STATUS_ACCESS_VIOLATION
+            data = binary.builder(capacity = required)
+            data.u32le(0)  # TitleIndex
+            data.u32le(value["type"])
+            data.u32le(len(raw))
+            data.append(raw)
+            event.machine.write(args[3], data.bytes()[:min(required, capacity)])
+            return 0 if capacity >= required else 0x80000005  # STATUS_BUFFER_OVERFLOW
         if name == "rtlpntqueryvaluekey":
             target = key_for(args[0])
             if target == None:
@@ -1082,11 +1596,18 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
                 state["opens"].append({"api": name, "hive": hive, "key": key, "found": existing})
             if name.startswith("regopen") and not existing:
                 return 2
-            if name.startswith("regcreate"):
-                ensure_key(hive, key)
-                if not existing:
-                    record_created_key(hive, key)
-            handle = allocate_handle(hive, key)
+            access = args[3] if name.startswith("regopenkeyex") else (args[5] if name.startswith("regcreatekeyex") else None)
+            if existing and access != None:
+                access = open_access(event, (hive, key), access)
+                if access == None: return 5
+            if not existing and on_open_key != None and access != None and access & 0xf2000000:
+                fail("new registry key requires concrete creation access")
+            if name.startswith("regcreate") and not existing:
+                extended = name.startswith("regcreatekeyex")
+                attributes = args[6] if extended else 0
+                creator = event.machine.read_pointer(attributes + (8 if event.machine.pointer_size == 8 else 4)) if attributes else 0
+                create_new_key(event, hive, key, dict(api=name, creator_security=creator, class_address=args[3] if extended else 0, options=args[4] & 0xffffffff if extended else 0, access=args[5] & 0xffffffff if extended else None))
+            handle = allocate_handle(hive, key, access)
             _write_handle(event.machine, args[result_index], handle)
             if name.startswith("regcreatekeyex") and args[8]:
                 event.machine.write(args[8], binary.u32le(2 if existing else 1))
@@ -1159,13 +1680,18 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             })
             return 0
         if name == "regclosekey":
-            if args[0] not in _ROOTS:
-                state["handles"][args[0]] = None
+            handle = _predefined_handle(args[0])
+            if state["handles"].get(handle) == None:
+                return 6
+            if handle not in _ROOTS:
+                state["handles"][handle] = None
+                state["handle_access"].pop(handle, None)
+                state["deleted_handles"].pop(handle, None)
             return 0
-        if name == "regflushkey":
+        if name in ["regflushkey", "ntflushkey"]:
             target = key_for(args[0])
             if target == None:
-                return 6  # ERROR_INVALID_HANDLE
+                return 0xc0000008 if name == "ntflushkey" else 6
             if len(state["flushes"]) < 4096:
                 state["flushes"].append({"hive": target[0], "key": target[1]})
             return 0
@@ -1181,11 +1707,26 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             for value in _direct_values(state, parent):
                 _delete_value(state, parent, value["name"])
             return 0
-        if name.startswith("regdeletekey"):
+        if name in ["regdeletekeya", "regdeletekeyw", "regdeletekeyexa", "regdeletekeyexw"]:
+            if name.startswith("regdeletekeyex"):
+                desired, reserved = args[2] & 0xffffffff, args[3] & 0xffffffff
+                if reserved or desired & 0x300 == 0x300:
+                    return 87  # ERROR_INVALID_PARAMETER
+                native_view = 0x100 if event.machine.pointer_size == 8 else 0x200
+                if desired not in [0, native_view]:
+                    fail("RegDeleteKeyEx: alternate registry views/access policies are not modeled")
             parent = key_for(args[0])
             if parent == None:
                 return 6
-            return _delete_tree(state, join_key(parent, _cstring(event.machine, args[1], wide)))
+            if not args[1]:
+                return 87
+            subkey = _cstring(event.machine, args[1], wide)
+            # Native RegDeleteKeyEx reopens even an empty relative name with
+            # DELETE, then deletes that key object. A read-only hKey is not
+            # itself the DELETE authorization. Keep this within the existing
+            # registry security model (not full NT ACL authorization), reject
+            # hive-root/child-bearing deletion, and retain stale references.
+            return delete_leaf(join_key(parent, subkey) if subkey else parent)
         if name.startswith("regdeletevalue"):
             target = key_for(args[0])
             if target == None:
@@ -1307,7 +1848,7 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         return 120
 
     def install(machine):
-        for module in ["advapi32.dll", "advapi32_vista.dll", "kernel32.dll"]:
+        for module in ["advapi32.dll", "advapi32_vista.dll", "kernel32.dll", "kernelbase.dll", "api-ms-win-core-registry-l1-1-0.dll"]:
             machine.provide_exports(callback, module = module, signatures = _CALLS)
         for imported in machine.imports_named(_CALLS):
             name = imported.name.lower()
@@ -1337,6 +1878,41 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
 
     def patches():
         return list(state["patches"])
+
+    def effects(patch_start = 0, key_deletion_start = 0):
+        """Capture surviving writes separately from chronological API patches.
+
+        A key may be deleted/recreated more than once. Replaying all sets
+        after excluding deleted keys would resurrect writes to dead objects.
+        Read only the final owned values for touched names; retain actual key
+        deletions independently, including empty keys. Source data is not
+        exported unless native code changed it. Capture before hive teardown.
+        Optional history offsets isolate a mounted-hive epoch from namespace
+        cleanup in an earlier epoch. Capture offsets before native mutation;
+        they refer to the current histories and become invalid after reset.
+        """
+        if type(patch_start) != "int" or type(key_deletion_start) != "int" or patch_start < 0 or patch_start > len(state["patches"]) or key_deletion_start < 0 or key_deletion_start > len(state["key_deletions"]):
+            fail("registry effect history offset is out of bounds")
+        touched = {}
+        for patch in state["patches"][patch_start:]:
+            touched[_identity(patch["hive"], patch["key"], patch["name"])] = patch
+        values = []
+        removals = []
+        for identity in sorted(touched.keys()):
+            patch = touched[identity]
+            current = state["values"].get(identity)
+            item = {"hive": patch["hive"], "key": output_key(patch["key"]), "name": patch["name"]}
+            if current != None:
+                # Numeric type + raw data is lossless and accepted by the hive
+                # writer. Do not round-trip strings through decoded API text.
+                item.update(type = current["type"], value = current["raw"])
+                values.append(item)
+            elif patch.get("delete", False):
+                removals.append(item)
+        return {"keys": reported_keys(), "key_deletions": key_deletions()[key_deletion_start:], "values": values, "value_deletions": removals}
+
+    def key_deletions():
+        return [{"hive": item["hive"], "key": output_key(item["key"])} for item in state["key_deletions"]]
 
     def queries():
         return list(state["queries"])
@@ -1402,6 +1978,8 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
 
     def reset():
         state["handles"] = dict(_ROOTS)
+        state["handle_access"] = {}
+        state["deleted_handles"] = {}
         state["overrides"] = {}
         state["next_handle"] = 0x10000
         state["patches"] = []
@@ -1409,7 +1987,11 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
         state["created_keys"] = {}
         state["values"] = {}
         state["source_cache"] = {}
+        state["source_cache_serial"] = 0
+        state["subkeys_cache"] = {}
+        state["key_names_revision"] = 0
         state["deleted_keys"] = {}
+        state["key_deletions"] = []
         state["deleted_values"] = {}
         state["queries"] = []
         state["opens"] = []
@@ -1422,12 +2004,44 @@ def registry_plugin(values = [], keys = [], hives = {}, user_sid = "", output_ke
             ensure_key(root[0], root[1])
         for hive, key in _BASELINE_KEYS:
             ensure_key(hive, key)
+        for mount in state["mounts"]: ensure_key(mount["hive"],mount["key"])
         load_keys(keys)
         load_values(values)
+
+    def transaction_data():
+        return {field:_clone_registry_overlay(state[field]) for field in _TRANSACTION_FIELDS}
+
+    def fork(next_handle):
+        child=registry_plugin(hives=state["sources"],user_sid=user_sid,output_key_case=output_key_case,environment=environment,on_create_key=on_create_key,effective_token_privileges=effective_token_privileges,mounts=state["mounts"],on_open_key=on_open_key)
+        child.state.update(transaction_data())
+        for field in ["handles","handle_access","deleted_handles","overrides","source_cache"]:
+            child.state[field]=_clone_registry_overlay(state[field])
+        child.state["next_handle"]=next_handle
+        return child
+
+    def commit_fork(child, baseline):
+        # The supported subset has no concurrent writer. Never overwrite an
+        # intervening parent edit or pretend it has been conflict-checked.
+        if transaction_data()!=baseline:
+            fail("concurrent registry writes during a native transaction are not modeled")
+        replacement=child._transaction_data()
+        state.update(replacement)
+        state["source_cache"]=_clone_registry_overlay(child.state["source_cache"])
+        for handle in state["handles"]:
+            if handle in child.state["deleted_handles"]: state["deleted_handles"][handle]=True
+        _invalidate_key_names(state)
 
     return emulator.plugin(
         install,
         name = "windows.registry",
         state = state,
-        attrs = {"patches": patches, "queries": queries, "opens": opens, "transactions": transactions, "keys": reported_keys, "reset": reset, "load_values": load_values, "load_keys": load_keys, "set_value": set_value, "get_value": get_value, "delete_value": delete_value, "delete_tree": delete_tree, "set_security": set_security, "set_key_security": set_key_security},
+        attrs = {"_duplicate_handle": duplicate_handle, "_close_handle": close_handle, "_dispatch": callback, "_fork": fork, "_transaction_data": transaction_data, "_commit_fork": commit_fork, "patches": patches, "effects": effects, "key_deletions": key_deletions, "queries": queries, "opens": opens, "transactions": transactions, "keys": reported_keys, "reset": reset, "load_values": load_values, "load_keys": load_keys, "set_value": set_value, "get_value": get_value, "delete_value": delete_value, "delete_tree": delete_tree, "set_security": set_security, "set_key_security": set_key_security},
     )
+
+
+def registry_handles_plugin(registry, kernel):
+    """Connect owned registry keys to same-process kernel handle operations."""
+    def install(machine):
+        kernel.state.setdefault("handle_duplicators", []).append(registry._duplicate_handle)
+        kernel.state.setdefault("handle_closers", []).append(registry._close_handle)
+    return emulator.plugin(install, name="windows.registry-handles")

@@ -178,7 +178,15 @@ func (d *driver) loopSMP() {
 		if d.pc.dmaRead != nil {
 			dmaReady = d.pc.dmaRead.ready
 		}
+		var nvmeReady <-chan struct{}
+		if d.pc.nvme != nil {
+			nvmeReady = d.pc.nvme.controller.IOReady()
+		}
 		select {
+		case <-nvmeReady:
+			if err := d.pc.nvme.controller.PollIO(false); err != nil && failure == nil {
+				failure = err
+			}
 		case <-dmaReady:
 			if err := d.pc.completeIDEDMARead(false); err != nil && failure == nil {
 				failure = err

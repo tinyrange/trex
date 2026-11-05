@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
+	"github.com/tinyrange/trex/internal/xmltoken"
 	"io"
 	"strings"
 	"unicode/utf16"
@@ -72,12 +73,14 @@ func binaryXMLBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	maximum := defaultBinaryXMLLimit
 	maxDepth := defaultBinaryXMLDepth
 	maxNodes := defaultBinaryXMLNodes
+	discardWhitespace := false
 	if err := starlark.UnpackArgs(
 		"xml", args, kwargs,
 		"value", &value,
 		"maximum?", &maximum,
 		"max_depth?", &maxDepth,
 		"max_nodes?", &maxNodes,
+		"discard_whitespace?", &discardWhitespace,
 	); err != nil {
 		return nil, err
 	}
@@ -88,25 +91,27 @@ func binaryXMLBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if err != nil {
 		return nil, fmt.Errorf("xml: %w", err)
 	}
-	data, err = decodeXMLBytes(data)
+	document, err := parseBinaryXML(data, maxDepth, maxNodes, discardWhitespace)
+	if err != nil {
+		return nil, err
+	}
+	return document, nil
+}
+
+// parseBinaryXML owns its document; it never calls back into Starlark.
+func parseBinaryXML(data []byte, maxDepth, maxNodes int, discardWhitespace bool) (*binaryXMLDocument, error) {
+	data, err := decodeXMLBytes(data)
 	if err != nil {
 		return nil, fmt.Errorf("xml: %w", err)
 	}
 
-	decoder := xml.NewDecoder(bytes.NewReader(data))
-	decoder.CharsetReader = func(label string, input io.Reader) (io.Reader, error) {
-		switch strings.ToLower(strings.ReplaceAll(label, "-", "")) {
-		case "utf8", "utf16", "unicode":
-			return input, nil
-		default:
-			return nil, fmt.Errorf("unsupported declared encoding %q", label)
-		}
-	}
+	decoder := xmltoken.New(data, true)
 	document := &binaryXMLDocument{}
 	var root *binaryXMLNode
 	stack := make([]*binaryXMLNode, 0, min(16, maxDepth))
 	scope := &binaryXMLNamespaceScope{declarations: map[string]string{"xml": xmlNamespace, "xmlns": xmlnsNamespace}}
 	scopes := []*binaryXMLNamespaceScope{scope}
+	var preserveSpace []bool
 	nodes := 0
 	for {
 		token, err := decoder.RawToken()
@@ -170,6 +175,17 @@ func binaryXMLBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 					value:     attribute.Value,
 				})
 			}
+			if discardWhitespace {
+				preserve := len(preserveSpace) != 0 && preserveSpace[len(preserveSpace)-1]
+				for _, attribute := range node.attributes {
+					if attribute.namespace == xmlNamespace && attribute.name == "space" {
+						// Unknown xml:space policies remain conservative: only an
+						// explicit default resets an inherited preserve request.
+						preserve = attribute.value != "default"
+					}
+				}
+				preserveSpace = append(preserveSpace, preserve)
+			}
 			if len(stack) == 0 {
 				if root != nil {
 					return nil, fmt.Errorf("xml: multiple root elements")
@@ -191,7 +207,13 @@ func binaryXMLBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 			}
 			stack = stack[:len(stack)-1]
 			scopes = scopes[:len(scopes)-1]
+			if discardWhitespace {
+				preserveSpace = preserveSpace[:len(preserveSpace)-1]
+			}
 		case xml.CharData:
+			if discardWhitespace && (len(preserveSpace) == 0 || !preserveSpace[len(preserveSpace)-1]) && isXMLWhitespace(token) {
+				continue
+			}
 			part := binaryXMLPart{kind: binaryXMLText, text: string(token)}
 			if len(stack) != 0 {
 				stack[len(stack)-1].content = append(stack[len(stack)-1].content, part)
@@ -222,6 +244,17 @@ func binaryXMLBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	}
 	document.root = root
 	return document, nil
+}
+
+// XML whitespace is narrower than Unicode whitespace. Never discard NBSP or
+// whitespace surrounding non-whitespace text, and do not rewrite attributes.
+func isXMLWhitespace(data []byte) bool {
+	for _, b := range data {
+		if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *binaryXMLNamespaceScope) lookup(prefix string) (string, bool) {
@@ -312,7 +345,7 @@ func (n *binaryXMLNode) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", n.Type())
 }
 func (n *binaryXMLNode) AttrNames() []string {
-	return []string{"attribute", "attributes", "bytes", "child", "children", "children_named", "direct_text", "name", "namespace", "prefix", "qualified_name", "text", "with_children", "with_text"}
+	return []string{"attribute", "attribute_map", "attributes", "bytes", "child", "children", "children_named", "direct_text", "name", "namespace", "prefix", "qualified_name", "text", "with_children", "with_text"}
 }
 func (n *binaryXMLNode) Attr(name string) (starlark.Value, error) {
 	switch name {
@@ -340,12 +373,15 @@ func (n *binaryXMLNode) Attr(name string) (starlark.Value, error) {
 		}
 		return starlark.NewList(values), nil
 	case "children":
-		children := n.childNodes()
-		values := make([]starlark.Value, len(children))
-		for index, child := range children {
-			values[index] = child
+		values := make([]starlark.Value, 0, len(n.content))
+		for _, part := range n.content {
+			if part.kind == binaryXMLChild {
+				values = append(values, part.child)
+			}
 		}
 		return starlark.NewList(values), nil
+	case "attribute_map":
+		return starlark.NewBuiltin("attribute_map", n.attributeMapBuiltin), nil
 	case "attribute":
 		return starlark.NewBuiltin("attribute", n.attributeBuiltin), nil
 	case "child":
@@ -396,6 +432,39 @@ func (n *binaryXMLNode) childNodes() []*binaryXMLNode {
 	return children
 }
 
+// attributeMapBuiltin projects one exact namespace without materializing an
+// intermediate dictionary for every attribute. Namespace declarations are not
+// ordinary attributes; strict additionally rejects other attribute namespaces.
+func (n *binaryXMLNode) attributeMapBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	namespace := ""
+	strict := false
+	if err := starlark.UnpackArgs("attribute_map", args, kwargs, "namespace?", &namespace, "strict?", &strict); err != nil {
+		return nil, err
+	}
+	result := starlark.NewDict(len(n.attributes))
+	for _, attribute := range n.attributes {
+		if attribute.namespace == "xmlns" {
+			continue
+		}
+		if attribute.namespace != namespace {
+			if strict {
+				return nil, fmt.Errorf("attribute_map: unsupported attribute namespace %q", attribute.namespace)
+			}
+			continue
+		}
+		key := starlark.String(attribute.name)
+		if _, found, err := result.Get(key); err != nil {
+			return nil, err
+		} else if found {
+			return nil, fmt.Errorf("attribute_map: duplicate attribute %q", attribute.name)
+		}
+		if err := result.SetKey(key, starlark.String(attribute.value)); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
 func (n *binaryXMLNode) attributeBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name string
 	namespace := ""
@@ -417,7 +486,11 @@ func (n *binaryXMLNode) childBuiltin(_ *starlark.Thread, _ *starlark.Builtin, ar
 	if err := starlark.UnpackArgs("child", args, kwargs, "name", &name, "namespace?", &namespace); err != nil {
 		return nil, err
 	}
-	for _, child := range n.childNodes() {
+	for _, part := range n.content {
+		if part.kind != binaryXMLChild {
+			continue
+		}
+		child := part.child
 		if child.name == name && child.namespace == namespace {
 			return child, nil
 		}
@@ -432,7 +505,11 @@ func (n *binaryXMLNode) childrenNamedBuiltin(_ *starlark.Thread, _ *starlark.Bui
 		return nil, err
 	}
 	values := make([]starlark.Value, 0)
-	for _, child := range n.childNodes() {
+	for _, part := range n.content {
+		if part.kind != binaryXMLChild {
+			continue
+		}
+		child := part.child
 		if child.name == name && child.namespace == namespace {
 			values = append(values, child)
 		}

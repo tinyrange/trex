@@ -8,8 +8,9 @@ import (
 )
 
 // ACLEntry preserves an ACE's bytes and exposes its common header. Mask and
-// SID are decoded for simple allow, deny, audit, alarm and mandatory-label
-// ACEs. Other ACE layouts remain explicitly opaque, not misidentified SIDs.
+// SID are decoded for simple allow, deny, audit, alarm, mandatory-label and
+// callback-allow ACEs. Callback application bytes remain in Data after SID.
+// Other ACE layouts remain explicitly opaque, not misidentified SIDs.
 type ACLEntry struct {
 	Type, Flags byte
 	Data        []byte
@@ -41,6 +42,13 @@ func ParseACL(data []byte) (byte, []ACLEntry, error) {
 		raw := data[offset : offset+size : offset+size]
 		entry := ACLEntry{Type: raw[0], Flags: raw[1], Data: raw}
 		switch entry.Type {
+		case 9:
+			sid, _, err := fileACESID(entry)
+			if err != nil {
+				return 0, nil, fmt.Errorf("ACL entry %d principal: %w", i, err)
+			}
+			entry.Mask = binary.LittleEndian.Uint32(raw[4:])
+			entry.SID = sid
 		case 0, 1, 2, 3, 0x11:
 			if size < 16 {
 				return 0, nil, fmt.Errorf("truncated ACL entry %d principal", i)

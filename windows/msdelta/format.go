@@ -122,9 +122,13 @@ func Parse(data []byte) (*Header, error) {
 			return nil, fmt.Errorf("msdelta: %d trailing bytes in PA31 metadata", metadata.remainingBytes())
 		}
 	}
-	preprocess, err := bits.buffer()
-	if err != nil {
-		return nil, fmt.Errorf("msdelta: preprocessing stream: %w", err)
+	var preprocess []byte
+	// PA31 reverse playback has a record stream instead of PE preprocessing.
+	if version != "PA31" || fileTypeSet&0x100 == 0 {
+		preprocess, err = bits.buffer()
+		if err != nil {
+			return nil, fmt.Errorf("msdelta: preprocessing stream: %w", err)
+		}
 	}
 	patch, err := bits.buffer()
 	if err != nil {
@@ -205,7 +209,9 @@ func (r *bitReader) read(count uint) (uint64, error) {
 		}
 		return low | high<<32, nil
 	}
-	r.fill()
+	if r.bitCount < count {
+		r.fill()
+	}
 	if r.bitCount < count {
 		return 0, errors.New("unexpected end of bitstream")
 	}

@@ -1,4 +1,4 @@
-package windows
+package catalog
 
 import (
 	"bytes"
@@ -60,17 +60,17 @@ func TestCatalogIndexSelectsOnlyMemberDigests(t *testing.T) {
 	for _, version := range []int{2, 3} {
 		for _, wrapped := range []bool{false, true} {
 			data := catalogTestFile(t, version, wrapped, want...)
-			got, err := parseCatalogIndex(data)
+			got, err := ParseIndex(data)
 			if err != nil || !reflect.DeepEqual(got, want) {
 				t.Fatalf("version %d wrapped %v: %x, %v", version, wrapped, got, err)
 			}
 			// Every truncation must reject, not silently return an incomplete index.
 			for end := 0; end < len(data); end++ {
-				if _, err := parseCatalogIndex(data[:end]); err == nil {
+				if _, err := ParseIndex(data[:end]); err == nil {
 					t.Fatalf("accepted truncation %d", end)
 				}
 			}
-			if _, err := parseCatalogIndex(append(data, 0)); err == nil {
+			if _, err := ParseIndex(append(data, 0)); err == nil {
 				t.Fatal("accepted trailing data")
 			}
 		}
@@ -78,17 +78,17 @@ func TestCatalogIndexSelectsOnlyMemberDigests(t *testing.T) {
 }
 func TestCatalogIndexRejectsUnsupportedEntries(t *testing.T) {
 	for _, version := range []int{2, 3} {
-		got, err := parseCatalogIndex(catalogTestFile(t, version, false))
+		got, err := ParseIndex(catalogTestFile(t, version, false))
 		if err != nil || len(got) != 0 {
 			t.Fatalf("empty CTL: %x %v", got, err)
 		}
 		for _, length := range []int{0, 19, 21, 31, 33} {
-			if _, err := parseCatalogIndex(catalogTestFile(t, version, false, make([]byte, length))); err == nil {
+			if _, err := ParseIndex(catalogTestFile(t, version, false, make([]byte, length))); err == nil {
 				t.Fatalf("accepted digest length %d", length)
 			}
 		}
 	}
-	if _, err := parseCatalogIndex(catalogTestFile(t, 4, false, make([]byte, 20))); err == nil {
+	if _, err := ParseIndex(catalogTestFile(t, 4, false, make([]byte, 20))); err == nil {
 		t.Fatal("accepted unknown subject algorithm")
 	}
 }

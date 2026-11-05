@@ -52,7 +52,7 @@ func windowsCatalogHash(data []byte, algorithm string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	ranges, err := authenticodePERanges(data)
+	ranges, err := authenticodePERangesMode(data, true)
 	if errors.Is(err, errNotPortableExecutable) {
 		_, _ = h.Write(data)
 		return h.Sum(nil), nil
@@ -62,6 +62,13 @@ func windowsCatalogHash(data []byte, algorithm string) ([]byte, error) {
 	}
 	for _, region := range ranges {
 		_, _ = h.Write(data[region.offset : region.offset+region.size])
+	}
+	// The PE SIP hashes virtual zero padding through the next 8-byte file
+	// boundary even for an unsigned image. This is based on physical file
+	// length, not the shorter stream after checksum/directory exclusions.
+	if padding := (-len(data)) & 7; padding != 0 {
+		var zeros [7]byte
+		_, _ = h.Write(zeros[:padding])
 	}
 	return h.Sum(nil), nil
 }
@@ -81,7 +88,13 @@ func authenticodeHasher(algorithm string) (hash.Hash, error) {
 	}
 }
 
+// authenticodePERanges returns mapped header/section ranges only. Page hashes
+// must not include overlays; the signing helper appends its own extra-data span.
 func authenticodePERanges(data []byte) ([]authenticodeRange, error) {
+	return authenticodePERangesMode(data, false)
+}
+
+func authenticodePERangesMode(data []byte, includeExtra bool) ([]authenticodeRange, error) {
 	if len(data) < 0x40 || string(data[:2]) != "MZ" {
 		return nil, errNotPortableExecutable
 	}
@@ -120,8 +133,14 @@ func authenticodePERanges(data []byte) ([]authenticodeRange, error) {
 	exclusions := []authenticodeRange{{offset: checksumOffset, size: 4}}
 	directoryCount := binary.LittleEndian.Uint32(data[directoryCountOffset : directoryCountOffset+4])
 	securityEntry := directoriesOffset + 4*8
+	certificateOffset, certificateSize := 0, 0
 	if directoryCount > 4 && securityEntry <= optionalEnd-8 {
 		exclusions = append(exclusions, authenticodeRange{offset: securityEntry, size: 8})
+		certificateOffset = int(binary.LittleEndian.Uint32(data[securityEntry : securityEntry+4]))
+		certificateSize = int(binary.LittleEndian.Uint32(data[securityEntry+4 : securityEntry+8]))
+		if includeExtra && certificateSize != 0 && (certificateOffset < headerSize || certificateOffset > len(data) || certificateSize > len(data)-certificateOffset) {
+			return nil, fmt.Errorf("invalid PE certificate table range")
+		}
 	}
 	sort.Slice(exclusions, func(i, j int) bool { return exclusions[i].offset < exclusions[j].offset })
 
@@ -158,11 +177,43 @@ func authenticodePERanges(data []byte) ([]authenticodeRange, error) {
 		sections = append(sections, authenticodeRange{offset: offset, size: size})
 	}
 	sort.Slice(sections, func(i, j int) bool { return sections[i].offset < sections[j].offset })
+	sumOfBytesHashed := headerSize
+	lastSectionEnd := headerSize
+	// Legacy images can advertise SizeOfHeaders smaller than the first raw
+	// section offset (for example a 0x400 header with 0x1000 file alignment).
+	// Catalog image hashing covers that physical header padding as well.
+	// Keep mapped/page-hash consumers on their original header extent.
+	if includeExtra && len(sections) != 0 && sections[0].offset > headerSize {
+		ranges = append(ranges, authenticodeRange{offset: headerSize, size: sections[0].offset - headerSize})
+		sumOfBytesHashed = sections[0].offset
+	}
 	for index, section := range sections {
 		if index > 0 && section.offset < sections[index-1].offset+sections[index-1].size {
 			return nil, fmt.Errorf("overlapping PE sections")
 		}
 		ranges = append(ranges, section)
+		sumOfBytesHashed += section.size
+		lastSectionEnd = section.offset + section.size
+	}
+	if !includeExtra {
+		return ranges, nil
+	}
+	if certificateSize != 0 && certificateOffset < lastSectionEnd {
+		return nil, fmt.Errorf("PE certificate table overlaps image sections")
+	}
+	// Authenticode includes extra data beyond the accumulated header/section
+	// byte count. It is not limited to mapped sections: legacy images retain
+	// debug records here. Only the certificate table is excluded, not the
+	// surrounding overlay. Keep bytes after that table covered as well.
+	cursor = sumOfBytesHashed
+	if certificateSize != 0 {
+		if certificateOffset > cursor {
+			ranges = append(ranges, authenticodeRange{offset: cursor, size: certificateOffset - cursor})
+		}
+		cursor = certificateOffset + certificateSize
+	}
+	if cursor < len(data) {
+		ranges = append(ranges, authenticodeRange{offset: cursor, size: len(data) - cursor})
 	}
 	return ranges, nil
 }

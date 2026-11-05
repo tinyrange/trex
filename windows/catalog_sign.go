@@ -16,7 +16,6 @@ import (
 )
 
 var (
-	catalogCTLOID        = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 10, 1}
 	catalogUsageOID      = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 12, 1, 1}
 	catalogMemberOID     = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 12, 1, 2}
 	catalogNameValueOID  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 12, 2, 1}

@@ -28,6 +28,10 @@ type intFormat struct {
 }
 
 func readRiftTable(bits *bitReader) (riftTable, error) {
+	return readRiftTableBounded(bits, maxRiftEntries)
+}
+
+func readRiftTableBounded(bits *bitReader, maximumEntries uint64) (riftTable, error) {
 	present, err := bits.read(1)
 	if err != nil {
 		return riftTable{}, err
@@ -43,13 +47,23 @@ func readRiftTable(bits *bitReader) (riftTable, error) {
 	if err != nil {
 		return riftTable{}, fmt.Errorf("target integer format: %w", err)
 	}
-	return readRiftWithFormats(bits, sourceFormat, targetFormat)
+	return readRiftWithFormatsBounded(bits, sourceFormat, targetFormat, maximumEntries)
 }
 
 func readRiftWithFormats(bits *bitReader, sourceFormat, targetFormat *intFormat) (riftTable, error) {
+	return readRiftWithFormatsBounded(bits, sourceFormat, targetFormat, maxRiftEntries)
+}
+
+func readRiftWithFormatsBounded(bits *bitReader, sourceFormat, targetFormat *intFormat, maximumEntries uint64) (riftTable, error) {
 	count, err := bits.number64()
-	if err != nil || count < 0 || count > maxRiftEntries {
-		return riftTable{}, errors.New("invalid rift entry count")
+	// Each pair requires at least two Huffman bits. Reject impossible counts
+	// before allocating, in addition to the caller's memory/work budget.
+	available := uint64(len(bits.data)-bits.bytePos)*8 + uint64(bits.bitCount)
+	if bits.bytePos < len(bits.data) {
+		available -= uint64(bits.lastPad)
+	}
+	if err != nil || count < 0 || uint64(count) > maximumEntries || uint64(count) > available/2 {
+		return riftTable{}, fmt.Errorf("invalid rift entry count %d (limit %d, available bits %d): %v", count, maximumEntries, available, err)
 	}
 	entries := make([]riftEntry, 0, int(count))
 	var source, displacement int64
@@ -106,25 +120,16 @@ func readIntFormat(bits *bitReader) (*intFormat, error) {
 		return nil, err
 	}
 	defaultLength := byte(value + 1)
-	length := defaultLength
 	remaining := int(defaultCount)
-	for index := int(positive); index < intFormatHalf; index++ {
-		if remaining == 0 {
-			length--
-			remaining = intFormatSymbols - int(positive) - int(negative) - index
+	for _, span := range [][2]int{{int(positive), intFormatHalf}, {intFormatHalf + int(negative), intFormatSymbols}} {
+		for index := span[0]; index < span[1]; index++ {
+			lengths[index] = defaultLength
+			if remaining == 0 {
+				lengths[index]--
+			} else {
+				remaining--
+			}
 		}
-		lengths[index] = length
-		remaining--
-	}
-	length = defaultLength
-	remaining = max(0, int(defaultCount)-(intFormatHalf-int(positive)))
-	for index := intFormatHalf + int(negative); index < intFormatSymbols; index++ {
-		if remaining == 0 {
-			length--
-			remaining = intFormatHalf - (index - intFormatHalf)
-		}
-		lengths[index] = length
-		remaining--
 	}
 	tree, err := newHuffman(lengths, 16)
 	if err != nil {
@@ -313,10 +318,12 @@ func (rift riftTable) reverse() riftTable {
 			}
 			if span != 0 {
 				imageEnd := imageStart + span
-				firstOverlap := 0
-				for firstOverlap < intervalCount && imageStart > intervalEnd[firstOverlap] && intervalEnd[firstOverlap] != int64(-1<<63) {
-					firstOverlap++
-				}
+				// Covered intervals are disjoint and ordered. Their final end
+				// may use MinInt64 as the exclusive +infinity sentinel. Do not
+				// rescan every earlier interval for every source breakpoint.
+				firstOverlap := sort.Search(intervalCount, func(i int) bool {
+					return intervalEnd[i] == int64(-1<<63) || intervalEnd[i] >= imageStart
+				})
 				insertAt, overlapEnd := firstOverlap, firstOverlap
 				newEnd := imageEnd
 				if firstOverlap < intervalCount {

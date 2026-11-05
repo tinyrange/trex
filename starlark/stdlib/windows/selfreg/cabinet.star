@@ -78,10 +78,17 @@ def cabinet_plugin(kernel):
             set_error(machine, context, 1, 2)
             state["actions"].append({"api": "fdicopy", "path": path, "found": False})
             return 0
+        data = kernel.state["file_data"](path)
+        if len(data) < 4 or data[:4] != b"MSCF":
+            # Setup may try FDICopy before falling back to an ordinary copy.
+            # A non-cabinet is an FDI failure, not an emulator/parser failure.
+            set_error(machine, context, 2, 0)  # FDIERROR_NOT_A_CABINET
+            state["actions"].append({"api": "fdicopy", "path": path, "found": True, "operation": 2, "error": 0})
+            return 0
         # FDI visits multiple entries in the same compressed folder. Keep the
         # bounded folder cache for this copy so each entry does not restart
         # decompression from the beginning of the folder.
-        cabinet = archive.cab(_cabinet_file(kernel.state["file_data"](path)))
+        cabinet = archive.cab(_cabinet_file(data))
         extracted = 0
         skipped = 0
         for archived_name in cabinet.files:

@@ -27,12 +27,15 @@ const (
 type CPU struct {
 	registers [16]uint64
 	xmm       [16][16]byte
+	selectors [6]uint16 // CS, SS, DS, ES, FS, GS; separate from FS/GS bases.
 	rip       uint64
 	flags     uint64
 	fsBase    uint64
 	gsBase    uint64
 	mxcsr     uint32
 	mxcsrSet  bool
+	// Deterministic virtual clock: one tick per retired instruction, as in x86.
+	timestampCounter uint64
 }
 
 var _ cpu.Processor = (*CPU)(nil)
@@ -80,7 +83,29 @@ func registerAlias(reg x86asm.Reg) (alias, bool) {
 
 func mask(width int) uint64 { return math.MaxUint64 >> (64 - width*8) }
 
+// segmentIndex describes selector storage, not descriptor-table emulation.
+func segmentIndex(reg x86asm.Reg) (int, bool) {
+	switch reg {
+	case x86asm.CS:
+		return 0, true
+	case x86asm.SS:
+		return 1, true
+	case x86asm.DS:
+		return 2, true
+	case x86asm.ES:
+		return 3, true
+	case x86asm.FS:
+		return 4, true
+	case x86asm.GS:
+		return 5, true
+	}
+	return 0, false
+}
+
 func (c *CPU) reg(reg x86asm.Reg) (uint64, error) {
+	if index, ok := segmentIndex(reg); ok {
+		return uint64(c.selectors[index]), nil
+	}
 	if reg == x86asm.RIP {
 		return c.rip, nil
 	}
@@ -115,6 +140,9 @@ var namedRegisters = func() map[string]x86asm.Reg {
 		if _, ok := registerAlias(reg); ok {
 			result[strings.ToLower(reg.String())] = reg
 		}
+	}
+	for _, reg := range []x86asm.Reg{x86asm.CS, x86asm.SS, x86asm.DS, x86asm.ES, x86asm.FS, x86asm.GS} {
+		result[strings.ToLower(reg.String())] = reg
 	}
 	// x86asm uses SPB and R8L; also accept conventional assembler spellings.
 	for name, reg := range map[string]x86asm.Reg{"spl": x86asm.SPB, "bpl": x86asm.BPB, "sil": x86asm.SIB, "dil": x86asm.DIB} {
@@ -163,6 +191,13 @@ func (c *CPU) SetRegister(name string, value uint64) error {
 		return nil
 	}
 	if r, ok := namedRegisters[strings.ToLower(name)]; ok {
+		if index, ok := segmentIndex(r); ok {
+			if value > 0xffff {
+				return fmt.Errorf("amd64: segment selector exceeds 16 bits: %#x", value)
+			}
+			c.selectors[index] = uint16(value)
+			return nil
+		}
 		return c.setReg(r, value)
 	}
 	return fmt.Errorf("amd64: unknown register %q", name)
@@ -426,6 +461,14 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				// The zero-input destination and other arithmetic flags are
 				// undefined; retaining them is a deterministic allowed choice.
 			}
+		case x86asm.FXSAVE, x86asm.FXSAVE64:
+			err = c.fxsave(memory, inst, next)
+		case x86asm.FXRSTOR, x86asm.FXRSTOR64:
+			err = c.fxrstor(memory, inst, next)
+		case x86asm.FNSTCW:
+			// No x87 state-changing instructions are admitted yet; FXSAVE
+			// and FNSTCW expose the same architectural reset environment.
+			err = c.writeOperand(memory, inst.Args[0], inst, next, 2, 0x037f)
 		case x86asm.STMXCSR:
 			err = c.writeOperand(memory, inst.Args[0], inst, next, 4, c.readMXCSR())
 		case x86asm.LDMXCSR:
@@ -790,7 +833,7 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			c.resultFlags(value, width)
 			err = write(value)
-		case x86asm.XORPS, x86asm.PXOR, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PUNPCKLQDQ, x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.PSHUFLW, x86asm.PSHUFD:
+		case x86asm.XORPS, x86asm.PXOR, x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PADDD, x86asm.PUNPCKLDQ, x86asm.PUNPCKLQDQ, x86asm.UNPCKLPD, x86asm.UNPCKHPD, x86asm.PSHUFLW, x86asm.PSHUFD:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
 				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
@@ -848,8 +891,26 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 						copy(result[i*4+2:i*4+4], value[i*2:i*2+2])
 					}
 					c.xmm[destination-x86asm.X0] = result
-				} else if inst.Op == x86asm.PUNPCKLQDQ {
+				} else if inst.Op == x86asm.PADDD {
+					register := &c.xmm[destination-x86asm.X0]
+					for offset := 0; offset < 16; offset += 4 {
+						sum := binary.LittleEndian.Uint32(register[offset:]) + binary.LittleEndian.Uint32(value[offset:])
+						binary.LittleEndian.PutUint32(register[offset:], sum)
+					}
+				} else if inst.Op == x86asm.PUNPCKLDQ {
+					before := c.xmm[destination-x86asm.X0]
+					var result [16]byte
+					for lane := 0; lane < 2; lane++ {
+						copy(result[8*lane:8*lane+4], before[4*lane:4*lane+4])
+						copy(result[8*lane+4:8*lane+8], value[4*lane:4*lane+4])
+					}
+					c.xmm[destination-x86asm.X0] = result
+				} else if inst.Op == x86asm.PUNPCKLQDQ || inst.Op == x86asm.UNPCKLPD {
 					copy(c.xmm[destination-x86asm.X0][8:], value[:8])
+				} else if inst.Op == x86asm.UNPCKHPD {
+					register := &c.xmm[destination-x86asm.X0]
+					copy(register[:8], register[8:])
+					copy(register[8:], value[8:])
 				} else if inst.Op == x86asm.PCMPEQB {
 					register := &c.xmm[destination-x86asm.X0]
 					for i, b := range value {
@@ -889,22 +950,30 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				value |= uint64(b>>7) << uint(i)
 			}
 			err = write(value)
-		case x86asm.COMISS:
+		case x86asm.COMISS, x86asm.COMISD:
 			source, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || source < x86asm.X0 || source > x86asm.X15 {
 				err = fmt.Errorf("invalid COMISS source %v", inst.Args[0])
 				break
 			}
+			width := 4
+			if inst.Op == x86asm.COMISD {
+				width = 8
+			}
 			var value uint64
 			if second, ok := inst.Args[1].(x86asm.Reg); ok && second >= x86asm.X0 && second <= x86asm.X15 {
-				value = uint64(binary.LittleEndian.Uint32(c.xmm[second-x86asm.X0][:4]))
+				value = binary.LittleEndian.Uint64(c.xmm[second-x86asm.X0][:8])
 			} else {
-				value, err = read(inst.Args[1], 4)
+				value, err = read(inst.Args[1], width)
 			}
 			if err == nil {
-				err = c.compareSingles(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]), uint32(value))
+				if width == 8 {
+					err = c.compareDoubles(binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8]), value)
+				} else {
+					err = c.compareSingles(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]), uint32(value))
+				}
 			}
-		case x86asm.DIVSS, x86asm.MULSS:
+		case x86asm.ADDSS, x86asm.DIVSS, x86asm.MULSS:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
 				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
@@ -918,7 +987,11 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			if err == nil {
 				var result uint32
-				result, err = c.arithmeticSingle(binary.LittleEndian.Uint32(c.xmm[destination-x86asm.X0][:4]), uint32(value), inst.Op == x86asm.MULSS)
+				if inst.Op == x86asm.ADDSS {
+					result, err = c.addSingle(binary.LittleEndian.Uint32(c.xmm[destination-x86asm.X0][:4]), uint32(value))
+				} else {
+					result, err = c.arithmeticSingle(binary.LittleEndian.Uint32(c.xmm[destination-x86asm.X0][:4]), uint32(value), inst.Op == x86asm.MULSS)
+				}
 				if err == nil {
 					binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
 				}
@@ -961,21 +1034,48 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 					binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
 				}
 			}
-		case x86asm.CVTTSS2SI:
+		case x86asm.MULSD:
+			destination, ok := inst.Args[0].(x86asm.Reg)
+			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
+				err = fmt.Errorf("invalid MULSD destination %v", inst.Args[0])
+				break
+			}
 			var value uint64
 			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
-				value = uint64(binary.LittleEndian.Uint32(c.xmm[source-x86asm.X0][:4]))
+				value = binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8])
 			} else {
-				value, err = read(inst.Args[1], 4)
+				value, err = read(inst.Args[1], 8)
+			}
+			if err == nil {
+				var result uint64
+				result, err = c.multiplyDouble(binary.LittleEndian.Uint64(c.xmm[destination-x86asm.X0][:8]), value)
+				if err == nil {
+					binary.LittleEndian.PutUint64(c.xmm[destination-x86asm.X0][:8], result)
+				}
+			}
+		case x86asm.CVTTSS2SI, x86asm.CVTTSD2SI:
+			inputWidth := 4
+			if inst.Op == x86asm.CVTTSD2SI {
+				inputWidth = 8
+			}
+			var value uint64
+			if source, ok := inst.Args[1].(x86asm.Reg); ok && source >= x86asm.X0 && source <= x86asm.X15 {
+				value = binary.LittleEndian.Uint64(c.xmm[source-x86asm.X0][:8])
+			} else {
+				value, err = read(inst.Args[1], inputWidth)
 			}
 			if err == nil {
 				width := inst.DataSize / 8
-				value, err = c.truncateSingleToInteger(uint32(value), width)
+				if inputWidth == 8 {
+					value, err = c.truncateDoubleToInteger(value, width)
+				} else {
+					value, err = c.truncateSingleToInteger(uint32(value), width)
+				}
 				if err == nil {
 					err = c.writeOperand(memory, inst.Args[0], inst, next, width, value)
 				}
 			}
-		case x86asm.CVTSI2SS:
+		case x86asm.CVTSI2SS, x86asm.CVTSI2SD:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
 				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
@@ -989,10 +1089,18 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				if width == 4 {
 					signed = int64(int32(value))
 				}
-				var result uint32
-				result, err = c.signedIntegerToSingle(signed)
-				if err == nil {
-					binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
+				if inst.Op == x86asm.CVTSI2SD {
+					var result uint64
+					result, err = c.signedIntegerToDouble(signed)
+					if err == nil {
+						binary.LittleEndian.PutUint64(c.xmm[destination-x86asm.X0][:8], result)
+					}
+				} else {
+					var result uint32
+					result, err = c.signedIntegerToSingle(signed)
+					if err == nil {
+						binary.LittleEndian.PutUint32(c.xmm[destination-x86asm.X0][:4], result)
+					}
 				}
 			}
 		case x86asm.CVTDQ2PD, x86asm.CVTPS2PD:
@@ -1020,6 +1128,16 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 					c.xmm[destination-x86asm.X0] = result
 				}
 			}
+		case x86asm.MOVLHPS:
+			destination, dstOK := inst.Args[0].(x86asm.Reg)
+			source, srcOK := inst.Args[1].(x86asm.Reg)
+			if !dstOK || !srcOK || destination < x86asm.X0 || destination > x86asm.X15 || source < x86asm.X0 || source > x86asm.X15 {
+				err = fmt.Errorf("invalid MOVLHPS operands %v, %v", inst.Args[0], inst.Args[1])
+				break
+			}
+			// Legacy MOVLHPS copies the low source quadword to the high
+			// destination quadword, preserving its low quadword and flags.
+			copy(c.xmm[destination-x86asm.X0][8:], c.xmm[source-x86asm.X0][:8])
 		case x86asm.MOVHPS:
 			if destination, ok := inst.Args[0].(x86asm.Reg); ok && destination >= x86asm.X0 && destination <= x86asm.X15 {
 				if _, ok := inst.Args[1].(x86asm.Mem); !ok {
@@ -1135,12 +1253,18 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 				copy(register[:], register[shift:])
 				clear(register[len(register)-shift:])
 			}
-		case x86asm.LFENCE, x86asm.MFENCE:
-			// Guest loads and stores complete synchronously in the portable
-			// address space; there are no buffered accesses to order here.
-		case x86asm.MOVDQA, x86asm.MOVDQU, x86asm.MOVAPS, x86asm.MOVUPS, x86asm.MOVAPD:
+		case x86asm.MFENCE, x86asm.LFENCE, x86asm.SFENCE:
+			// Guest memory operations are completed synchronously by the
+			// portable address space, so no load or store remains to order.
+		case x86asm.MOVDQA, x86asm.MOVDQU, x86asm.MOVAPS, x86asm.MOVUPS, x86asm.MOVNTPS, x86asm.MOVAPD:
 			var value [16]byte
-			aligned := inst.Op == x86asm.MOVDQA || inst.Op == x86asm.MOVAPS || inst.Op == x86asm.MOVAPD
+			aligned := inst.Op == x86asm.MOVAPD || inst.Op == x86asm.MOVDQA || inst.Op == x86asm.MOVAPS || inst.Op == x86asm.MOVNTPS
+			if inst.Op == x86asm.MOVNTPS {
+				if _, ok := inst.Args[0].(x86asm.Mem); !ok {
+					err = fmt.Errorf("invalid MOVNTPS destination %v", inst.Args[0])
+					break
+				}
+			}
 			switch source := inst.Args[1].(type) {
 			case x86asm.Reg:
 				if source < x86asm.X0 || source > x86asm.X15 {
@@ -1272,6 +1396,12 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 					next = c.rip
 				}
 			}
+		case x86asm.RDTSC:
+			// CPU time is virtual and replayable, never sampled from the host.
+			// EDX:EAX are 32-bit writes and do not modify flags.
+			ticks := c.timestampCounter + 1
+			c.registers[0] = uint64(uint32(ticks))
+			c.registers[2] = ticks >> 32
 		case x86asm.CPUID:
 			leaf := uint32(c.registers[0])
 			var eax, ebx, ecx, edx uint32
@@ -1512,6 +1642,8 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			if err == nil {
 				next = target
 			}
+		case x86asm.IRETQ:
+			next, err = c.iretq(memory)
 		case x86asm.RET:
 			sp := c.registers[x86asm.RSP-x86asm.RAX]
 			next, err = readWord(memory, sp, 8)
@@ -1530,6 +1662,7 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 	if err != nil {
 		return cpu.Continue, fmt.Errorf("amd64: at %#x (%s): %w", c.rip, inst, err)
 	}
+	c.timestampCounter++
 	c.rip = next
 	return effect, nil
 }

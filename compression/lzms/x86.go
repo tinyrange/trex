@@ -27,8 +27,15 @@ func restoreX86Addresses(data []byte) {
 		}
 		// E9 is scan-only: consume its operand but do not let it participate in
 		// translation or target-recency state.
-		if data[position] == 0xe9 {
+		switch data[position] {
+		case 0xe9:
 			position += 5
+			continue
+		case 0x48, 0x4c, 0xe8, 0xf0, 0xff:
+			// Only these leading bytes can be a candidate. Most payload bytes
+			// are not instructions; avoid the non-inline recognizer for them.
+		default:
+			position++
 			continue
 		}
 		operandOffset, window, recognized := x86Candidate(data, position)

@@ -215,12 +215,614 @@ def test_registry_key_information():
         "max_value_length": 16,
     })
 
+def test_registry_native_enumerate_full_value_information():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        registry = module["registry_plugin"](values = [{"hive": "SOFTWARE", "key": "/NativeProbe", "name": "Abc", "type": "REG_BINARY", "value": b"123456"}])
+        machine.use(registry)
+        key = machine.allocate(value = binary.encode("NativeProbe", encoding = "utf16le", nul = True))
+        opened = machine.allocate(size = machine.pointer_size)
+        equal(machine.call(machine.resolve_export("advapi32.dll", name = "RegOpenKeyExW"), args = [0x80000002, key, 0, 0x20019, opened]).value, 0)
+        handle = machine.read_pointer(opened)
+        output = machine.allocate(size = 48)
+        needed = machine.allocate(value = b"Z" * 8)
+        enumerate = machine.resolve_export("ntdll.dll", name = "NtEnumerateValueKey")
+        high = 0x600000000000 if architecture == "amd64" else 0
+        for capacity, status in [(0, 0xc0000023), (19, 0xc0000023), (20, 0x80000005), (33, 0x80000005), (34, 0), (48, 0)]:
+            machine.write(output, b"Z" * 48)
+            result = machine.call(enumerate, args = [handle, high, high | 1, output, high | capacity, needed])
+            equal(result.reason, "return")
+            equal(result.value, status)
+            equal(machine.read_u32le(needed), 34)
+            equal(machine.read(needed + 4, 4), b"ZZZZ")
+            if capacity >= 20:
+                equal([machine.read_u32le(output + offset) for offset in range(0, 20, 4)], [0, 3, 28, 6, 6])
+            if capacity >= 34:
+                equal(machine.read(output + 20, 6), binary.encode("abc", encoding = "utf16le"))
+                equal(machine.read(output + 28, 6), b"123456")
+            written = min(capacity, 34) if capacity >= 20 else 0
+            equal(machine.read(output + written, 48 - written), b"Z" * (48 - written))
+        for capacity, expected in [(0, 0xc0000023), (11, 0xc0000023), (12, 0x80000005), (18, 0)]:
+            machine.write(output, b"Z" * 48)
+            result = machine.call(enumerate, args = [handle, 0, 0, output, capacity, needed])
+            equal(result.reason, "return")
+            equal(result.value, expected)
+            equal(machine.read_u32le(needed), 18)
+            if capacity >= 12:
+                equal([machine.read_u32le(output + offset) for offset in range(0, 12, 4)], [0, 3, 6])
+            if capacity >= 18:
+                equal(machine.read(output + 12, 6), binary.encode("abc", encoding = "utf16le"))
+            written = min(capacity, 18) if capacity >= 12 else 0
+            equal(machine.read(output + written, 48 - written), b"Z" * (48 - written))
+        equal(machine.call(enumerate, args = [handle, 1, 1, output, 48, needed]).value, 0x8000001a)
+        equal(machine.call(enumerate, args = [0x12345, 0, 1, output, 48, needed]).value, 0xc0000008)
+
+def test_registry_key_name_cache_tracks_mutation_and_source_reload():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    def source(child):
+        return windows.hive(windows.hive_from_patches("SOFTWARE", [{"key": "/Root/" + child, "name": "Value", "type": "REG_DWORD", "value": 1}]))
+    registry = module["registry_plugin"](hives = {"SOFTWARE": source("Old")})
+    target = ("SOFTWARE", "/Root")
+    names = module["_direct_subkeys"](registry.state, target)
+    equal(names, ["Old"])
+    names.append("caller mutation")
+    equal(module["_direct_subkeys"](registry.state, target), ["Old"])
+    registry.set_value("SOFTWARE", "/Root/New", "Value", "REG_DWORD", 2)
+    equal(module["_direct_subkeys"](registry.state, target), ["new", "Old"])
+    equal(registry.delete_tree("SOFTWARE", "/Root/New"), 0)
+    equal(module["_direct_subkeys"](registry.state, target), ["Old"])
+    registry.state["sources"]["SOFTWARE"] = source("Replacement")
+    registry.state["source_cache"].clear()
+    equal(module["_direct_subkeys"](registry.state, target), ["Replacement"])
+    registry.load_keys([{"hive": "SOFTWARE", "key": "/Root/New"}])
+    equal(module["_direct_subkeys"](registry.state, target), ["new", "Replacement"])
+    registry.reset()
+    equal(module["_direct_subkeys"](registry.state, target), ["Replacement"])
+
+def test_registry_deleted_ancestor_boundaries():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    identity = module["_key_identity"]
+    deleted = module["_key_deleted"]
+    state = {"deleted_keys": {identity("SOFTWARE", "/Branch"): True, identity("SOFTWARE", "/A%2fB"): True}}
+    for hive, key, expected in [
+        ("SOFTWARE", "/Branch", True),
+        ("SOFTWARE", "/Branch/Child/Grandchild", True),
+        ("SOFTWARE", "/Branchish/Child", False),
+        ("SYSTEM", "/Branch/Child", False),
+        ("SOFTWARE", "/", False),
+        ("SOFTWARE", "/A%2fB/Child", True),
+        ("SOFTWARE", "/A/B/Child", False),
+        ("SOFTWARE", "/A%2fBC/Child", False),
+    ]:
+        equal(deleted(state, identity(hive, key)), expected)
+    state["deleted_keys"][identity("SOFTWARE", "/").rstrip("/")] = True
+    true(deleted(state, identity("SOFTWARE", "/")))
+    true(deleted(state, identity("SOFTWARE", "/Unrelated/Child")))
+    true(not deleted(state, identity("SYSTEM", "/Unrelated/Child")))
+
+def test_registry_cached_information_after_many_source_deletions():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    source = windows.hive(windows.hive_from_patches("SOFTWARE", [
+        {"key": "/Hot/Child" + str(1000 + i), "name": "Value", "type": "REG_DWORD", "value": i}
+        for i in range(512)
+    ]))
+    for architecture in ["x86", "amd64"]:
+        registry = module["registry_plugin"](hives = {"SOFTWARE": source})
+        for i in range(0, 512, 2):
+            equal(registry.delete_tree("SOFTWARE", "/Hot/Child" + str(1000 + i)), 0)
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(registry)
+        path = machine.allocate(value = binary.encode("Hot", encoding = "utf16le", nul = True))
+        opened = machine.allocate(size = machine.pointer_size)
+        equal(machine.call(machine.resolve_export("kernelbase.dll", name = "RegOpenKeyExW"), args = [0x80000002, path, 0, 0x20019, opened]).value, 0)
+        output = machine.allocate(value = b"Z" * 48)
+        needed = machine.allocate(value = b"Z" * 8)
+        result = machine.call(machine.resolve_export("ntdll.dll", name = "NtQueryKey"), args = [machine.read_pointer(opened), 4, output, 40, needed])
+        equal((result.reason, result.value), ("return", 0))
+        equal(machine.read_u32le(needed), 40)
+        equal(machine.read(needed + 4, 4), b"ZZZZ")
+        equal([machine.read_u32le(output + offset) for offset in range(8, 36, 4)], [0, 256, 18, 0, 0, 0, 6])
+        equal(machine.read(output + 36, 12), b"Z" * 12)
+        equal(registry.get_value("SOFTWARE", "/Hot/Child1000", "Value"), None)
+        equal(registry.get_value("SOFTWARE", "/Hot/Child1001", "Value"), 1)
+
+def test_registry_native_cached_key_information():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        registry = module["registry_plugin"](keys = [{"hive": "SOFTWARE", "key": "/NativeProbe/Child"}], values = [{"hive": "SOFTWARE", "key": "/NativeProbe", "name": "Current", "type": "REG_BINARY", "value": b"123456"}])
+        machine.use(registry)
+        key = machine.allocate(value = binary.encode("NativeProbe", encoding = "utf16le", nul = True))
+        opened = machine.allocate(size = machine.pointer_size)
+        equal(machine.call(machine.resolve_export("advapi32.dll", name = "RegOpenKeyExW"), args = [0x80000002, key, 0, 0x20019, opened]).value, 0)
+        handle = machine.read_pointer(opened)
+        output = machine.allocate(size = 48)
+        needed = machine.allocate(value = b"Z" * 8)
+        query = machine.resolve_export("ntdll.dll", name = "NtQueryKey")
+        high = 0x600000000000 if architecture == "amd64" else 0
+        for size, expected in [(0, 0xc0000023), (39, 0xc0000023), (40, 0), (48, 0)]:
+            machine.write(output, b"Z" * 48)
+            result = machine.call(query, args = [handle, high | 4, output, high | size, needed])
+            equal(result.reason, "return")
+            equal(result.value, expected)
+            equal(machine.read_u32le(needed), 40)
+            equal(machine.read(needed + 4, 4), b"ZZZZ")
+            if expected:
+                equal(machine.read(output, 48), b"Z" * 48)
+            else:
+                equal(machine.read_u64le(output), 0)
+                equal([machine.read_u32le(output + offset) for offset in range(8, 36, 4)], [0, 1, 10, 1, 14, 6, 22])
+                equal(machine.read(output + 36, 12), b"Z" * 12)
+        equal(machine.call(query, args = [0x12345, 4, output, 48, needed]).value, 0xc0000008)
+        result = machine.call(query, args = [handle, 3, output, 48, needed])
+        equal(result.reason, "plugin")
+        true("only KeyFullInformation and KeyCachedInformation" in result.detail)
+
+def test_registry_native_set_value_effects():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        registry = module["registry_plugin"](keys = [{"hive": "SOFTWARE", "key": "/NativeProbe"}])
+        machine.use(registry)
+        key = machine.allocate(value = binary.encode("NativeProbe", encoding = "utf16le", nul = True))
+        opened = machine.allocate(size = machine.pointer_size)
+        equal(machine.call(machine.resolve_export("advapi32.dll", name = "RegOpenKeyExW"), args = [0x80000002, key, 0, 0x2001f, opened]).value, 0)
+        handle = machine.read_pointer(opened)
+        layout = abi["counted_string_layout"](machine.pointer_size)
+        name = machine.allocate(size = layout["Size"])
+        text = binary.encode("Version", encoding = "utf16le")
+        machine.write_u16le(name, len(text))
+        machine.write_u16le(name + 2, len(text))
+        machine.write_pointer(name + layout["Buffer"], machine.allocate(value = text))
+        set = machine.resolve_export("ntdll.dll", name = "NtSetValueKey")
+        query = machine.resolve_export("ntdll.dll", name = "NtQueryValueKey")
+        output = machine.allocate(size = 64)
+        needed = machine.allocate(size = 4)
+        high = 0x600000000000 if architecture == "amd64" else 0
+        for kind, raw in [(3, b"\x00a\xffz"), (4, b"\x78\x56\x34\x12"), (1, b"A\x00\x00\x00"), (3, b"")]:
+            source = machine.allocate(value = raw) if raw else 0
+            result = machine.call(set, args = [handle, name, 0, high | kind, source, high | len(raw)])
+            equal(result.reason, "return")
+            equal(result.value, 0)
+            equal(registry.patches()[-1]["name"], "Version")
+            result = machine.call(query, args = [handle, name, 2, output, 64, needed])
+            equal(result.value, 0)
+            equal(machine.read_u32le(output + 4), kind)
+            equal(machine.read_u32le(output + 8), len(raw))
+            equal(machine.read(output + 12, len(raw)), raw)
+        delete = machine.resolve_export("ntdll.dll", name = "NtDeleteValueKey")
+        equal(machine.call(delete, args = [handle, name]).value, 0)
+        true(registry.patches()[-1]["delete"])
+        equal(machine.call(query, args = [handle, name, 2, output, 64, needed]).value, 0xc0000034)
+        count = len(registry.patches())
+        equal(machine.call(delete, args = [handle, name]).value, 0xc0000034)
+        equal(machine.call(delete, args = [0x12345, name]).value, 0xc0000008)
+        equal(len(registry.patches()), count)
+        equal(machine.call(set, args = [0x12345, name, 0, 3, 0, 0]).value, 0xc0000008)
+        equal(machine.call(set, args = [handle, name, 0, 3, 0, 1]).value, 0xc0000005)
+        result = machine.call(set, args = [handle, name, 0, 1, machine.allocate(value = b"A\x00"), 2])
+        equal(result.reason, "plugin")
+        true("raw registry patches" in result.detail)
+        equal(len(registry.patches()), count)
+
+def test_registry_native_partial_value_query():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        registry = module["registry_plugin"](values = [{"hive": "SOFTWARE", "key": "/NativeProbe", "name": "Current", "type": "REG_DWORD", "value": 1}])
+        machine.use(registry)
+        key = machine.allocate(value = binary.encode("NativeProbe", encoding = "utf16le", nul = True))
+        opened = machine.allocate(size = machine.pointer_size)
+        equal(machine.call(machine.resolve_export("advapi32.dll", name = "RegOpenKeyExW"), args = [0x80000002, key, 0, 0x20019, opened]).value, 0)
+        handle = machine.read_pointer(opened)
+        layout = abi["counted_string_layout"](machine.pointer_size)
+        name = machine.allocate(size = layout["Size"])
+        text = binary.encode("cUrReNt", encoding = "utf16le")
+        source = machine.allocate(value = text)
+        machine.write_u16le(name, len(text))
+        machine.write_u16le(name + 2, len(text))
+        machine.write_pointer(name + layout["Buffer"], source)
+        output = machine.allocate(size = 20)
+        length = machine.allocate(size = 8)
+        query = machine.resolve_export("ntdll.dll", name = "NtQueryValueKey")
+        data = binary.builder()
+        for value in [0, 4, 4, 1]: data.u32le(value)
+        payload = data.bytes()
+        for capacity, status, written in [(0, 0xc0000023, 0), (11, 0xc0000023, 0), (12, 0x80000005, 12), (14, 0x80000005, 14), (16, 0, 16), (20, 0, 16)]:
+            machine.write(output, b"Z" * 20)
+            machine.write(length, b"Z" * 8)
+            size = capacity | (0x7fff00000000 if architecture == "amd64" else 0)
+            result = machine.call(query, args = [handle, name, 2, output, size, length])
+            equal(result.reason, "return")
+            equal(result.value, status)
+            equal(machine.read_u32le(length), 16)
+            equal(machine.read(length + 4, 4), b"ZZZZ")
+            equal(machine.read(output, written), payload[:written])
+            equal(machine.read(output + written, 20 - written), b"Z" * (20 - written))
+        machine.write_u16le(name, 0)  # Missing unnamed value, not named Current.
+        machine.write(output, b"Z" * 20)
+        equal(machine.call(query, args = [handle, name, 2, output, 20, length]).value, 0xc0000034)
+        equal(machine.read(output, 20), b"Z" * 20)
+        equal(machine.call(query, args = [0x12345, name, 2, output, 20, length]).value, 0xc0000008)
+        result = machine.call(query, args = [handle, name, 1, output, 20, length])
+        equal(result.reason, "plugin")
+        true("information class 1" in result.detail)
+
+def test_registry_native_enumerate_long_key_buffer():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        name = "longkey" * 16
+        encoded = binary.encode(name, encoding = "utf16le")
+        required = 16 + len(encoded)
+        registry = module["registry_plugin"](keys = [{"hive": "SOFTWARE", "key": "/" + name}])
+        machine.use(registry)
+        # Predefined HKLM has other baseline children; locate our exact index.
+        subkeys = module["_direct_subkeys"](registry.state, ("SOFTWARE", "/"))
+        index = subkeys.index(name)
+        target = machine.resolve_export("ntdll.dll", name = "NtEnumerateKey")
+        output = machine.allocate(value = b"Z" * (required + 8))
+        needed = machine.allocate(value = b"Y" * 8)
+        upper = 0xfeed00000000 if architecture == "amd64" else 0
+        for capacity, status in [(0, 0xc0000023), (15, 0xc0000023), (16, 0x80000005), (96, 0x80000005), (required, 0)]:
+            machine.write(output, b"Z" * (required + 8))
+            result = machine.call(target, args = [0x80000002, upper | index, upper, output, upper | capacity, needed])
+            equal(result.reason, "return")
+            equal(result.value, status)
+            equal(machine.read_u32le(needed), required)
+            equal(machine.read(needed + 4, 4), b"YYYY")
+            if capacity < 16:
+                equal(machine.read(output, required + 8), b"Z" * (required + 8))
+            else:
+                equal(machine.read_u32le(output + 12), len(encoded))
+                equal(machine.read(output + 16, capacity - 16), encoded[:capacity - 16])
+                equal(machine.read(output + capacity, required + 8 - capacity), b"Z" * (required + 8 - capacity))
+        equal(registry.patches(), [])
+
+def test_registry_native_delete_key_lifetime():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        source = windows.hive(windows.hive_from_patches("SOFTWARE", [
+            {"key": "/DeleteProbe/Leaf", "name": "", "type": "REG_SZ", "value": "old.inf"},
+            {"key": "/DeleteProbe/Leaf", "name": "Other", "type": "REG_DWORD", "value": 7},
+        ]))
+        registry = module["registry_plugin"](hives = {"SOFTWARE": source})
+        equal(registry.effects(), dict(keys=[], key_deletions=[], values=[], value_deletions=[]))
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(registry)
+        if architecture == "amd64":
+            registry.state["next_handle"] = 0x100010000
+        layout = abi["object_attributes_layout"](machine.pointer_size)
+        string = abi["counted_string_layout"](machine.pointer_size)
+        descriptor = machine.allocate(size = string["Size"])
+        obj = machine.allocate(size = layout["Size"])
+        output = machine.allocate(value = b"Z" * (machine.pointer_size + 8))
+        disposition = machine.allocate(value = b"Y" * 8)
+        machine.write_u32le(obj, layout["Size"])
+        machine.write_pointer(obj + layout["ObjectName"], descriptor)
+        def name(value, parent = 0):
+            raw = binary.encode(value, encoding = "utf16le")
+            machine.write_u16le(descriptor, len(raw))
+            machine.write_u16le(descriptor + 2, len(raw))
+            machine.write_pointer(descriptor + string["Buffer"], machine.allocate(value = raw))
+            machine.write_pointer(obj + layout["RootDirectory"], parent)
+        def call(api, args):
+            result = machine.call(machine.resolve_export("ntdll.dll", name = api), args = args)
+            equal(result.reason, "return", result.detail)
+            return result.value
+        name(r"\Registry\Machine\SOFTWARE\DeleteProbe")
+        equal(call("NtOpenKey", [output, 0x10000, obj]), 0)
+        parent = machine.read_pointer(output)
+        # Leaf deletion must not accidentally turn into recursive deletion.
+        equal(call("NtDeleteKey", [parent]), 0xc0000121)
+        equal(registry.patches(), [])
+        name("Leaf", parent)
+        handles = []
+        for access in [0x20019, 0x10000, 0x10000]:
+            upper = 0xface00000000 if architecture == "amd64" else 0
+            equal(call("NtOpenKey", [output, upper | access, obj]), 0)
+            handles.append(machine.read_pointer(output))
+            equal(machine.read(output + machine.pointer_size, 8), b"Z" * 8)
+        reader, deleter, second = handles
+        equal(call("NtDeleteKey", [0]), 0xc0000008)
+        equal(call("NtDeleteKey", [0x80000002]), 0xc0000008)
+        equal(call("NtDeleteKey", [reader]), 0xc0000022)
+        equal(registry.patches(), [])
+        equal(call("NtDeleteKey", [deleter]), 0)
+        equal(call("NtDeleteKey", [second]), 0)
+        equal([p["key"].lower() for p in registry.key_deletions()], ["/deleteprobe/leaf"])
+        equal(len(registry.patches()), 2)
+        true(all([p.get("delete", False) for p in registry.patches()]))
+        equal(registry.get_value("SOFTWARE", "/DeleteProbe/Leaf", ""), None)
+        equal(module["_direct_subkeys"](registry.state, ("SOFTWARE", "/DeleteProbe")), [])
+        equal(sorted(registry.state["deleted_handles"]), sorted(handles))
+        # No automatic close: every original key reference is still owned.
+        true(all([registry.state["handles"][h] != None for h in handles]))
+        machine.write(output, b"Z" * (machine.pointer_size + 8))
+        equal(call("NtOpenKey", [output, 0x20019, obj]), 0xc0000034)
+        equal(machine.read(output, machine.pointer_size + 8), b"Z" * (machine.pointer_size + 8))
+        for api, args in [
+            ("NtQueryKey", [reader, 4, output, 40, disposition]),
+            ("NtQueryValueKey", [reader, descriptor, 2, output, 40, disposition]),
+            ("NtEnumerateKey", [reader, 0, 0, output, 40, disposition]),
+            ("NtEnumerateValueKey", [reader, 0, 0, output, 40, disposition]),
+            ("NtSetValueKey", [reader, descriptor, 0, 4, disposition, 4]),
+            ("NtDeleteValueKey", [reader, descriptor]),
+        ]:
+            equal(call(api, args), 0xc000017c)
+        equal(machine.read(output, machine.pointer_size + 8), b"Z" * (machine.pointer_size + 8))
+        equal(machine.read(disposition, 8), b"Y" * 8)
+        name("Child", reader)
+        equal(call("NtOpenKey", [output, 0x20019, obj]), 0xc000017c)
+        equal(call("NtCreateKey", [output, 0x10000, obj, 0, 0, 0, disposition]), 0xc000017c)
+        # Creating by the live parent's name creates a distinct empty object;
+        # old references must not alias it and lazy source data must stay gone.
+        name("Leaf", parent)
+        equal(call("NtCreateKey", [output, 0x10000, obj, 0, 0, 0, disposition]), 0)
+        fresh = machine.read_pointer(output)
+        equal(machine.read_u32le(disposition), 1)
+        equal(machine.read(disposition + 4, 4), b"YYYY")
+        equal(module["_direct_values"](registry.state, ("SOFTWARE", "/DeleteProbe/Leaf")), [])
+        registry.set_value("SOFTWARE", "/DeleteProbe/Leaf", "New", "REG_DWORD", 9)
+        equal(call("NtDeleteKey", [deleter]), 0)
+        equal(registry.get_value("SOFTWARE", "/DeleteProbe/Leaf", "New"), 9)
+        captured = registry.effects()
+        equal(captured["values"], [dict(hive="SOFTWARE", key="/DeleteProbe/Leaf", name="New", type=4, value=binary.u32le(9))])
+        equal([p["name"].lower() for p in captured["value_deletions"]], ["(default)", "other"])
+        # Recreated names lose their live tombstone, not the source-removal
+        # event required by offline effect consumers. Stale handles add none.
+        equal([p["key"].lower() for p in registry.key_deletions()], ["/deleteprobe/leaf"])
+        query = machine.resolve_export("advapi32.dll", name = "RegQueryValueExW")
+        equal(machine.call(query, args = [reader, 0, 0, 0, 0, 0]).value, 1018)
+        close = machine.resolve_export("advapi32.dll", name = "RegCloseKey")
+        for handle in handles:
+            equal(machine.call(close, args = [handle]).value, 0)
+            equal(call("NtDeleteKey", [handle]), 0xc0000008)
+        equal(registry.state["deleted_handles"], {})
+        offsets = (len(registry.patches()), len(registry.key_deletions()))
+        equal(call("NtDeleteKey", [fresh]), 0)
+        scoped = registry.effects(patch_start=offsets[0], key_deletion_start=offsets[1])
+        equal(scoped["values"], [])
+        equal([p["name"] for p in scoped["value_deletions"]], ["new"])
+        equal(len(scoped["key_deletions"]), 1)
+        raises(registry.effects, kwargs={"patch_start":len(registry.patches())+1}, message="offset is out of bounds")
+        equal([p["key"].lower() for p in registry.key_deletions()], ["/deleteprobe/leaf", "/deleteprobe/leaf"])
+        equal(registry.get_value("SOFTWARE", "/DeleteProbe/Leaf", "New"), None)
+        equal(registry.effects()["values"], [])
+        # Reports own their outer records; later deletion must not change a
+        # captured value or make the historical New=9 write survive today.
+        equal(captured["values"][0]["value"], binary.u32le(9))
+        # An empty source namespace produces no value patches at all; its
+        # actual deletion still has to reach the image-effect consumer.
+        registry.load_keys([{"hive": "SOFTWARE", "key": "/ExportEmpty"}])
+        patch_count = len(registry.patches())
+        name(r"\Registry\Machine\SOFTWARE\ExportEmpty")
+        equal(call("NtOpenKey", [output, 0x10000, obj]), 0)
+        empty_handle = machine.read_pointer(output)
+        equal(call("NtDeleteKey", [empty_handle]), 0)
+        equal(len(registry.patches()), patch_count)
+        equal(registry.key_deletions()[-1]["key"].lower(), "/exportempty")
+        equal(machine.call(close, args=[empty_handle]).value, 0)
+        registry.reset()
+        equal(registry.key_deletions(), [])
+        equal(registry.state["deleted_handles"], {})
+        equal(registry.state["handle_access"], {})
+        equal(registry.get_value("SOFTWARE", "/DeleteProbe/Leaf", ""), "old.inf")
+
+def test_registry_creation_security_provider():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    descriptor = windows.compile_sddl("O:SYG:SYD:P(A;;KA;;;SY)")
+    for architecture in ["x86", "amd64"]:
+        for native in [False, True]:
+            for complete in [False, True]:
+                requests = []
+                def provider(machine, request):
+                    requests.append(dict(request))
+                    return {key:descriptor for key in request["missing_keys"]} if complete else {}
+                registry = module["registry_plugin"](on_create_key=provider)
+                machine = emulator.machine(code=b"\xc3", architecture=architecture)
+                machine.use(registry)
+                output = machine.allocate(value=b"Z" * (machine.pointer_size+8))
+                disposition = machine.allocate(value=b"Y" * 8)
+                if native:
+                    layout = abi["object_attributes_layout"](machine.pointer_size)
+                    string = abi["counted_string_layout"](machine.pointer_size)
+                    raw = binary.encode(chr(92)+"Registry"+chr(92)+"Machine"+chr(92)+"SOFTWARE"+chr(92)+"Created"+chr(92)+"Child", encoding="utf16le")
+                    name = machine.allocate(size=string["Size"])
+                    machine.write_u16le(name,len(raw))
+                    machine.write_u16le(name+2,len(raw))
+                    machine.write_pointer(name+string["Buffer"],machine.allocate(value=raw))
+                    obj = machine.allocate(size=layout["Size"])
+                    machine.write_u32le(obj,layout["Size"])
+                    machine.write_pointer(obj+layout["ObjectName"],name)
+                    address = machine.resolve_export("ntdll.dll",name="NtCreateKey")
+                    result = machine.call(address,args=[output,0xf003f,obj,0,0,0,disposition])
+                else:
+                    key = machine.allocate(value=binary.encode("SOFTWARE"+chr(92)+"Created"+chr(92)+"Child",encoding="utf16le",nul=True))
+                    address = machine.resolve_export("advapi32.dll",name="RegCreateKeyExW")
+                    result = machine.call(address,args=[0x80000002,key,0,0,0,0xf003f,0,output,disposition])
+                equal(len(requests),1)
+                equal(requests[0]["missing_keys"],["/Created","/Created/Child"])
+                equal(requests[0]["creator_security"],0)
+                if not complete:
+                    equal(result.reason,"plugin")
+                    equal(registry.effects(),dict(keys=[],key_deletions=[],values=[],value_deletions=[]))
+                    equal(machine.read(output,machine.pointer_size+8),b"Z"*(machine.pointer_size+8))
+                    equal(machine.read(disposition,8),b"Y"*8)
+                    continue
+                equal(result.reason,"return",result.detail)
+                equal(result.value,0)
+                equal(machine.read_u32le(disposition),1)
+                equal(machine.read(disposition+4,4),b"YYYY")
+                equal(machine.read(output+machine.pointer_size,8),b"Z"*8)
+                equal([(key["key"],key["security"]) for key in registry.effects()["keys"]],[("/Created",descriptor),("/Created/Child",descriptor)])
+                close = machine.resolve_export("advapi32.dll",name="RegCloseKey")
+                equal(machine.call(close,args=[machine.read_pointer(output)]).value,0)
+
+def test_registry_win32_delete_key_ex_lifetime():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    for architecture in ["x86", "amd64"]:
+        for suffix, encoding in [("W", "utf16le"), ("A", "ascii")]:
+            source = windows.hive(windows.hive_from_patches("SOFTWARE", [
+                {"key": "/DeleteApi/Leaf", "name": "Old", "type": "REG_DWORD", "value": 17},
+                {"key": "/DeleteApi/Parent/Child", "name": "Keep", "type": "REG_DWORD", "value": 23},
+            ]))
+            registry = module["registry_plugin"](hives = {"SOFTWARE": source})
+            machine = emulator.machine(code = b"\xc3", architecture = architecture)
+            machine.use(registry)
+            if architecture == "amd64":
+                registry.state["next_handle"] = 0x100010000
+            def text(value):
+                return machine.allocate(value = binary.encode(value, encoding = encoding, nul = True))
+            def call(api, args):
+                result = machine.call(machine.resolve_export("api-ms-win-core-registry-l1-1-0.dll", name = api), args = args)
+                equal(result.reason, "return", result.detail)
+                return result.value
+            output = machine.allocate(value = b"Z" * (machine.pointer_size + 8))
+            equal(call("RegOpenKeyEx" + suffix, [0x80000002, text("SOFTWARE" + chr(92) + "DeleteApi"), 0, 0x20019, output]), 0)
+            parent = machine.read_pointer(output)
+            # hKey need not have DELETE access: the target is opened separately.
+            equal(call("RegOpenKeyEx" + suffix, [parent, text("Leaf"), 0, 0x20019, output]), 0)
+            reader = machine.read_pointer(output)
+            equal(machine.read(output + machine.pointer_size, 8), b"Z" * 8)
+            flush = machine.resolve_export("ntdll.dll", name="NtFlushKey")
+            equal(machine.call(flush,args=[reader]).value,0)
+            equal(len(registry.state["flushes"]),1)
+            equal(machine.call(flush,args=[123]).value,0xc0000008)
+            equal(len(registry.state["flushes"]),1)
+            deleted = machine.resolve_export("advapi32.dll", name = "RegDeleteKeyEx" + suffix)
+            leaf = text("Leaf")
+            high = 0xfeed00000000 if architecture == "amd64" else 0
+            native_view = 0x100 if architecture == "amd64" else 0x200
+            for key, desired, reserved, expected in [(parent, 0, 1, 87), (parent, 0x300, 0, 87), (0, 0, 0, 6)]:
+                result = machine.call(deleted, args = [key, leaf, high | desired, high | reserved])
+                equal(result.reason, "return", result.detail)
+                equal(result.value, expected)
+                equal(registry.patches(), [])
+            equal(call("RegDeleteKeyEx" + suffix, [parent, 0, 0, 0]), 87)
+            alternate = 0x200 if architecture == "amd64" else 0x100
+            result = machine.call(deleted, args = [parent, leaf, alternate, 0])
+            true(result.reason != "return")
+            true("alternate registry views" in result.detail)
+            equal(registry.patches(), [])
+            for api in ["RegDeleteKeyEx" + suffix, "RegDeleteKey" + suffix]:
+                args = [parent, text("Parent")]
+                if "Ex" in api:
+                    args += [0, 0]
+                equal(call(api, args), 5)
+                equal(registry.get_value("SOFTWARE", "/DeleteApi/Parent/Child", "Keep"), 23)
+                equal(registry.patches(), [])
+            equal(call("RegDeleteKeyEx" + suffix, [parent, leaf, high | native_view, high]), 0)
+            equal(len(registry.patches()), 1)
+            true(registry.patches()[0]["delete"])
+            equal(registry.get_value("SOFTWARE", "/DeleteApi/Leaf", "Old"), None)
+            true(reader in registry.state["deleted_handles"])
+            true(registry.state["handles"][reader] != None)
+            equal(machine.call(flush,args=[reader]).value,0xc000017c)
+            equal(len(registry.state["flushes"]),1)
+            equal(call("RegQueryValueEx" + suffix, [reader, 0, 0, 0, 0, 0]), 1018)
+            equal(call("RegDeleteKeyEx" + suffix, [parent, leaf, 0, 0]), 2)
+            machine.write(output, b"Z" * (machine.pointer_size + 8))
+            equal(call("RegOpenKeyEx" + suffix, [parent, leaf, 0, 0x20019, output]), 2)
+            equal(machine.read(output, machine.pointer_size + 8), b"Z" * (machine.pointer_size + 8))
+            equal(call("RegCreateKeyEx" + suffix, [parent, leaf, 0, 0, 0, 0x20019, 0, output, 0]), 0)
+            fresh = machine.read_pointer(output)
+            equal(registry.get_value("SOFTWARE", "/DeleteApi/Leaf", "Old"), None)
+            registry.set_value("SOFTWARE", "/DeleteApi/Leaf", "New", "REG_DWORD", 31)
+            equal(call("RegDeleteKeyEx" + suffix, [reader, text("Child"), 0, 0]), 1018)
+            equal(registry.get_value("SOFTWARE", "/DeleteApi/Leaf", "New"), 31)
+            equal(call("RegCloseKey", [reader]), 0)
+            # Empty (but non-NULL) names reopen/delete the hKey itself.
+            # This must retain the same stale-object lifetime and must not
+            # require DELETE on the original read-only handle.
+            equal(call("RegDeleteKeyEx" + suffix, [fresh, text(""), high | native_view, high]), 0)
+            equal(call("RegQueryValueEx" + suffix, [fresh, 0, 0, 0, 0, 0]), 1018)
+            equal(call("RegCreateKeyEx" + suffix, [parent, leaf, 0, 0, 0, 0x20019, 0, output, 0]), 0)
+            second = machine.read_pointer(output)
+            equal(call("RegDeleteKey" + suffix, [second, text("")]), 0)
+            equal(call("RegQueryValueEx" + suffix, [second, 0, 0, 0, 0, 0]), 1018)
+            equal(call("RegDeleteKey" + suffix, [parent, text("")]), 5)
+            equal(call("RegDeleteKeyEx" + suffix, [0x80000002, text(""), 0, 0]), 5)
+            equal(call("RegCloseKey", [second]), 0)
+            equal(call("RegCloseKey", [fresh]), 0)
+            equal(call("RegCloseKey", [parent]), 0)
+
+def test_registry_native_object_pointer_width():
+    module = testing.module("@stdlib//windows/selfreg:registry.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        registry = module["registry_plugin"](keys = [{"hive": "SYSTEM", "key": "/NativeProbe/Child"}])
+        machine.use(registry)
+        string = abi["counted_string_layout"](machine.pointer_size)
+        attributes = abi["object_attributes_layout"](machine.pointer_size)
+        descriptor = machine.allocate(size = string["Size"])
+        obj = machine.allocate(size = attributes["Size"])
+        output = machine.allocate(size = machine.pointer_size + 4)
+        machine.write_u32le(obj, attributes["Size"])
+        machine.write_pointer(obj + attributes["ObjectName"], descriptor)
+        parent = 0
+        # Counted names deliberately have no NUL terminator. AMD64 allocations
+        # are above 4 GiB, exposing either descriptor or object truncation.
+        for name, api in [("\\Registry\\Machine\\SYSTEM\\NativeProbe", "NtOpenKey"), ("Child", "NtOpenKeyEx")]:
+            text = binary.encode(name, encoding = "utf16le")
+            source = machine.allocate(value = text)
+            machine.write_u16le(descriptor, len(text))
+            machine.write_u16le(descriptor + 2, len(text))
+            machine.write_pointer(descriptor + string["Buffer"], source)
+            machine.write_pointer(obj + attributes["RootDirectory"], parent)
+            machine.write(output, b"Z" * (machine.pointer_size + 4))
+            args = [output, 0x20019, obj] + ([0] if api == "NtOpenKeyEx" else [])
+            result = machine.call(machine.resolve_export("ntdll.dll", name = api), args = args)
+            equal(result.reason, "return")
+            equal(result.value, 0)
+            equal(machine.read(output + machine.pointer_size, 4), b"ZZZZ")
+            parent = machine.read_pointer(output)
+        equal(registry.opens()[-1]["hive"], "SYSTEM")
+        equal(registry.opens()[-1]["key"].lower(), "/nativeprobe/child")
+        # Native driver-store code reopens an existing control set with an
+        # empty relative name. The seventh argument, not the sixth, receives
+        # the disposition; DWORD options may have stale Win64 upper bits.
+        machine.write_pointer(obj + attributes["RootDirectory"], parent)
+        machine.write_u16le(descriptor, 0)
+        disposition = machine.allocate(size = 8, value = b"ZZZZZZZZ")
+        options = 0x600000000000 if architecture == "amd64" else 0
+        created = machine.call(machine.resolve_export("ntdll.dll", name = "NtCreateKey"), args = [output, 0x2001f, obj, 0, 0, options, disposition])
+        equal(created.reason, "return")
+        equal(created.value, 0)
+        equal(machine.read_u32le(disposition), 2)
+        equal(machine.read(disposition + 4, 4), b"ZZZZ")
+        equal(registry.keys(), [])
+        # OPEN_LINK must also open an ordinary key itself. Upper slot bits
+        # are not options. The handle must retain this exact root-relative key.
+        machine.write(output, b"Z" * (machine.pointer_size + 4))
+        result = machine.call(machine.resolve_export("ntdll.dll", name = "NtOpenKeyEx"), args = [output, 0x20019, obj, options | 8])
+        equal(result.reason, "return")
+        equal(result.value, 0)
+        equal(registry.state["handles"][machine.read_pointer(output)], registry.state["handles"][parent])
+        equal(machine.read(output + machine.pointer_size, 4), b"ZZZZ")
+        before = dict(registry.state["handles"])
+        machine.write(output, b"Z" * (machine.pointer_size + 4))
+        result = machine.call(machine.resolve_export("ntdll.dll", name = "NtOpenKeyEx"), args = [output, 0x20019, obj, 16])
+        equal(result.reason, "plugin")
+        true("unsupported open options" in result.detail)
+        equal(registry.state["handles"], before)
+        equal(machine.read(output, machine.pointer_size + 4), b"Z" * (machine.pointer_size + 4))
+
 def test_registry_plugin_publishes_late_bound_exports():
     module = testing.module("@stdlib//windows/selfreg:registry.star")
     machine = emulator.x86(code = b"\xc3")
     machine.use([module["registry_plugin"]()])
     true(machine.resolve_export("advapi32.dll", name = "RegEnumValueW") != 0)
     true(machine.resolve_export("kernel32.dll", name = "RegOpenKeyExW") != 0)
+    query = machine.resolve_export("api-ms-win-core-registry-l1-1-0.dll", name = "RegQueryValueExW")
+    true(query != 0)
+    equal(machine.call(query, args = [0x80000001, 0, 0, 0, 0, 0]).value, 2)
     true(machine.resolve_export("ntdll.dll", name = "NtEnumerateKey") != 0)
     true(machine.resolve_export("shlwapi.dll", name = "SHRegGetValueW") != 0)
     true(machine.resolve_export("shlwapi.dll", ordinal = 128) != 0)
@@ -288,6 +890,56 @@ def test_registry_structured_key_parts_preserve_literal_slashes():
     equal(module["_direct_subkeys"](registry.state, ("SOFTWARE", "/Plugins/Objects")), ["vendor:format/algorithm/sample/4.0"])
     equal(module["_join_key"](("SOFTWARE", "/Plugins/Objects"), "vendor:format/algorithm/sample/4.0"), ("SOFTWARE", encoded))
     equal(registry.get_value("SOFTWARE", encoded, "ModuleId"), "module")
+
+
+def test_registry_native_absolute_names_keep_literal_slashes():
+    module=testing.module("@stdlib//windows/selfreg:registry.star")
+    abi=testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86","amd64"]:
+        machine=emulator.machine(code=b"\xc3",architecture=architecture)
+        paths=[(["Root","Hash/Leaf="],11),(["Root","Hash","Leaf="],22),(["Mount/Offline","Hash/Leaf="],33),(["Mount","Offline","Hash","Leaf="],44)]
+        source=windows.hive_from_patches("SOFTWARE",[dict(key_parts=parts,name="Marker",type="REG_DWORD",value=value) for parts,value in paths])
+        registry=module["registry_plugin"](hives={"SOFTWARE":windows.hive(source)})
+        machine.use(registry)
+        width=machine.pointer_size
+        string=abi["counted_string_layout"](width)
+        attributes=abi["object_attributes_layout"](width)
+        descriptor=machine.allocate(size=string["Size"])
+        obj=machine.allocate(size=attributes["Size"])
+        machine.write_u32le(obj,attributes["Size"])
+        machine.write_pointer(obj+attributes["ObjectName"],descriptor)
+        output=machine.allocate(size=width+4)
+        name=machine.allocate(value=binary.encode("Marker",encoding="utf16le",nul=True))
+        size=machine.allocate(value=binary.u32le(4))
+        data=machine.allocate(size=4)
+        native_open=machine.resolve_export("ntdll.dll",name="NtOpenKey")
+        query=machine.resolve_export("advapi32.dll",name="RegQueryValueExW")
+        slash=chr(92)
+        for relative,expected in [("SOFTWARE"+slash+"Root"+slash+"Hash/Leaf=",11),("SOFTWARE"+slash+"Root"+slash+"Hash"+slash+"Leaf=",22),("Mount/Offline"+slash+"Hash/Leaf=",33),("Mount"+slash+"Offline"+slash+"Hash"+slash+"Leaf=",44)]:
+            text=binary.encode(slash+"Registry"+slash+"Machine"+slash+relative,encoding="utf16le")
+            pointer=machine.allocate(value=text)
+            machine.write_u16le(descriptor,len(text))
+            machine.write_u16le(descriptor+2,len(text))
+            machine.write_pointer(descriptor+string["Buffer"],pointer)
+            machine.write(output,b"Z"*(width+4))
+            result=machine.call(native_open,args=[output,0x20019,obj])
+            equal(result.reason,"return",result.detail)
+            equal(result.value,0)
+            equal(machine.read(output+width,4),b"ZZZZ")
+            handle=machine.read_pointer(output)
+            machine.write_u32le(size,4)
+            equal(machine.call(query,args=[handle,name,0,0,data,size]).value,0)
+            equal(machine.read_u32le(data),expected)
+        # Unix-looking display paths are not native object-manager paths.
+        text=binary.encode("/Registry/Machine/SOFTWARE/Root/Hash/Leaf=",encoding="utf16le")
+        pointer=machine.allocate(value=text)
+        machine.write_u16le(descriptor,len(text))
+        machine.write_u16le(descriptor+2,len(text))
+        machine.write_pointer(descriptor+string["Buffer"],pointer)
+        machine.write(output,b"Z"*(width+4))
+        equal(machine.call(native_open,args=[output,0x20019,obj]).value,0xc0000034)
+        equal(machine.read(output,width+4),b"Z"*(width+4))
+
 
 def test_registry_initial_keys_are_baseline_state():
     module = testing.module("@stdlib//windows/selfreg:registry.star")
@@ -991,6 +1643,196 @@ def test_crt_imported_mode_data_matches_accessors():
         equal(machine.read_pointer(argv + machine.pointer_size * 2), 0)
         equal(machine.read_pointer(machine.read_pointer(environment_output)), 0)
 
+
+
+
+
+def test_security_native_descriptor_control_preserves_native_write_order():
+    module=testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86","amd64"]:
+        machine=emulator.machine(code=b"\xc3",architecture=architecture)
+        machine.use(module["security_plugin"]())
+        read_control=machine.resolve_export("ntdll.dll",name="RtlGetControlSecurityDescriptor")
+        source=machine.allocate(value=b"\x01\x00\x14\x90")
+        control=machine.allocate(value=b"CONTROL!")
+        revision=machine.allocate(value=b"REVISION")
+        result=machine.call(read_control,args=[source,control,revision])
+        equal(result.reason,"return",result.detail)
+        equal(result.value,0)
+        equal(machine.read_u16le(control),0x9014)
+        equal(machine.read(control+2,6),b"NTROL!")
+        equal(machine.read_u32le(revision),1)
+        equal(machine.read(revision+4,4),b"SION")
+        for invalid in [0,2,255]:
+            machine.write_u8(source,invalid)
+            machine.write(control,b"CONTROL!")
+            result=machine.call(read_control,args=[source,control,revision])
+            equal(result.value,0xc0000058)
+            equal(machine.read(control,8),b"CONTROL!")
+            equal(machine.read_u32le(revision),invalid)
+            equal(machine.read(revision+4,4),b"SION")
+
+
+def test_security_native_duplicate_and_adjust_preserve_token_ownership():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86","amd64"]:
+        machine=emulator.machine(code=b"\xc3",architecture=architecture)
+        kernel=module["kernel32_plugin"]()
+        security=module["security_plugin"](kernel=kernel,token_privileges={17:0,18:1})
+        machine.use([kernel,security])
+        open_process=machine.resolve_export("ntdll.dll",name="NtOpenProcessToken")
+        duplicate=machine.resolve_export("ntdll.dll",name="NtDuplicateToken")
+        adjust=machine.resolve_export("ntdll.dll",name="NtAdjustPrivilegesToken")
+        width=machine.pointer_size
+        output=machine.allocate(value=b"GUARD123TAIL")
+        process=0xffffffffffffffff if width==8 else 0xffffffff
+        equal(machine.call(open_process,args=[process,0x2a,output]).value,0)
+        primary=machine.read_pointer(output)
+        attributes=machine.allocate(size=48 if width==8 else 24)
+        machine.write_u32le(attributes,48 if width==8 else 24)
+        qos=machine.allocate(size=12)
+        machine.write_u32le(qos,12)
+        machine.write_u32le(qos+4,2)
+        machine.write_u8(qos+8,1)
+        machine.write_pointer(attributes+(40 if width==8 else 20),qos)
+        machine.write(output,b"GUARD123TAIL")
+        machine.write_u32le(qos+4,4)
+        equal(machine.call(duplicate,args=[primary,0x2c,attributes,0,2,output]).value,0xc00000a5)
+        equal(machine.read(output,12),b"GUARD123TAIL")
+        machine.write_u32le(qos+4,2)
+        equal(machine.call(duplicate,args=[primary,0x2c,attributes,0,2,output]).value,0)
+        copied=machine.read_pointer(output)
+        equal(machine.read(output+width,12-width),b"GUARD123TAIL"[width:])
+        token=kernel.state["handles"][copied]["value"]
+        equal(token["type"],2)
+        equal(token["impersonation_level"],2)
+        equal(token["privileges"],{17:0,18:1})
+        attach=machine.resolve_export("ntdll.dll",name="NtSetInformationThread")
+        open_thread=machine.resolve_export("ntdll.dll",name="NtOpenThreadToken")
+        thread=0xfffffffffffffffe if width==8 else 0xfffffffe
+        slot=machine.allocate(size=width)
+        machine.write_pointer(slot,copied)
+        equal(machine.call(attach,args=[thread,5,slot,width-1]).value,0xc0000004)
+        machine.write_pointer(slot,primary)
+        equal(machine.call(attach,args=[thread,5,slot,width]).value,0xc00000a8)
+        machine.write_pointer(slot,copied)
+        equal(machine.call(attach,args=[thread,5,slot,width]).value,0)
+        equal(machine.call(open_thread,args=[thread,8,1,output]).value,0)
+        thread_handle=machine.read_pointer(output)
+        equal(kernel.state["handles"][thread_handle]["value"]["type"],2)
+        equal(machine.call(open_thread,args=[thread,2,1,output]).value,0)
+        duplicate_source=machine.read_pointer(output)
+        machine.write_u32le(qos+4,3)
+        machine.write(output,b"GUARD123TAIL")
+        equal(machine.call(duplicate,args=[duplicate_source,0x2c,attributes,0,2,output]).value,0xc00000a5)
+        equal(machine.read(output,12),b"GUARD123TAIL")
+        machine.write_u32le(qos+4,2)
+        request=machine.allocate(size=16)
+        machine.write_u32le(request,1)
+        machine.write_u64le(request+4,17)
+        machine.write_u32le(request+12,2)
+        previous=machine.allocate(value=b"UNCHANGED_PREVIOUS__")
+        length=machine.allocate(size=4)
+        kernel.state["last_error"]=1234
+        equal(machine.call(adjust,args=[copied,0,request,4,previous,length]).value,0xc0000023)
+        equal(machine.read_u32le(length),16)
+        equal(machine.read(previous,20),b"UNCHANGED_PREVIOUS__")
+        equal(token["privileges"],{17:0,18:1})
+        equal(kernel.state["last_error"],1234)
+        equal(machine.call(adjust,args=[copied,0,request,20,previous,length]).value,0)
+        equal(machine.read_u32le(previous),1)
+        equal(machine.read_u64le(previous+4),17)
+        equal(machine.read_u32le(previous+12),0)
+        equal(token["privileges"],{17:2,18:1})
+        equal(security.state["process_token"]["privileges"],{17:0,18:1})
+        equal(kernel.state["last_error"],1234)
+        machine.write_u64le(request+4,999)
+        equal(machine.call(adjust,args=[copied,0,request,0,0,0]).value,0x106)
+        equal(token["privileges"],{17:2,18:1})
+        equal(kernel.state["last_error"],1234)
+        equal(machine.call(adjust,args=[copied,1,0,0,0,0]).value,0)
+        equal(token["privileges"],{17:0,18:1})
+        equal(machine.call(adjust,args=[123,0,request,0,0,0]).value,0xc0000008)
+        machine.write_pointer(slot,0)
+        equal(machine.call(attach,args=[thread,5,slot,width]).value,0)
+        equal(machine.call(open_thread,args=[thread,8,1,output]).value,0xc000007c)
+        equal(kernel.state["handles"][thread_handle]["value"]["privileges"],{17:0,18:1})
+
+
+def test_security_impersonate_self_clones_only_owned_primary_token():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86","amd64"]:
+        machine = emulator.machine(code=b"\xc3",architecture=architecture)
+        kernel = module["kernel32_plugin"]()
+        security = module["security_plugin"](kernel=kernel,token_privileges={17:0,18:1})
+        machine.use([kernel,security])
+        impersonate = machine.resolve_export("api-ms-win-security-base-l1-1-0.dll",name="ImpersonateSelf")
+        open_thread = machine.resolve_export("advapi32.dll",name="OpenThreadToken")
+        revert = machine.resolve_export("advapi32.dll",name="RevertToSelf")
+        native_open = machine.resolve_export("ntdll.dll",name="NtOpenThreadToken")
+        output = machine.allocate(value=b"GUARD123"+b"TAIL")
+        pseudo = 0xfffffffffffffffe if architecture=="amd64" else 0xfffffffe
+        equal(machine.call(open_thread,args=[pseudo,0x28,1,output]).value,0)
+        equal(kernel.state["last_error"],1008)
+        equal(machine.read(output,12),b"GUARD123TAIL")
+        equal(machine.call(native_open,args=[pseudo,8,1,output]).value,0xc000007c)
+        equal(machine.call(native_open,args=[123,8,1,output]).value,0xc0000008)
+        equal(machine.call(native_open,args=[pseudo,8,1,0]).value,0xc000000d)
+        equal(machine.read(output,12),b"GUARD123TAIL")
+        equal(machine.call(impersonate,args=[2]).value,1)
+        equal(machine.call(native_open,args=[pseudo,0x28,1,output]).value,0)
+        handle = machine.read_pointer(output)
+        entry = kernel.state["handles"][handle]
+        token = entry["value"]
+        equal(token["type"],2)
+        equal(token["impersonation_level"],2)
+        equal(token["privileges"],{17:0,18:1})
+        token["privileges"][17]=2
+        equal(security.state["process_token"]["privileges"],{17:0,18:1})
+        # Invalid level does not overwrite an existing impersonation context.
+        equal(machine.call(impersonate,args=[0xffffffff]).value,0)
+        equal(kernel.state["last_error"],1346)
+        equal(security.state["thread_tokens"][8]["privileges"],{17:2,18:1})
+        kernel.state["current_thread"]={"id":12}
+        equal(machine.call(open_thread,args=[pseudo,8,1,output]).value,0)
+        equal(kernel.state["last_error"],1008)
+        kernel.state["current_thread"]=None
+        equal(machine.call(revert).value,1)
+        equal(machine.call(open_thread,args=[pseudo,8,1,output]).value,0)
+        # An already opened token handle still owns the detached object.
+        equal(entry["value"]["privileges"],{17:2,18:1})
+        equal(machine.call(native_open,args=[pseudo,8,1,output]).value,0xc000007c)
+        equal(machine.call(impersonate,args=[1]).value,1)
+        equal(security.state["thread_tokens"][8]["privileges"],{17:0,18:1})
+        equal(security.state["thread_tokens"][8]["impersonation_level"],1)
+        equal(machine.call(revert).value,1)
+
+
+def test_crt_private_memory_contract_preserves_abi_and_overlap():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code=b"\xc3", architecture=architecture)
+        machine.use(module["msvcrt_plugin"]())
+        source = machine.allocate(value=b"0123456789")
+        destination = machine.allocate(value=b"guard..........tail")
+        copy = machine.resolve_export("api-ms-win-crt-private-l1-1-0.dll", name="memcpy")
+        move = machine.resolve_export("api-ms-win-crt-private-l1-1-0.dll", name="memmove")
+        compare = machine.resolve_export("api-ms-win-crt-private-l1-1-0.dll", name="memcmp")
+        result = machine.call(copy, args=[destination+5, source, 10])
+        equal(result.reason,"return",result.detail)
+        equal(result.value,destination+5)
+        equal(machine.read(destination,19),b"guard0123456789tail")
+        equal(machine.call(compare,args=[destination+5,source,10]).value,0)
+        equal(machine.call(move,args=[destination+7,destination+5,8]).value,destination+7)
+        equal(machine.read(destination,19),b"guard0101234567tail")
+        equal(machine.call(move,args=[destination+5,destination+7,8]).value,destination+5)
+        equal(machine.read(destination,19),b"guard0123456767tail")
+        # Zero length must not dereference null source/destination, and no
+        # integer-width truncation may change the returned destination.
+        equal(machine.call(copy,args=[0,0,0]).value,0)
+        equal(machine.call(compare,args=[0,0,0]).value,0)
+
+
 def test_crt_unsigned_char_locale_initialization():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     for architecture in ["x86", "amd64"]:
@@ -1152,6 +1994,201 @@ def test_event_log_exports_support_late_loaded_modules():
     equal(machine.call(unregister, args = [handle & 0xffffffff, handle >> 32]).value, 0)
     equal(provider.state["trace_providers"], {})
 
+def test_security_native_allow_ace_ex_contract():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    sid_value = testing.module("@stdlib//windows:security.star")["sid"]
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use([kernel, module["security_plugin"](kernel = kernel)])
+        kernel.state["last_error"] = 31337
+        high = 0xface00000000 if architecture == "amd64" else 0
+        api = machine.resolve_export("ntdll.dll", name = "RtlAddAccessAllowedAceEx")
+        sid = machine.allocate(value = sid_value(5, [18]))
+        def check(revision = 2, flags = 2, capacity = 68, count = 0, sid_revision = 1, sid_count = 1, acl_revision = 2, expected = 0):
+            acl = machine.allocate(value = binary.concat([bytes([acl_revision, 0]), binary.u16le(capacity), binary.u16le(count), b"ZZ", b"Q" * 80]))
+            principal = machine.allocate(value = binary.concat([bytes([sid_revision, sid_count]), b"\x00" * 5, b"\x05", binary.u32le(18), b"\x00" * 60]))
+            before = machine.read(acl, 88)
+            result = machine.call(api, args = [acl, high | revision, high | flags, high | 0xf003f, principal])
+            equal(result.reason, "return", result.detail)
+            equal(result.value, expected)
+            equal(kernel.state["last_error"], 31337)
+            if expected:
+                equal(machine.read(acl, 88), before)
+            else:
+                equal(machine.read_u8(acl), max(acl_revision, revision))
+                equal(machine.read_u16le(acl + 4), 1)
+                equal(machine.read(acl + 6, 2), b"ZZ")
+                equal(machine.read(acl + capacity, 8), b"Q" * 8)
+                equal(machine.read_u8(acl + 8), 0)
+                equal(machine.read_u8(acl + 9), flags)
+                equal(machine.read_u32le(acl + 12), 0xf003f)
+                equal(machine.read(acl + 16, 8 + sid_count * 4), machine.read(principal, 8 + sid_count * 4))
+            return acl
+        for revision in [0, 1, 2, 3, 4]:
+            check(revision = revision)
+        for flags in [0, 0x1f, 0x20, 0x3f]:
+            check(flags = flags)
+        for flags in [0x40, 0x80, 0x100, 0xff]:
+            check(flags = flags, expected = 0xc000000d)
+        check(revision = 5, expected = 0xc0000059)
+        check(acl_revision = 5, expected = 0xc0000059)
+        check(acl_revision = 1, expected = 0xc0000077)
+        check(acl_revision = 3)
+        check(acl_revision = 4)
+        check(sid_revision = 2, expected = 0xc0000078)
+        check(sid_count = 16, expected = 0xc0000078)
+        check(sid_count = 0)
+        check(capacity = 7, expected = 0xc0000077)
+        check(capacity = 24, expected = 0xc0000099)
+        check(capacity = 27, expected = 0xc0000099)
+        check(capacity = 29)
+        check(count = 100, expected = 0xc0000077)
+        # A second append preserves the first ACE and all unused/guard bytes.
+        acl = check()
+        original = machine.read(acl + 8, 20)
+        second = machine.allocate(value = sid_value(5, [32, 544]))
+        result = machine.call(api, args = [acl, 4, 3, 0x20019, second])
+        equal(result.reason, "return", result.detail)
+        equal(result.value, 0)
+        equal(machine.read(acl + 8, 20), original)
+        parsed = windows.acl_entries(machine.read(acl, 68))
+        equal(parsed["revision"], 4)
+        equal(len(parsed["entries"]), 2)
+        equal(parsed["entries"][0]["sid"], sid_value(5, [18]))
+        equal(parsed["entries"][1]["sid"], sid_value(5, [32, 544]))
+        equal(parsed["entries"][1]["flags"], 3)
+        equal(parsed["entries"][1]["mask"], 0x20019)
+        equal(machine.read(acl + 68, 8), b"Q" * 8)
+        # Malformed existing ACE extents fail before any append.
+        machine.write_u16le(acl + 10, 2)
+        corrupt = machine.read(acl, 88)
+        result = machine.call(api, args = [acl, 2, 0, 1, sid])
+        equal(result.reason, "return", result.detail)
+        equal(result.value, 0xc0000077)
+        equal(machine.read(acl, 88), corrupt)
+        equal(kernel.state["last_error"], 31337)
+
+def test_security_native_descriptor_validation():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    principal = testing.module("@stdlib//windows:security.star")["sid"](5, [18])
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use([kernel, module["security_plugin"](kernel = kernel)])
+        kernel.state["last_error"] = 31337
+        for relative in [False, True]:
+            layout = abi["security_descriptor_layout"](machine.pointer_size, relative = relative)
+            for mutation, expected in [("", 1), ("revision", 0), ("sid", 0), ("count", 0), ("acl", 0), ("ace", 0), ("acl_revision3", 1), ("null_acl", 1), ("absent_acl", 1)]:
+                sd = machine.allocate(size = 136)
+                sid, acl = sd + 48, sd + 64
+                machine.write(sd, b"\x01\x00")
+                machine.write_u16le(sd + 2, 0x8004 if relative else 4)
+                machine.write(sid, principal)
+                machine.write(acl, binary.concat([b"\x02\x00", binary.u16le(28), binary.u16le(1), b"\x00\x00", b"\x00\x02", binary.u16le(20), binary.u32le(0xf003f), principal]).bytes())
+                for field, pointer in [("Owner", sid), ("Group", sid), ("Dacl", acl)]:
+                    if relative:
+                        machine.write_u32le(sd + layout[field], pointer - sd)
+                    else:
+                        machine.write_pointer(sd + layout[field], pointer)
+                if mutation == "revision":
+                    machine.write(sd, b"\x02")
+                elif mutation == "sid":
+                    machine.write(sid, b"\x02")
+                elif mutation == "count":
+                    machine.write(sid + 1, b"\x10")
+                elif mutation == "acl":
+                    machine.write_u16le(acl + 2, 7)
+                elif mutation == "ace":
+                    machine.write_u16le(acl + 10, 2)
+                elif mutation == "acl_revision3":
+                    machine.write(acl, b"\x03")
+                elif mutation == "null_acl":
+                    machine.write_pointer(sd + layout["Dacl"], 0)
+                elif mutation == "absent_acl":
+                    machine.write_u16le(sd + 2, 0x8000 if relative else 0)
+                    machine.write_u16le(acl + 2, 7)
+                machine.write(sd + 128, b"GUARDEND")
+                before = machine.read(sd, 136)
+                for library, api in [("ntdll.dll", "RtlValidSecurityDescriptor"), ("advapi32.dll", "IsValidSecurityDescriptor")]:
+                    result = machine.call(machine.resolve_export(library, name = api), args = [sd])
+                    equal(result.reason, "return", result.detail)
+                    equal(result.value, expected, architecture + " " + str(relative) + " " + mutation)
+                    equal(machine.read(sd, 136), before)
+                    equal(kernel.state["last_error"], 31337)
+
+def test_security_native_absolute_to_self_relative():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    principal = testing.module("@stdlib//windows:security.star")["sid"](5, [18])
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use([kernel, module["security_plugin"](kernel = kernel)])
+        kernel.state["last_error"] = 31337
+        sd = machine.allocate(size = 128)
+        machine.write(sd, b"\x01\x00")
+        machine.write_u16le(sd + 2, 4)
+        sid, acl = sd + 48, sd + 64
+        machine.write(sid, principal)
+        acl_bytes = binary.concat([b"\x02\x00", binary.u16le(28), binary.u16le(1), b"\x00\x00", b"\x00\x02", binary.u16le(20), binary.u32le(0xf003f), principal]).bytes()
+        machine.write(acl, acl_bytes)
+        layout = abi["security_descriptor_layout"](machine.pointer_size)
+        for field, pointer in [("Owner", sid), ("Group", sid), ("Dacl", acl)]:
+            machine.write_pointer(sd + layout[field], pointer)
+        source = machine.read(sd, 128)
+        output = machine.allocate(value = b"Z" * 148)
+        length = machine.allocate(value = binary.concat([binary.u32le(0), b"GUARDEND"]))
+        for api_name in ["RtlAbsoluteToSelfRelativeSD", "RtlMakeSelfRelativeSD"]:
+            api = machine.resolve_export("ntdll.dll", name = api_name)
+            for capacity, destination, expected in [(0, 0, 0xc0000023), (71, output, 0xc0000023), (72, output, 0), (140, output, 0), (140, 0, 0xc000000d)]:
+                machine.write(output, b"Z" * 148)
+                machine.write_u32le(length, capacity)
+                result = machine.call(api, args = [sd, destination, length])
+                equal(result.reason, "return", result.detail)
+                equal(result.value, expected)
+                equal(machine.read_u32le(length), 72 if expected == 0xc0000023 else capacity)
+                equal(machine.read(length + 4, 8), b"GUARDEND")
+                equal(machine.read(sd, 128), source)
+                equal(kernel.state["last_error"], 31337)
+                if expected:
+                    equal(machine.read(output, 148), b"Z" * 148)
+                else:
+                    equal(machine.read_u16le(output + 2), 0x8004)
+                    equal([machine.read_u32le(output + offset) for offset in [4, 8, 12, 16]], [48, 60, 0, 20])
+                    equal(machine.read(output + 20, 28), acl_bytes)
+                    equal(machine.read(output + 48, 12), principal)
+                    equal(machine.read(output + 60, 12), principal)
+                    equal(machine.read(output + 72, 76), b"Z" * 76)
+                    serialized = machine.read(output, 72)
+                    parts = windows.security_descriptor_parts(serialized)
+                    equal(parts["owner"], principal)
+                    equal(parts["group"], principal)
+                    equal(parts["dacl"], acl_bytes)
+        # Make accepts a self-relative input; Absolute rejects it. Both use
+        # the same canonical native layout and preserve destination guards.
+        relative=machine.allocate(value=serialized)
+        api=machine.resolve_export("ntdll.dll",name="RtlMakeSelfRelativeSD")
+        for capacity,expected in [(71,0xc0000023),(140,0)]:
+            machine.write(output,b"Z"*148)
+            machine.write_u32le(length,capacity)
+            result=machine.call(api,args=[relative,output,length])
+            equal(result.reason,"return",result.detail)
+            equal(result.value,expected)
+            equal(machine.read_u32le(length),72 if expected else 140)
+            equal(machine.read(output,148),b"Z"*148 if expected else binary.concat([serialized,b"Z"*76]).bytes())
+            equal(machine.read(relative,72),serialized)
+        machine.write(output,b"Z"*148)
+        api=machine.resolve_export("ntdll.dll",name="RtlAbsoluteToSelfRelativeSD")
+        machine.write_u16le(sd + 2, 0x8004)
+        machine.write_u32le(length, 140)
+        result = machine.call(api, args = [sd, output, length])
+        equal(result.reason, "return", result.detail)
+        equal(result.value, 0xc00000e7)
+        equal(machine.read_u32le(length), 140)
+        equal(machine.read(output, 148), b"Z" * 148)
+
 def test_security_reports_required_sid_length():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     machine = emulator.x86(code = b"\xc3")
@@ -1215,6 +2252,937 @@ def test_compare_string_amd64_int_lengths():
             equal(result.reason, "return")
             equal(result.value, 2)
         equal(machine.call(compare, args = [0x7f, 0, left, 4, right, 4]).value, 1)
+def test_kernel_integer_to_char_native_boundaries():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"]())
+        format = machine.resolve_export("ntdll.dll", name = "RtlIntegerToChar")
+        output = machine.allocate(size = 40)
+        high = 0x7fff00000000 if architecture == "amd64" else 0
+        for value, base, capacity, status, data in [
+            (255, 16, 2, 0, b"FF"),
+            (255, 16, 3, 0, b"FF\x00"),
+            (0x1234, 16, 2, 0x80000005, b""),
+            (255, 3, 16, 0xc000000d, b""),
+            (1, 0, 5, 0, b"1\x00"),
+            (0xffffffff, 10, 10, 0, b"4294967295"),
+            (0xffffffff, 2, 32, 0, b"11111111111111111111111111111111"),
+        ]:
+            machine.write(output, b"Z" * 40)
+            result = machine.call(format, args = [high | value, high | base, high | capacity, output])
+            equal(result.reason, "return")
+            equal(result.value, status)
+            equal(machine.read(output, len(data)), data)
+            equal(machine.read(output + len(data), 40 - len(data)), b"Z" * (40 - len(data)))
+
+def test_cabinet_non_cabinet_copy_reports_fdi_error():
+    win32 = testing.module("@stdlib//windows/selfreg:win32.star")
+    cabinet = testing.module("@stdlib//windows/selfreg:cabinet.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = win32["kernel32_plugin"](files = {"C:/Input/driver.sys": b"MZ\x90\x00not-a-cabinet"})
+        plugin = cabinet["cabinet_plugin"](kernel)
+        machine.use([kernel, plugin])
+        def unexpected(event): fail("a non-cabinet must not produce file notifications")
+        machine.provide_export(unexpected, module = "test-cabinet.dll", name = "Notify", argc = 2, convention = "cdecl")
+        notify = machine.resolve_export("test-cabinet.dll", name = "Notify")
+        original_paths = sorted(kernel.state["paths"])
+        error = machine.allocate(value = b"Z" * 16)
+        create = machine.resolve_export("cabinet.dll", name = "FDICreate")
+        context = machine.call(create, args = [0, 0, 0, 0, 0, 0, 0, 0xffffffff, error]).value
+        name = machine.allocate(value = b"driver.sys\x00")
+        directory = machine.allocate(value = binary.encode("C:/Input/", encoding = "ascii", nul = True))
+        result = machine.call(machine.resolve_export("cabinet.dll", name = "FDICopy"), args = [context, name, directory, 0, notify, 0, 0])
+        equal(result.reason, "return")
+        equal(result.value, 0)
+        equal(machine.read_u32le(error), 2)  # FDIERROR_NOT_A_CABINET
+        equal(machine.read_u32le(error + 4), 0)
+        equal(machine.read_u32le(error + 8), 1)
+        equal(machine.read(error + 12, 4), b"ZZZZ")
+        equal(plugin.state["actions"][-1]["operation"], 2)
+        equal(sorted(kernel.state["paths"]), original_paths)
+
+def test_kernel_exclusive_srw_native_alias_contention():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"]())
+        lock = machine.allocate(size = machine.pointer_size)
+        initialize = machine.resolve_export("ntdll.dll", name = "RtlInitializeSRWLock")
+        acquire = machine.resolve_export("ntdll.dll", name = "RtlAcquireSRWLockExclusive")
+        release = machine.resolve_export("ntdll.dll", name = "RtlReleaseSRWLockExclusive")
+        attempt = machine.resolve_export("kernel32.dll", name = "TryAcquireSRWLockExclusive")
+        equal(machine.call(initialize, args = [lock]).reason, "return")
+        equal(machine.call(acquire, args = [lock]).reason, "return")
+        equal(machine.call(attempt, args = [lock]).value, 0)
+        contender = machine.spawn(acquire, args = [lock])
+        equal(contender.run().reason, "wait")
+        equal(machine.call(release, args = [lock]).reason, "return")
+        equal(contender.run().reason, "return")
+        equal(machine.call(attempt, args = [lock]).value, 0)
+        invalid = machine.call(release, args = [lock])
+        equal(invalid.reason, "plugin")
+        true("exclusive ownership" in invalid.detail)
+        contender.close()
+
+def test_profile_string_native_dword_capacity():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use(kernel)
+        high = 0x600000000000 if architecture == "amd64" else 0
+        for suffix, encoding, unit in [("A", "ascii", 1), ("W", "utf16le", 2)]:
+            section = machine.allocate(value = binary.encode("Version", encoding = encoding, nul = True))
+            key = machine.allocate(value = binary.encode("ProductType", encoding = encoding, nul = True))
+            default = machine.allocate(value = binary.encode("abcdef", encoding = encoding, nul = True))
+            file = machine.allocate(value = binary.encode("C:/absent.ini", encoding = encoding, nul = True))
+            output = machine.allocate(size = 32)
+            for base in ["GetPrivateProfileString", "GetProfileString"]:
+                get = machine.resolve_export("kernel32.dll", name = base + suffix)
+                for capacity in [0, 1, 4, 8]:
+                    machine.write(output, b"Z" * 32)
+                    args = [section, key, default, output, high | capacity]
+                    if base == "GetPrivateProfileString": args.append(file)
+                    result = machine.call(get, args = args)
+                    equal(result.reason, "return")
+                    count = min(6, capacity - 1) if capacity else 0
+                    equal(result.value, count)
+                    expected = binary.encode("abcdef"[:count], encoding = encoding, nul = True) if capacity else b""
+                    equal(machine.read(output, len(expected)), expected)
+                    equal(machine.read(output + len(expected), 32 - len(expected)), b"Z" * (32 - len(expected)))
+
+def test_crt_toupper_ascii_int_width():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["msvcrt_plugin"]())
+        upper = machine.resolve_export("msvcrt.dll", name = "toupper")
+        high = 0x600000000000 if architecture == "amd64" else 0
+        for value in range(128):
+            expected = value - 32 if value >= 97 and value <= 122 else value
+            result = machine.call(upper, args = [high | value])
+            equal(result.reason, "return")
+            equal(result.value, expected)
+        equal(machine.call(upper, args = [high | 0xffffffff]).value, 0xffffffff)
+        result = machine.call(upper, args = [0xe9])
+        equal(result.reason, "plugin")
+        true("native CRT locale tables" in result.detail)
+
+def test_catalog_hash_native_sizing_and_file_handle():
+    win32 = testing.module("@stdlib//windows/selfreg:win32.star")
+    crypto_module = testing.module("@stdlib//windows/selfreg:crypto.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = win32["kernel32_plugin"](files = {"C:/Input/member.inf": b"catalog member"})
+        plugin = crypto_module["cryptoapi_plugin"](kernel = kernel)
+        machine.use([kernel, plugin])
+        calculate = machine.resolve_export("wintrust.dll", name = "CryptCATAdminCalcHashFromFileHandle")
+        path = machine.allocate(value = binary.encode("C:/Input/member.inf", encoding = "utf16le", nul = True))
+        opened = machine.call(machine.resolve_export("kernel32.dll", name = "CreateFileW"), args = [path, 0x80000000, 1, 0, 3, 0, 0]).value
+        size = machine.allocate(value = b"Z" * 8)
+        output = machine.allocate(value = b"Z" * 32)
+        high = 0x600000000000 if architecture == "amd64" else 0
+        for capacity, destination, expected in [(0, 0, 1), (19, output, 0), (20, 0, 1), (32, 0, 1)]:
+            machine.write_u32le(size, capacity)
+            result = machine.call(calculate, args = [opened, size, destination, high])
+            equal(result.reason, "return")
+            equal(result.value, expected)
+            equal(machine.read_u32le(size), 20)
+            equal(machine.read(size + 4, 4), b"ZZZZ")
+            equal(machine.read(output, 32), b"Z" * 32)
+        machine.write_u32le(size, 32)
+        result = machine.call(calculate, args = [opened, size, output, high])
+        equal(result.reason, "return")
+        equal(result.value, 1)
+        equal(machine.read(output, 20), crypto.hash("sha1", b"catalog member"))
+        equal(machine.read(output + 20, 12), b"Z" * 12)
+        equal(plugin.state["actions"][-1]["operation"], "catalog-hash")
+        machine.call(machine.resolve_export("kernel32.dll", name = "CloseHandle"), args = [opened])
+        result = machine.call(calculate, args = [opened, size, output, 0])
+        equal(result.value, 0)
+        equal(kernel.state["last_error"], 6)
+        result = machine.call(calculate, args = [opened, size, output, 1])
+        equal(result.value, 0)
+        equal(kernel.state["last_error"], 87)
+
+def test_kernel_delete_on_close_open_object_lifetime():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86","amd64"]:
+        for wide in [False,True]:
+            machine = emulator.machine(code=b"\xc3",architecture=architecture)
+            kernel = module["kernel32_plugin"](files={"D:/temp/name":b"original"},volumes={"D:":dict(filesystem="NTFS",serial=4)})
+            machine.use(kernel)
+            if architecture=="amd64":
+                kernel.state["next_handle"]=0x100040000
+            invalid=(1<<(machine.pointer_size*8))-1
+            def text(value):
+                return machine.allocate(value=binary.encode(value,encoding="utf16le" if wide else "ascii",nul=True))
+            def call(api,args):
+                result=machine.call(machine.resolve_export("kernel32.dll",name=api),args=args)
+                equal(result.reason,"return",result.detail)
+                return result.value
+            create="CreateFileW" if wide else "CreateFileA"
+            path=text("D:/temp/name")
+            name=r"d:\temp\name"
+            blocker=call(create,[path,0x80000000,3,0,3,0,0])
+            equal(call(create,[path,0x80000000,7,0,2,0x04000000,0]),invalid)
+            equal(kernel.state["last_error"],32)
+            equal(kernel.state["file_data"](name),b"original")
+            equal(call("CloseHandle",[blocker]),1)
+            kernel.state["paths"][name]["attributes"]=1
+            equal(call(create,[path,0x80000000,7,0,2,0x04000000,0]),invalid)
+            equal(kernel.state["last_error"],5)
+            equal(kernel.state["file_data"](name),b"original")
+            kernel.state["paths"][name]["attributes"]=0x80
+            owner=call(create,[path,0x80000000,7,0,3,0x04000000,0])
+            other=call(create,[path,0x80000000,7,0,3,0,0])
+            true(owner!=invalid and other!=invalid)
+            output=machine.allocate(value=b"Z"*(machine.pointer_size+8))
+            equal(call("DuplicateHandle",[invalid,owner,invalid,output,0,0,2]),1)
+            duplicate=machine.read_pointer(output)
+            true(duplicate!=owner)
+            if architecture=="amd64":
+                true(duplicate>0xffffffff)
+            equal(machine.read(output+machine.pointer_size,8),b"Z"*8)
+            equal(call("CloseHandle",[owner]),1)
+            equal(kernel.state["pending_file_deletes"],{})
+            equal(call("CloseHandle",[duplicate]),1)
+            true(name in kernel.state["paths"])
+            true(name in kernel.state["pending_file_deletes"])
+            equal(call(create,[path,0x80000000,7,0,3,0,0]),invalid)
+            buffer=machine.allocate(size=8)
+            count=machine.allocate(size=4)
+            equal(call("ReadFile",[other,buffer,8,count,0]),1)
+            equal(machine.read(buffer,8),b"original")
+            equal(call("CloseHandle",[other]),1)
+            true(name not in kernel.state["paths"])
+            equal(kernel.state["pending_file_deletes"],{})
+            # A later create has independent identity and no stale deletion.
+            fresh=call(create,[path,0x40000000,7,0,1,0,0])
+            true(fresh!=invalid)
+            equal(call("CloseHandle",[fresh]),1)
+            true(name in kernel.state["paths"])
+            renamed = text("D:/temp/renamed")
+            owner = call(create,[path,0x80000000,7,0,3,0x04000000,0])
+            move = "MoveFileW" if wide else "MoveFileA"
+            equal(call(move,[path,renamed]),1)
+            fresh = call(create,[path,0x40000000,7,0,1,0,0])
+            true(fresh!=invalid)
+            equal(call("CloseHandle",[owner]),1)
+            true(name in kernel.state["paths"])
+            true(r"d:\temp\renamed" not in kernel.state["paths"])
+            equal(call("CloseHandle",[fresh]),1)
+
+def test_kernel_hard_link_identity_and_lifetime():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"](files = {"D:/store/a.inf": b"abcdefgh"}, directories = ["D:/inf", "E:/inf"], volumes = {"D:": {"filesystem": "NTFS", "serial": 42}, "E:": {"filesystem": "NTFS", "serial": 43}})
+        machine.use(kernel)
+        invalid = (1 << (machine.pointer_size * 8)) - 1
+        def text(s):
+            return machine.allocate(value = binary.encode(s, encoding = "utf16le", nul = True))
+        def call(api, args):
+            result = machine.call(machine.resolve_export("kernel32.dll", name = api), args = args)
+            equal(result.reason, "return", result.detail)
+            return result.value
+        source, alias = text("D:/store/a.inf"), text("D:/inf/b.inf")
+        source_key, alias_key = r"d:\store\a.inf", r"d:\inf\b.inf"
+        kernel.state["paths"][source_key]["security"] = b"source-owned-descriptor"
+        for dest, src, reserved, error in [(text("E:/inf/c.inf"), source, 0, 17), (text("D:/missing/c.inf"), source, 0, 3), (alias, text("D:/store/missing.inf"), 0, 2), (alias, text("D:/store"), 0, 5), (alias, source, 1, 87)]:
+            equal(call("CreateHardLinkW", [dest, src, reserved]), 0)
+            equal(kernel.state["last_error"], error)
+            true(alias_key not in kernel.state["paths"])
+        equal(call("CreateHardLinkW", [alias, source, 0]), 1)
+        equal(call("CreateHardLinkW", [alias, source, 0]), 0)
+        equal(kernel.state["last_error"], 183)
+        # Linking a lazy input does not read or duplicate its payload.
+        true("data" not in kernel.state["paths"][source_key])
+        equal(kernel.state["paths"][alias_key]["security"], b"source-owned-descriptor")
+        a = call("CreateFileW", [source, 0xc0000000, 7, 0, 3, 0, 0])
+        b = call("CreateFileW", [alias, 0xc0000000, 7, 0, 3, 0, 0])
+        true(a != invalid and b != invalid)
+        info = machine.allocate(value = b"Z" * 56)
+        equal(call("GetFileInformationByHandle", [a, info]), 1)
+        equal(machine.read_u32le(info + 28), 42)
+        equal(machine.read_u32le(info + 40), 2)
+        identity = machine.read(info + 44, 8)
+        true(identity != b"\x00" * 8)
+        equal(call("GetFileInformationByHandle", [b, info]), 1)
+        equal(machine.read(info + 44, 8), identity)
+        equal(machine.read(info + 52, 4), b"ZZZZ")
+        data = machine.allocate(value = b"XY")
+        count = machine.allocate(value = b"Y" * 8)
+        equal(call("SetFilePointer", [b, 2, 0, 0]), 2)
+        equal(call("WriteFile", [b, data, 2, count, 0]), 1)
+        equal(kernel.state["file_data"](source_key), b"abXYefgh")
+        stamp = machine.allocate(value = binary.u64le(123456))
+        equal(call("SetFileTime", [b, 0, 0, stamp]), 1)
+        equal(call("GetFileInformationByHandle", [a, info]), 1)
+        equal(machine.read_u64le(info + 20), 123456)
+        # CREATE_ALWAYS truncates the shared file instead of replacing one alias.
+        truncate = call("CreateFileW", [alias, 0x40000000, 7, 0, 2, 0, 0])
+        true(truncate != invalid)
+        equal(call("GetFileSize", [a, 0]), 0)
+        equal(call("WriteFile", [truncate, data, 2, count, 0]), 1)
+        equal(call("CloseHandle", [truncate]), 1)
+        # A pending unlink keeps its live references and blocks reopening.
+        equal(call("DeleteFileW", [alias]), 1)
+        true(alias_key in kernel.state["paths"])
+        equal(call("CreateFileW", [alias, 0, 7, 0, 3, 0, 0]), invalid)
+        equal(kernel.state["last_error"], 5)
+        equal(call("CloseHandle", [b]), 1)
+        true(alias_key in kernel.state["paths"])
+        equal(call("CloseHandle", [a]), 1)
+        true(alias_key not in kernel.state["paths"])
+        equal(kernel.state["file_data"](source_key), b"XY")
+        # A new occupant of the deleted name has its own identity and bytes.
+        fresh = call("CreateFileW", [alias, 0xc0000000, 7, 0, 1, 0, 0])
+        equal(call("GetFileInformationByHandle", [fresh, info]), 1)
+        true(machine.read(info + 44, 8) != identity)
+        equal(call("CloseHandle", [fresh]), 1)
+        equal(call("DeleteFileW", [alias]), 1)
+        equal(call("CreateHardLinkW", [alias, source, 0]), 1)
+        exclusive = call("CreateFileW", [source, 0x80000000, 0, 0, 3, 0, 0])
+        equal(call("CreateFileW", [alias, 0x80000000, 7, 0, 3, 0, 0]), invalid)
+        equal(kernel.state["last_error"], 32)
+        equal(call("DeleteFileW", [alias]), 0)
+        equal(kernel.state["last_error"], 32)
+        equal(call("CloseHandle", [exclusive]), 1)
+        # Cloning preserves aliases but owns a separate mutable object.
+        cloned = module["kernel32_plugin"](prepared_file_entries = kernel.state["paths"])
+        true(cloned.state["write_file_data"](alias_key, 0, b"QR"))
+        equal(cloned.state["file_data"](source_key), b"QR")
+        equal(kernel.state["file_data"](source_key), b"XY")
+        # Overwriting a destination updates every alias; copying onto one's
+        # own alias fails without truncating either name.
+        copied = text("D:/store/copied.inf")
+        equal(call("CopyFileW", [source, alias, 0]), 0)
+        equal(kernel.state["last_error"], 32)
+        equal(call("CopyFileW", [source, copied, 0]), 1)
+        copy_handle = call("CreateFileW", [copied, 0x40000000, 7, 0, 3, 0, 0])
+        machine.write(data, b"IJ")
+        equal(call("WriteFile", [copy_handle, data, 2, count, 0]), 1)
+        equal(call("CloseHandle", [copy_handle]), 1)
+        equal(call("CopyFileExW", [copied, alias, 0, 0, 0, 0]), 1)
+        equal(kernel.state["file_data"](source_key), b"IJ")
+        equal(kernel.state["file_data"](alias_key), b"IJ")
+
+def test_kernel_hard_link_mappings_and_clone():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"](files = {"D:/a": b"abcdefgh"}, volumes = {"D:": {"filesystem": "NTFS"}})
+        machine.use(kernel)
+        def text(s):
+            return machine.allocate(value = binary.encode(s, encoding = "utf16le", nul = True))
+        def call(m, api, args):
+            result = m.call(m.resolve_export("kernel32.dll", name = api), args = args)
+            equal(result.reason, "return", result.detail)
+            return result.value
+        a, b, renamed = text("D:/a"), text("D:/b"), text("D:/renamed")
+        equal(call(machine, "CreateHardLinkW", [b, a, 0]), 1)
+        opened = call(machine, "CreateFileW", [a, 0xc0000000, 7, 0, 3, 0, 0])
+        other = call(machine, "CreateFileW", [b, 0xc0000000, 7, 0, 3, 0, 0])
+        mapping = call(machine, "CreateFileMappingW", [opened, 0, 4, 0, 0, 0])
+        view = call(machine, "MapViewOfFile", [mapping, 2, 0, 0, 8])
+        data = machine.allocate(value = b"XY")
+        count = machine.allocate(size = 4)
+        equal(call(machine, "WriteFile", [other, data, 2, count, 0]), 1)
+        equal(machine.read(view, 8), b"XYcdefgh")
+        machine.write(view + 2, b"UV")
+        equal(call(machine, "FlushViewOfFile", [view, 8]), 1)
+        equal(kernel.state["file_data"](r"d:\a"), b"XYUVefgh")
+        # machine.snapshot() forks CPU/memory, NOT semantic plugin state.
+        # Independent API variants require a fresh kernel namespace clone.
+        cloned_machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        cloned_kernel = module["kernel32_plugin"](prepared_file_entries = kernel.state["paths"])
+        cloned_machine.use(cloned_kernel)
+        cloned_name = cloned_machine.allocate(value = binary.encode("D:/b", encoding = "utf16le", nul = True))
+        cloned_data = cloned_machine.allocate(value = b"QQ")
+        cloned_count = cloned_machine.allocate(size = 4)
+        cloned_file = call(cloned_machine, "CreateFileW", [cloned_name, 0x40000000, 7, 0, 3, 0, 0])
+        equal(call(cloned_machine, "WriteFile", [cloned_file, cloned_data, 2, cloned_count, 0]), 1)
+        equal(cloned_kernel.state["file_data"](r"d:\a"), b"QQUVefgh")
+        equal(machine.read(view, 8), b"XYUVefgh")
+        equal(kernel.state["file_data"](r"d:\b"), b"XYUVefgh")
+        equal(call(machine, "MoveFileW", [a, renamed]), 1)
+        fresh = call(machine, "CreateFileW", [a, 0xc0000000, 7, 0, 1, 0, 0])
+        equal(call(machine, "WriteFile", [fresh, data, 2, count, 0]), 1)
+        machine.write(view + 4, b"ZZ")
+        equal(call(machine, "FlushViewOfFile", [view, 8]), 1)
+        equal(kernel.state["file_data"](r"d:\renamed"), b"XYUVZZgh")
+        equal(kernel.state["file_data"](r"d:\b"), b"XYUVZZgh")
+        equal(kernel.state["file_data"](r"d:\a"), b"XY")
+        equal(call(machine, "DeleteFileW", [b]), 1)
+        equal(call(machine, "CloseHandle", [opened]), 1)
+        equal(call(machine, "CloseHandle", [other]), 1)
+        equal(call(machine, "CloseHandle", [mapping]), 1)
+        true(r"d:\b" in kernel.state["paths"])
+        equal(call(machine, "UnmapViewOfFile", [view]), 1)
+        true(r"d:\b" not in kernel.state["paths"])
+        equal(kernel.state["file_data"](r"d:\renamed"), b"XYUVZZgh")
+        equal(call(machine, "CloseHandle", [fresh]), 1)
+
+def test_kernel_copy_file_ex_effects_and_failure_atomicity():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"](files = {"C:/Input/source.sys": b"MZactual-driver", "C:/Output/existing.sys": b"original"}, directories = ["C:/Output"])
+        machine.use(kernel)
+        copy = machine.resolve_export("kernel32.dll", name = "CopyFileExW")
+        source = machine.allocate(value = binary.encode("C:/Input/source.sys", encoding = "utf16le", nul = True))
+        output = machine.allocate(value = binary.encode("C:/Output/new.sys", encoding = "utf16le", nul = True))
+        existing = machine.allocate(value = binary.encode("C:/Output/existing.sys", encoding = "utf16le", nul = True))
+        absent = machine.allocate(value = binary.encode("C:/Missing/new.sys", encoding = "utf16le", nul = True))
+        key = "c:" + chr(92) + "input" + chr(92) + "source.sys"
+        destination = "c:" + chr(92) + "output" + chr(92) + "new.sys"
+        original = "c:" + chr(92) + "output" + chr(92) + "existing.sys"
+        metadata = {"attributes": 0x21, "creation_time": 101, "access_time": 102, "write_time": 103, "security": b"owned-descriptor"}
+        kernel.state["paths"][key].update(metadata)
+        high = 0x600000000000 if architecture == "amd64" else 0
+        result = machine.call(copy, args = [source, output, 0, 0, 0, high])
+        equal(kernel.state["last_error"], 0)
+        equal(result.reason, "return")
+        equal(result.value, 1, architecture + " copy failed: " + str(result.detail) + " queries=" + str(kernel.state["file_queries"]))
+        entry = kernel.state["paths"][destination]
+        equal(entry["data"], b"MZactual-driver")
+        equal(entry["size"], len(b"MZactual-driver"))
+        true(entry["dirty"])
+        for field, value in metadata.items():
+            equal(entry[field], value)
+        for target, flags, expected in [(existing, 1, 80), (absent, 0, 3), (output, 0, 5)]:
+            result = machine.call(copy, args = [source, target, 0, 0, 0, high | flags])
+            equal(result.reason, "return")
+            equal(result.value, 0)
+            equal(kernel.state["last_error"], expected)
+            equal(kernel.state["file_data"](original), b"original")
+        cancel = machine.allocate(size = 4)
+        machine.write_u32le(cancel, 1)
+        result = machine.call(copy, args = [source, existing, 0, 0, cancel, 0])
+        equal(result.value, 0)
+        equal(kernel.state["last_error"], 1235)
+        result = machine.call(copy, args = [source, existing, 123, 0, 0, 0])
+        equal(result.reason, "plugin")
+        true("progress callbacks are not modeled" in result.detail)
+        equal(kernel.state["file_data"](original), b"original")
+
+def test_kernel_dos_device_name_native_boundaries():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"]())
+        classify = machine.resolve_export("ntdll.dll", name = "RtlIsDosDeviceName_U")
+        equal(machine.call(classify, args = [0]).value, 0)
+        for path, expected in [
+            ("", 0), ("SET1.tmp", 0), ("D:/dir/SET1.tmp", 0),
+            ("CON", 6), ("nul", 6), ("AUX", 6), ("PRN", 6),
+            ("COM1", 8), ("COM9", 8), ("COM0", 0), ("COM10", 0),
+            ("LPT1", 8), ("LPT9", 8), ("LPT0", 0),
+            ("CONIN$", 12), ("CONOUT$", 14), ("CLOCK$", 0),
+            ("NUL   ", 6), ("NUL...", 6), ("NUL:", 6),
+            ("C:/foo/NUL", 0xe0006), ("foo/NUL/bar", 0),
+            ("//server/share/NUL", 0), ("//./CON", 0), ("//?/C:/NUL", 0),
+        ]:
+            for spelling in [path, path.replace("/", chr(92))]:
+                source = machine.allocate(value = binary.encode(spelling, encoding = "utf16le", nul = True))
+                result = machine.call(classify, args = [source])
+                equal(result.reason, "return")
+                equal(result.value, expected)
+        source = machine.allocate(value = binary.encode("NUL.txt", encoding = "utf16le", nul = True))
+        result = machine.call(classify, args = [source])
+        equal(result.reason, "plugin")
+        true("native DOS-device process policy" in result.detail)
+
+def test_kernel_ansi_char_native_pointer_advance():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"]())
+        convert = machine.resolve_export("ntdll.dll", name = "RtlAnsiCharToUnicodeChar")
+        source = machine.allocate(value = b"ZZ")
+        slot = machine.allocate(value = b"Z" * (machine.pointer_size + 8))
+        # Native original-media NTDLL: ASCII identity, one-byte consumption,
+        # including NUL; only the native-width caller pointer is changed.
+        for value in range(128):
+            machine.write(source, bytes([value, 90]))
+            machine.write_pointer(slot, source)
+            result = machine.call(convert, args = [slot])
+            equal(result.reason, "return")
+            equal(result.value, value)
+            equal(machine.read_pointer(slot), source + 1)
+            equal(machine.read(source, 2), bytes([value, 90]))
+            equal(machine.read(slot + machine.pointer_size, 8), b"Z" * 8)
+        machine.write(source, b"\x80Z")
+        machine.write_pointer(slot, source)
+        result = machine.call(convert, args = [slot])
+        equal(result.reason, "plugin")
+        true("native NLS code-page table" in result.detail)
+        equal(machine.read_pointer(slot), source)
+
+def test_kernel_upcase_unicode_char_parameter_width():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"]())
+        upcase = machine.resolve_export("ntdll.dll", name = "RtlUpcaseUnicodeChar")
+        high = 0x7fff12340000 if architecture == "amd64" else 0x12340000
+        for unit, expected in [(0, 0), (ord("a"), ord("A")), (ord("z"), ord("Z")), (ord("D"), ord("D")), (ord("/"), ord("/"))]:
+            result = machine.call(upcase, args = [high | unit])
+            equal(result.reason, "return")
+            equal(result.value, expected)
+        result = machine.call(upcase, args = [0xe9])
+        equal(result.reason, "plugin")
+        true("native NLS upcase table" in result.detail)
+
+def test_kernel_find_failure_handle_native_width():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"](directories = ["C:/Input"])
+        machine.use(kernel)
+        invalid = (1 << (machine.pointer_size * 8)) - 1
+        output = machine.allocate(value = b"Z" * 592)
+        for suffix, encoding in [("A", "ascii"), ("W", "utf16le")]:
+            find = machine.resolve_export("kernel32.dll", name = "FindFirstFile" + suffix)
+            for path, error in [("C:/Input/missing.inf", 2), ("C:/Absent/missing.inf", 3)]:
+                source = machine.allocate(value = binary.encode(path, encoding = encoding, nul = True))
+                result = machine.call(find, args = [source, output])
+                equal(result.reason, "return")
+                equal(result.value, invalid)
+                equal(kernel.state["last_error"], error)
+                equal(machine.read(output, 592), b"Z" * 592)
+                # GetFileAttributes returns DWORD, not HANDLE.
+                attributes = machine.resolve_export("kernel32.dll", name = "GetFileAttributes" + suffix)
+                equal(machine.call(attributes, args = [source]).value, 0xffffffff)
+            equal(machine.call(find, args = [0, output]).value, invalid)
+            equal(kernel.state["last_error"], 87)
+
+def test_kernel_mutex_handle_independence():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use(kernel)
+        close = machine.resolve_export("kernel32.dll", name = "CloseHandle")
+        wait = machine.resolve_export("kernel32.dll", name = "WaitForSingleObject")
+        for name, extended in [("CreateMutexW", False), ("CreateMutexExW", True)]:
+            create = machine.resolve_export("kernel32.dll", name = name)
+            args = [0, 0, 0, 0x1f0001] if extended else [0, 0, 0]
+            first = machine.call(create, args = args).value
+            second = machine.call(create, args = args).value
+            true(first != second)
+            equal(machine.call(close, args = [first]).value, 1)
+            equal(machine.call(wait, args = [second, 0]).value, 0)
+            equal(machine.call(close, args = [second]).value, 1)
+        name = machine.allocate(value = binary.encode("NativeMutex", encoding = "utf16le", nul = True))
+        create = machine.resolve_export("kernel32.dll", name = "CreateMutexW")
+        first = machine.call(create, args = [0, 0, name]).value
+        second = machine.call(create, args = [0, 1, name]).value
+        true(first != second)
+        equal(kernel.state["last_error"], 183)
+        opened = machine.call(machine.resolve_export("kernel32.dll", name = "OpenMutexW"), args = [0x1f0001, 0, name]).value
+        true(opened != first and opened != second)
+        equal(machine.call(close, args = [first]).value, 1)
+        equal(machine.call(close, args = [second]).value, 1)
+        equal(machine.call(wait, args = [opened, 0]).value, 0)
+        equal(machine.call(close, args = [opened]).value, 1)
+        equal(machine.call(machine.resolve_export("kernel32.dll", name = "OpenMutexW"), args = [0x1f0001, 0, name]).value, 0)
+        equal(kernel.state["last_error"], 2)
+
+def test_kernel_guid_from_counted_string_native_effects():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"]())
+        layout = abi["counted_string_layout"](machine.pointer_size)
+        descriptor = machine.allocate(size = layout["Size"])
+        output = machine.allocate(size = 20)
+        parse = machine.resolve_export("ntdll.dll", name = "RtlGUIDFromString")
+        prefix = binary.builder()
+        prefix.u32le(0x4d36e97d)
+        prefix.u16le(0xe325)
+        prefix.u16le(0x11ce)
+        for text, status, fields in [
+            ("{4d36e97d-e325-11ce-bfc1-08002be10318}", 0, 8),
+            ("4d36e97d-e325-11ce-bfc1-08002be10318", 0xc000000d, 0),
+            ("{4d36e97d-e325-11ce-bfc1-08002be10318}extra", 0xc000000d, 8),
+            ("{4d36e97d-e325-zzzz-bfc1-08002be10318}", 0xc000000d, 6),
+            ("{4d36e97d-e325-11ce-bfc1-08002be1031z}", 0xc000000d, 8),
+        ]:
+            data = binary.encode(text, encoding = "utf16le")
+            source = machine.allocate(value = data)  # No terminator.
+            machine.write_u16le(descriptor, len(data))
+            machine.write_u16le(descriptor + 2, len(data))
+            machine.write_pointer(descriptor + layout["Buffer"], source)
+            machine.write(output, b"Z" * 20)
+            result = machine.call(parse, args = [descriptor, output])
+            equal(result.reason, "return")
+            equal(result.value, status)
+            equal(machine.read(output, fields), prefix.bytes()[:fields])
+            if status == 0:
+                equal(machine.read(output + 8, 8), b"\xbf\xc1\x08\x00\x2b\xe1\x03\x18")
+                equal(machine.read(output + 16, 4), b"ZZZZ")
+            else:
+                equal(machine.read(output + fields, 20 - fields), b"Z" * (20 - fields))
+
+def test_crt_integer_end_pointer_native_width():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["msvcrt_plugin"]())
+        output = machine.allocate(size = machine.pointer_size + 4)
+        for name, encoding, width in [("strtoul", "ascii", 1), ("wcstol", "utf16le", 2), ("wcstoul", "utf16le", 2)]:
+            parse = machine.resolve_export("msvcrt.dll", name = name)
+            for text, radix, value, consumed in [("  3426tail", 10, 3426, 6), ("0x10z", 0, 16, 4), ("abc", 10, 0, 0)]:
+                source = machine.allocate(value = binary.encode(text, encoding = encoding, nul = True))
+                machine.write(output, b"Z" * (machine.pointer_size + 4))
+                result = machine.call(parse, args = [source, output, radix])
+                equal(result.reason, "return")
+                equal(result.value, value)
+                equal(machine.read_pointer(output), source + consumed * width)
+                equal(machine.read(output + machine.pointer_size, 4), b"ZZZZ")
+
+def test_kernel_file_mapping_native_dword_widths():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        data = binary.builder()
+        data.reserve(65536)
+        data.append(b"AB")
+        kernel = module["kernel32_plugin"](files = {"C:/Input/data.bin": data.bytes()})
+        machine.use(kernel)
+        path = machine.allocate(value = binary.encode("C:/Input/data.bin", encoding = "utf16le", nul = True))
+        file = machine.call(machine.resolve_export("kernel32.dll", name = "CreateFileW"), args = [path, 0x80000000, 1, 0, 3, 0, 0]).value
+        high = 0x7fff00000000 if architecture == "amd64" else 0
+        create = machine.resolve_export("kernel32.dll", name = "CreateFileMappingW")
+        result = machine.call(create, args = [file, 0, high | 2, high, high | 65538, 0])
+        equal(result.reason, "return")
+        true(result.value != 0)
+        mapping = result.value
+        equal(kernel.state["file_queries"][-1]["size"], 65538)
+        equal(kernel.state["file_queries"][-1]["protect"], 2)
+        view = machine.resolve_export("kernel32.dll", name = "MapViewOfFile")
+        result = machine.call(view, args = [mapping, 4, high, high | 65536, 2])
+        equal(result.reason, "return")
+        true(result.value != 0)
+        equal(machine.read(result.value, 2), b"AB")
+        equal(kernel.state["file_queries"][-1]["offset"], 65536)
+        equal(machine.call(machine.resolve_export("kernel32.dll", name = "UnmapViewOfFile"), args = [result.value]).value, 1)
+        if architecture == "amd64":
+            # NumberOfBytesToMap is SIZE_T, unlike the DWORD offset fields.
+            equal(machine.call(view, args = [mapping, 4, 0, 65536, 0x100000002]).value, 0)
+            equal(kernel.state["last_error"], 87)
+        invalid = 0xffffffffffffffff if architecture == "amd64" else 0xffffffff
+        page = machine.call(create, args = [invalid, 0, 4, 0, 8, 0])
+        equal(page.reason, "return")
+        true(page.value != 0)
+        address = machine.call(view, args = [page.value, 4, 0, 0, 8]).value
+        true(address != 0)
+        equal(machine.read(address, 8), b"\x00" * 8)
+
+def test_kernel_compare_string_ordinal_units():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use(kernel)
+        compare = machine.resolve_export("kernel32.dll", name = "CompareStringOrdinal")
+        for left, right, count, insensitive, expected in [
+            (b"a\x00b\x00", b"A\x00B\x00", 2, 1, 2),
+            (b"a\x00b\x00", b"A\x00B\x00", 2, 0, 3),
+            (b"\x00\x01", b"\xff\x00", 1, 0, 3),
+            (b"\x00\xd8", b"\x00\xe0", 1, 0, 1),
+            (b"a\x00\x00\x00b\x00", b"a\x00\x00\x00c\x00", 3, 0, 1),
+            (b"a\x00\x00\x00b\x00", b"a\x00\x00\x00c\x00", 0xffffffff, 0, 2),
+        ]:
+            a = machine.allocate(value = left)
+            b = machine.allocate(value = right)
+            size = count | (0x7fff00000000 if architecture == "amd64" else 0)
+            result = machine.call(compare, args = [a, size, b, size, insensitive])
+            equal(result.reason, "return")
+            equal(result.value, expected)
+        empty = machine.allocate(size = 2)
+        equal(machine.call(compare, args = [empty, 0, empty, 0, 0]).value, 2)
+        equal(machine.call(compare, args = [empty, 0, empty, 1, 0]).value, 1)
+        equal(machine.call(compare, args = [empty, 0xfffffffe, empty, 0, 0]).value, 0)
+        equal(kernel.state["last_error"], 87)
+
+def test_kernel_duplicate_unicode_string_native_contract():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use(kernel)
+        layout = abi["counted_string_layout"](machine.pointer_size)
+        duplicate = machine.resolve_export("ntdll.dll", name = "RtlDuplicateUnicodeString")
+        free = machine.resolve_export("ntdll.dll", name = "RtlFreeUnicodeString")
+        source = machine.allocate(value = b"A\x00\x00\xd8Z\x00")
+        descriptor = machine.allocate(size = layout["Size"])
+        output = machine.allocate(value = b"Z" * (layout["Size"] + 8))
+        high = 0x600000000000 if architecture == "amd64" else 0
+        machine.write_u16le(descriptor, 4)
+        machine.write_u16le(descriptor + 2, 6)
+        machine.write_pointer(descriptor + layout["Buffer"], source)
+        for flags in [0, 1, 3]:
+            machine.write(output, b"Z" * (layout["Size"] + 8))
+            result = machine.call(duplicate, args = [high | flags, descriptor, output])
+            equal(result.reason, "return")
+            equal(result.value, 0)
+            address = machine.read_pointer(output + layout["Buffer"])
+            true(address != source)
+            equal(machine.read_u16le(output), 4)
+            equal(machine.read_u16le(output + 2), 4 if flags == 0 else 6)
+            equal(machine.read(address, 4), b"A\x00\x00\xd8")
+            if flags:
+                equal(machine.read(address + 4, 2), b"\x00\x00")
+            equal(machine.read(output + layout["Size"], 8), b"Z" * 8)
+            true(address in kernel.state["local_allocations"])
+            machine.call(free, args = [output])
+            true(address not in kernel.state["local_allocations"])
+        for flags, length, maximum, status in [(2, 4, 6, 0xc000000d), (4, 4, 6, 0xc000000d), (1, 3, 6, 0xc000000d), (1, 4, 3, 0xc000000d), (1, 65534, 65534, 0xc0000106)]:
+            machine.write_u16le(descriptor, length)
+            machine.write_u16le(descriptor + 2, maximum)
+            machine.write(output, b"Z" * layout["Size"])
+            equal(machine.call(duplicate, args = [flags, descriptor, output]).value, status)
+            equal(machine.read(output, layout["Size"]), b"Z" * layout["Size"])
+        for flags in [0, 1, 3]:
+            equal(machine.call(duplicate, args = [flags, 0, output]).value, 0)
+            equal(machine.read_u16le(output), 0)
+            equal(machine.read_u16le(output + 2), 2 if flags == 3 else 0)
+            address = machine.read_pointer(output + layout["Buffer"])
+            if flags == 3:
+                true(address != 0)
+                equal(machine.read(address, 2), b"\x00\x00")
+            else:
+                equal(address, 0)
+            machine.call(free, args = [output])
+
+def test_kernel_prefix_counted_unicode_strings():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"]())
+        layout = abi["counted_string_layout"](machine.pointer_size)
+        left = machine.allocate(size = layout["Size"])
+        right = machine.allocate(size = layout["Size"])
+        compare = machine.resolve_export("ntdll.dll", name = "RtlPrefixUnicodeString")
+        high = 0x600000000000 if architecture == "amd64" else 0x100
+        for a, b, insensitive, expected in [
+            (b"S\x00Y\x00S\x00", b"s\x00y\x00s\x00X\x00", high | 1, 1),
+            (b"S\x00Y\x00S\x00", b"s\x00y\x00s\x00X\x00", high, 0),
+            (b"A\x00\x00\x00B\x00", b"a\x00\x00\x00c\x00X\x00", 1, 0),
+            (b"\x00\xd8", b"\x00\xd8X\x00", 1, 1),
+            (b"ABCDEF", b"ABCD", 0, 0),
+        ]:
+            for descriptor, data in [(left, a), (right, b)]:
+                machine.write_u16le(descriptor, len(data))
+                machine.write_pointer(descriptor + layout["Buffer"], machine.allocate(value = data))
+            result = machine.call(compare, args = [left, right, insensitive])
+            equal(result.reason, "return")
+            equal(result.value, expected)
+        machine.write_u16le(left, 0)
+        machine.write_pointer(left + layout["Buffer"], 1)
+        machine.write_pointer(right + layout["Buffer"], 1)
+        equal(machine.call(compare, args = [left, right, 1]).value, 1)
+        for descriptor, data in [(left, b"\xe9\x00"), (right, b"\xc9\x00")]:
+            machine.write_u16le(descriptor, 2)
+            machine.write_pointer(descriptor + layout["Buffer"], machine.allocate(value = data))
+        result = machine.call(compare, args = [left, right, 1])
+        equal(result.reason, "plugin")
+        true("NLS" in result.detail)
+
+def test_kernel_equal_counted_unicode_strings():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"]())
+        layout = abi["counted_string_layout"](machine.pointer_size)
+        left = machine.allocate(size = layout["Size"])
+        right = machine.allocate(size = layout["Size"])
+        compare = machine.resolve_export("ntdll.dll", name = "RtlEqualUnicodeString")
+        for a, b, insensitive, expected in [
+            (b"S\x00Y\x00S\x00", b"s\x00y\x00s\x00", 1, 1),
+            (b"S\x00Y\x00S\x00", b"s\x00y\x00s\x00", 0x7fff00000000 if architecture == "amd64" else 0x100, 0),
+            (b"A\x00\x00\x00B\x00", b"a\x00\x00\x00c\x00", 1, 0),
+            (b"\x00\xd8", b"\x00\xd8", 1, 1),
+            (b"A", b"A", 0, 1),
+        ]:
+            for descriptor, data in [(left, a), (right, b)]:
+                source = machine.allocate(value = data)
+                machine.write_u16le(descriptor, len(data))
+                machine.write_u16le(descriptor + 2, len(data))
+                machine.write_pointer(descriptor + layout["Buffer"], source)
+            result = machine.call(compare, args = [left, right, insensitive])
+            equal(result.reason, "return")
+            equal(result.value, expected)
+        # Length mismatch and two empty strings do not dereference buffers.
+        machine.write_pointer(left + layout["Buffer"], 1)
+        machine.write_pointer(right + layout["Buffer"], 1)
+        machine.write_u16le(left, 2)
+        machine.write_u16le(right, 0)
+        equal(machine.call(compare, args = [left, right, 1]).value, 0)
+        machine.write_u16le(left, 0)
+        equal(machine.call(compare, args = [left, right, 1]).value, 1)
+        # Do not substitute host Unicode casing for Windows' NLS table.
+        for descriptor, data in [(left, b"\xe9\x00"), (right, b"\xc9\x00")]:
+            machine.write_u16le(descriptor, 2)
+            machine.write_pointer(descriptor + layout["Buffer"], machine.allocate(value = data))
+        result = machine.call(compare, args = [left, right, 1])
+        equal(result.reason, "plugin")
+        true("native NLS upcase table" in result.detail)
+
+def test_kernel_create_unicode_string_owned_buffer():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture, memory_limit = 4 << 20)
+        kernel = module["kernel32_plugin"]()
+        machine.use(kernel)
+        layout = abi["counted_string_layout"](machine.pointer_size)
+        output = machine.allocate(value = b"Z" * (layout["Size"] + 4))
+        create = machine.resolve_export("ntdll.dll", name = "RtlCreateUnicodeString")
+        free = machine.resolve_export("ntdll.dll", name = "RtlFreeUnicodeString")
+        for data in [b"\x00\x00", b"A\x00\x00\xd8\x00\x00", binary.encode("A" * 32766, encoding = "utf16le", nul = True)]:
+            machine.write(output, b"Z" * (layout["Size"] + 4))
+            source = machine.allocate(value = data)
+            result = machine.call(create, args = [output, source])
+            equal(result.reason, "return")
+            equal(result.value, 1)
+            owned = machine.read_pointer(output + layout["Buffer"])
+            equal(owned != source, True)
+            equal(machine.read_u16le(output), len(data) - 2)
+            equal(machine.read_u16le(output + 2), len(data))
+            equal(machine.read(owned, len(data)), data)
+            machine.write_u16le(source, 0x42)
+            equal(machine.read(owned, len(data)), data)
+            equal(kernel.state["local_allocations"][owned], len(data))
+            equal(machine.call(free, args = [output]).reason, "return")
+            equal(owned in kernel.state["local_allocations"], False)
+            equal(machine.read_u16le(output), 0)
+            equal(machine.read_u16le(output + 2), 0)
+            equal(machine.read_pointer(output + layout["Buffer"]), 0)
+            equal(machine.read(output + layout["Size"], 4), b"ZZZZ")
+        # The native oversized-source branch leaves the descriptor unchanged.
+        machine.write(output, b"Z" * (layout["Size"] + 4))
+        source = machine.allocate(value = binary.encode("A" * 32767, encoding = "utf16le", nul = True))
+        equal(machine.call(create, args = [output, source]).value, 0)
+        equal(machine.read(output, layout["Size"] + 4), b"Z" * (layout["Size"] + 4))
+
+def test_kernel_multiple_wait_native_width():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use(kernel)
+        # High bits and array stride both matter on AMD64.
+        kernel.state["next_handle"] = 0x100040000 if architecture == "amd64" else 0x40000
+        event = machine.call(machine.resolve_export("kernel32.dll", name = "CreateEventW"), args = [0, 1, 0, 0]).value
+        semaphore = machine.call(machine.resolve_export("kernel32.dll", name = "CreateSemaphoreW"), args = [0, 1, 1, 0]).value
+        handles = machine.allocate(size = 2 * machine.pointer_size)
+        machine.write_pointer(handles, event)
+        machine.write_pointer(handles + machine.pointer_size, semaphore)
+        for name in ["WaitForMultipleObjects", "WaitForMultipleObjectsEx"]:
+            wait = machine.resolve_export("kernel32.dll", name = name)
+            args = [2, handles, 1, 0] + ([0] if name.endswith("Ex") else [])
+            # Wait-all timeout must not consume the ready semaphore.
+            result = machine.call(wait, args = args)
+            equal(result.reason, "return")
+            equal(result.value, 0x102)
+            args[2] = 0
+            equal(machine.call(wait, args = args).value, 1)
+            equal(machine.call(wait, args = args).value, 0x102)
+            machine.call(machine.resolve_export("kernel32.dll", name = "ReleaseSemaphore"), args = [semaphore, 1, 0])
+        # Suspended waits must retain the same full-width handle array.
+        machine.call(machine.resolve_export("kernel32.dll", name = "WaitForMultipleObjects"), args = [2, handles, 0, 0])
+        current = {}
+        kernel.state["current_thread"] = current
+        result = machine.call(machine.resolve_export("kernel32.dll", name = "WaitForMultipleObjectsEx"), args = [2, handles, 0, 10, 0])
+        equal(result.reason, "wait")
+        equal(current["wait"]["handles"], [event, semaphore])
+        kernel.state["current_thread"] = None
+        for count in [0, 65]:
+            equal(machine.call(machine.resolve_export("kernel32.dll", name = "WaitForMultipleObjects"), args = [count, 0, 0, 0]).value, 0xffffffff)
+            equal(kernel.state["last_error"], 87)
+
+def test_kernel_ldr_load_dll_native_pointer_width():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"](virtual_modules = ["msvcrt.dll"])
+        machine.use(kernel)
+        layout = abi["counted_string_layout"](machine.pointer_size)
+        descriptor = machine.allocate(size = layout["Size"])
+        text = binary.encode("MSVCRT.dll", encoding = "utf16le")
+        source = machine.allocate(value = text)
+        machine.write_u16le(descriptor, len(text))
+        machine.write_u16le(descriptor + 2, len(text))
+        machine.write_pointer(descriptor + layout["Buffer"], source)
+        output = machine.allocate(value = b"Z" * (machine.pointer_size + 4))
+        result = machine.call(machine.resolve_export("ntdll.dll", name = "LdrLoadDll"), args = [0, 0, descriptor, output])
+        equal(result.reason, "return")
+        equal(result.value, 0)
+        equal(machine.read_pointer(output), kernel.state["modules"]["msvcrt.dll"])
+        equal(machine.read(output + machine.pointer_size, 4), b"ZZZZ")
+        equal(kernel.state["module_queries"][-1]["module"], "msvcrt.dll")
+
+def test_kernel_system_windows_directory_capacity():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"](environment = {"SystemRoot": "D:/OS"}))
+        for suffix, encoding, width in [("A", "ascii", 1), ("W", "utf16le", 2)]:
+            export = machine.resolve_export("kernel32.dll", name = "GetSystemWindowsDirectory" + suffix)
+            expected = binary.encode("D:\\OS", encoding = encoding, nul = True)
+            required = len(expected) // width
+            equal(machine.call(export, args = [0, 0]).value, required)
+            output = machine.allocate(size = len(expected) + 4)
+            machine.write(output, b"Z" * (len(expected) + 4))
+            equal(machine.call(export, args = [output, required - 1]).value, required)
+            equal(machine.read(output, len(expected) + 4), b"Z" * (len(expected) + 4))
+            result = machine.call(export, args = [output, required])
+            equal(result.reason, "return")
+            equal(result.value, required - 1)
+            equal(machine.read(output, len(expected)), expected)
+            equal(machine.read(output + len(expected), 4), b"ZZZZ")
+
+def test_kernel_unicode_string_ex_native_boundaries():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(module["kernel32_plugin"]())
+        initialize = machine.resolve_export("ntdll.dll", name = "RtlInitUnicodeStringEx")
+        size = 16 if architecture == "amd64" else 8
+        pointer_offset = 8 if architecture == "amd64" else 4
+        descriptor = machine.allocate(size = size + 4)
+        # Native NTDLL clears lengths/padding on overflow but keeps Buffer.
+        # No terminator is needed once the source exceeds the length limit.
+        for data, status, length in [
+            (None, 0, 0),
+            (b"\x00\x00", 0, 0),
+            (b"\x00\xd8A\x00\x00\x00", 0, 4),
+            (binary.encode("A" * 32766, encoding = "utf16le", nul = True), 0, 65532),
+            (b"A\x00" * 32767, 0xc0000106, 0),
+        ]:
+            source = machine.allocate(value = data) if data != None else 0
+            machine.write(descriptor, b"Z" * (size + 4))
+            result = machine.call(initialize, args = [descriptor, source])
+            equal(result.reason, "return")
+            equal(result.value, status)
+            equal(machine.read_u16le(descriptor), length)
+            equal(machine.read_u16le(descriptor + 2), length + 2 if source and status == 0 else 0)
+            equal(machine.read_pointer(descriptor + pointer_offset), source)
+            if architecture == "amd64":
+                equal(machine.read_u32le(descriptor + 4), 0)
+            equal(machine.read(descriptor + size, 4), b"ZZZZ")
+
 def test_device_family_info_optional_outputs():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     for architecture in ["x86", "amd64"]:
@@ -1450,12 +3418,84 @@ def test_kernel_init_once_executes_callback_once_and_preserves_context():
         equal(machine.call(target, args = [once, callback, 7, context]).value, 1)
         machine.write_pointer(context, 0)
         equal(machine.call(target, args = [once, callback, 9, context]).value, 1)
-        equal((calls, machine.read_pointer(context), machine.read_pointer(once)), ([7], context_value, 2))
+        equal((calls, machine.read_pointer(context), machine.read_pointer(once)), ([7], context_value, context_value | 2))
     event_name = machine.allocate(value = binary.encode("Sample", encoding = "utf16le", nul = True))
     create_event = machine.resolve_export("kernel32.dll", name = "CreateEventExW")
     event = machine.call(create_event, args = [0, event_name, 3, 0x1f0003]).value
     true(event != 0)
     equal(machine.call(machine.resolve_export("kernel32.dll", name = "WaitForSingleObject"), args = [event, 0]).value, 0)
+
+
+def test_kernel_init_once_begin_complete_matches_native_states():
+    module=testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86","amd64"]:
+        machine=emulator.machine(code=b"\xc3",architecture=architecture)
+        kernel=module["kernel32_plugin"]()
+        machine.use([kernel])
+        begin=machine.resolve_export("kernel32.dll",name="InitOnceBeginInitialize")
+        complete=machine.resolve_export("kernel32.dll",name="InitOnceComplete")
+        once=machine.allocate(size=machine.pointer_size)
+        pending=machine.allocate(value=binary.u32le(0xaabbccdd))
+        context=machine.allocate(size=machine.pointer_size)
+        value=0x12345678 if architecture=="x86" else 0x123456789abcdef0
+        machine.write_pointer(context,value)
+        kernel.state["last_error"]=123
+        equal(machine.call(begin,args=[once,1,pending,context]).value,0)
+        equal((kernel.state["last_error"],machine.read_u32le(pending),machine.read_pointer(context)),(31,0xaabbccdd,value))
+        for flags in [3,4]:
+            equal(machine.call(begin,args=[once,flags,pending,context]).value,0)
+            equal((kernel.state["last_error"],machine.read_pointer(once),machine.read_u32le(pending)),(87,0,0xaabbccdd))
+        kernel.state["last_error"]=123
+        equal(machine.call(begin,args=[once,0,pending,context]).value,1)
+        equal((machine.read_pointer(once),machine.read_u32le(pending),machine.read_pointer(context),kernel.state["last_error"]),(1,1,value,123))
+        for flags,invalid_context in [(0,3),(4,4),(2,0)]:
+            equal(machine.call(complete,args=[once,flags,invalid_context]).value,0)
+            equal((machine.read_pointer(once),kernel.state["last_error"]),(1,87))
+        equal(machine.call(complete,args=[once,0,value]).value,1)
+        equal(machine.read_pointer(once),value|2)
+        machine.write_pointer(context,0)
+        equal(machine.call(begin,args=[once,1,pending,context]).value,1)
+        equal((machine.read_u32le(pending),machine.read_pointer(context)),(0,value))
+        equal(machine.call(complete,args=[once,0,0]).value,0)
+        equal((machine.read_pointer(once),kernel.state["last_error"]),(value|2,31))
+        # Memory, not a stale completed-context cache, controls reinitialization.
+        machine.write_pointer(once,0)
+        equal(machine.call(begin,args=[once,0,pending,0]).value,1)
+        equal(machine.call(complete,args=[once,4,0]).value,1)
+        equal(machine.read_pointer(once),0)
+        equal(machine.call(begin,args=[once,2,pending,context]).value,1)
+        equal(machine.read_pointer(once),3)
+        equal(machine.call(begin,args=[once,2,pending,context]).value,1)
+        for flags in [0,6]:
+            equal(machine.call(complete,args=[once,flags,0]).value,0)
+            equal((machine.read_pointer(once),kernel.state["last_error"]),(3,87))
+        equal(machine.call(complete,args=[once,2,value]).value,1)
+        equal(machine.read_pointer(once),value|2)
+
+def test_kernel_init_once_execute_retry_and_private_context():
+    module=testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86","amd64"]:
+        machine=emulator.machine(code=b"\xc3",architecture=architecture)
+        kernel=module["kernel32_plugin"]()
+        machine.use([kernel])
+        once=machine.allocate(size=machine.pointer_size)
+        calls=[]
+        def initialize(event):
+            calls.append(event.args[1])
+            true(event.args[2]!=0)
+            event.machine.write_pointer(event.args[2],0x1234)
+            return event.args[1]
+        callback=machine.provide_export(initialize,module="sample.dll",name="Once",argc=3)
+        execute=machine.resolve_export("kernel32.dll",name="InitOnceExecuteOnce")
+        equal(machine.call(execute,args=[once,callback,0,0]).value,0)
+        equal((machine.read_pointer(once),kernel.state["last_error"]),(0,31))
+        output=machine.allocate(size=machine.pointer_size)
+        equal(machine.call(execute,args=[once,callback,0,output]).value,0)
+        equal((machine.read_pointer(once),machine.read_pointer(output),kernel.state["last_error"]),(0,0x1234,31))
+        equal(machine.call(execute,args=[once,callback,1,0]).value,1)
+        equal(machine.read_pointer(once),0x1236)
+        equal(machine.call(execute,args=[once,callback,9,0]).value,1)
+        equal(calls,[0,0,1])
 
 def test_kernel_resolves_rva_delay_imports():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -2495,6 +4535,98 @@ def test_kernel_thread_page_priority_and_process_termination():
     equal(result.reason, "process-exit")
     equal(kernel.state["process_exit_code"], 7)
 
+def test_rtl_relative_nt_path_status_and_buffer_ownership():
+    win32 = testing.module("@stdlib//windows/selfreg:win32.star")
+    for arch in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = arch)
+        kernel = win32["kernel32_plugin"]()
+        machine.use(kernel)
+        kernel.state["current_directory"] = "C:" + chr(92) + "Caller"
+        convert = machine.resolve_export("ntdll.dll", name = "RtlDosPathNameToRelativeNtPathName_U_WithStatus")
+        legacy = machine.resolve_export("ntdll.dll", name = "RtlDosPathNameToRelativeNtPathName_U")
+        size = 16 if arch == "amd64" else 8
+        relative_size = size + 2 * machine.pointer_size
+        storage = machine.allocate(value = b"Q" * (size + 16))
+        output = storage + 8
+        rel_storage = machine.allocate(value = b"R" * (relative_size + 16))
+        relative = rel_storage + 8
+        part_storage = machine.allocate(value = b"P" * (machine.pointer_size + 16))
+        part = part_storage + 8
+        # Independent actual NTDLL d8b90 captures: rejected buffers untouched.
+        for text, expected in [(None, 0xc0000033), ("", 0xc0000033), ("D:" + chr(92) + "a" * 32767, 0xc0000106)]:
+            path = machine.allocate(value = binary.encode(text, encoding = "utf16le", nul = True)) if text != None else 0
+            result = machine.call(convert, args = [path, output, part, relative])
+            equal(result.reason, "return", result.detail)
+            equal(result.value, expected)
+            equal(machine.read(storage, size + 16), b"Q" * (size + 16))
+            equal(machine.read(rel_storage, relative_size + 16), b"R" * (relative_size + 16))
+            equal(kernel.state["local_allocations"], {})
+        text = "D:" + chr(92) + "Native" + chr(92) + chr(0x1f600) + ".DLL"
+        path = machine.allocate(value = binary.encode(text, encoding = "utf16le", nul = True))
+        encoded = binary.encode(chr(92) + "??" + chr(92) + text, encoding = "utf16le", nul = True)
+        result = machine.call(convert, args = [path, output, part, relative])
+        equal(result.reason, "return", result.detail)
+        equal(result.value, 0)  # NT_SUCCESS, not the Boolean wrapper's 1.
+        buffer = machine.read_pointer(output + (8 if arch == "amd64" else 4))
+        equal(machine.read_u16le(output), len(encoded) - 2)
+        equal(machine.read_u16le(output + 2), len(encoded))
+        equal(machine.read(buffer, len(encoded)), encoded)
+        equal(machine.read_cstring(machine.read_pointer(part), encoding = "utf16le"), chr(0x1f600) + ".DLL")
+        equal(machine.read_pointer(part) - buffer, len(binary.encode(chr(92) + "??" + chr(92) + "D:" + chr(92) + "Native" + chr(92), encoding = "utf16le")))
+        equal(machine.read(relative, relative_size), b"\x00" * relative_size)
+        equal(machine.read(storage, 8), b"Q" * 8)
+        equal(machine.read(output + size, 8), b"Q" * 8)
+        equal(machine.read(rel_storage, 8), b"R" * 8)
+        equal(machine.read(relative + relative_size, 8), b"R" * 8)
+        equal(machine.read(part_storage, 8), b"P" * 8)
+        equal(machine.read(part + machine.pointer_size, 8), b"P" * 8)
+        machine.call(machine.resolve_export("ntdll.dll", name = "RtlReleaseRelativeName"), args = [relative])
+        machine.call(machine.resolve_export("ntdll.dll", name = "RtlFreeUnicodeString"), args = [output])
+        equal(kernel.state["local_allocations"], {})
+        # Legacy Boolean ABI is unchanged and shares the owned allocation/free.
+        equal(machine.call(legacy, args = [path, output, 0, 0]).value, 1)
+        machine.call(machine.resolve_export("ntdll.dll", name = "RtlFreeUnicodeString"), args = [output])
+        for unsupported in ["relative.dll", "C:" + chr(92) + "Caller" + chr(92) + "same.dll"]:
+            path = machine.allocate(value = binary.encode(unsupported, encoding = "utf16le", nul = True))
+            equal(machine.call(convert, args = [path, output, part, relative]).reason, "plugin")
+            equal(kernel.state["local_allocations"], {})
+
+def test_cryptoapi_delay_contract_shares_owned_contexts():
+    crypto_module = testing.module("@stdlib//windows/selfreg:crypto.star")
+    win32 = testing.module("@stdlib//windows/selfreg:win32.star")
+    contract = "api-ms-win-security-cryptoapi-l1-1-0.dll"
+    for arch in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = arch)
+        kernel = win32["kernel32_plugin"](virtual_modules = [contract])
+        provider = crypto_module["cryptoapi_plugin"](kernel = kernel)
+        machine.use([kernel, provider])
+        name = machine.allocate(value = binary.encode(contract, nul = True))
+        loaded = machine.call(machine.resolve_export("kernel32.dll", name = "LoadLibraryExA"), args = [name, 0, 0])
+        equal(loaded.reason, "return", loaded.detail)
+        not_equal(loaded.value, 0)
+        resolve = machine.resolve_export("kernel32.dll", name = "GetProcAddress")
+        acquire_name = machine.allocate(value = binary.encode("CryptAcquireContextW", nul = True))
+        release_name = machine.allocate(value = binary.encode("CryptReleaseContext", nul = True))
+        acquire = machine.call(resolve, args = [loaded.value, acquire_name]).value
+        release = machine.call(resolve, args = [loaded.value, release_name]).value
+        not_equal(acquire, 0)
+        not_equal(release, 0)
+        output = machine.allocate(value = b"Q" * 16)
+        equal(machine.call(acquire, args = [output, 0, 0, 1, 0xf0000000]).value, 1)
+        handle = machine.read_pointer(output)
+        true(handle in provider.state["providers"])
+        equal(machine.read(output + machine.pointer_size, 16 - machine.pointer_size), b"Q" * (16 - machine.pointer_size))
+        # A context acquired via the delay contract is owned by the same
+        # provider and may be released through Advapi32 (and vice versa).
+        equal(machine.call(machine.resolve_export("advapi32.dll", name = "CryptReleaseContext"), args = [handle, 0]).value, 1)
+        equal(machine.call(release, args = [handle, 0]).value, 0)
+        equal(machine.call(machine.resolve_export("advapi32.dll", name = "CryptAcquireContextW"), args = [output, 0, 0, 1, 0xf0000000]).value, 1)
+        handle = machine.read_pointer(output)
+        equal(machine.call(release, args = [handle, 0]).value, 1)
+        equal(provider.state["providers"], {})
+        unknown = machine.allocate(value = binary.encode("NotACryptoExport", nul = True))
+        equal(machine.call(resolve, args = [loaded.value, unknown]).value, 0)
+
 def test_cryptoapi_verification_context_lifecycle():
     module = testing.module("@stdlib//windows/selfreg:crypto.star")
     true(module["_cryptoapi_provider_module"]("advapi32.dll"))
@@ -2568,6 +4700,190 @@ def test_cryptoapi_verification_context_lifecycle():
     true(module["_pkcs1_digest_matches"](encoded, crypto.hash("sha256", b"abc"), prefix))
     true(not module["_pkcs1_digest_matches"](binary.concat([encoded[:-1], b"\x00"]), crypto.hash("sha256", b"abc"), prefix))
 
+def test_security_adjusts_only_owned_privileges():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        security = module["security_plugin"](kernel = kernel, token_privileges = {17: 0, 18: 1})
+        machine.use([kernel, security])
+        output = machine.allocate(size = machine.pointer_size)
+        process = machine.resolve_export("advapi32.dll", name = "OpenProcessToken")
+        equal(machine.call(process, args = [0xffffffff, 0x2a, output]).value, 1)
+        primary = machine.read_pointer(output)
+        duplicate = machine.resolve_export("advapi32.dll", name = "DuplicateTokenEx")
+        equal(machine.call(duplicate, args = [primary, 0x2a, 0, 2, 2, output]).value, 1)
+        token = machine.read_pointer(output)
+        adjust = machine.resolve_export("api-ms-win-security-base-l1-1-0.dll", name = "AdjustTokenPrivileges")
+        request = binary.builder()
+        request.u32le(2)
+        for luid in [17, 999]:
+            request.u64le(luid)
+            request.u32le(2)
+        changes = machine.allocate(value = request.bytes())
+        previous = machine.allocate(value = b"Z" * 24)
+        required = machine.allocate(size = 4)
+        # Failed previous-state sizing must not mutate the token.
+        equal(machine.call(adjust, args = [token, 0, changes, 15, previous, required]).value, 0)
+        equal(kernel.state["last_error"], 122)
+        equal(machine.read_u32le(required), 16)
+        equal(machine.read(previous, 24), b"Z" * 24)
+        equal(security.state["tokens"][token]["value"]["privileges"][17], 0)
+        capacity = 0x7fff00000010 if architecture == "amd64" else 16
+        equal(machine.call(adjust, args = [token, 0, changes, capacity, previous, required]).value, 1)
+        equal(kernel.state["last_error"], 1300)  # TRUE, but not all assigned.
+        equal(machine.read_u32le(previous), 1)
+        equal(machine.read_u64le(previous + 4), 17)
+        equal(machine.read_u32le(previous + 12), 0)
+        equal(machine.read(previous + 16, 8), b"Z" * 8)
+        privileges = security.state["tokens"][token]["value"]["privileges"]
+        equal(privileges, {17: 2, 18: 1})
+        equal(security.state["process_token"]["privileges"], {17: 0, 18: 1})
+        # Restore exactly the returned previous state.
+        equal(machine.call(adjust, args = [token, 0, previous, 0, 0, 0]).value, 1)
+        equal(kernel.state["last_error"], 0)
+        equal(privileges[17], 0)
+        query = machine.resolve_export("advapi32.dll", name = "GetTokenInformation")
+        equal(machine.call(query, args = [token, 3, previous, 24, required]).value, 0)
+        equal(kernel.state["last_error"], 122)
+        equal(machine.read_u32le(required), 28)
+        data = machine.allocate(size = 28)
+        equal(machine.call(query, args = [token, 3, data, 28, required]).value, 1)
+        equal(machine.read_u32le(data), 2)
+        equal(machine.read_u64le(data + 4), 17)
+        equal(machine.read_u64le(data + 16), 18)
+        # Removed privileges cannot be re-added by adjustment.
+        machine.write_u32le(changes, 1)
+        machine.write_u32le(changes + 12, 4)
+        equal(machine.call(adjust, args = [token, 0, changes, 0, 0, 0]).value, 1)
+        equal(17 in privileges, False)
+        machine.write_u32le(changes + 12, 2)
+        equal(machine.call(adjust, args = [token, 0, changes, 0, 0, 0]).value, 1)
+        equal(kernel.state["last_error"], 1300)
+        equal(17 in privileges, False)
+
+def test_security_token_object_lifetime():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        security = module["security_plugin"](kernel = kernel)
+        machine.use([kernel, security])
+        kernel.state["next_handle"] = 0x100040000 if architecture == "amd64" else 0x40000
+        output = machine.allocate(size = machine.pointer_size + 4)
+        process = machine.resolve_export("advapi32.dll", name = "OpenProcessToken")
+        thread = machine.resolve_export("advapi32.dll", name = "OpenThreadToken")
+        duplicate = machine.resolve_export("advapi32.dll", name = "DuplicateTokenEx")
+        assign = machine.resolve_export("advapi32.dll", name = "SetThreadToken")
+        query = machine.resolve_export("advapi32.dll", name = "GetKernelObjectSecurity")
+        set_security = machine.resolve_export("advapi32.dll", name = "SetKernelObjectSecurity")
+        current_process = 0xffffffffffffffff if architecture == "amd64" else 0xffffffff
+        current_thread = 0xfffffffffffffffe if architecture == "amd64" else 0xfffffffe
+        machine.write(output, b"Z" * (machine.pointer_size + 4))
+        equal(machine.call(thread, args = [current_thread, 0x20008, 1, output]).value, 0)
+        equal(kernel.state["last_error"], 1008)
+        equal(machine.read(output, machine.pointer_size + 4), b"Z" * (machine.pointer_size + 4))
+        equal(machine.call(process, args = [current_process, 0x6000e, output]).value, 1)
+        primary = machine.read_pointer(output)
+        equal(machine.read(output + machine.pointer_size, 4), b"ZZZZ")
+        required = machine.allocate(size = 4)
+        equal(machine.call(query, args = [primary, 4, 0, 0, required]).value, 0)
+        equal(kernel.state["last_error"], 122)
+        size = machine.read_u32le(required)
+        descriptor = machine.allocate(size = size)
+        equal(machine.call(query, args = [primary, 4, descriptor, size, required]).value, 1)
+        original = machine.read(descriptor, size)
+        dacl = machine.read_u32le(descriptor + 16)
+        true(dacl >= 20)  # No NULL/permissive DACL substitution.
+        equal(machine.read_u16le(descriptor + dacl + 4), 2)
+        equal(machine.call(assign, args = [0, primary]).value, 0)
+        equal(kernel.state["last_error"], 1349)
+        attributes = machine.allocate(size = 24 if architecture == "amd64" else 12)
+        machine.write_u32le(attributes, 24 if architecture == "amd64" else 12)
+        source_descriptor = machine.allocate(value = original)
+        machine.write_pointer(attributes + machine.pointer_size, source_descriptor)
+        equal(machine.call(duplicate, args = [primary, 0x6000e, attributes, 2, 2, output]).value, 1)
+        copied = machine.read_pointer(output)
+        machine.free(source_descriptor)  # Duplicate owns its descriptor bytes.
+        true(copied != primary)
+        tighter = module["_sddl_descriptor"]("O:SYG:SYD:(A;;GA;;;SY)")
+        protected = machine.allocate(value = tighter)
+        equal(machine.call(set_security, args = [copied, 4, protected]).value, 1)
+        equal(machine.call(query, args = [primary, 4, descriptor, size, required]).value, 1)
+        equal(machine.read(descriptor, size), original)  # Independent duplicate.
+        equal(machine.call(assign, args = [0, copied]).value, 1)
+        close = machine.resolve_export("kernel32.dll", name = "CloseHandle")
+        equal(machine.call(close, args = [copied]).value, 1)
+        equal(machine.call(thread, args = [current_thread, 0x20008, 1, output]).value, 1)
+        reopened = machine.read_pointer(output)
+        true(reopened != copied)
+        equal(machine.call(query, args = [reopened, 4, descriptor, size, required]).value, 1)
+        equal(machine.read(descriptor, len(tighter)), tighter)
+        # A different emulated thread has no inherited impersonation token.
+        kernel.state["current_thread"] = {"id": 16}
+        equal(machine.call(thread, args = [current_thread, 8, 1, output]).value, 0)
+        equal(kernel.state["last_error"], 1008)
+        kernel.state["current_thread"] = None
+        equal(machine.call(machine.resolve_export("advapi32.dll", name = "RevertToSelf")).value, 1)
+        equal(machine.call(thread, args = [current_thread, 8, 1, output]).value, 0)
+        equal(kernel.state["last_error"], 1008)
+        equal(machine.call(process, args = [current_process, 0x20008, output]).value, 1)
+        read_only = machine.read_pointer(output)
+        equal(machine.call(set_security, args = [read_only, 4, protected]).value, 0)
+        equal(kernel.state["last_error"], 5)
+        equal(machine.call(process, args = [current_process, 8, output]).value, 1)
+        query_only = machine.read_pointer(output)
+        equal(machine.call(query, args = [query_only, 4, descriptor, size, required]).value, 0)
+        equal(kernel.state["last_error"], 5)
+        equal(machine.call(close, args = [primary]).value, 1)
+        equal(machine.call(duplicate, args = [primary, 0x6000e, 0, 2, 2, output]).value, 0)
+        equal(kernel.state["last_error"], 6)
+        equal(machine.call(query, args = [0xdeadbeef, 4, descriptor, size, required]).value, 0)
+        equal(kernel.state["last_error"], 6)
+
+def test_nt_open_process_owned_query_handle():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture, width in [("x86", 4), ("amd64", 8)]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"]()
+        machine.use([kernel, module["security_plugin"](kernel = kernel)])
+        kernel.state["last_error"] = 0x1234
+        kernel.state["next_handle"] = 0x100040000 if width == 8 else 0x40000
+        target = machine.resolve_export("ntdll.dll", name = "NtOpenProcess")
+        output = machine.allocate(value = b"\xa5" * (width + 8))
+        attributes = machine.allocate(value = b"\x00" * (48 if width == 8 else 24))
+        machine.write_u32le(attributes, 48 if width == 8 else 24)
+        client = machine.allocate(value = b"\x00" * (width * 2))
+        machine.write_pointer(client, 4)
+        result = machine.call(target, args = [output, 0xfeed00001000 if width == 8 else 0x1000, attributes, client])
+        equal(result.reason, "return")
+        equal(result.value, 0)
+        handle = machine.read_pointer(output)
+        equal(handle, 0x100040000 if width == 8 else 0x40000)
+        equal(machine.read(output + width, 8), b"\xa5" * 8)
+        equal(kernel.state["handles"][handle], {"kind": "process_reference", "value": {"id": 4, "access": 0x1000, "inherit": False}})
+        equal(kernel.state["last_error"], 0x1234)
+        close = machine.resolve_export("ntdll.dll", name = "NtClose")
+        equal(machine.call(close, args = [handle]).value, 0)
+        true(handle not in kernel.state["handles"])
+        # Rejection must neither publish a handle nor overwrite its output.
+        machine.write(output, b"\xa5" * (width + 8))
+        before = dict(kernel.state["handles"])
+        machine.write_pointer(client, 99)
+        equal(machine.call(target, args = [output, 0x1000, attributes, client]).value, 0xc000000b)
+        equal(machine.read(output, width + 8), b"\xa5" * (width + 8))
+        equal(kernel.state["handles"], before)
+        machine.write_pointer(client, 4)
+        machine.write_u32le(attributes, 0)
+        equal(machine.call(target, args = [output, 0x1000, attributes, client]).value, 0xc000000d)
+        equal(machine.read(output, width + 8), b"\xa5" * (width + 8))
+        machine.write_u32le(attributes, 48 if width == 8 else 24)
+        result = machine.call(target, args = [output, 0x1fffff, attributes, client])
+        equal(result.reason, "plugin")
+        true("outside limited current-process queries" in result.detail)
+        equal(kernel.state["handles"], before)
+        equal(machine.read(output, width + 8), b"\xa5" * (width + 8))
+
 def test_security_access_mapping():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     true(module["_security_provider_module"]("advapi32.dll"))
@@ -2586,36 +4902,39 @@ def test_security_access_mapping():
     machine.use([kernel, security])
     output = machine.allocate(size = 8)
     open_thread_token = machine.resolve_export("api-ms-win-core-processthreads-l1-1-0.dll", name = "OpenThreadToken")
-    equal(machine.call(open_thread_token, args = [0xfffffffffffffffe, 8, 1, output]).value, 1)
-    equal(machine.read_u32le(output), 1)
+    equal(machine.call(open_thread_token, args = [0xfffffffffffffffe, 8, 1, output]).value, 0)
+    equal(kernel.state["last_error"], 1008)
+    open_process_token = machine.resolve_export("advapi32.dll", name = "OpenProcessToken")
+    equal(machine.call(open_process_token, args = [0xffffffffffffffff, 10, output]).value, 1)
+    process_token = machine.read_pointer(output)
     revert = machine.resolve_export("api-ms-win-security-base-l1-1-0.dll", name = "RevertToSelf")
     equal(machine.call(revert).value, 1)
     required = machine.allocate(size = 4)
     token_information = machine.resolve_export("api-ms-win-security-base-l1-1-0.dll", name = "GetTokenInformation")
-    equal(machine.call(token_information, args = [1, 1, 0, 0, required]).value, 0)
+    equal(machine.call(token_information, args = [process_token, 1, 0, 0, required]).value, 0)
     information_size = machine.read_u32le(required)
     true(information_size > 16)
     information = machine.allocate(size = information_size)
-    equal(machine.call(token_information, args = [1, 1, information, information_size, required]).value, 1)
+    equal(machine.call(token_information, args = [process_token, 1, information, information_size, required]).value, 1)
     equal(machine.read_pointer(information), information + 16)
     is_appcontainer = machine.allocate(size = 4)
-    equal(machine.call(token_information, args = [1, 29, is_appcontainer, 4, required]).value, 1)
+    equal(machine.call(token_information, args = [process_token, 29, is_appcontainer, 4, required]).value, 1)
     equal(machine.read_u32le(required), 4)
     equal(machine.read_u32le(is_appcontainer), 0)
     session_id = machine.allocate(size = 4)
-    equal(machine.call(token_information, args = [1, 12, session_id, 4, required]).value, 1)
+    equal(machine.call(token_information, args = [process_token, 12, session_id, 4, required]).value, 1)
     equal(machine.read_u32le(required), 4)
     equal(machine.read_u32le(session_id), 0)
     integrity = machine.allocate(size = 64)
-    equal(machine.call(token_information, args = [1, 25, integrity, 64, required]).value, 1)
+    equal(machine.call(token_information, args = [process_token, 25, integrity, 64, required]).value, 1)
     integrity_sid = machine.read_pointer(integrity)
     equal(machine.read_u32le(integrity + 8), 0x60)
     equal(machine.read(integrity_sid, 8), b"\x01\x01\x00\x00\x00\x00\x00\x10")
     equal(machine.read_u32le(integrity_sid + 8), 12288)
     duplicated = machine.allocate(size = 8)
     duplicate_token = machine.resolve_export("api-ms-win-security-base-l1-1-0.dll", name = "DuplicateTokenEx")
-    equal(machine.call(duplicate_token, args = [1, 0x2000c, 0, 1, 2, duplicated]).value, 1)
-    equal(machine.read_pointer(duplicated), 2)
+    equal(machine.call(duplicate_token, args = [process_token, 0x2000c, 0, 1, 2, duplicated]).value, 1)
+    true(machine.read_pointer(duplicated) != process_token)
     object_required = machine.allocate(size = 4)
     get_object_security = machine.resolve_export("api-ms-win-security-base-l1-1-0.dll", name = "GetKernelObjectSecurity")
     equal(machine.call(get_object_security, args = [0xffffffff, 4, 0, 0, object_required]).value, 0)
@@ -3292,7 +5611,257 @@ def test_kernel_file_information_reports_memory_backed_size():
     equal(machine.read_u32le(information + 36), 10)
     equal(machine.read_u32le(information + 40), 1)
 
+def test_secure_wide_tokenizer_matches_native_utf16_contexts():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    # Independent target msvcrt.dll wcstok_s (63960) captures, including the
+    # end-pointer context and non-BMP UTF-16 offsets. No host tokenization oracle.
+    captures = [
+        ("2000200061002c002c0062003b000000", "20002c003b000000", [(4,8),(10,14),(None,14),(None,14)], "20002000610000002c00620000000000"),
+        ("6100620063000000", "0000", [(0,6),(None,6),(None,6)], "6100620063000000"),
+        ("0000", "2c000000", [(None,0),(None,0)], "0000"),
+        ("2c002c002c000000", "2c000000", [(None,6),(None,6)], "2c002c002c000000"),
+        ("3dd800de2c00b2030000", "2c000000", [(0,6),(6,8),(None,8)], "3dd800de0000b2030000"),
+    ]
+    for architecture in ["x86","amd64"]:
+        for raw_hex,delim_hex,expected,final_hex in captures:
+            machine=emulator.machine(code=b"\xc3",architecture=architecture)
+            crt=module["msvcrt_plugin"]()
+            machine.use(crt)
+            raw=binary.decode(raw_hex,"hex")
+            delimiters=binary.decode(delim_hex,"hex")
+            source=machine.allocate(value=binary.concat([raw,b"GUARDEND"]).bytes())
+            delim=machine.allocate(value=binary.concat([delimiters,b"DELIMEND"]).bytes())
+            output=machine.allocate(value=b"ZZZZZZZZZZZZZZZZZZZZZZZZ")
+            context=output+8
+            machine.write_pointer(context,0)
+            function=machine.resolve_export("msvcrt.dll",name="wcstok_s")
+            actual=[]
+            for index in range(len(expected)):
+                result=machine.call(function,args=[source if index==0 else 0,delim,context])
+                equal(result.reason,"return",result.detail)
+                actual.append((result.value-source if result.value else None,machine.read_pointer(context)-source))
+            equal(actual,expected)
+            equal(machine.read(source,len(raw)),binary.decode(final_hex,"hex"))
+            equal(machine.read(source+len(raw),8),b"GUARDEND")
+            equal(machine.read(delim,len(delimiters)+8),binary.concat([delimiters,b"DELIMEND"]).bytes())
+            equal(machine.read(output,8),b"ZZZZZZZZ")
+            equal(machine.read(context+machine.pointer_size,16-machine.pointer_size),b"Z"*(16-machine.pointer_size))
+            equal(crt.state.get("errno",{}),{})
+
+
+def test_secure_wide_tokenizer_contexts_do_not_alias_and_invalid_handler_stops():
+    module=testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86","amd64"]:
+        machine=emulator.machine(code=b"\xc3",architecture=architecture)
+        crt=module["msvcrt_plugin"]()
+        machine.use(crt)
+        function=machine.resolve_export("msvcrt.dll",name="wcstok_s")
+        def wide(text):
+            return machine.allocate(value=binary.encode(text,encoding="utf16le",nul=True))
+        a,b=wide("one,two;three"),wide("α|β")
+        ca,cb=machine.allocate(size=machine.pointer_size),machine.allocate(size=machine.pointer_size)
+        comma,semi,pipe=wide(","),wide(";"),wide("|")
+        for source,delim,context,wanted in [(a,comma,ca,a),(b,pipe,cb,b),(0,semi,ca,a+8),(0,pipe,cb,b+4),(0,semi,ca,a+16)]:
+            result=machine.call(function,args=[source,delim,context])
+            equal(result.reason,"return",result.detail)
+            equal(result.value,wanted)
+        equal(machine.read_pointer(cb),b+6)
+        equal(machine.read_pointer(ca),a+26)
+        c=wide("replacement")
+        equal(machine.call(function,args=[c,comma,ca]).value,c)
+        equal(machine.read_pointer(ca),c+22)
+        equal(crt.state["wcstok_next"],0)
+        for invalid in ["context","delimiter","input"]:
+            machine=emulator.machine(code=b"\xc3",architecture=architecture)
+            crt=module["msvcrt_plugin"]()
+            machine.use(crt)
+            raw=binary.encode("a,b",encoding="utf16le",nul=True)
+            source=machine.allocate(value=raw)
+            delim=machine.allocate(value=binary.encode(",",encoding="utf16le",nul=True))
+            context=machine.allocate(size=machine.pointer_size)
+            result=machine.call(machine.resolve_export("msvcrt.dll",name="wcstok_s"),args=[0 if invalid=="input" else source,0 if invalid=="delimiter" else delim,0 if invalid=="context" else context])
+            equal(result.reason,"CRT wcstok_s invalid-parameter handler is not modeled")
+            equal(machine.read(source,len(raw)),raw)
+            equal(machine.read_pointer(context),0)
+            equal(machine.read_u32le(crt.state["errno"].values()[0]),22)
+
+
+def test_legacy_wcsicmp_null_arguments_match_native():
+    # Windows 26300.9457 AMD64 MSVCRT: _wcsicmp RVA 60a00, errno 7f10.
+    # Native default handler captured context, looked up genuine .pdata,
+    # ran native RtlVirtualUnwind, emitted a diagnostic, and returned normally.
+    module=testing.module("@stdlib//windows/selfreg:win32.star")
+    machine=emulator.machine(code=b"\xc3",architecture="amd64")
+    kernel=module["kernel32_plugin"]()
+    crt=module["msvcrt_plugin"](kernel=kernel)
+    machine.use([kernel,crt])
+    compare=machine.resolve_export("msvcrt.dll",name="_wcsicmp")
+    errno=machine.call(machine.resolve_export("msvcrt.dll",name="_errno")).value
+    raw=b"\x00\x00GUARDEND"
+    empty=machine.allocate(value=raw)
+    for args in [[empty,0],[0,empty],[0,0],[0x1234,0],[0,0x1234]]:
+        machine.write_u32le(errno,123)
+        result=machine.call(compare,args=args)
+        equal(result.reason,"return",result.detail)
+        equal(result.value,0x7fffffff)
+        equal(machine.read_u32le(errno),22)
+        equal(machine.read(empty,len(raw)),raw)
+    equal(len(crt.state["actions"]),5)
+    left=machine.allocate(value=binary.encode("BaTTeRy",encoding="utf16le",nul=True))
+    right=machine.allocate(value=binary.encode("battery",encoding="utf16le",nul=True))
+    machine.write_u32le(errno,123)
+    equal(machine.call(compare,args=[left,right]).value,0)
+    equal(machine.read_u32le(errno),123)
+    # Do not silently apply the legacy contract to a UCRT/API-set export.
+    def modern_callback(event):
+        return module["_crt_legacy_wcsicmp_invalid"](event,errno)
+    modern=machine.provide_export(modern_callback,module="ucrtbase.dll",name="_wcsicmp",argc=2)
+    result=machine.call(machine.resolve_export("ucrtbase.dll",name="_wcsicmp"),args=[empty,0])
+    equal(result.reason,"CRT _wcsicmp invalid-parameter handler is not modeled for this runtime")
+
+
+def test_kernel_large_readonly_file_mapping_is_budgeted_and_lazy():
+    module=testing.module("@stdlib//windows/selfreg:win32.star")
+    size=(17<<20)+8
+    source=binary.concat([b"HEAD",b"x"*(17<<20),b"TAIL"])
+    for architecture in ["x86","amd64"]:
+        for budget in [4<<20,32<<20]:
+            machine=emulator.machine(code=b"\xc3",architecture=architecture,memory_limit=budget)
+            kernel=module["kernel32_plugin"](files={"C:/large.bin":source})
+            machine.use(kernel)
+            path=machine.allocate(value=binary.encode("C:/large.bin",encoding="utf16le",nul=True))
+            def call(name,args):
+                result=machine.call(machine.resolve_export("kernel32.dll",name=name),args=args)
+                equal(result.reason,"return",result.detail)
+                return result.value
+            opened=call("CreateFileW",[path,0x80000000,7,0,3,0,0])
+            mapping=call("CreateFileMappingW",[opened,0,2,0,0,0])
+            true(mapping!=0)
+            entry=kernel.state["paths"]["c:"+chr(92)+"large.bin"]
+            true("data" not in entry,"mapping creation materialized source")
+            # A small EOF range succeeds even when the whole source exceeds
+            # the guest memory budget, and never reads unrelated source bytes.
+            tail=call("MapViewOfFile",[mapping,4,0,17<<20,8])
+            equal(machine.read(tail,8),b"xxxxTAIL")
+            true("data" not in entry)
+            equal(call("UnmapViewOfFile",[tail]),1)
+            equal(call("MapViewOfFile",[mapping,2,0,0,4]),0)
+            equal(kernel.state["last_error"],5)
+            equal(call("MapViewOfFile",[mapping,4,0,size-2,3]),0)
+            equal(kernel.state["last_error"],87)
+            result=machine.call(machine.resolve_export("kernel32.dll",name="MapViewOfFile"),args=[mapping,4,0,0,0])
+            if budget==4<<20:
+                true(result.reason!="return", "over-budget map fabricated an OS result")
+                equal(len(kernel.state["views"]),0)
+                true("data" not in entry)
+            else:
+                equal(result.reason,"return",result.detail)
+                view=result.value
+                true(view!=0)
+                equal(machine.read(view,4),b"HEAD")
+                equal(machine.read(view+size-4,4),b"TAIL")
+                equal(machine.read(view+(1<<20)-1,3),b"xxx")
+                true("data" not in entry)
+                equal(call("UnmapViewOfFile",[view]),1)
+                true(not entry.get("dirty",False))
+            equal(call("CloseHandle",[mapping]),1)
+            equal(call("CloseHandle",[opened]),1)
+
+
+
+def test_registry_backup_restore_effective_token_access():
+    registry_module = testing.module("@stdlib//windows/selfreg:registry.star")
+    win32 = testing.module("@stdlib//windows/selfreg:win32.star")
+    abi = testing.module("@stdlib//windows/emulation:abi.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code=b"\xc3",architecture=architecture)
+        security = win32["security_plugin"](token_privileges={17:0,18:0})
+        registry = registry_module["registry_plugin"](keys=[dict(hive="SYSTEM",key="/BackupProbe")],effective_token_privileges=security.effective_privileges)
+        machine.use([security,registry])
+        width=machine.pointer_size
+        strings=abi["counted_string_layout"](width)
+        objects=abi["object_attributes_layout"](width)
+        raw=binary.encode(r"\Registry\Machine\SYSTEM\BackupProbe",encoding="utf16le")
+        text=machine.allocate(value=raw)
+        name=machine.allocate(size=strings["Size"])
+        machine.write_u16le(name,len(raw))
+        machine.write_u16le(name+2,len(raw))
+        machine.write_pointer(name+strings["Buffer"],text)
+        attrs=machine.allocate(size=objects["Size"])
+        machine.write_u32le(attrs,objects["Size"])
+        machine.write_pointer(attrs+objects["ObjectName"],name)
+        output=machine.allocate(value=b"Z"*(width+4))
+        disposition=machine.allocate(value=b"Z"*8)
+        data=machine.allocate(value=b"abcd")
+        value_name=machine.allocate(size=strings["Size"])
+        high=0x600000000000 if width==8 else 0
+        def call(api,args):
+            result=machine.call(machine.resolve_export("ntdll.dll",name=api),args=args)
+            equal(result.reason,"return")
+            return result.value
+        # Deliberately request full access; backup must not grant write/delete.
+        for privileges,expected in [({17:0,18:0},0),({17:1,18:1},0),({17:2},0x1020019),({18:2},0x1030006),({17:3,18:2},0x103001f)]:
+            security.state["process_token"]["privileges"]=privileges
+            for api in ["NtOpenKeyEx","NtCreateKey"]:
+                machine.write(output,b"Z"*(width+4))
+                machine.write(disposition,b"Z"*8)
+                before=dict(registry.state["handles"])
+                args=[output,0xf003f,attrs,high|12] if api=="NtOpenKeyEx" else [output,0xf003f,attrs,0,0,high|4,disposition]
+                status=call(api,args)
+                equal(status,0 if expected else 0xc0000022)
+                if not expected:
+                    equal(machine.read(output,width+4),b"Z"*(width+4))
+                    equal(machine.read(disposition,8),b"Z"*8)
+                    equal(registry.state["handles"],before)
+                    continue
+                handle=machine.read_pointer(output)
+                equal(registry.state["handle_access"][handle],expected)
+                equal(machine.read(output+width,4),b"ZZZZ")
+                if api=="NtCreateKey":
+                    equal(machine.read_u32le(disposition),2)
+                    equal(machine.read(disposition+4,4),b"ZZZZ")
+                equal(call("NtSetValueKey",[handle,value_name,0,3,data,4]),0 if expected&2 else 0xc0000022)
+                if not expected&0x10000: equal(call("NtDeleteKey",[handle]),0xc0000022)
+        # A thread token replaces (never unions with) process privileges.
+        security.state["process_token"]["privileges"]={17:2,18:2}
+        for level,privileges,expected in [(2,{},0),(1,{17:2,18:2},0),(2,{17:2},0x1020019),(3,{18:2},0x1030006)]:
+            security.state["thread_tokens"][8]=dict(type=2,impersonation_level=level,privileges=privileges)
+            equal(call("NtOpenKeyEx",[output,0,attrs,4]),0 if expected else 0xc0000022)
+            if expected: equal(registry.state["handle_access"][machine.read_pointer(output)],expected)
+        security.state["thread_tokens"].clear()
+        equal(call("NtOpenKeyEx",[output,0,attrs,4]),0)
+        equal(registry.state["handle_access"][machine.read_pointer(output)],0x103001f)
+        # A transaction view keeps the same dynamic token query, not a snapshot.
+        child=registry._fork(0x20000)
+        def child_open(event): return child._dispatch(event, "ntopenkeyex")
+        child_address=machine.provide_export(child_open,module="probe",name="OpenChild",argc=4)
+        security.state["process_token"]["privileges"]={}
+        denied=machine.call(child_address,args=[output,0,attrs,4])
+        equal(denied.reason,"return")
+        equal(denied.value,0xc0000022)
+        security.state["process_token"]["privileges"]={17:2}
+        allowed=machine.call(child_address,args=[output,0,attrs,4])
+        equal(allowed.reason,"return")
+        equal(allowed.value,0)
+        equal(child.state["handle_access"][machine.read_pointer(output)],0x1020019)
+        # Unknown key creation remains fail-closed before any mutation.
+        missing=binary.encode(r"\Registry\Machine\SYSTEM\MissingBackupKey",encoding="utf16le")
+        pointer=machine.allocate(value=missing)
+        machine.write_u16le(name,len(missing))
+        machine.write_u16le(name+2,len(missing))
+        machine.write_pointer(name+strings["Buffer"],pointer)
+        security.state["process_token"]["privileges"]={18:2}
+        before=registry.effects()
+        denied=machine.call(machine.resolve_export("ntdll.dll",name="NtCreateKey"),args=[output,0,attrs,0,0,4,disposition])
+        equal(denied.reason,"plugin")
+        true("creation security" in denied.detail)
+        equal(registry.effects(),before)
+
 TEST_SUITE = suite("stdlib/internal", [
+    case("kernel_large_readonly_mapping", test_kernel_large_readonly_file_mapping_is_budgeted_and_lazy),
+    case("crt_legacy_wcsicmp_null", test_legacy_wcsicmp_null_arguments_match_native),
+    case("crt_secure_wide_tokenizer", test_secure_wide_tokenizer_matches_native_utf16_contexts),
+    case("crt_secure_wide_tokenizer_contexts", test_secure_wide_tokenizer_contexts_do_not_alias_and_invalid_handler_stops),
     case("registry_initial_assignment_modes", test_registry_initial_assignment_modes),
     case("gdb_integer_codecs", test_gdb_integer_codecs),
     case("resource_patch_normalization", test_resource_patch_normalization),
@@ -3305,10 +5874,24 @@ TEST_SUITE = suite("stdlib/internal", [
     case("registry_multi_string_decode", test_registry_multi_string_decode),
     case("registry_qword_round_trip", test_registry_qword_round_trip),
     case("registry_key_information", test_registry_key_information),
+    case("registry_native_enumerate_full_value_information", test_registry_native_enumerate_full_value_information),
+    case("registry_key_name_cache_tracks_mutation_and_source_reload", test_registry_key_name_cache_tracks_mutation_and_source_reload),
+    case("registry_deleted_ancestor_boundaries", test_registry_deleted_ancestor_boundaries),
+    case("registry_cached_information_after_many_source_deletions", test_registry_cached_information_after_many_source_deletions),
+    case("registry_native_cached_key_information", test_registry_native_cached_key_information),
+    case("registry_native_set_value_effects", test_registry_native_set_value_effects),
+    case("registry_native_partial_value_query", test_registry_native_partial_value_query),
+    case("registry_native_enumerate_long_key_buffer", test_registry_native_enumerate_long_key_buffer),
+    case("registry_native_delete_key_lifetime", test_registry_native_delete_key_lifetime),
+    case("registry_creation_security_provider", test_registry_creation_security_provider),
+    case("registry_win32_delete_key_ex_lifetime", test_registry_win32_delete_key_ex_lifetime),
+    case("registry_native_object_pointer_width", test_registry_native_object_pointer_width),
+    case("registry_backup_restore_effective_token_access", test_registry_backup_restore_effective_token_access),
     case("registry_plugin_publishes_late_bound_exports", test_registry_plugin_publishes_late_bound_exports),
     case("registry_set_key_value_uses_existing_subkey_and_win64_dwords", test_registry_set_key_value_uses_existing_subkey_and_win64_dwords),
     case("registry_provider_recognizes_api_set_contracts", test_registry_provider_recognizes_api_set_contracts),
     case("registry_plugin_reads_source_hives_lazily", test_registry_plugin_reads_source_hives_lazily),
+    case("registry_native_literal_absolute", test_registry_native_absolute_names_keep_literal_slashes),
     case("registry_structured_key_parts_preserve_literal_slashes", test_registry_structured_key_parts_preserve_literal_slashes),
     case("registry_initial_keys_are_baseline_state", test_registry_initial_keys_are_baseline_state),
     case("registry_predefined_root_override_redirects_operations", test_registry_predefined_root_override_redirects_operations),
@@ -3332,6 +5915,10 @@ TEST_SUITE = suite("stdlib/internal", [
     case("crt_scanf_floating_point", test_crt_scanf_floating_point),
     case("crt_errno_is_stable_and_writable", test_crt_errno_is_stable_and_writable),
     case("crt_imported_mode_data_matches_accessors", test_crt_imported_mode_data_matches_accessors),
+    case("security_native_descriptor_control", test_security_native_descriptor_control_preserves_native_write_order),
+    case("security_native_owned_tokens", test_security_native_duplicate_and_adjust_preserve_token_ownership),
+    case("security_impersonate_self", test_security_impersonate_self_clones_only_owned_primary_token),
+    case("crt_private_memory_contract", test_crt_private_memory_contract_preserves_abi_and_overlap),
     case("crt_api_set_contracts", test_crt_api_set_contracts),
     case("query_actctx_basic_bounds", test_query_actctx_basic_bounds),
     case("fixed_timezone_and_secure_wide_crt", test_fixed_timezone_and_secure_wide_crt),
@@ -3354,6 +5941,8 @@ TEST_SUITE = suite("stdlib/internal", [
     case("kernel_short_path_preserves_components_without_aliases", test_kernel_short_path_preserves_components_without_aliases),
     case("kernel_current_directory_resolves_relative_file_paths", test_kernel_current_directory_resolves_relative_file_paths),
     case("shlwapi_provider_recognizes_api_set_contracts", test_shlwapi_provider_recognizes_api_set_contracts),
+    case("kernel_init_once_begin_complete_matches_native_states", test_kernel_init_once_begin_complete_matches_native_states),
+    case("kernel_init_once_execute_retry_and_private_context", test_kernel_init_once_execute_retry_and_private_context),
     case("kernel_init_once_executes_callback_once_and_preserves_context", test_kernel_init_once_executes_callback_once_and_preserves_context),
     case("kernel_resolves_rva_delay_imports", test_kernel_resolves_rva_delay_imports),
     case("ole_com_contract_aliases_share_state", test_ole_com_contract_aliases_share_state),
@@ -3372,6 +5961,9 @@ TEST_SUITE = suite("stdlib/internal", [
     case("profile_section_parser", test_profile_section_parser),
     case("event_log_provider_recognizes_api_set_contracts", test_event_log_provider_recognizes_api_set_contracts),
     case("security_reports_required_sid_length", test_security_reports_required_sid_length),
+    case("security_native_allow_ace_ex_contract", test_security_native_allow_ace_ex_contract),
+    case("security_native_descriptor_validation", test_security_native_descriptor_validation),
+    case("security_native_absolute_to_self_relative", test_security_native_absolute_to_self_relative),
     case("create_service_default_account", test_create_service_default_account),
     case("automation_registration_signatures", test_automation_registration_signatures),
     case("com_target_invocation_continues_budget", test_com_target_invocation_continues_budget),
@@ -3383,7 +5975,12 @@ TEST_SUITE = suite("stdlib/internal", [
     case("kernel_system_query_provider_preserves_target_status_contract", test_kernel_system_query_provider_preserves_target_status_contract),
     case("kernel_thread_page_priority_and_process_termination", test_kernel_thread_page_priority_and_process_termination),
     case("kernel_critical_section_blocks_other_execution_and_is_recursive", test_kernel_critical_section_blocks_other_execution_and_is_recursive),
+    case("rtl_relative_nt_path_status", test_rtl_relative_nt_path_status_and_buffer_ownership),
+    case("cryptoapi_delay_contract", test_cryptoapi_delay_contract_shares_owned_contexts),
     case("cryptoapi_verification_context_lifecycle", test_cryptoapi_verification_context_lifecycle),
+    case("security_adjusts_only_owned_privileges", test_security_adjusts_only_owned_privileges),
+    case("security_token_object_lifetime", test_security_token_object_lifetime),
+    case("nt_open_process_owned_query_handle", test_nt_open_process_owned_query_handle),
     case("security_access_mapping", test_security_access_mapping),
     case("sddl_security_descriptor", test_sddl_security_descriptor),
     case("mandatory_label_ace", test_mandatory_label_ace),
@@ -3409,8 +6006,36 @@ TEST_SUITE = suite("stdlib/internal", [
     case("netapi_reports_join_information_with_owned_buffer", test_netapi_reports_join_information_with_owned_buffer),
     case("kernel_file_information_reports_memory_backed_size", test_kernel_file_information_reports_memory_backed_size),
     case("compare_string_amd64_int_lengths", test_compare_string_amd64_int_lengths),
+    case("kernel_integer_to_char_native_boundaries", test_kernel_integer_to_char_native_boundaries),
+    case("cabinet_non_cabinet_copy_reports_fdi_error", test_cabinet_non_cabinet_copy_reports_fdi_error),
+    case("kernel_exclusive_srw_native_alias_contention", test_kernel_exclusive_srw_native_alias_contention),
+    case("profile_string_native_dword_capacity", test_profile_string_native_dword_capacity),
+    case("crt_toupper_ascii_int_width", test_crt_toupper_ascii_int_width),
+    case("catalog_hash_native_sizing_and_file_handle", test_catalog_hash_native_sizing_and_file_handle),
+    case("kernel_hard_link_identity_and_lifetime", test_kernel_hard_link_identity_and_lifetime),
+    case("kernel_delete_on_close_open_object_lifetime", test_kernel_delete_on_close_open_object_lifetime),
+    case("kernel_hard_link_mappings_and_clone", test_kernel_hard_link_mappings_and_clone),
+    case("kernel_copy_file_ex_effects_and_failure_atomicity", test_kernel_copy_file_ex_effects_and_failure_atomicity),
+    case("kernel_dos_device_name_native_boundaries", test_kernel_dos_device_name_native_boundaries),
+    case("kernel_ansi_char_native_pointer_advance", test_kernel_ansi_char_native_pointer_advance),
+    case("kernel_upcase_unicode_char_parameter_width", test_kernel_upcase_unicode_char_parameter_width),
+    case("kernel_find_failure_handle_native_width", test_kernel_find_failure_handle_native_width),
+    case("kernel_mutex_handle_independence", test_kernel_mutex_handle_independence),
+    case("kernel_guid_from_counted_string_native_effects", test_kernel_guid_from_counted_string_native_effects),
+    case("crt_integer_end_pointer_native_width", test_crt_integer_end_pointer_native_width),
+    case("kernel_file_mapping_native_dword_widths", test_kernel_file_mapping_native_dword_widths),
+    case("kernel_compare_string_ordinal_units", test_kernel_compare_string_ordinal_units),
+    case("kernel_duplicate_unicode_string_native_contract", test_kernel_duplicate_unicode_string_native_contract),
+    case("kernel_prefix_counted_unicode_strings", test_kernel_prefix_counted_unicode_strings),
+    case("kernel_equal_counted_unicode_strings", test_kernel_equal_counted_unicode_strings),
+    case("kernel_create_unicode_string_owned_buffer", test_kernel_create_unicode_string_owned_buffer),
+    case("kernel_multiple_wait_native_width", test_kernel_multiple_wait_native_width),
+    case("kernel_ldr_load_dll_native_pointer_width", test_kernel_ldr_load_dll_native_pointer_width),
+    case("kernel_system_windows_directory_capacity", test_kernel_system_windows_directory_capacity),
+    case("kernel_unicode_string_ex_native_boundaries", test_kernel_unicode_string_ex_native_boundaries),
     case("device_family_info_optional_outputs", test_device_family_info_optional_outputs),
     case("crt_bsearch_calls_target_comparator", test_crt_bsearch_calls_target_comparator),
     case("crt_wcspbrk_returns_first_matching_unit", test_crt_wcspbrk_returns_first_matching_unit),
     case("crt_secure_memory_copy_checks_capacity", test_crt_secure_memory_copy_checks_capacity),
 ])
+

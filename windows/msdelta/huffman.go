@@ -5,7 +5,10 @@ import (
 	"fmt"
 )
 
+const huffmanLookupBits = 10
+
 type huffman struct {
+	lookup  [1 << huffmanLookupBits]uint32
 	first   []uint32
 	offset  []int
 	symbols []int
@@ -62,10 +65,43 @@ func newHuffman(lengths []byte, maximum int) (*huffman, error) {
 		symbols[position] = symbol
 		positions[int(length)-1]++
 	}
-	return &huffman{first: first, offset: offsets, symbols: symbols}, nil
+	h := &huffman{first: first, offset: offsets, symbols: symbols}
+	// Simulate the canonical decoder for each low-bit prefix. Leave long or
+	// invalid codes empty so they retain the checked slow-path semantics.
+	for prefix := range h.lookup {
+		var code uint32
+		for length := 0; length < min(maximum, huffmanLookupBits); length++ {
+			code |= uint32(prefix>>length) & 1
+			if code >= first[length] {
+				index := int(code) + offsets[length]
+				if index >= 0 && index < len(symbols) && uint64(symbols[index]) <= uint64(^uint32(0)>>5) {
+					h.lookup[prefix] = uint32(symbols[index])<<5 | uint32(length+1)
+				}
+				break
+			}
+			code <<= 1
+		}
+	}
+	return h, nil
 }
 
 func (h *huffman) decode(bits *bitReader) (int, error) {
+	if bits.bitCount < huffmanLookupBits {
+		bits.fill()
+	}
+	entry := h.lookup[bits.value&((1<<huffmanLookupBits)-1)]
+	length := uint(entry & 31)
+	// A short final code is valid without a full lookup-width reservoir.
+	// Never consume padding or accept a truncated longer code.
+	if length != 0 && length <= bits.bitCount {
+		bits.value >>= length
+		bits.bitCount -= length
+		return int(entry >> 5), nil
+	}
+	return h.decodeSlow(bits)
+}
+
+func (h *huffman) decodeSlow(bits *bitReader) (int, error) {
 	var code uint32
 	for length := 0; length < len(h.first); length++ {
 		bit, err := bits.read(1)

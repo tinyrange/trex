@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"path"
 	"sort"
 	"strings"
@@ -28,6 +27,7 @@ type StageEffectSummary struct {
 
 type StageFileEffect struct {
 	Architecture     string
+	CSIFileKey       string
 	Kind             string
 	SourceName       string
 	SourceMode       string
@@ -134,8 +134,14 @@ func PlanStageEffects(stage *CumulativeStage, plan StageAssemblyPlan) (StageEffe
 	sort.Slice(packages, func(i, j int) bool { return strings.ToLower(packages[i].Path) < strings.ToLower(packages[j].Path) })
 	for _, pack := range packages {
 		name := strings.TrimPrefix(strings.ReplaceAll(pack.Path, "\\", "/"), "/")
-		base := path.Base(name)
-		if err := addFile("package-manifest", []string{name}, nil, "", "/Windows/servicing/Packages/"+base, nil); err != nil {
+		if pack.Manifest == nil {
+			return StageEffectPlan{}, fmt.Errorf("package %q has no parsed identity", pack.Path)
+		}
+		storeName, err := cbsPackageName(pack.Manifest.Identity)
+		if err != nil {
+			return StageEffectPlan{}, err
+		}
+		if err := addFile("package-manifest", []string{name}, nil, "", "/Windows/servicing/Packages/"+storeName+".mum", nil); err != nil {
 			return StageEffectPlan{}, err
 		}
 		catalog := strings.TrimSuffix(name, path.Ext(name)) + ".cat"
@@ -143,26 +149,19 @@ func PlanStageEffects(stage *CumulativeStage, plan StageAssemblyPlan) (StageEffe
 		// installation. Keep the verified catalog there and link the same
 		// bytes into the native catalog store, including for WOW64 packages.
 		// FileCrypt's catalog-only signature exercises this during boot.
-		catalogDestination := `$(runtime.windows)\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\` + path.Base(catalog)
-		if err := addFile("package-catalog", []string{catalog}, nil, "", "/Windows/servicing/Packages/"+path.Base(catalog), []string{catalogDestination}); err != nil {
+		catalogDestination := `$(runtime.windows)\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\` + storeName + ".cat"
+		if err := addFile("package-catalog", []string{catalog}, nil, "", "/Windows/servicing/Packages/"+storeName+".cat", []string{catalogDestination}); err != nil {
 			return StageEffectPlan{}, err
 		}
 	}
 	components := append([]PlannedComponent(nil), plan.Components...)
 	sort.Slice(components, func(i, j int) bool { return components[i].Path < components[j].Path })
 	for _, component := range components {
-		file, err := stage.openAssemblyFile(component.Path)
+		parsed, err := openPlannedManifest(component, stage.openAssemblyFile, stage.releaseAssemblyFile)
 		if err != nil {
-			return StageEffectPlan{}, fmt.Errorf("uup servicing: open component manifest %q: %w", component.Path, err)
+			return StageEffectPlan{}, fmt.Errorf("uup servicing: component manifest %q: %w", component.Path, err)
 		}
-		if file.Size() < 0 || file.Size() > maximumAssemblyManifestSize {
-			return StageEffectPlan{}, fmt.Errorf("uup servicing: component manifest %q exceeds %d-byte bound", component.Path, maximumAssemblyManifestSize)
-		}
-		manifest, err := ParseAssemblyManifest(io.NewSectionReader(file, 0, file.Size()))
-		stage.releaseAssemblyFile(component.Path)
-		if err != nil {
-			return StageEffectPlan{}, fmt.Errorf("uup servicing: parse component manifest %q: %w", component.Path, err)
-		}
+		manifest := parsed.Manifest()
 		if manifest.Identity.ExactKey() != component.Identity.ExactKey() {
 			return StageEffectPlan{}, fmt.Errorf("uup servicing: component manifest %q identity does not match package reference", component.Path)
 		}
@@ -171,21 +170,23 @@ func PlanStageEffects(stage *CumulativeStage, plan StageAssemblyPlan) (StageEffe
 			return StageEffectPlan{}, err
 		}
 		result.Summary.Files += len(manifest.Files)
-		result.Summary.RegistryKeys += len(manifest.RegistryKeys)
-		for _, key := range manifest.RegistryKeys {
-			result.RegistryKeys = append(result.RegistryKeys, StageRegistryKeyEffect{
-				Architecture: manifest.Identity.ProcessorArchitecture,
-				KeyName:      key,
-			})
-		}
-		result.Summary.RegistryValues += len(manifest.RegistryValues)
-		for _, value := range manifest.RegistryValues {
-			result.RegistryValues = append(result.RegistryValues, StageRegistryEffect{
-				Architecture: manifest.Identity.ProcessorArchitecture,
-				Value:        value,
-			})
-			result.Summary.RegistryRoots[firstPathPart(value.KeyName)]++
-			result.Summary.RegistryTypes[strings.ToUpper(value.ValueType)]++
+		if !component.StagedOnly {
+			result.Summary.RegistryKeys += len(manifest.RegistryKeys)
+			for _, key := range manifest.RegistryKeys {
+				result.RegistryKeys = append(result.RegistryKeys, StageRegistryKeyEffect{
+					Architecture: manifest.Identity.ProcessorArchitecture,
+					KeyName:      key,
+				})
+			}
+			result.Summary.RegistryValues += len(manifest.RegistryValues)
+			for _, value := range manifest.RegistryValues {
+				result.RegistryValues = append(result.RegistryValues, StageRegistryEffect{
+					Architecture: manifest.Identity.ProcessorArchitecture,
+					Value:        value,
+				})
+				result.Summary.RegistryRoots[firstPathPart(value.KeyName)]++
+				result.Summary.RegistryTypes[strings.ToUpper(value.ValueType)]++
+			}
 		}
 		for _, file := range manifest.Files {
 			relative, err := componentSourcePath(file)
@@ -201,11 +202,14 @@ func PlanStageEffects(stage *CumulativeStage, plan StageAssemblyPlan) (StageEffe
 				return StageEffectPlan{}, fmt.Errorf("uup servicing: component %q file %q: %w", manifest.Identity.Name, file.Name, err)
 			}
 			destinations := make([]string, 0, 1+len(file.Links))
-			if file.DestinationPath != "" {
+			if !component.StagedOnly && file.DestinationPath != "" {
 				destinations = append(destinations, componentDestinationPath(file.DestinationPath, relative))
 				result.Summary.DestinationRoots[firstPathPart(file.DestinationPath)]++
 			}
 			for _, destination := range file.Links {
+				if component.StagedOnly {
+					continue
+				}
 				destinations = append(destinations, destination)
 				result.Summary.DestinationRoots[firstPathPart(destination)]++
 				result.Summary.Links++
@@ -218,6 +222,11 @@ func PlanStageEffects(stage *CumulativeStage, plan StageAssemblyPlan) (StageEffe
 			if err := addFile("component-file", sourceNames, expectedHash, installedFallback, storePath, destinations); err != nil {
 				return StageEffectPlan{}, fmt.Errorf("uup servicing: component %s selected by %s file %q attributes=%v: %w", formatAssemblyIdentity(manifest.Identity), component.SelectedBy, file.Name, file.Attributes, err)
 			}
+			fileKey, err := csiFileKey(file.Name)
+			if err != nil {
+				return StageEffectPlan{}, err
+			}
+			result.Files[len(result.Files)-1].CSIFileKey = fileKey
 			result.Files[len(result.Files)-1].Architecture = manifest.Identity.ProcessorArchitecture
 		}
 		for _, name := range manifest.TopLevel {
@@ -335,6 +344,16 @@ func stageEffectComponentPrefix(name string) string {
 }
 
 func assemblyFileSHA256(file AssemblyFile) (*[sha256.Size]byte, error) {
+	if file.Digest != nil {
+		hash, err := assemblyNestedSHA256(file.Digest)
+		if err != nil {
+			return nil, err
+		}
+		if file.Hash != "" && (!strings.EqualFold(file.Hash, hash) || (!strings.EqualFold(file.HashAlgorithm, "sha256") && !strings.EqualFold(file.HashAlgorithm, "sha-256"))) {
+			return nil, fmt.Errorf("conflicting assembly file digest declarations")
+		}
+		file.Hash, file.HashAlgorithm = hash, "sha256"
+	}
 	if file.Hash == "" || (!strings.EqualFold(file.HashAlgorithm, "sha256") && !strings.EqualFold(file.HashAlgorithm, "sha-256")) {
 		return nil, nil
 	}
