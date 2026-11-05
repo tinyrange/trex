@@ -1,7 +1,9 @@
 package msdelta
 
 // PA31 playback framing was cross-checked against the MIT-licensed
-// CaddyGlow/ms-delta reverse.rs implementation. See playback.LICENSE.
+// CaddyGlow/ms-delta src/pa30/reverse.rs implementation, reviewed at commit
+// 6f25d63e8a8573015feb2f6a3d3f98861edbb22c. See playback.LICENSE and
+// docs/third-party-format-references.md for scope and provenance.
 
 import (
 	"errors"

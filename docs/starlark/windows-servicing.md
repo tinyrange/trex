@@ -5,6 +5,12 @@ The primary API consumer is Starlark. Portable implementation lives under
 filesystem and emulator primitives. No private recipe checkout is required.
 `cmd/windows11` integration is separate follow-up work.
 
+## Library and image-recipe boundary
+
+trex provides reusable construction, inspection and validation APIs. tinyrangex
+contains the image recipes: media selection, orchestration, specialization and
+end-to-end validation.
+
 ## Scope and phase contracts
 
 This is a set of composable, fail-closed building blocks, **not** a promise that
