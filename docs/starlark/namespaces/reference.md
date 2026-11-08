@@ -5260,6 +5260,12 @@ Reads a 8-bit unsigned integer from source at the byte offset, using single-byte
 
 Returns bytes with up to count non-overlapping occurrences of old replaced by new; count=-1 replaces all. old must be nonempty and maximum bounds the result.
 
+### `binary.rpm_metadata`
+
+`binary.rpm_metadata(file, maximum_entries=65536, maximum_bytes=16MiB) -> record`
+
+Reads RPM package metadata with a version-3/4 lead and v1 headers, without executing scripts, decompressing payloads or authenticating signatures. Returns fields (named stored tags), tags and signature_tags (numeric keys with type/count/value), source_package, payload_offset and a borrowed payload file. STRING is a string; numeric values and STRING_ARRAY/I18NSTRING are lists; BIN is bytes. Missing fields are absent; localized strings are not selected. Unknown tags are retained; unknown types, duplicate tags, unsupported leads, invalid offsets/counts/alignment and unterminated strings fail. Entry/byte limits cover both headers; decoded values are also bounded against alias amplification. Maximum entries is 1M and maximum bytes is 256MiB. No digest, immutable-region or signature verification is performed; this is inspection, not package validation or an RPM database reader.
+
 ### `binary.software_update_catalog`
 
 `binary.software_update_catalog(source) -> list`

@@ -18,6 +18,7 @@ import (
 	"github.com/tinyrange/trex/binary/elfmeta"
 	irixbinary "github.com/tinyrange/trex/binary/irix"
 	"github.com/tinyrange/trex/binary/perf"
+	"github.com/tinyrange/trex/binary/rpm"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	starfile "github.com/tinyrange/trex/storage/star"
 	windowsapi "github.com/tinyrange/trex/windows"
@@ -68,6 +69,7 @@ func binaryScalarCodecNamed(name string) (binaryScalarCodec, bool) {
 
 func Builtins() starlark.StringDict {
 	attrs := starlark.StringDict{
+		"rpm_metadata":                 starlark.NewBuiltin("rpm_metadata", rpm.Builtin),
 		"irix_executable":              starlark.NewBuiltin("irix_executable", irixbinary.Builtin),
 		"apple_device_tree":            starlark.NewBuiltin("apple_device_tree", appleDeviceTreeBuiltin),
 		"encode_apple_device_tree":     starlark.NewBuiltin("encode_apple_device_tree", encodeAppleDeviceTreeBuiltin),
