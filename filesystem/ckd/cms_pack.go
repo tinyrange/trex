@@ -83,7 +83,12 @@ func unpackCMS(b []byte, starts []int, maximumBytes int) (*CMSUnpacked, error) {
 	var out, record []byte
 	emit := func(p []byte) error {
 		record = append(record, p...)
-		if len(out)+len(record) > maximumBytes {
+		// A variable record is written with a 2-byte length prefix.
+		pending := len(record)
+		if variable {
+			pending += 2
+		}
+		if len(out)+pending > maximumBytes {
 			return fmt.Errorf("cms unpack: decoded content exceeds limit")
 		}
 		if !variable {

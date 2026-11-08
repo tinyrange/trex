@@ -174,6 +174,10 @@ func (m *CMSMinidisk) FilesAt(origin uint32, limit int) ([]CMSFile, error) {
 	if !bytes.Equal(b[:8], []byte{0, 0, 0, 1, 0, 0, 0, 0}) || dir.Type != "DIRECTOR" || dir.RecordFormat != 0xc6 || dir.RecordLength != 64 {
 		return nil, fmt.Errorf("cms: directory block does not begin with its own FST")
 	}
+	// The directory holds at least its own FST and ALLOCMAP.
+	if dir.Records < 2 {
+		return nil, fmt.Errorf("cms: directory declares %d entries", dir.Records)
+	}
 	if int(dir.Records) > limit {
 		return nil, fmt.Errorf("cms: %d directory entries exceed limit %d", dir.Records, limit)
 	}

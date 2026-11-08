@@ -3,6 +3,7 @@ package ckd
 import (
 	"bytes"
 	"fmt"
+	"io"
 
 	"github.com/tinyrange/trex/storage"
 	starfile "github.com/tinyrange/trex/storage/star"
@@ -116,8 +117,8 @@ func CMSLibraryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if source.Size() > int64(maxBytes) {
 		return nil, fmt.Errorf("cms_library: %d bytes exceed max_bytes", source.Size())
 	}
-	data := make([]byte, source.Size())
-	if _, err := source.ReadAt(data, 0); err != nil && int64(len(data)) != source.Size() {
+	data, err := readWhole(source, maxBytes)
+	if err != nil {
 		return nil, err
 	}
 	l, err := ParseCMSLibrary(data, maxEntries)
@@ -152,12 +153,11 @@ func CMSUnpackBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if !ok || maxBytes <= 0 || source.Size() > int64(maxBytes) || (container != "F" && container != "V") {
 		return nil, fmt.Errorf("cms_unpack: portable file within positive max_bytes and record_format F or V required")
 	}
-	data := make([]byte, source.Size())
-	if n, err := source.ReadAt(data, 0); int64(n) != source.Size() {
+	data, err := readWhole(source, maxBytes)
+	if err != nil {
 		return nil, err
 	}
 	var u *CMSUnpacked
-	var err error
 	if container == "F" {
 		u, err = UnpackCMS(data, maxBytes)
 	} else {
@@ -198,8 +198,8 @@ func CMSModuleBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if !ok || (recfm != "F" && recfm != "V") || maxEntries <= 0 || maxBytes <= 0 || source.Size() > int64(maxBytes) {
 		return nil, fmt.Errorf("cms_module: portable file, record_format F or V and positive limits required")
 	}
-	data := make([]byte, source.Size())
-	if n, err := source.ReadAt(data, 0); int64(n) != source.Size() {
+	data, err := readWhole(source, maxBytes)
+	if err != nil {
 		return nil, err
 	}
 	m, err := ParseCMSModule(data, recfm == "V", maxEntries)
@@ -253,8 +253,8 @@ func CMSCallableLibraryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 	if !ok || maxEntries <= 0 || maxBytes <= 0 || source.Size() > int64(maxBytes) {
 		return nil, fmt.Errorf("cms_csllib: portable file within positive limits required")
 	}
-	data := make([]byte, source.Size())
-	if n, err := source.ReadAt(data, 0); int64(n) != source.Size() {
+	data, err := readWhole(source, maxBytes)
+	if err != nil {
 		return nil, err
 	}
 	l, err := ParseCMSCallableLibrary(data, maxEntries)
@@ -281,8 +281,8 @@ func CMSLoadLibraryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlar
 	if !ok || maxEntries <= 0 || maxBytes <= 0 || source.Size() > int64(maxBytes) {
 		return nil, fmt.Errorf("cms_loadlib: portable file within positive limits required")
 	}
-	data := make([]byte, source.Size())
-	if n, err := source.ReadAt(data, 0); int64(n) != source.Size() {
+	data, err := readWhole(source, maxBytes)
+	if err != nil {
 		return nil, err
 	}
 	l, err := ParseCMSLoadLibrary(data, maxEntries)
@@ -290,11 +290,16 @@ func CMSLoadLibraryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlar
 		return nil, err
 	}
 	entries := make([]starlark.Value, len(l.Entries))
+	// Aliases share their member's stream, so build each member once.
+	streams := map[uint32][]byte{}
 	for i, e := range l.Entries {
-		var stream []byte
-		for _, r := range e.Records {
-			stream = append(stream, byte(len(r)>>8), byte(len(r)))
-			stream = append(stream, r...)
+		stream, ok := streams[e.Record]
+		if !ok {
+			for _, r := range e.Records {
+				stream = append(stream, byte(len(r)>>8), byte(len(r)))
+				stream = append(stream, r...)
+			}
+			streams[e.Record] = stream
 		}
 		entries[i] = starfile.NewRecord(starlark.StringDict{
 			"name": starlark.String(e.Name), "raw_name": starlark.Bytes(e.RawName), "alias": starlark.Bool(e.Alias),
@@ -320,8 +325,8 @@ func ObjectDeckBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if !ok || maxCards <= 0 || maxBytes <= 0 || source.Size() > int64(maxBytes) {
 		return nil, fmt.Errorf("object_deck: portable file within positive limits required")
 	}
-	data := make([]byte, source.Size())
-	if n, err := source.ReadAt(data, 0); int64(n) != source.Size() {
+	data, err := readWhole(source, maxBytes)
+	if err != nil {
 		return nil, err
 	}
 	d, err := ParseObjectDeck(data, maxCards)
@@ -454,4 +459,25 @@ func cpUsersValue(us []CPUser) *starlark.List {
 		})
 	}
 	return starlark.NewList(out)
+}
+
+// readWhole reads all of source, failing on any read error or short read and
+// on sources larger than maximum bytes.
+func readWhole(source storage.Reader, maximum int) ([]byte, error) {
+	size := source.Size()
+	if size < 0 || size > int64(maximum) {
+		return nil, fmt.Errorf("source of %d bytes exceeds max_bytes %d", size, maximum)
+	}
+	// One ReadAt: a full read may report io.EOF; any other error, or a short
+	// read even without an error, fails (looping on a reader that breaks the
+	// io.ReaderAt contract could otherwise never finish).
+	data := make([]byte, size)
+	n, err := source.ReadAt(data, 0)
+	if err != nil && !(err == io.EOF && int64(n) == size) {
+		return nil, err
+	}
+	if int64(n) != size {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return data, nil
 }
