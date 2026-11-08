@@ -144,8 +144,18 @@ def native_registry_creation_provider(root, facts):
     path,sha,key=_RUNTIME_IMAGES["ntoskrnl.exe"]
     file=root.find(path)
     pe=windows.pe(file) if file!=None else None
-    if pe==None or hex(digest(file,algorithm="sha256"))!=sha or pe.codeview["key"]!=key:
+    actual=hex(digest(file,algorithm="sha256")) if file!=None else ""
+    server=actual=="a22c81e8c1507b42bce8d17181c3af9a9314c4b4d6dbaef6bf07e1aa3d179636"
+    if server:
+        key="B65A1E5D9D57D828E82F8C75F19E98571"
+    if pe==None or (not server and actual!=sha) or pe.codeview==None or pe.codeview["key"]!=key:
         fail("native registry security requires inspected kernel")
+    # Server 2025 26100.32230, independently executed against its real parent
+    # key descriptor. Token field offsets and registry mapping are identical;
+    # entry points and SID globals are not interchangeable across kernels.
+    pool,free_pool,lock,unlock=(0xb680f0,0xb68cd0,0x2f0d80,0x20d8e0) if server else (0xb820f0,0xb82870,0x211bc0,0x25fa10)
+    assign_rva,release_rva=(0x910e10,0xa20ce0) if server else (0x949590,0xa305a0)
+    sid_globals=(0xe67788,0xe67850,0xf04968,0xe67848) if server else (0xe67d40,0xe67ce8,0xf05878,0xe67cf0)
     if facts["owner"]!=sid(5,[32,544]) or facts["primary_group"]!=sid(5,[18]) or facts["integrity_level"]!=16384 or facts["process_trust_sid"]!=b"":
         fail("native registry security requires the declared non-protected SYSTEM subject")
     expected_dacl=acl([access_allowed_ace(sid(5,[18]),0x10000000),access_allowed_ace(sid(5,[32,544]),0xa0020000)],size=60)
@@ -181,7 +191,7 @@ def native_registry_creation_provider(root, facts):
         state["locks"]=0
         return 0
     def install(machine):
-        for callback,rva,argc in [(allocate,0xb820f0,3),(free,0xb82870,2),(acquire,0x211bc0,2),(release,0x25fa10,1)]:
+        for callback,rva,argc in [(allocate,pool,3),(free,free_pool,2),(acquire,lock,2),(release,unlock,1)]:
             machine.hook(callback,address=base+rva,argc=argc)
     m.use(emulator.plugin(install,name="windows.servicing.native-key-security",state=state))
     system=m.allocate(value=sid(5,[18]))
@@ -203,7 +213,7 @@ def native_registry_creation_provider(root, facts):
     subject=m.allocate(size=32)
     m.write_pointer(subject+16,token)
     mapping=m.allocate(value=binary.decode("1900020006000200390002003f000f00","hex"))
-    for rva,value in [(0xe67d40,sid(3,[0])),(0xe67ce8,sid(3,[1])),(0xf05878,sid(16,[4096])),(0xe67cf0,sid(3,[4]))]:
+    for rva,value in [(sid_globals[0],sid(3,[0])),(sid_globals[1],sid(3,[1])),(sid_globals[2],sid(16,[4096])),(sid_globals[3],sid(3,[4]))]:
         m.write_pointer(base+rva,m.allocate(value=value))
     def assign(parent):
         windows.security_descriptor_parts(parent)
@@ -212,13 +222,13 @@ def native_registry_creation_provider(root, facts):
         if state["allocations"] or state["locks"] or m.read_u16le(thread+0x1e4): fail("unclean native key-security context")
         input=m.allocate(value=parent)
         output=m.allocate(size=8)
-        result=m.call(base+0x949590,args=[input,0,output,1,subject,mapping,1])
+        result=m.call(base+assign_rva,args=[input,0,output,1,subject,mapping,1])
         if result.reason!="return" or result.value: fail("native SeAssignSecurity failed",result.reason,result.detail,hex(result.value))
         address=m.read_pointer(output)
         if address not in state["allocations"] or not m.read_u16le(address+2)&0x8000: fail("native descriptor ownership/control")
         data=m.read(address,state["allocations"][address][0])
         windows.security_descriptor_parts(data)
-        disposed=m.call(base+0xa305a0,args=[output])
+        disposed=m.call(base+release_rva,args=[output])
         if disposed.reason!="return" or disposed.value or m.read_pointer(output) or state["allocations"] or state["locks"] or m.read_u16le(thread+0x1e4):
             fail("native key-security resource lifetime")
         m.free(input)

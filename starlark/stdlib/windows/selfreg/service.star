@@ -17,6 +17,7 @@ _SIGNATURES = {
     "queryserviceconfig2a": 5,
     "queryserviceconfig2w": 5,
     "queryservicestatus": 2,
+    "queryservicestatusex": 5,
     "registerservicectrlhandlera": 2,
     "registerservicectrlhandlerw": 2,
     "registerservicectrlhandlerexa": 3,
@@ -90,7 +91,7 @@ def _multi_string(machine, address, wide):
 def _service_is_active(status):
     return status != None and len(status) >= 2 and status[1] >= 2 and status[1] <= 7
 
-def service_manager_plugin(registry, continuation_limit = 64, instruction_limit = 100000, initialize_module = None, pump_background = None):
+def service_manager_plugin(registry, continuation_limit = 64, instruction_limit = 100000, initialize_module = None, pump_background = None, kernel = None):
     """Models SCM configuration and registry-directed service activation.
 
     Local COM servers hosted by a service are resolved through CLSID/AppID and
@@ -99,7 +100,7 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
     """
     if continuation_limit < 0 or continuation_limit > 1024 or instruction_limit < 1 or instruction_limit > 10000000:
         fail("invalid service execution limits")
-    state = {"handles": {}, "services": {}, "next_handle": 0x50000, "status": {}, "activations": [], "executions": [], "execution_results": [], "execution_slices": 0, "execution_steps": 0, "settled_dispatchers": {}, "starting_class": ""}
+    state = {"handles": {}, "services": {}, "deleted_services": {}, "next_handle": 0x50000, "status": {}, "activations": [], "executions": [], "execution_results": [], "execution_slices": 0, "execution_steps": 0, "settled_dispatchers": {}, "starting_class": ""}
 
     def retain_execution(execution, result):
         state["executions"].append(execution)
@@ -174,6 +175,12 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
             return None
         return entry["value"]
 
+    def service_error(code):
+        state["last_error"] = code
+        if kernel != None:
+            kernel.state["last_error"] = code
+        return 0
+
     def callback(event):
         name = event.name.lower()
         args = event.args
@@ -200,8 +207,19 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
         if name.startswith("openservice"):
             manager = state["handles"].get(args[0])
             service = _cstring(machine, args[1], wide)
+            if manager == None or manager["kind"] != "manager" or not service or len(service) > 256 or "/" in service or chr(92) in service:
+                return 0
+            if service.lower() in state["deleted_services"]:
+                return 0
             known = state["services"].get(service.lower())
-            return handle("service", known) if manager != None and manager["kind"] == "manager" and known != None else 0
+            if known == None:
+                # Existing services are read lazily from the caller's actual
+                # SYSTEM hive, not only from CreateService calls in this run.
+                kind = registry.get_value("SYSTEM", service_key(service), "Type")
+                if type(kind) == "int" and kind != 0:
+                    known = service
+                    state["services"][service.lower()] = service
+            return handle("service", known) if known != None else 0
         if name.startswith("changeserviceconfig2"):
             service = service_for(args[0])
             if service == None:
@@ -252,6 +270,31 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
             if service == None:
                 return 0
             state["services"].pop(service.lower(), None)
+            state["deleted_services"][service.lower()] = True
+            return 1
+        if name == "queryservicestatusex":
+            service = service_for(args[0])
+            if service == None:
+                return service_error(6)
+            if args[1] != 0:
+                return service_error(124)  # ERROR_INVALID_LEVEL
+            if not args[4]:
+                return service_error(87)
+            machine.write_u32le(args[4], 36)
+            if args[3] < 36:
+                return service_error(122)
+            if not args[2]:
+                return service_error(87)
+            status = state["status"].get(service.lower())
+            if status == None:
+                kind = registry.get_value("SYSTEM", service_key(service), "Type")
+                if type(kind) != "int":
+                    fail("service status requires the declared service type")
+                status = [kind, 1, 0, 0, 0, 0, 0]
+            if status[1] != 1:
+                fail("active extended service status requires explicit process identity")
+            for index, value in enumerate(status + [0, 0]):
+                machine.write_u32le(args[2] + index * 4, value)
             return 1
         if name == "queryservicestatus":
             service = service_for(args[0])
@@ -286,8 +329,8 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
             if not table:
                 state["activations"].append({"service": "", "result": "invalid-table", "detail": "null service table", "steps": 0})
                 return 0
-            service_name_address = machine.read_u32le(table)
-            target = machine.read_u32le(table + 4)
+            service_name_address = machine.read_pointer(table)
+            target = machine.read_pointer(table + machine.pointer_size)
             if not target:
                 state["activations"].append({"service": "", "result": "invalid-table", "detail": "null ServiceMain", "steps": 0})
                 return 0
@@ -299,9 +342,8 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
                 value = binary.encode(service_name, encoding = "utf16le" if wide else "ascii", nul = True),
                 name = "service dispatcher name",
             )
-            arguments = binary.builder(capacity = 4)
-            arguments.u32le(name_copy)
-            argv = machine.allocate(value = arguments.bytes(), name = "service dispatcher argv")
+            argv = machine.allocate(size = machine.pointer_size, name = "service dispatcher argv")
+            machine.write_pointer(argv, name_copy)
             execution = machine.spawn(target, args = [1, argv])
             result = execution.run(instruction_limit = instruction_limit)
             continuations = 0
@@ -326,9 +368,10 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
                 "eip": startup.eip,
                 "steps": startup.steps,
                 "recent": startup.recent,
-                "registers": startup.registers,
                 "trace": startup.trace,
             }
+            if hasattr(startup, "registers"):
+                activation["registers"] = startup.registers
             if result != startup:
                 activation["background"] = {
                     "result": result.reason,
@@ -410,9 +453,8 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
             return activation
 
         service_name = machine.allocate(value = binary.encode(activation["service"], encoding = "utf16le", nul = True), name = "service name")
-        arguments = binary.builder(capacity = 4)
-        arguments.u32le(service_name)
-        argv = machine.allocate(value = arguments.bytes(), name = "service argv")
+        argv = machine.allocate(size = machine.pointer_size, name = "service argv")
+        machine.write_pointer(argv, service_name)
         execution = machine.spawn(target, args = [1, argv])
         state["starting_class"] = class_name
         result = execution.run()

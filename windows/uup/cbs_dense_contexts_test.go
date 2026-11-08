@@ -8,7 +8,7 @@ import (
 
 func TestCBSDensePackageSnapshotBoundaries(t *testing.T) {
 	template := cbsIntentManifest(t, "Template", "neutral", `<update name="feature"/>`)
-	inputs := make([]CBSPackageIntent, 1<<16)
+	inputs := make([]CBSPackageIntent, MaxCBSPackageContexts)
 	for i := range inputs {
 		m := *template
 		m.Identity.Name = fmt.Sprintf("Package-%05d", i)
@@ -19,7 +19,7 @@ func TestCBSDensePackageSnapshotBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	changes := []CBSUpdateIntentChange{}
-	for _, i := range []int{0, 15, 16, 1023, 1024, 65535} {
+	for _, i := range []int{0, 15, 16, 1023, 1024, 65535, 65536, MaxCBSPackageContexts - 1} {
 		changes = append(changes, CBSUpdateIntentChange{inputs[i].Manifest.Identity, CBSStateStaged})
 	}
 	next, err := old.WithIntendedStates(changes)
@@ -48,15 +48,15 @@ func TestCBSDensePackageSnapshotBoundaries(t *testing.T) {
 			t.Fatalf("identity fallback at %d: %x, %v", i, got, err)
 		}
 	}
-	final, err := next.WithPublishedUpdates(inputs[65535].Manifest.Identity, map[string]uint32{"feature": CBSStateAbsent})
+	final, err := next.WithPublishedUpdates(inputs[MaxCBSPackageContexts-1].Manifest.Identity, map[string]uint32{"feature": CBSStateAbsent})
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := next.UpdateState(inputs[65535].Manifest.Identity, "feature")
+	before, err := next.UpdateState(inputs[MaxCBSPackageContexts-1].Manifest.Identity, "feature")
 	if err != nil || before.IntendedState != CBSStateStaged {
 		t.Fatal("publication poisoned previous snapshot", before, err)
 	}
-	after, err := final.UpdateState(inputs[65535].Manifest.Identity, "feature")
+	after, err := final.UpdateState(inputs[MaxCBSPackageContexts-1].Manifest.Identity, "feature")
 	if err != nil || after.IntendedState != CBSStateAbsent {
 		t.Fatal(after, err)
 	}

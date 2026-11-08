@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/tinyrange/trex/vmm"
 	"j5.nz/cc/hypervisor"
@@ -14,18 +15,35 @@ const nvmeAddress = 0xd0000000
 // pciNVMe replaces IDE at 00:01.0. One namespace, one I/O queue pair and
 // level-triggered INTx are supplied by the shared cc NVMe controller.
 type pciNVMe struct {
-	config     [256]byte
-	controller *hypervisor.NVMeController
-	irq        func(uint32, bool) error
-	pending    bool
-	msi        func(uint64, uint32) error
+	config          [256]byte
+	controller      *hypervisor.NVMeController
+	irq             func(uint32, bool) error
+	pending         bool
+	msi             func(uint64, uint32) error
+	backingFailures diskIOFailures
+	backingTiming   diskIOTiming
 }
 
-type nvmeDisk struct{ disk vmm.Disk }
+type nvmeDisk struct {
+	disk     vmm.Disk
+	failures *diskIOFailures
+	timing   *diskIOTiming
+}
 
-func (d nvmeDisk) Size() int64                             { return d.disk.Device.Geometry().Size }
-func (d nvmeDisk) ReadAt(b []byte, off int64) (int, error) { return d.disk.Device.ReadAt(b, off) }
-func (d nvmeDisk) WriteAt(b []byte, off int64) (int, error) {
+func (d nvmeDisk) Size() int64 { return d.disk.Device.Geometry().Size }
+func (d nvmeDisk) ReadAt(b []byte, off int64) (int, error) {
+	started := time.Now()
+	n, err := d.disk.Device.ReadAt(b, off)
+	d.timing.record("read", off, len(b), time.Since(started))
+	d.failures.record("read", off, len(b), n, err)
+	return n, err
+}
+func (d nvmeDisk) WriteAt(b []byte, off int64) (n int, err error) {
+	started := time.Now()
+	defer func() {
+		d.timing.record("write", off, len(b), time.Since(started))
+		d.failures.record("write", off, len(b), n, err)
+	}()
 	if d.disk.ReadOnly {
 		return 0, fmt.Errorf("NVMe disk is read-only")
 	}
@@ -81,7 +99,7 @@ func newPCINVMe(p *pc) *pciNVMe {
 		d.config[0x50] = 5 // MSI, one 64-bit message, no per-vector masking.
 		d.config[0x52] = 0x80
 	}
-	d.controller = hypervisor.NewNVMeController(nvmeDisk{p.disk}, nvmeMemory{p}, d, 16)
+	d.controller = hypervisor.NewNVMeController(nvmeDisk{disk: p.disk, failures: &d.backingFailures, timing: &d.backingTiming}, nvmeMemory{p}, d, 16)
 	return d
 }
 func (d *pciNVMe) SetMSI(addr uint64, data uint32) error {

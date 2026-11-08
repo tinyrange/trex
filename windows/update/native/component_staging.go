@@ -1,7 +1,7 @@
 package native
 
 import (
-	"crypto/sha256"
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -103,9 +103,14 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 	for i, n := range order {
 		readOrder[i] = starlark.MakeInt(n)
 	}
-	// A target larger than the stage DAG cache must still survive adjacent
-	// disk reads. This shared bounded LRU avoids pinning one buffer per file.
-	contentCache := bytecache.New(512 << 20)
+	// Keep adjacent reads cheap without retaining full decoded targets alongside
+	// guest RAM. The compressed LRU also serializes full-target reconstruction.
+	// Oversized supported targets are admitted alone; ordinary entries share
+	// a smaller working set instead of occupying the maximum target budget.
+	contentCache, err := newStageContentCache(128 << 20)
+	if err != nil {
+		return nil, err
+	}
 	normalize := func(name string) string {
 		return strings.ToLower(strings.TrimPrefix(strings.ReplaceAll(name, "/", `\`), `\`))
 	}
@@ -133,7 +138,9 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 	for i, effect := range plan.Files {
 		contentKeys[i] = i
 		size, hash, known := declaredStageContent(effect, declaredSizes, declaredHashes, normalize)
-		if !known {
+		// A second manifest's legacy digest needs its own validation, even
+		// when modern content identity matches a previously verified alias.
+		if !known || effect.ExpectedSHA1 != nil {
 			continue
 		}
 		identity := stageContentIdentity{size: size, hash: hash}
@@ -169,7 +176,7 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 			if size < 0 || size > 512<<20 {
 				return nil, fmt.Errorf("staged file exceeds lazy read bound")
 			}
-			reader := &reopenedStageReader{size: size, cache: contentCache, key: bytecache.Key{Index: contentKeys[i]}, open: func() (storage.Reader, error) { return stage.OpenPlannedFile(effect) }}
+			reader := &reopenedStageReader{size: size, compressed: contentCache, key: bytecache.Key{Index: contentKeys[i]}, open: func() (storage.Reader, error) { return stage.OpenPlannedFile(effect) }}
 			if known {
 				reader.expectedSHA256 = &digest
 			}
@@ -185,6 +192,32 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 			return nil, fmt.Errorf("component staging file is not a Starlark file")
 		}
 		return value, nil
+	})
+
+	deltaInputs := starlark.NewBuiltin("component_staging.delta_inputs", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var i int
+		if err := starlark.UnpackArgs("component_staging.delta_inputs", args, kwargs, "index", &i); err != nil {
+			return nil, err
+		}
+		if i < 0 || i >= len(plan.Files) {
+			return nil, fmt.Errorf("component staging index out of range")
+		}
+		effect := plan.Files[i]
+		if effect.SourceMode != "payload" {
+			return nil, fmt.Errorf("component staging file is not a delta payload")
+		}
+		inputs, err := stage.InspectExpressDeltaInputs(effect.SourceName)
+		if err != nil {
+			return nil, err
+		}
+		return starvalue.NewRecord(starlark.StringDict{
+			"source":        starvalue.NewReader("delta basis", &starvalue.Bytes{Data: inputs.Source}),
+			"delta":         starvalue.NewReader("delta record", &starvalue.Bytes{Data: inputs.Delta}),
+			"psf_record":    starlark.Bool(inputs.PSFRecord),
+			"target_name":   starlark.String(inputs.Target.Name),
+			"target_size":   starlark.MakeInt64(inputs.Target.Length),
+			"target_sha256": starlark.Bytes(inputs.Target.SHA256[:]),
+		}), nil
 	})
 	recoveryInfo := starlark.NewBuiltin("component_staging.recovery_info", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var i int
@@ -269,7 +302,7 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 	}
 	result := starvalue.NewRecord(starlark.StringDict{
 		"components": starlark.NewList(components), "files": starlark.NewList(files), "read_order": starlark.NewList(readOrder), "open": open,
-		"cache_stats": componentCacheStatsBuiltin(contentCache), "recovery_info": recoveryInfo, "create_recovery": reverse, "inherited_recovery": inherited,
+		"delta_inputs": deltaInputs, "cache_stats": componentCacheStatsBuiltin(contentCache), "recovery_info": recoveryInfo, "create_recovery": reverse, "inherited_recovery": inherited,
 	})
 	result.Freeze()
 	return result, nil
@@ -280,7 +313,8 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 type reopenedStageReader struct {
 	expectedSHA256 *[32]byte
 	verified       atomic.Bool
-	cache          *bytecache.Cache
+	cache          *bytecache.Cache // Recovery records use the existing raw cache.
+	compressed     *stageContentCache
 	key            bytecache.Key
 	size           int64
 	open           func() (storage.Reader, error)
@@ -304,34 +338,28 @@ func (r *reopenedStageReader) ReadAt(p []byte, off int64) (int, error) {
 	if off >= r.size {
 		return 0, io.EOF
 	}
+	if r.compressed != nil {
+		file, err := r.compressed.get(r)
+		if err != nil {
+			return 0, err
+		}
+		if r.expectedSHA256 != nil {
+			r.verified.Store(true)
+		}
+		return file.ReadAt(p, off)
+	}
+
 	if r.cache != nil {
 		data, err := r.cache.Get(r.key, func() ([]byte, error) {
-			f, err := r.open()
+			data, err := loadStageContent(r)
 			if err != nil {
 				return nil, err
 			}
-			if f.Size() != r.size || r.size < 0 || r.size > 512<<20 {
-				return nil, fmt.Errorf("invalid or changed staged file length")
-			}
-			data := make([]byte, r.size)
-			_, err = io.ReadFull(io.NewSectionReader(f, 0, r.size), data)
-			if err != nil {
-				return nil, err
-			}
-			if r.expectedSHA256 != nil {
-				if sha256.Sum256(data) != *r.expectedSHA256 {
-					return nil, fmt.Errorf("staged file content identity changed")
-				}
-				r.verified.Store(true)
-			}
-			return data, nil
+			return bytes.Clone(data), nil
 		})
 		if err != nil {
 			return 0, err
 		}
-		// A cache hit may have been verified by a different exact-content
-		// alias. The key includes both full digest and length; publishing this
-		// reader's proof still requires a successful read of that cache entry.
 		if r.expectedSHA256 != nil {
 			r.verified.Store(true)
 		}

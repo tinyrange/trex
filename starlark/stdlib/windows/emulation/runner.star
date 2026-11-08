@@ -20,7 +20,7 @@ load("@stdlib//windows/selfreg:comcat.star", "component_categories_provider")
 load("@stdlib//windows/selfreg:wer.star", "wer_plugin")
 load("@stdlib//windows/selfreg:appmodel.star", "appmodel_plugin")
 
-def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, process_create_provider = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800, network_hosts = {}, network_connect = None, stack_size = 1 << 20, virtual_modules = [], token_privileges = {}, api_set_namespace = None, loader_lookup_observer = None, module_paths = {}, object_directories = {}, object_security_module = "ntdll.dll", token_facts = {}, registry_creation_provider = None, registry_hive_mounts = []):
+def run(file, module, export = "DllRegisterServer", arguments = [], prepare = None, execute = None, plugins = [], plugin_factories = [], modules = {}, deferred_modules = [], files = {}, directories = [], prepared_file_entries = None, registry_values = [], registry_keys = [], registry_hives = {}, registry_output_key_case = "preserve", prepared_registry_state = None, setup_infs = {}, setup_directories = {}, type_libraries = {}, environment = {}, volumes = {}, user_name = "Administrator", user_sid = "S-1-5-21-1-2-3-500", version = {}, initialize = False, executable = False, command_line = "regsvr32.exe", on_class_registration = None, on_thread_create = None, process_create_provider = None, instruction_limit = 2000000, target_instruction_limit = 0, target_continuation_limit = 4, rpc_continuation_limit = 64, rpc_manager_trace = False, rpc_manager_trace_limit = 4096, rpc_manager_call_trace = False, rpc_manager_call_trace_limit = 4096, rpc_manager_call_trace_start = 0, rpc_manager_call_trace_size = 0, rpc_client_observer = None, system_query_observer = None, system_query_provider = None, service_continuation_limit = 64, memory_limit = 32 << 20, trace = False, trace_limit = 4096, profile = False, profile_interval = 256, profile_limit = 16384, system_time = 946684800, network_hosts = {}, network_connect = None, stack_size = 1 << 20, virtual_modules = [], token_privileges = {}, api_set_namespace = None, loader_lookup_observer = None, module_paths = {}, object_directories = {}, object_security_module = "ntdll.dll", token_facts = {}, registry_creation_provider = None, registry_hive_mounts = [], maximum_file_size = 16 << 20, redirection_trust_policy = None):
     """Runs one target export or executable using semantic system-DLL plugins.
 
     `prepare(machine)` may allocate target memory and return the integer
@@ -33,13 +33,20 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     import graph is initialized lazily if COM or SCM activates the module.
     Set `executable` when the primary image is a process: dependency DLLs still
     receive process attach, but the PE entry point is not called as DllMain.
+    `redirection_trust_policy` declares initial policy-16 flags for the modeled
+    process. It admits get/set only in a junction-free virtual namespace and
+    is not evidence of a real service process mitigation configuration.
+    `maximum_file_size` explicitly bounds virtual file writes (16 MiB by default,
+    at most 512 MiB); increasing it does not relax the emulator memory limit.
     `command_line` is returned by both GetCommandLine variants. `environment`
     augments a minimal standard Windows process environment and may override
     any of its values. `process_create_provider(machine, request)` supplies a
     bounded semantic result for child-process creation. Each `plugin_factories`
     callback runs after the core
     runtime plugins are constructed and receives a record containing `crt`,
-    `cryptoapi`, `kernel`, and `module_files`; it must return one emulator plugin. This lets callers add
+    `cryptoapi`, `bcrypt`, `kernel`, `registry`, and `module_files`; it must return
+    one emulator plugin. Registry security changes must use the registry plugin
+    so subsequent operations and returned effects share the same state. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
     `object_directories` maps exact NT directory names to explicit allowed access
     masks (or records with access and explicit self-relative security bytes).
@@ -281,7 +288,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         return security.effective_privileges()
     registry = registry_plugin(effective_token_privileges = effective_registry_privileges, values = registry_values, keys = registry_keys, hives = registry_hives, mounts = registry_hive_mounts, user_sid = user_sid, output_key_case = registry_output_key_case, prepared_state = prepared_registry_state, environment = process_environment, on_create_key = registry_creation_provider)
     versions = version_plugin(file, module_path = module, module_files = module_images)
-    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, on_module_map = map_target_module, on_process_create = process_create_provider, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time, tls_slots = tls_slots, api_set_namespace = api_set_namespace, on_loader_lookup = loader_lookup_observer, module_paths = source_paths)
+    kernel = kernel32_plugin(module, version = version, environment = process_environment, volumes = volumes, virtual_modules = virtual_system_modules, files = files, directories = directories, prepared_file_entries = prepared_file_entries, on_thread_create = on_thread_create, on_module_load = load_target_module, on_module_map = map_target_module, on_process_create = process_create_provider, command_line = command_line, thread_instruction_limit = target_instruction_limit, on_system_query = system_query_observer, system_query_provider = system_query_provider, system_time = system_time, tls_slots = tls_slots, api_set_namespace = api_set_namespace, on_loader_lookup = loader_lookup_observer, module_paths = source_paths, maximum_file_size = maximum_file_size, redirection_trust_policy = redirection_trust_policy)
     setup = setupapi_plugin(infs = setup_infs, directories = setup_directories, registry = registry, kernel = kernel)
     advpack = advpack_plugin(registry, module_images, kernel = kernel, setup = setup)
     performance = loadperf_plugin(registry, kernel)
@@ -334,7 +341,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         classes = class_ids(image)
         if classes:
             server_classes[name.lower()] = classes
-    services = service_manager_plugin(registry, continuation_limit = service_continuation_limit, instruction_limit = target_instruction_limit, initialize_module = initialize_target_module, pump_background = kernel.state["pump_thread_slice"])
+    services = service_manager_plugin(registry, continuation_limit = service_continuation_limit, instruction_limit = target_instruction_limit, initialize_module = initialize_target_module, pump_background = kernel.state["pump_thread_slice"], kernel = kernel)
     def pump_background_slice(machine):
         service_progress = services.state["pump_execution_slice"](machine)
         thread_progress = kernel.state["pump_thread_slice"](machine)
@@ -385,6 +392,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         "cryptoapi": cryptoapi,
         "bcrypt": bcrypt,
         "kernel": kernel,
+        "registry": registry,
         "module_files": modules,
     }) for factory in plugin_factories]
     # `module_images` is extended by load_target_module. Resource lookup keeps

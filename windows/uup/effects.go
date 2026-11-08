@@ -1,6 +1,7 @@
 package uup
 
 import (
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -33,6 +34,7 @@ type StageFileEffect struct {
 	SourceMode       string
 	SourceDescriptor *ContentDescriptor
 	ExpectedSHA256   *[sha256.Size]byte
+	ExpectedSHA1     *[sha1.Size]byte
 	StorePath        string
 	Destinations     []string
 }
@@ -226,6 +228,11 @@ func PlanStageEffects(stage *CumulativeStage, plan StageAssemblyPlan) (StageEffe
 			if err != nil {
 				return StageEffectPlan{}, err
 			}
+			legacyHash, err := assemblyFileSHA1(file)
+			if err != nil {
+				return StageEffectPlan{}, err
+			}
+			result.Files[len(result.Files)-1].ExpectedSHA1 = legacyHash
 			result.Files[len(result.Files)-1].CSIFileKey = fileKey
 			result.Files[len(result.Files)-1].Architecture = manifest.Identity.ProcessorArchitecture
 		}
@@ -349,8 +356,22 @@ func assemblyFileSHA256(file AssemblyFile) (*[sha256.Size]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if file.Hash != "" && (!strings.EqualFold(file.Hash, hash) || (!strings.EqualFold(file.HashAlgorithm, "sha256") && !strings.EqualFold(file.HashAlgorithm, "sha-256"))) {
-			return nil, fmt.Errorf("conflicting assembly file digest declarations")
+		if file.Hash != "" {
+			switch strings.ToLower(file.HashAlgorithm) {
+			case "sha1", "sha-1":
+				// .NET manifests may retain an obsolete build-time SHA-1
+				// attribute alongside the binding nested SHA-256. Validate
+				// its syntax without equating the two declarations.
+				if _, err := assemblyFileSHA1(file); err != nil {
+					return nil, err
+				}
+			case "sha256", "sha-256":
+				if !strings.EqualFold(file.Hash, hash) {
+					return nil, fmt.Errorf("conflicting assembly file digest declarations")
+				}
+			default:
+				return nil, fmt.Errorf("unsupported assembly file attribute digest algorithm %q", file.HashAlgorithm)
+			}
 		}
 		file.Hash, file.HashAlgorithm = hash, "sha256"
 	}

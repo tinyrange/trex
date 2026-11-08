@@ -8,7 +8,7 @@ load("@stdlib//windows/servicing:population.star", "plan_servicing_population")
 load("@stdlib//windows/servicing:package_store.star", "package_metadata_executions")
 
 
-def plan_package_phases(base, image, closure, hives=None, work_limit=2097152):
+def plan_package_phases(base, image, closure, hives=None, work_limit=2097152, editions=["Microsoft-Windows-ProfessionalEdition"]):
     """Return install population and a compact, independently owned closure.
 
     StageChain ordering is captured before install planning. Both phases use
@@ -23,11 +23,11 @@ def plan_package_phases(base, image, closure, hives=None, work_limit=2097152):
     readers; keep their backing capabilities alive through construction.
     """
     stage = plan_servicing_population(base, image, closure, hives=hives,
-        phase="stage", work_limit=work_limit).deployment_plan()
+        phase="stage", work_limit=work_limit, editions=editions).deployment_plan()
     catalog_hint_packages = [e.package for e in stage.executions]
     stage = None
     population = plan_servicing_population(base, image, closure, hives=hives,
-        work_limit=work_limit).deployment_plan()
+        work_limit=work_limit, editions=editions).deployment_plan()
     needed = {a.package.lower(): True for a in population.deployment_actions(changed_only=True)}
     needed.update({e.package.lower(): True for e in package_metadata_executions(population, list(closure["files"]))})
     files = {name: file for name, file in closure["files"].items() if name.lower() in needed}

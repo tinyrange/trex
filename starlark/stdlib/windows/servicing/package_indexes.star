@@ -98,11 +98,13 @@ def plan_servicing_package_indexes(file):
                 fail("CBS condition metadata index traversal exceeds depth")
             if node.name == "detectUpdate":
                 references = [n for n in node.children if n.namespace == _NS]
-                if len(references) != 1 or references[0].name not in ["parent", "update"]:
-                    fail("CBS update detector requires one parent/local reference")
-                reference = references[0]
-                if reference.name == "parent":
-                    add("UpdateDetect", reference.attribute("name"), name, "REG_DWORD", 0)
+                if not references or len(references) > 65536 or any([r.name not in ["parent", "update"] for r in references]):
+                    fail("CBS update detector requires bounded parent/local references")
+                # ServerManager-UX has alternative parent updates. Each parent
+                # contributes an index record; local references never do.
+                for reference in references:
+                    if reference.name == "parent":
+                        add("UpdateDetect", reference.attribute("name"), name, "REG_DWORD", 0)
             elif node.name == "updateComponent":
                 elevation = {"revision": 2, "distribution": 4, "build": 8, "version": 32, "install": 128}.get(node.attribute("elevate", ""))
                 targets = node.children_named("assemblyIdentity", namespace=_NS)

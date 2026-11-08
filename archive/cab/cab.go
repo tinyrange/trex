@@ -56,10 +56,11 @@ type folder struct {
 }
 
 type fileRecord struct {
-	name              string
-	size              uint32
-	folder            uint16
-	uncompressedStart uint32
+	name                   string
+	size                   uint32
+	folder                 uint16
+	uncompressedStart      uint32
+	date, time, attributes uint16
 }
 
 // FileInfo describes a member of a cabinet without materializing it.
@@ -180,6 +181,9 @@ func OpenWithCache(file storage.Reader, cache bool, store *bytecache.Cache, sour
 			size:              binary.LittleEndian.Uint32(record[0:4]),
 			uncompressedStart: binary.LittleEndian.Uint32(record[4:8]),
 			folder:            binary.LittleEndian.Uint16(record[8:10]),
+			date:              binary.LittleEndian.Uint16(record[10:12]),
+			time:              binary.LittleEndian.Uint16(record[12:14]),
+			attributes:        binary.LittleEndian.Uint16(record[14:16]),
 		})
 	}
 	fileIndex := make(map[string]int, len(files)*2)
@@ -483,10 +487,26 @@ func (f *Entry) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", f.Type())
 }
 func (f *Entry) Attr(name string) (starlark.Value, error) {
+	if name == "cab_metadata" {
+		result := starlark.NewDict(6)
+		for _, field := range []struct {
+			name  string
+			value uint16
+		}{
+			{"date", f.file.date}, {"time", f.file.time}, {"attributes", f.file.attributes},
+			{"folder", f.file.folder}, {"set_id", f.archive.setID}, {"cabinet", f.archive.cabinet},
+		} {
+			if err := result.SetKey(starlark.String(field.name), starlark.MakeInt(int(field.value))); err != nil {
+				return nil, err
+			}
+		}
+		result.Freeze()
+		return result, nil
+	}
 	return starfile.Attr(f, name), nil
 }
 func (f *Entry) AttrNames() []string {
-	return starfile.AttrNames()
+	return append(starfile.AttrNames(), "cab_metadata")
 }
 
 func (c *Archive) fileData(file fileRecord) ([]byte, error) {

@@ -69,7 +69,7 @@ func (m registryPathMapper) resolve(key, architecture string) (string, string, e
 			return "", "", fmt.Errorf("registry pass requires nonempty ordinary key components")
 		}
 	}
-	if architecture != "amd64" && architecture != "x86" && architecture != "wow64" {
+	if architecture != "amd64" && architecture != "msil" && architecture != "x86" && architecture != "wow64" {
 		return "", "", fmt.Errorf("unsupported registry architecture")
 	}
 	var root string
@@ -102,7 +102,9 @@ func (m registryPathMapper) resolve(key, architecture string) (string, string, e
 	if len(parts) > 1 {
 		path += `\` + strings.Join(parts[1:], `\`)
 	}
-	if architecture == "amd64" {
+	// Native CSI identity binding retains store bitness for MSIL; only
+	// x86/wow64 select the redirected view in this amd64 policy.
+	if architecture == "amd64" || architecture == "msil" {
 		return "system", path, nil
 	}
 	original := path

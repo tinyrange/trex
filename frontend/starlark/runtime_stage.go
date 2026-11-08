@@ -9,9 +9,11 @@ import (
 
 func runtimeNamespace() namespace {
 	return namespace{name: "runtime", attrs: starlark.StringDict{
-		"stats":          starlark.NewBuiltin("stats", runtimeStatsBuiltin),
-		"release_memory": starlark.NewBuiltin("release_memory", runtimeReleaseMemoryBuiltin),
-		"heap_profile":   starlark.NewBuiltin("heap_profile", runtimeHeapProfileBuiltin),
+		"stats":            starlark.NewBuiltin("stats", runtimeStatsBuiltin),
+		"host_memory":      starlark.NewBuiltin("host_memory", runtimeHostMemoryBuiltin),
+		"release_memory":   starlark.NewBuiltin("release_memory", runtimeReleaseMemoryBuiltin),
+		"set_memory_limit": starlark.NewBuiltin("set_memory_limit", runtimeSetMemoryLimitBuiltin),
+		"heap_profile":     starlark.NewBuiltin("heap_profile", runtimeHeapProfileBuiltin),
 	}}
 }
 

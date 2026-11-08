@@ -8,8 +8,14 @@ _SYSTEM='/Windows/System32/config/SYSTEM'
 _PARENT='/ControlSet001/Control/MediaCategories'
 _DACL='D:(A;CI;KR;;;BU)(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;;KA;;;BA)(A;CIIO;KA;;;CO)(A;CI;KR;;;S-1-15-2-1)(A;CI;KR;;;S-1-15-3-1024-1065365936-1281604716-3511738428-1654721687-432734479-3232135806-4053264122-3456934681)'
 
+# Server 26100.32230 MediaCategories, SYSTEM owner/group and inherited DACL.
+# Native SeAssignSecurity produces 8c04 (not the parent's present-NULL SACL).
+_SERVER_PARENT=binary.decode("0100148cc4000000d000000000000000140000000200b00006000000001218001900020001020000000000052000000021020000001218003f000f0001020000000000052000000020020000001214003f000f00010100000000000512000000001a14003f000f000101000000000003000000000012180019000200010200000000000f02000000010000000012380019000200010a00000000000f0300000000040000b031803f6cbc634c3ce050d1970ca1620f01cb197e7aa6c0fae697f119a30cce010100000000000512000000010100000000000512000000","hex")
+
 def _child_security(parent, subject_group):
     selected=windows.security_descriptor_parts(parent)
+    if selected==windows.security_descriptor_parts(_SERVER_PARENT):
+        return windows.inherit_registry_security(windows.compile_sddl('O:BAG:'+subject_group),parent)
     expected=windows.compile_sddl('O:BAG:'+subject_group+_DACL)
     parts=windows.security_descriptor_parts(expected)
     if selected['control']!=0x8004 or selected['resource_manager_control'] or selected['sacl']!=None or selected['dacl']!=parts['dacl'] or selected['owner']!=parts['owner']:

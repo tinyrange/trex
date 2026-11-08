@@ -26,7 +26,10 @@ def collect_servicing_metadata(base, image, source, features, roots, package_lim
     staged and absent registrations. Parent applicability and XML contained flags
     NEVER prune metadata. Missing references are returned, not authorized to skip.
     """
-    if package_limit < 1 or package_limit > 65536 or not features or not roots:
+    # Server cumulative updates can contain more than 80,000 exact MUMs.
+    # Keep the conservative default; callers may explicitly budget a larger
+    # bounded closure without pruning package metadata before applicability.
+    if package_limit < 1 or package_limit > 131072 or not features or not roots:
         fail("servicing metadata needs bounded packages and explicit features/roots")
     software = windows.hive(hives["SOFTWARE"] if hives != None else base[image + "/Windows/System32/config/SOFTWARE"])
     registered = software.find(_PACKAGES).children
@@ -112,6 +115,10 @@ def _close_servicing_metadata(registered, roots, available, open_entry, package_
         identity = root.child("assemblyIdentity", namespace = _NS)
         if identity == None or _package_name(identity).lower() != key:
             fail("servicing package identity mismatch: " + name)
+        # Cabinet member casing is not the CBS identity spelling. Native
+        # population callbacks use the signed manifest identity, so retain that
+        # spelling after the case-insensitive member/identity check above.
+        name = _package_name(identity)
         package = root.child("package", namespace = _NS)
         if package == None:
             fail("servicing package declaration missing: " + name)
@@ -135,6 +142,27 @@ def _close_servicing_metadata(registered, roots, available, open_entry, package_
     return dict(files = files, xmls = xmls, origins = origins, missing = missing, roots = list(roots))
 
 
+def _capability_version_filter(identity):
+    # ProcessCapabilityUpdateType supplies a two-component version parser.
+    # An omitted or zero version is the native wildcard, not exact empty.
+    if "name" not in identity or any([k not in ["name", "version"] for k in identity]):
+        fail("initial capability identity requires resolved arch/language policy " + str(identity))
+    if "version" not in identity:
+        return 0
+    parts = identity["version"].split(".")
+    if len(parts) != 2 or any([not p.isdigit() or int(p) > 65535 for p in parts]):
+        fail("unsupported capability reference version " + identity["version"])
+    return (int(parts[0]) << 16) | int(parts[1])
+
+def _capability_version_matches(version_filter, version):
+    if version_filter == 0:
+        return True
+    parts = version.split(".")
+    if len(parts) != 4 or any([not p.isdigit() or int(p) > 65535 for p in parts]):
+        fail("invalid capability index version " + version)
+    # CheckCapabilityMatch compares FileVersionFromString's low DWORD.
+    return version_filter == ((int(parts[2]) << 16) | int(parts[3]))
+
 def _initial_servicing_component_state(records, primary):
     # CSI pins retain resolved manifests independently of payload staging.
     # In particular the recipe's completed staged Recall removal retains p!
@@ -144,7 +172,7 @@ def _initial_servicing_component_state(records, primary):
             return state
     return 0
 
-def plan_servicing_population(base, image, closure, work_limit=2097152, hives=None, phase="install"):
+def plan_servicing_population(base, image, closure, work_limit=2097152, hives=None, phase="install", editions=["Microsoft-Windows-ProfessionalEdition"]):
     """Plan ordinary package admission; reject unsupported or unresolved policy.
 
     This does not apply a CSI transaction or authorize boot. Unknown nonzero
@@ -226,7 +254,7 @@ def plan_servicing_population(base, image, closure, work_limit=2097152, hives=No
 
     contexts=[dict(manifest=parsed[n],intended_state=states[n],parents=scopes[i]) for i,n in enumerate(names)]
 
-    index=windows.cbs_update_index(contexts,editions=['Microsoft-Windows-ProfessionalEdition']).with_components(component_entries)
+    index=windows.cbs_update_index(contexts,editions=editions).with_components(component_entries)
 
     baselines={n:package_values[n].get('Baseline',0) if n in package_values else 0 for n in names}
 
@@ -284,8 +312,17 @@ def plan_servicing_population(base, image, closure, work_limit=2097152, hives=No
         if action==2: return dict(before_updates=[],deferred=[])
         if action>=4:
             candidates=[x for x in related(n) if snapshot.package_state(x)==80]
-            if candidates: fail('unresolved native reinstall '+n+' '+str(candidates))
-            return dict(before_updates=[],deferred=[])
+            if not candidates: return dict(before_updates=[],deferred=[])
+            # ReInstallSupersededLowerVersion (CBS32131 110059..110098,
+            # 110308..110321) selects the greatest superseded version, not
+            # every lower package. Ordinary sessions request installed with
+            # no named owner and skip recursive MUM (110422..110469).
+            previous=max(candidates,key=lambda x: versions[x])
+            if n.lower().startswith('package_for_rollupfix~'):
+                fail('LCU reinstall needs capability/container validation '+n)
+            if any([c.name=='selectable' for u in update_nodes[previous].values() for c in u.children]):
+                fail('reinstall needs adjusted update-selection migration '+previous)
+            return dict(before_updates=[dict(package=previous,owner='',state=112,integration=2,ceiling=4096,skip_mum=True)],deferred=[])
         immediate=[]
         later=[]
         for previous in related(n):
@@ -327,12 +364,13 @@ def plan_servicing_population(base, image, closure, work_limit=2097152, hives=No
 
     cap_registry={k.name.lower():k.values for k in sw.find('/Microsoft/Windows/CurrentVersion/Component Based Servicing/CapabilityIndex').children}
 
+    session_editions = {edition.lower(): True for edition in editions}
     def selectable_enabled(node):
         custom=[c for c in node.children if c.name=='customInformation']
         if not custom: return True
         editions=[attrs(e)['name'].lower() for c in custom for group in c.children if group.name=='EnableSelectabilityForEditions' for e in group.children if e.name=='EnableSelectabilityForEdition']
         if not editions: fail('unsupported edition selection')
-        return 'microsoft-windows-professionaledition' in editions
+        return any([edition in session_editions for edition in editions])
 
     def cap_meta(n):
         nodes=[c for c in packages[n].children if c.name=='declareCapability']
@@ -349,7 +387,7 @@ def plan_servicing_population(base, image, closure, work_limit=2097152, hives=No
     cap_metadata={n:cap_meta(n) for n in names}
 
     def capability_start(a,snapshot):
-        if set(a)!=set(['name']): fail('initial capability identity requires resolved version/arch/language policy '+str(a))
+        version_filter = _capability_version_filter(a)
         records=cap_registry.get(a['name'].lower(),{})
         strict=[]
         relaxed=[]
@@ -357,7 +395,7 @@ def plan_servicing_population(base, image, closure, work_limit=2097152, hives=No
             parts=v.split('~')
             if len(parts)!=5: fail('invalid capability index value '+v)
             if parts[0].lower()!=a['name'].lower() or parts[2] or parts[3]: continue
-            if parts[4]: fail('nonzero capability version filter required '+v)
+            if not _capability_version_matches(version_filter, parts[4]): continue
             n=name_by_lower[p.lower()]
             if cap_metadata[n]['kind']==3: continue
             value=max([states[x] for x in families[familykeys[n]]])

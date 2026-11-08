@@ -9,8 +9,9 @@ _KEY='/ControlSet001/Services/'
 _GROUP='/Microsoft/Windows NT/CurrentVersion/SvcHost'
 _SD=windows.compile_sddl('O:SYG:SYD:AI(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KR;;;BU)')
 
-def _manifest(name,image='old.exe',group='Old',sddl='D:(A;;RP;;;SY)',extra='',start='demand'):
+def _manifest(name,image='old.exe',group='Old',sddl='D:(A;;RP;;;SY)',extra='',start='demand',launch_protected=None):
     text='<assembly xmlns="'+_NS+'"><assemblyIdentity name="test" processorArchitecture="amd64" version="1.0.0.0"/><memberships><categoryMembership><id typeName="Service"/><categoryInstance><serviceData name="'+name+'" imagePath="'+image+'" start="'+start+'" type="win32OwnProcess" errorControl="normal"><securityDescriptor name="S"/>'+extra+'</serviceData></categoryInstance></categoryMembership><categoryMembership><id name="Microsoft.Windows.Categories" publicKeyToken="365143bb27e7ac8b" typeName="SvcHost"/><categoryInstance subcategory="'+group+'"><serviceGroup position="last" serviceName="'+name+'"/></categoryInstance></categoryMembership></memberships><trustInfo><securityDescriptorDefinition name="S" sddl="'+sddl+'"/></trustInfo></assembly>'
+    if launch_protected!=None: text=text.replace('<serviceData ', '<serviceData launchProtected="'+launch_protected+'" ')
     file=binary.concat([text])
     return (file,binary.xml(file).root)
 
@@ -89,7 +90,43 @@ def test_unchanged_competing_declarations_and_service_rights():
     equal(windows.acl_entries(parts['sacl'])['entries'][0]['mask'],0xf01ff)
     raises(mod['_service_security'],args=['D:(A;;RP;;;SY',None])
 
+
+def test_unchanged_x86_contribution_is_not_a_view_mapping():
+    root=_root()
+    original={p:digest(root.find(p)) for p in [_SYS,_SOFT]}
+    a,b=_manifest('Test'),_manifest('Test',image='new.exe')
+    runtime=_runtime([(a,a),(a,a)])
+    x86=runtime['transitions'][1]
+    x86['component_identities']={s:binary.encode(binary.text(v).replace('Architecture=amd64','Architecture=x86')) for s,v in x86['component_identities'].items()}
+    result=apply_direct_services(root,runtime)
+    equal(result['services'],[])
+    equal(result['groups'],0)
+    equal({p:digest(root.find(p)) for p in original},original)
+    # Do not discard x86 ownership before detecting an amd64-side change.
+    runtime['transitions'][0]=_runtime([(a,b)])['transitions'][0]
+    raises(plan_direct_services,args=[root,runtime],message='unestablished x86 contribution')
+    x86['documents']['after']=_manifest('Test',group='New')
+    raises(plan_direct_services,args=[root,dict(transitions=[x86])],message='changed x86 SvcHost')
+    equal({p:digest(root.find(p)) for p in original},original)
+
+
+def test_launch_protection_matches_installed_native_controls():
+    # Independent source Server controls: sppsvc=1, ClipSVC=2, WinDefend=3.
+    for name,value in [('windows',1),('windowsLight',2),('antimalwareLight',3)]:
+        root=_root()
+        runtime=_runtime([(_manifest('Test'),_manifest('Test',launch_protected=name))])
+        apply_direct_services(root,runtime)
+        values=windows.hive(root.find(_SYS)).find(_KEY+'Test').values
+        equal(values['LaunchProtected'],value)
+        equal(values['Start'],4)
+    root=_root()
+    original=digest(root.find(_SYS))
+    raises(plan_direct_services,args=[root,_runtime([(_manifest('Test'),_manifest('Test',launch_protected='unknown'))])],message='unsupported service launchProtected')
+    equal(digest(root.find(_SYS)),original)
+
 TEST_SUITE=suite('nt6_update_services_direct',[
+    case('launch_protection',test_launch_protection_matches_installed_native_controls),
+    case('unchanged_x86',test_unchanged_x86_contribution_is_not_a_view_mapping),
     case('unchanged_owners_and_service_rights',test_unchanged_competing_declarations_and_service_rights),
     case('configuration_and_policy',test_configuration_deltas_preserve_policy_and_group_members),
     case('security_and_failure_actions',test_definition_change_and_failure_action_bytes),

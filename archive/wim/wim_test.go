@@ -246,7 +246,7 @@ func indexedLookupFixture(names []string) *Archive {
 	metadata = append(metadata, make([]byte, 8)...)
 	root := entry{path: "/image1", isDir: true, subdirOff: 8}
 	return &Archive{images: []image{{root: root, metadata: metadata,
-		dirs: make(map[string][]entry), byPath: map[string]entry{wimPathKey(root.path): root}}}}
+		dirs: make(map[string][]entry), byPath: map[string]*entry{wimPathKey(root.path): &root}}}}
 }
 
 func TestIndexedWIMLookupPreservesSimpleFoldAndLazyLoading(t *testing.T) {

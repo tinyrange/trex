@@ -462,8 +462,14 @@ def test_source_folder_security_matches_native_image_control():
     # replacing this with the ordinary six-ACE file policy is incorrect.
     expected = binary.decode("0100149c14000000340000000000000054000000010600000000000550000000b589fb381984c2cb5c6c236d5700776ec0026487010600000000000550000000b589fb381984c2cb5c6c236d5700776ec0026487020018010b00000000032800ff011f00010600000000000550000000b589fb381984c2cb5c6c236d5700776ec002648700001800a900120001020000000000052000000020020000000b1800000000a00102000000000005200000002002000000001400a9001200010100000000000512000000000b1400000000a001010000000000051200000000001800a900120001020000000000052000000021020000000b1800000000a00102000000000005200000002102000000001800a9001200010200000000000f0200000001000000000b1800000000a0010200000000000f020000000100000000001800a9001200010200000000000f0200000002000000000b1800000000a0010200000000000f0200000002000000", "hex")
     equal(stage["build_update_source_folder_security"](parent),expected)
-    unsupported = windows.compile_sddl("O:SYG:SYD:AI(A;OICI;FA;;;SY)S:AI(AU;OICISA;FA;;;WD)")
-    raises(stage["build_update_source_folder_security"],args=[unsupported],message="parent SACL")
+    audited = windows.compile_sddl("O:SYG:SYD:AI(A;OICI;FA;;;SY)S:AI(AU;OICISA;FA;;;WD)")
+    actual = windows.security_descriptor_parts(stage["build_update_source_folder_security"](audited))
+    original = windows.security_descriptor_parts(expected)
+    for field in ["owner", "group", "dacl", "control"]:
+        equal(actual[field], original[field])
+    # The generalized directory assignment now inherits audits instead of
+    # rejecting all parent SACLs. Preserve the success audit with ID set.
+    equal(actual["sacl"], windows.security_descriptor_parts(windows.compile_sddl("S:AI(AU;OICISAID;FA;;;WD)"))["sacl"])
 
 TEST_SUITE = suite("nt6_update_files", [
     case("clean_payload_owner_transfer", test_filemap_clean_payload_still_transfers_exact_owner),

@@ -70,7 +70,9 @@ func transformPESourceTraced(data []byte, layout peLayout, rift riftTable, flags
 	}
 	put32(data, int(layout.timestampOffset), target.timestamp)
 	marker := make([]byte, len(data))
-	if layout.machine == 0x14c && flags&peTransformMarkCode != 0 {
+	// MARK excludes non-executable sections on AMD64 as well as x86.
+	// A .pdata entry does not make a non-executable section eligible.
+	if flags&peTransformMarkCode != 0 {
 		markNonExecutablePE(marker, layout)
 	}
 	if flags&peTransformMarkCode != 0 {
@@ -489,11 +491,12 @@ func markNonExecutablePE(marker []byte, layout peLayout) {
 }
 
 // The MARK transform claims headers and directory extents as instruction
-// boundaries, not just individual rewritten fields. MSDelta applies the PE
-// RVA-to-file mapping to every directory, including Security: although that
-// directory is a file offset in the PE format, its delta marker coordinates
-// follow this same mapping. Keep this compatibility rule local to MSDelta;
-// certificate parsing must continue to use the actual file offset.
+// boundaries, not just individual rewritten fields. Native DataDirectories
+// first tries a raw-backed RVA lookup, including for Security. If that fails,
+// an in-file numeric address is used directly as a file offset. Virtual-only
+// section tails must not acquire backing through the unbounded delta rift.
+// Keep this compatibility rule local to MSDelta; certificate parsing always
+// uses the actual file offset.
 func markPEDirectories(marker []byte, layout peLayout) {
 	mark := func(offset int, size uint64) {
 		if offset < 0 || offset >= len(marker) {
@@ -505,16 +508,25 @@ func markPEDirectories(marker []byte, layout peLayout) {
 		}
 	}
 	mark(0, uint64(layout.headerSize))
-	// Use the delta coordinate map rather than section membership. Virtual
-	// padding sections have no file coordinate and must not redirect a mark
-	// into code; the rift also defines continuation across RVA gaps.
-	rvaToFile := layout.fileToRVA().reverse()
 	for _, directory := range layout.directories {
 		if directory.rva == 0 || directory.size == 0 {
 			continue
 		}
-		offset := rvaToFile.mapForward(int64(directory.rva))
-		if offset >= 0 && offset < int64(len(marker)) {
+		offset := uint64(0)
+		if directory.rva < layout.headerSize {
+			offset = uint64(directory.rva)
+		} else {
+			for _, section := range layout.sections {
+				if directory.rva >= section.rva && uint64(directory.rva-section.rva) < uint64(section.rawSize) {
+					offset = uint64(section.rawStart) + uint64(directory.rva-section.rva)
+					break
+				}
+			}
+		}
+		if offset == 0 && uint64(directory.rva) < uint64(len(marker)) {
+			offset = uint64(directory.rva)
+		}
+		if offset != 0 && offset < uint64(len(marker)) {
 			mark(int(offset), uint64(directory.size))
 		}
 	}

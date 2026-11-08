@@ -3,6 +3,7 @@ package native
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"testing"
 
 	"github.com/tinyrange/trex/storage"
@@ -31,6 +32,7 @@ func TestComponentCacheExactContentAliases(t *testing.T) {
 	// A predecessor with the same full identity shares content too, but never
 	// acquires a proof merely from its declaration.
 	plan.Files = append(plan.Files, uup.StageFileEffect{SourceMode: "predecessor", SourceName: "previous", SourceDescriptor: &descriptors[0], StorePath: "/store/previous"})
+	plan.Files = append(plan.Files, uup.StageFileEffect{SourceMode: "payload", SourceName: "first", StorePath: "/store/legacy", ExpectedSHA1: &[20]byte{}})
 	value, err := componentStagingRecord(stage, plan, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -47,14 +49,20 @@ func TestComponentCacheExactContentAliases(t *testing.T) {
 			t.Fatal("declaration became verification")
 		}
 	}
+	if readers[5].key == readers[0].key {
+		t.Fatal("legacy check shared another manifest's cache key")
+	}
 	a, b := readers[0], readers[1]
 	if a.key != b.key || a.key != readers[4].key || a.key == readers[2].key || a.key == readers[3].key || readers[2].key == readers[3].key {
 		t.Fatal("cache identity lost hash/length separation")
 	}
-	originalCache := a.cache
-	cache := bytecache.New(8)
+	originalCache := a.compressed
+	cache, err := newStageContentCache(8 + 128)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, r := range readers {
-		r.cache = cache
+		r.compressed = cache
 	}
 	calls := 0
 	a.open = func() (storage.Reader, error) { calls++; return &starfile.Bytes{Data: data}, nil }
@@ -62,6 +70,11 @@ func TestComponentCacheExactContentAliases(t *testing.T) {
 	got := make([]byte, len(data))
 	if _, err = a.ReadAt(got, 0); err != nil || !bytes.Equal(got, data) {
 		t.Fatal("first read", err)
+	}
+	legacyFailure := errors.New("manifest legacy digest mismatch")
+	readers[5].open = func() (storage.Reader, error) { return nil, legacyFailure }
+	if _, err := readers[5].ReadAt(got, 0); !errors.Is(err, legacyFailure) {
+		t.Fatal("cached alias bypassed legacy verification", err)
 	}
 	if _, ok := b.VerifiedSHA256(); ok {
 		t.Fatal("unread alias published proof")
@@ -74,7 +87,7 @@ func TestComponentCacheExactContentAliases(t *testing.T) {
 	}
 	// Evict, then force the alias's own source to return wrong bytes. The old
 	// verified identity must not bypass validation on a new reconstruction.
-	_, err = cache.Get(bytecache.Key{Index: 100}, func() ([]byte, error) { return []byte("evicting"), nil })
+	_, err = cache.get(&reopenedStageReader{key: bytecache.Key{Index: 100}, size: 8, open: func() (storage.Reader, error) { return &starfile.Bytes{Data: []byte("evicting")}, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +106,7 @@ func TestComponentCacheExactContentAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := v.(*starfile.ReaderValue).StorageReader().(*reopenedStageReader)
-	if r.cache == originalCache {
+	if r.compressed == originalCache {
 		t.Fatal("cache leaked across plans")
 	}
 	if _, ok := r.VerifiedSHA256(); ok {

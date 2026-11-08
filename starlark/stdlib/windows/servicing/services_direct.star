@@ -17,6 +17,7 @@ _FIELDS={
     'dependOnGroup':('DependOnGroup',7), 'requiredPrivileges':('RequiredPrivileges',7),
     'start':('Start',4), 'type':('Type',4), 'errorControl':('ErrorControl',4),
     'sidType':('ServiceSidType',4), 'delayedAutoStart':('DelayedAutoStart',4),
+    'launchProtected':('LaunchProtected',4),
 }
 _ENUMS={
     'start':{'boot':0,'system':1,'auto':2,'demand':3,'disabled':4},
@@ -24,6 +25,7 @@ _ENUMS={
     'errorControl':{'ignore':0,'normal':1,'severe':2,'critical':3},
     'sidType':{'none':0,'unrestricted':1,'restricted':3},
     'delayedAutoStart':{'false':0,'true':1},
+    'launchProtected':{'windows':1,'windowsLight':2,'antimalwareLight':3},
 }
 
 def _attrs(n):
@@ -47,6 +49,9 @@ def _leaf(value):
 def _shape(n):
     return (n.name,sorted(_attrs(n).items()),[_shape(c) for c in n.children])
 
+def _svc_host_shapes(root):
+    return [_shape(n) for n in _walk(root,'categoryMembership') if any([_attrs(i).get('typeName')=='SvcHost' for i in _children(n,'id')])]
+
 def collect_direct_services(runtime):
     """Collect before/after service and group contributions from manifest-bound runtime transitions."""
     services={'before':{},'after':{}}
@@ -56,7 +61,7 @@ def collect_direct_services(runtime):
             root=document[1]
             identity=windows.csi_identity(transition['component_identities'][side])
             declarations=_walk(root,'serviceData')
-            if declarations and identity.processor_architecture not in ['amd64','wow64']:
+            if declarations and identity.processor_architecture not in ['amd64','wow64','x86']:
                 fail('service declaration requires explicit target architecture')
             definitions={}
             for d in _walk(root,'securityDescriptorDefinition'):
@@ -80,7 +85,7 @@ def collect_direct_services(runtime):
                         fail('unsupported service security reference')
                     security=definitions.get(reference['name'])
                     if security==None: fail('missing service security definition')
-                record=dict(attrs=attrs,children=children,security=security,
+                record=dict(attrs=attrs,children=children,security=security,architecture=identity.processor_architecture,
                     signature=json.encode((sorted(attrs.items()),[_shape(c) for c in n.children],security)))
                 services[side].setdefault(name,[]).append(record)
             for membership in _walk(root,'categoryMembership'):
@@ -89,6 +94,14 @@ def collect_direct_services(runtime):
                 category=_attrs(ids[0])
                 if category.get('name')!='Microsoft.Windows.Categories' or category.get('publicKeyToken')!='365143bb27e7ac8b':
                     fail('unsupported SvcHost category')
+                if identity.processor_architecture=='x86':
+                    # No registry-view decision is needed for an unchanged
+                    # contribution. Do not authorize changed x86 membership.
+                    other='after' if side=='before' else 'before'
+                    paired=transition.get('documents',{}).get(other)
+                    if paired==None or windows.csi_identity(transition['component_identities'][other]).processor_architecture!='x86' or json.encode(_svc_host_shapes(root))!=json.encode(_svc_host_shapes(paired[1])):
+                        fail('changed x86 SvcHost membership requires separate policy')
+                    continue
                 prefix=('/Wow6432Node' if identity.processor_architecture=='wow64' else '')+_GROUP
                 if identity.processor_architecture not in ['amd64','wow64']: fail('unsupported SvcHost architecture')
                 for instance in _children(membership,'categoryInstance'):
@@ -107,6 +120,8 @@ def collect_direct_services(runtime):
         old,new=services['before'].get(name,[]),services['after'].get(name,[])
         if sorted([v['signature'] for v in old])==sorted([v['signature'] for v in new]):
             continue  # Unchanged competing declarations do not require ranking.
+        if any([v['architecture']=='x86' for v in old+new]):
+            fail('changed service has unestablished x86 contribution: '+name)
         for side,records in [('before',old),('after',new)]:
             if len(set([v['signature'] for v in records]))>1:
                 fail('changed service has competing declarations: '+name)

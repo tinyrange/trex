@@ -53,11 +53,11 @@ func TestReopenedStageReaderBoundariesAndRevalidation(t *testing.T) {
 }
 
 func TestStageReadersShareBoundedCacheAndReloadAfterEviction(t *testing.T) {
-	cache := bytecache.New(8)
+	cache := stageTestCache(t, 8+128)
 	calls := [2]int{}
 	var failure error
 	makeReader := func(i int) *reopenedStageReader {
-		return &reopenedStageReader{size: 8, cache: cache, key: bytecache.Key{Index: i}, open: func() (storage.Reader, error) {
+		return &reopenedStageReader{size: 8, compressed: cache, key: bytecache.Key{Index: i}, open: func() (storage.Reader, error) {
 			calls[i]++
 			if failure != nil {
 				return nil, failure
@@ -78,7 +78,7 @@ func TestStageReadersShareBoundedCacheAndReloadAfterEviction(t *testing.T) {
 	if _, err := b.ReadAt(p, 0); err != nil {
 		t.Fatal(err)
 	}
-	if cache.Stats().Bytes > 8 {
+	if cache.Stats().Bytes > 8+128 {
 		t.Fatal("unbounded payload cache")
 	}
 	failure = errors.New("integrity failure after eviction")
@@ -113,7 +113,7 @@ func TestLazyStageReferenceDefersReconstructionButNotReadErrors(t *testing.T) {
 func TestStageVerifiedDigestRequiresFullValidationAndRechecksReopenedBytes(t *testing.T) {
 	data := []byte("verified")
 	expected := sha256.Sum256(data)
-	r := &reopenedStageReader{size: 8, expectedSHA256: &expected, cache: bytecache.New(0), open: func() (storage.Reader, error) { return &starfile.Bytes{Data: data}, nil }}
+	r := &reopenedStageReader{size: 8, expectedSHA256: &expected, compressed: stageTestCache(t, 0), open: func() (storage.Reader, error) { return &starfile.Bytes{Data: data}, nil }}
 	if _, ok := r.VerifiedSHA256(); ok {
 		t.Fatal("declared hash treated as verified")
 	}

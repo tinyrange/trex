@@ -28,7 +28,7 @@ func cbsParentQuery(args starlark.Tuple, kwargs []starlark.Tuple, mode string) (
 	if err := starlark.UnpackArgs(name, args, kwargs, "packages", &packages, "candidates", &candidates); err != nil {
 		return nil, err
 	}
-	if packages.Len() > 1<<16 || candidates.Len() > 1<<16 {
+	if packages.Len() > uup.MaxCBSPackageContexts || candidates.Len() > uup.MaxCBSPackageContexts {
 		return nil, fmt.Errorf("CBS parent lists exceed bound")
 	}
 	states := make([]uup.CBSParentCandidate, 0, candidates.Len())

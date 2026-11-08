@@ -242,7 +242,19 @@ func (w *cliSignature) method(depth int) bool {
 		// LocalVarSig entries. This is independent of whether its token fits
 		// the source width; a representable first-token control still leaves
 		// every later local unchanged.
-		count = 1
+		// LocalVarSig enters the bare type walker, not TransformParam.
+		// Its prelude skips 0x4? markers and one BYREF, but does not
+		// consume custom modifiers (UpdateCompression32131 5ac81..5acba).
+		for w.pos < len(w.source) && w.source[w.pos]&0xf0 == 0x40 {
+			w.pos++
+		}
+		if w.pos < len(w.source) && w.source[w.pos] == 0x10 {
+			w.pos++
+		}
+		if w.pos < len(w.source) && (w.source[w.pos] == 0x1f || w.source[w.pos] == 0x20) {
+			return false
+		}
+		return w.typ(depth + 1)
 	}
 	for i := uint32(0); i < count; i++ {
 		// At a method's outer type boundary, custom modifiers precede

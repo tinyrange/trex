@@ -71,8 +71,12 @@ func serializedCertificateBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args 
 			return nil, err
 		}
 	}
+	record, err := certificateStarlarkValue(cert, sha1.Sum(cert.Raw))
+	if err != nil {
+		return nil, err
+	}
 	return starfile.NewRecord(starlark.StringDict{
-		"certificate": certificateStarlarkValue(cert, sha1.Sum(cert.Raw)),
+		"certificate": record,
 		"properties":  props,
 	}), nil
 }

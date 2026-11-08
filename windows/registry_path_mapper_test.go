@@ -73,3 +73,21 @@ func TestRegistryPathMapperRejectsInvalidRulesAndKeys(t *testing.T) {
 		t.Fatal("accepted redirect without anchor")
 	}
 }
+
+func TestRegistryPathMapperManagedNativeView(t *testing.T) {
+	m := registryPathMapper{`\registry\machine\software`: 3}
+	// Native CSI bitness2 for MSIL, unlike x86/wow64 bitness3. These
+	// ServerManager keys come from the Server managed plug-in manifests.
+	for _, key := range []string{
+		`HKLM\Software\Microsoft\ServerManager\Roles\16\Plugins`,
+		`HKLM\Software\Microsoft\ServerManager\Roles\481\Plugins`,
+		`HKCR\CLSID\{fixture}`, // catches accidental blanket WOW redirection
+	} {
+		scope, path, err := m.resolve(key, "msil")
+		nativeScope, nativePath, nativeErr := m.resolve(key, "amd64")
+		_, wowPath, wowErr := m.resolve(key, "wow64")
+		if err != nil || nativeErr != nil || wowErr != nil || scope != nativeScope || path != nativePath || path == wowPath {
+			t.Fatalf("%s: managed %s %s %v; native %s %s %v; WOW %s %v", key, scope, path, err, nativeScope, nativePath, nativeErr, wowPath, wowErr)
+		}
+	}
+}

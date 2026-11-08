@@ -84,7 +84,40 @@ def test_foreign_channel_state_rejects_before_any_hive_publication():
     raises(events["plan_update_event_registry"],args=[root,dict(before={},after={}),"CurrentControlSet"],message="canonical selected control set")
 
 
+
+def test_new_disabled_debug_preserves_access_without_shared_session():
+    root=_fixture()
+    channel=_channel("Microsoft-Windows-SAMLIB/Debug","false")
+    access="O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x2;;;AU)(A;;0x2;;;LS)(A;;0x2;;;NS)(A;;0x2;;;AC)"
+    channel["attributes"].update(type="Debug",access=access)
+    original=digest(root.find("/Windows/System32/config/SYSTEM"))
+    software,system=_apply(root,{}, {_NEW:_item(_NEW,[channel])})
+    equal(software.find(_ROOT+["Channels","Microsoft-Windows-SAMLIB/Debug"]).values,dict(Type=3,Isolation=1,Enabled=0,OwningPublisher=_NEW,ChannelAccess=access))
+    equal(digest(root.find("/Windows/System32/config/SYSTEM")),original)
+    equal(system.find(["controlset001","Control","WMI","Autologger","EventLog-System",_NEW]),None)
+    raises(events["plan_update_event_registry"],args=[root,dict(before={_NEW:_item(_NEW,[channel])},after={}),"controlset001"],message="Debug channel replacement")
+    channel["attributes"]["enabled"]="true"
+    raises(events["plan_update_event_registry"],args=[_fixture(),dict(before={},after={_NEW:_item(_NEW,[channel])}),"controlset001"],message="unsupported Debug")
+
+
+def test_debug_existing_session_state_rejects_atomically():
+    channel=_channel("Microsoft-Windows-SAMLIB/Debug","false")
+    channel["attributes"]["type"]="Debug"
+    # wevtutil Sha256HashToGuid, with its version nibble (not RFC variant).
+    session_guid="efde66c0-943f-54b6-7c1d-9b6550b10605"
+    prefix=["controlset001","Control","WMI"]
+    for parts,name in [(prefix+["Autologger","EventLog-Microsoft-Windows-SAMLIB-Debug"],"Start"),(prefix+["Security"],session_guid),(prefix+["Security"],"{"+session_guid.upper()+"}")]:
+        root=_fixture()
+        path="/Windows/System32/config/SYSTEM"
+        root.write(path,windows.hive_from_patches("SYSTEM",[dict(key_parts=parts,name=name,type="REG_DWORD",value=0)],source=root.find(path)))
+        original={n:digest(root.find("/Windows/System32/config/"+n)) for n in ["SOFTWARE","SYSTEM"]}
+        raises(events["plan_update_event_registry"],args=[root,dict(before={},after={_NEW:_item(_NEW,[channel])}),"controlset001"],message="disabled Debug channel has existing")
+        equal({n:digest(root.find("/Windows/System32/config/"+n)) for n in original},original)
+
+
 TEST_SUITE=suite("private/nt6_update_events",[
+    case("disabled_debug",test_new_disabled_debug_preserves_access_without_shared_session),
+    case("debug_existing_session",test_debug_existing_session_state_rejects_atomically),
     case("identity_handoff",test_provider_handoff_preserves_channel_and_changes_logger_identity),
     case("shared_keywords",test_shared_keywords_use_ordinal_not_id_and_disabled_has_no_logger),
     case("foreign_configuration",test_foreign_channel_state_rejects_before_any_hive_publication),

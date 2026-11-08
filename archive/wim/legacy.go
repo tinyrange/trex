@@ -82,7 +82,7 @@ func openLegacyWIM(file storage.Reader, header []byte, cache *bytecache.Cache, s
 		name := fmt.Sprintf("image%d", index)
 		root := entry{name: name, path: "/" + name, isDir: true, attrs: 0x10, securityID: ^uint32(0), subdirOff: uint64(rootOffset)}
 		w.images = append(w.images, image{index: index, resource: item.resource, metadata: data, security: security,
-			root: root, dirs: make(map[string][]entry), byPath: map[string]entry{wimPathKey(root.path): root}})
+			root: root, dirs: make(map[string][]entry), byPath: map[string]*entry{wimPathKey(root.path): &root}})
 	}
 	return w, nil
 }
@@ -203,7 +203,8 @@ func (w *Archive) readLegacyDir(image *image, dir entry) ([]entry, error) {
 		}
 		children = append(children, child)
 	}
-	for _, child := range children {
+	for i := range children {
+		child := &children[i]
 		key := wimPathKey(child.path)
 		if _, exists := image.byPath[key]; exists {
 			return nil, fmt.Errorf("wim 1.10: duplicate path %s", child.path)

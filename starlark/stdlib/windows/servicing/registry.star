@@ -138,93 +138,109 @@ def _registry_set_security(state, parts, selected, default, deferred, created):
     state["keys"][parts] = dict(key_parts=list(parts), security=assigned)
 
 
-def plan_update_ordinary_registry(root, keys, groups, buckets, control_set):
+def plan_update_ordinary_registry(root, keys, groups, buckets, control_set, profile_hives = None):
     """Plan complete ordinary keys/values against the actual constructed image.
 
     No hive is published until every target passes native readback. Unchanged
-    user-profile trees require no binding. Changed profiles, atomic mutable
-    trees and nonempty retired-security cleanup fail closed, never get reported
-    as completed. Literal key components are retained, including dot and slash.
+    user-profile trees require no binding. Changed profiles require explicit
+    hive paths and support existing-key value changes only: profile key creation,
+    security assignment and cleanup remain fail-closed. The caller owns complete
+    profile enumeration; HKCU is never substituted with HKU/.DEFAULT. Atomic
+    mutable trees and nonempty retired-security cleanup also remain fail-closed. Literal key components are retained, including dot and slash.
     """
     if not control_set.startswith("controlset") or len(control_set) != 13 or not control_set[10:].isdigit():
         fail("registry requires an explicit selected control set")
-    if any([k["subtree_changed"] for k in keys["user"].values()]):
+    profile_hives = [] if profile_hives == None else profile_hives
+    if type(profile_hives) != "list" or any([type(path) != "string" or not path.startswith("/") or not path.lower().endswith("/ntuser.dat") or chr(92) in path or chr(0) in path or any([p in ["", ".", ".."] for p in path[1:].split("/")]) for path in profile_hives]):
+        fail("registry profiles require explicit canonical hive paths")
+    if len({path.lower(): True for path in profile_hives}) != len(profile_hives):
+        fail("duplicate registry profile binding")
+    if not profile_hives and any([k["subtree_changed"] for k in keys["user"].values()]):
         fail("changed per-user registry trees require explicit profile bindings")
     changed_values = {}
     for (scope,path,name), (before,after) in groups.items():
         if sorted([v[1:] for v in before]) != sorted([v[1:] for v in after]):
-            if scope != "system":
+            if scope != "system" and (scope != "user" or not profile_hives):
                 fail("changed per-user registry values require explicit profile bindings")
-            changed_values.setdefault(path, []).append((name,before,after))
+            changed_values.setdefault((scope,path), []).append((name,before,after))
     states = {}
     queued = []
     report = dict(set_values=0, deleted_values=0, created_keys=0, removed_keys=0, security_keys=0, preserved_values=0)
-    machine = keys["system"]
-    for path in sorted(machine, key=lambda p: (p.count(chr(92)),p)):
-        item = machine[path]
-        decision = select_servicing_registry_key_commit(item["operation"],item["security_flags"],item["descriptor"],auxiliary_flags=item["auxiliary_flags"])
-        if decision["action"] == "skip":
-            if path in changed_values:
-                fail("changed registry values were hidden by subtree skip")
-            continue
-        target, parts = _registry_route(path,control_set)
-        if target not in states:
-            hpath = "/Windows/System32/config/"+target
-            source = root.find(hpath)
-            if source == None:
-                fail("missing physical registry hive: "+target)
-            states[target] = dict(path=hpath, source=source, source_hash=digest(source), hive=windows.hive(source), nodes={}, keys={}, patches=[], deletes=[], removed={})
-        state = states[target]
-        node = _registry_node(state,parts)
-        if decision["action"] == "open" and node == None:
-            continue
-        created = node == None
-        if created:
-            if not parts or _registry_node(state,parts[:-1]) == None:
-                fail("registry creation encountered an unplanned missing parent: "+path)
-            node = dict(security=None, children={}, values={})
-            state["nodes"][parts] = node
-            _registry_node(state,parts[:-1])["children"][parts[-1]] = True
-            decision = select_servicing_registry_key_commit(item["operation"],item["security_flags"],item["descriptor"],created=True,auxiliary_flags=item["auxiliary_flags"])
-            report["created_keys"] += 1
-        if decision["security"] != "none":
-            _registry_set_security(state, parts, item["descriptor"], decision["security"] == "default", decision["defer_inheritance"], created)
-        elif created:
-            fail("new registry key has no final security assignment")
-        if decision["queue_empty_delete"]:
-            queued.append((target,parts,item["old_descriptor"] != None))
-        for name,before,after in changed_values.get(path,[]):
-            old, new = _registry_value_selection(before,buckets), _registry_value_selection(after,buckets)
-            selected = [v for v in [old,new] if v != None]
-            if any([v[3] not in ["true","false"] or v[5] for v in selected]):
-                fail("unsupported registry value policy: "+path)
-            if len(selected)==2 and (old[3] != new[3] or old[4] != new[4]):
-                fail("registry value policy changed across owners")
-            mutable = selected[-1][3] == "true"
-            prior, value = _registry_value_bytes(old), _registry_value_bytes(new)
-            current = node["values"].get(name)
-            if any([v[1]==7 for v in selected]):
-                if any([len(side)>1 for side in [before,after]]):
-                    fail("overlapping MULTI_SZ owners require contribution arbitration")
-                hint = selected[-1][4] or "append"
-                outcome = select_servicing_paired_registry_multi_action(_registry_multi_entries(prior),_registry_multi_entries(value),current,operation_hint=hint,mutable=mutable if old != None and new != None else False)
-                action,value = outcome["action"],outcome.get("value")
+    targets = [("system",None,keys["system"])] + [("user",path,keys["user"]) for path in profile_hives]
+    for scope,binding,tree in targets:
+        for path in sorted(tree, key=lambda p: (p.count(chr(92)),p)):
+            item = tree[path]
+            decision = select_servicing_registry_key_commit(item["operation"],item["security_flags"],item["descriptor"],auxiliary_flags=item["auxiliary_flags"])
+            if decision["action"] == "skip":
+                if (scope,path) in changed_values:
+                    fail("changed registry values were hidden by subtree skip")
+                continue
+            if scope == "system":
+                target, parts = _registry_route(path,control_set)
+                hpath = "/Windows/System32/config/"+target
             else:
-                if any([v[4] for v in selected]):
-                    fail("ordinary registry value has a nonordinary operation hint")
-                action = select_servicing_registry_value_action(prior,value,current,mutable)
-            if action == "set":
-                state["patches"].append(dict(key_parts=list(parts),name=name,type=value["type"],value=value["raw"]))
-                node["values"][name] = value
-                report["set_values"] += 1
-            elif action == "delete":
-                state["deletes"].append(dict(key_parts=list(parts),name=name))
-                node["values"].pop(name,None)
-                report["deleted_values"] += 1
-            elif action == "preserve":
-                report["preserved_values"] += 1
-            elif action != "none":
-                fail("unsupported registry value action")
+                prefix = chr(92)+"registry"+chr(92)+"user"+chr(92)
+                if not path.startswith(prefix):
+                    fail("profile key is outside the abstract user root")
+                target, parts, hpath = "PROFILE:"+binding.lower(), tuple(path[len(prefix):].split(chr(92))), binding
+            if target not in states:
+                source = root.find(hpath)
+                if source == None:
+                    fail("missing physical registry hive: "+target)
+                states[target] = dict(path=hpath, source=source, source_hash=digest(source), hive=windows.hive(source), nodes={}, keys={}, patches=[], deletes=[], removed={})
+            state = states[target]
+            node = _registry_node(state,parts)
+            if scope == "user" and (node == None or decision["security"] != "none" or decision["queue_empty_delete"]):
+                fail("profile registry requires existing keys without security or cleanup effects: "+path)
+            if decision["action"] == "open" and node == None:
+                continue
+            created = node == None
+            if created:
+                if not parts or _registry_node(state,parts[:-1]) == None:
+                    fail("registry creation encountered an unplanned missing parent: "+path)
+                node = dict(security=None, children={}, values={})
+                state["nodes"][parts] = node
+                _registry_node(state,parts[:-1])["children"][parts[-1]] = True
+                decision = select_servicing_registry_key_commit(item["operation"],item["security_flags"],item["descriptor"],created=True,auxiliary_flags=item["auxiliary_flags"])
+                report["created_keys"] += 1
+            if decision["security"] != "none":
+                _registry_set_security(state, parts, item["descriptor"], decision["security"] == "default", decision["defer_inheritance"], created)
+            elif created:
+                fail("new registry key has no final security assignment")
+            if decision["queue_empty_delete"]:
+                queued.append((target,parts,item["old_descriptor"] != None))
+            for name,before,after in changed_values.get((scope,path),[]):
+                old, new = _registry_value_selection(before,buckets), _registry_value_selection(after,buckets)
+                selected = [v for v in [old,new] if v != None]
+                if any([v[3] not in ["true","false"] or v[5] for v in selected]):
+                    fail("unsupported registry value policy: "+path)
+                if len(selected)==2 and (old[3] != new[3] or old[4] != new[4]):
+                    fail("registry value policy changed across owners")
+                mutable = selected[-1][3] == "true"
+                prior, value = _registry_value_bytes(old), _registry_value_bytes(new)
+                current = node["values"].get(name)
+                if any([v[1]==7 for v in selected]):
+                    if any([len(side)>1 for side in [before,after]]):
+                        fail("overlapping MULTI_SZ owners require contribution arbitration")
+                    hint = selected[-1][4] or "append"
+                    outcome = select_servicing_paired_registry_multi_action(_registry_multi_entries(prior),_registry_multi_entries(value),current,operation_hint=hint,mutable=mutable if old != None and new != None else False)
+                    action,value = outcome["action"],outcome.get("value")
+                else:
+                    if any([v[4] for v in selected]):
+                        fail("ordinary registry value has a nonordinary operation hint")
+                    action = select_servicing_registry_value_action(prior,value,current,mutable)
+                if action == "set":
+                    state["patches"].append(dict(key_parts=list(parts),name=name,type=value["type"],value=value["raw"]))
+                    node["values"][name] = value
+                    report["set_values"] += 1
+                elif action == "delete":
+                    state["deletes"].append(dict(key_parts=list(parts),name=name))
+                    node["values"].pop(name,None)
+                    report["deleted_values"] += 1
+                elif action == "preserve":
+                    report["preserved_values"] += 1
+                elif action != "none":
+                    fail("unsupported registry value action")
     # Reverse hierarchy order: real residual contents include undeclared keys
     # and values. A declaration disappearing does not justify recursive delete.
     for target,parts,had_security in reversed(queued):

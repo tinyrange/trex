@@ -166,12 +166,16 @@ def plan_package_catalog_hints(root, packages):
             if actual not in proofs:
                 file=root.find(actual)
                 meta=root.get_metadata(actual)
-                logical=archive.dcs(file) if file.size>=4 and file.bytes(0,4)==b'DCS\x01' else file
-                proofs[actual]=dict(hash=digest(file),order=meta.write_order,eas=[dict(e) for e in meta.extended_attributes],logical=logical,hashes={},object=('link',meta.hard_link_id) if meta.hard_link_id else ('path',actual.lower()))
+                proofs[actual]=dict(hash=digest(file),order=meta.write_order,eas=[dict(e) for e in meta.extended_attributes],hashes={},object=('link',meta.hard_link_id) if meta.hard_link_id else ('path',actual.lower()))
             proof=proofs[actual]
             algorithm='sha256' if len(member['digest'])==32 else 'sha1'
             if algorithm not in proof['hashes']:
-                proof['hashes'][algorithm]=windows.catalog_hash(proof['logical'],algorithm=algorithm)
+                # DCS decoding owns an expanded byte buffer. Cache only its
+                # digest, not every expanded file for the whole catalog pass.
+                file=root.find(actual)
+                logical=archive.dcs(file) if file.size>=4 and file.bytes(0,4)==b'DCS\x01' else file
+                proof['hashes'][algorithm]=windows.catalog_hash(logical,algorithm=algorithm)
+                logical=None
             if proof['hashes'][algorithm]!=member['digest']:
                 mismatch_count+=1
                 if len(mismatches)<16:

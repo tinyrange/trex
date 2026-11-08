@@ -320,6 +320,7 @@ def servicing_file_path_roots(software, windows_directory, target):
     # Public is ProfilesDirectory + Public, not the registry Public value.
     for directory_id, parent_id, suffix in [
         (37, 36, "System32"),
+        (0x50000, 36, "System"),
         (41, 36, "SysWOW64"),
         (0x20000, 36, "System32\\Drivers"),
         (0xe0000, 36, "SysWOW64\\Drivers"),
@@ -620,17 +621,21 @@ def build_servicing_created_security(parent, directory = False, token_default_da
     SYSTEM owner/primary group and SYSTEM integrity. This is not a general
     token-dependent SeAssignSecurityEx implementation. The native NTFS path
     takes auto-DACL inheritance only when the parent has DACL_AUTO_INHERITED.
-    Noninheritable ordinary parent audit ACEs do not propagate. If no DACL
+    Ordinary audit ACEs inherit when the parent SACL is auto-inherited;
+    noninheritable parent audit ACEs do not propagate. If no DACL
     inherits, the caller must explicitly supply the subject token default DACL.
     Only nonpropagating allow ACEs with mapped file rights are supported there;
-    legacy inheritance and other token/SACL policies remain fail-closed.
+    legacy propagating SACL inheritance and other token/SACL policies
+    remain fail-closed.
     """
     if parent == None:
         fail("servicing creation requires the actual parent descriptor")
     parts = windows.security_descriptor_parts(parent)
     if parts["resource_manager_control"] or not parts["control"] & 0x400 or parts["dacl"] == None:
         fail("servicing creation requires an auto-inherited parent DACL")
-    _servicing_noninheriting_audit(parts["sacl"], "parent")
+    # Legacy SACL inheritance does not mark inherited ACEs. Keep that
+    # propagating case fail-closed until explicitly modeled.
+    _validate_servicing_directory_audit(parts["sacl"], "parent", inheritable = bool(parts["control"] & 0x800))
     if token_default_dacl != None:
         acl = windows.acl_entries(token_default_dacl)
         if acl["revision"] != 2 or not acl["entries"]:
@@ -647,17 +652,21 @@ def build_servicing_created_security(parent, directory = False, token_default_da
         dacl = token_default_dacl
     # Native flags are 0x4001 or 0x4003 according to the parent's SACL AI
     # control, even when that SACL is absent/NULL. SYSTEM adds no label.
-    return _servicing_security_bytes(0x8404 | (parts["control"] & 0x800), inherited["owner"], inherited["group"], dacl, None)
+    sacl = inherited["sacl"]
+    control = 0x8404 | (parts["control"] & 0x800) | (0x10 if sacl != None else 0)
+    return _servicing_security_bytes(control, inherited["owner"], inherited["group"], dacl, sacl)
 
 
-def _servicing_noninheriting_audit(sacl, role):
+def _validate_servicing_directory_audit(sacl, role, inheritable = False):
     if sacl == None:
         return
     acl = windows.acl_entries(sacl)
     if acl["revision"] != 2:
         fail("unsupported servicing directory " + role + " SACL")
     for entry in acl["entries"]:
-        if entry["type"] != 2 or entry["flags"] & ~0xc0 or entry["mask"] & ~0x1f01ff:
+        flags = 0xdf if inheritable else 0xc0
+        mask = 0x11f01ff if inheritable else 0x1f01ff
+        if entry["type"] != 2 or entry["flags"] & ~flags or entry["mask"] & ~mask:
             fail("unsupported servicing directory " + role + " SACL")
 
 
@@ -666,7 +675,7 @@ def build_servicing_directory_security_request(data, parent, default = False):
 
     This is WCP's directory setter input, not creation-time inheritance or
     authorization. Covers protected DACLs, explicit unprotected DACLs and
-    noninheritable ordinary audit SACLs observed in the pinned update.
+    ordinary audit SACLs, including OI/CI/NP/IO/ID inheritance flags.
     Other control/SACL forms fail closed until separately established.
     """
     if parent == None or (data == None and not default):
@@ -680,8 +689,8 @@ def build_servicing_directory_security_request(data, parent, default = False):
     allowed_controls = [0x8000] if default else [0x8004, 0x9004, 0x9404, 0x9014]
     if parts["resource_manager_control"] or parts["control"] not in allowed_controls or (not default and parts["dacl"] == None):
         fail("unsupported servicing directory security controls")
-    _servicing_noninheriting_audit(inherited_parent["sacl"], "parent")
-    _servicing_noninheriting_audit(parts["sacl"], "selected")
+    _validate_servicing_directory_audit(inherited_parent["sacl"], "parent", inheritable=True)
+    _validate_servicing_directory_audit(parts["sacl"], "selected", inheritable=True)
     system = binary.decode("010100000000000512000000", "hex")
     prepared = _servicing_security_bytes(parts["control"], parts["owner"] or system, parts["group"] or system, parts["dacl"], parts["sacl"])
     inherited = windows.inherit_file_security(prepared, parent = parent, directory = True)
@@ -832,7 +841,7 @@ def _assign_servicing_security(current, request, directory = False, clear_labels
     if directory:
         if control not in [0x8f04, 0x9f04, 0x9f14]:
             fail("unsupported servicing directory assignment controls")
-        _servicing_noninheriting_audit(parts["sacl"], "selected")
+        _validate_servicing_directory_audit(parts["sacl"], "selected", inheritable=True)
         control = (control & ~0x300) | 0x10
     if old["resource_manager_control"] or old["control"] & ~0xbf14 or parts["resource_manager_control"] or (not directory and (control & ~0xb014 or control & 0x8014 != 0x8014)):
         fail("unsupported servicing security assignment controls")
@@ -876,7 +885,7 @@ def _assign_servicing_security(current, request, directory = False, clear_labels
                 # Native audit copying retains ACCESS_SYSTEM_SECURITY;
                 # only effective allow ACEs clip that bit. The real Sense
                 # task parent carries inherited audit mask 0x010d0000.
-                if entry["flags"] & 0xf or entry["mask"] & ~0x11f01ff:
+                if entry["flags"] & (~0xdf if directory else 0xf) or entry["mask"] & ~0x11f01ff:
                     fail("unsupported servicing audit entry")
                 audit.append(entry["data"])
     sacl_entries = audit + labels
@@ -1129,11 +1138,12 @@ def servicing_directory_propagation_policy(software, components):
 
 
 def servicing_filemap_collision_policy(software, components):
-    """Select the ordinary direct transaction's directory collision gate.
+    """Select the ordinary direct transaction's ownership strictness gate.
 
     Coordinator initialization ORs 0x4800 for SingleResourceOwnership and the
     raw SmiHiveUpdates DWORD into its flags. InitializeCFileInstaller copies
-    bit 0x800 to the strict-directory byte. Ordinary primitive flags cannot
+    bit 0x800 to the ownership byte (also used by ReportFileCollision).
+    The historical strict_directories key names this shared gate. Primitive flags cannot
     supply that bit. This is not a repair/custom-coordinator policy.
     """
     single = _servicing_configuration_dword(software, components, "SingleResourceOwnership", 0)
@@ -1400,15 +1410,17 @@ def reduce_servicing_unprojected_files(records):
         sources[key][side] = dict(component_identity = identity, hash = _copy_servicing_native_file_hash(record["source_hash"]), record = record)
     return sources
 
-def reduce_servicing_file_declarations(records, unprojected = ()):
+def reduce_servicing_file_declarations(records, unprojected = (), collision_policy = None):
     """Reduce explicit native ProcessFile inputs; do not infer installer flags.
 
     Each input must supply process_flags and source_hash (None or a native
     digest_method/transform/digest record). This supports ordinary primary/link calls
     with flags 1, 2, 8, 10, 20 and 40 only, not repair, filters, external
-    sources or collision policy. Repeated same-side destinations/primary
-    sources fail closed. Hashes live on interned sources, so links use their
-    primary's hashes even when the primary has another destination.
+    sources. With an explicit non-strict ownership policy, ordinary primary
+    overlaps with identical metadata reduce in call order, as native ProcessFile
+    does. Mixed metadata, writable/link overlaps, strict-policy overlaps and
+    repeated primary sources remain unsupported. Hashes live on interned sources,
+    so links use their primary's hashes even at another destination.
     """
     paths = {}
     sources = reduce_servicing_unprojected_files(unprojected)
@@ -1444,7 +1456,20 @@ def reduce_servicing_file_declarations(records, unprojected = ()):
         item = paths[key]
         selected = item[side]
         if selected["source_key"] != None:
-            fail("repeated file destination requires native collision policy: " + path)
+            if collision_policy == None or type(collision_policy.get("strict_directories")) != "bool" or collision_policy["strict_directories"]:
+                fail("repeated file destination requires non-strict native collision policy: " + path)
+            if (flags | selected["process_flags"]) & 0x18 or (side == "after" and not flags & 1):
+                fail("unsupported writable or link file overlap: " + path)
+            previous = sources[selected["source_key"]][side]["record"]
+            if any([previous[field] != record[field] for field in ["process_flags", "attributes", "descriptor"]]):
+                fail("unsupported mixed-metadata, writable or link file overlap: " + path)
+            # WCP 26100.32131 bfB5e..bfB90 reports each repeated addition,
+            # sets PathElement+95 bit20, then replaces the selected identity.
+            # ReportFileCollision does not increment its fatal counter when
+            # CFileInstaller+10 is false. Old contributions also replace the
+            # selected source, but do not report an addition collision.
+            if side == "after":
+                item["file_flags"] |= 0x20
         selected["source_key"] = source_key
         selected["component_identity"] = identity
         selected["process_flags"] = flags
@@ -1531,14 +1556,17 @@ def preprocess_servicing_file_declarations(reduced):
 def select_servicing_file_hash(file):
     """Bounded CmsGetFileHashInformation projection, not payload verification.
 
-    All files in the exact current transition use a single nested SHA256 with
-    Identity transform and no legacy hash. Native parsed enum 1 maps to digest
-    method 2; transform enum 0 maps to transform 1. Other shapes require their
-    own native selection/validation and are rejected, not guessed or ignored.
+    Select the nested SHA256 Identity digest for file projection. .NET may
+    additionally retain an obsolete build-time SHA1 attribute. Its syntax is
+    checked, but the nested digest is binding; native readers verify SHA256.
+    Other algorithms/transforms remain unsupported.
     """
     digest = file.digest
-    if file.hash or file.hash_algorithm or digest == None:
+    if digest == None:
         fail("unsupported servicing file hash shape")
+    if file.hash or file.hash_algorithm:
+        if file.hash_algorithm.lower() not in ["sha1", "sha-1"] or len(file.hash) != 40 or any([file.hash[i].lower() not in "0123456789abcdef" for i in range(len(file.hash))]):
+            fail("unsupported servicing file hash shape")
     if digest.algorithm != "http://www.w3.org/2000/09/xmldsig#sha256" or list(digest.transforms) != ["urn:schemas-microsoft-com:HashTransforms.Identity"]:
         fail("unsupported servicing file hash algorithm or transform")
     value = binary.decode("".join(digest.value.split()), "base64")
@@ -1667,7 +1695,9 @@ def build_servicing_immutable_file_security_request(item, parent):
     if item["operation"] not in [1, 3] or after["state"] != 2 or not item["own_changed"]:
         fail("unsupported immutable file security transition")
     allowed_security = [0x88, 0xb8] if item["operation"] == 3 else [0xc0, 0xe0]
-    allowed_process = [0x41, 0x43] if item["operation"] == 3 else [0x41]
+    # ProcessFile flag2 only selects the boot-critical commit phase; it does
+    # not alter the immutable security request, including new-only files.
+    allowed_process = [0x41, 0x43]
     if after.get("process_flags") not in allowed_process or item["security_flags"] not in allowed_security:
         fail("unsupported immutable file security flags")
     definition = after["descriptor"]
@@ -1861,6 +1891,11 @@ def expand_servicing_registry_string(value, source_roots, target, architecture):
         if len(fields) != 2:
             fail("unterminated registry macro")
         name = fields[0]
+        if name.lower() == "assembly.empty":
+            # .NET uses $$(assembly.empty)(Registry:...) to store a literal
+            # MSBuild expression. Expand this span once; never rescan output.
+            variables[name.lower()] = ""
+            continue
         if name.lower() == "build.packagemoniker":
             # Native registry InterpretValueData retains this unresolved name.
             # Case variants would conflict in the ordinary variables map, so
@@ -1895,8 +1930,10 @@ def prepare_servicing_registry_value_data(attributes, source_roots, target, arch
     allowed = ["name", "valueType", "value", "mutable", "operationHint", "IEDownlevelValue"]
     if type(attributes) != "dict" or any([name not in allowed for name in attributes]):
         fail("unsupported registry value preparation attributes")
-    for name in ["name", "valueType", "value"]:
-        if type(attributes.get(name)) != "string":
+    if "name" in attributes and type(attributes["name"]) != "string":
+        fail("registry value preparation requires string name")
+    for name in ["valueType", "value"]:
+        if type(attributes.get(name, "" if name == "value" and attributes.get("valueType") == "REG_SZ" else None)) != "string":
             fail("registry value preparation requires " + name)
     kinds = {"REG_NONE": 0, "REG_SZ": 1, "REG_EXPAND_SZ": 2, "REG_BINARY": 3, "REG_DWORD": 4, "REG_MULTI_SZ": 7, "REG_QWORD": 11}
     spelling = attributes["valueType"]
@@ -1906,8 +1943,8 @@ def prepare_servicing_registry_value_data(attributes, source_roots, target, arch
         fail("unsupported registry mutable spelling")
     if attributes.get("operationHint", "") not in ["", "append", "prepend", "replace"]:
         fail("unsupported registry operation hint")
-    name = expand_servicing_registry_string(attributes["name"], source_roots, target, architecture)
-    text = attributes["value"]
+    name = expand_servicing_registry_string(attributes.get("name", ""), source_roots, target, architecture)
+    text = attributes.get("value", "")
     kind = kinds[spelling]
     if kind in [1, 2, 7]:
         text = expand_servicing_registry_string(text, source_roots, target, architecture)

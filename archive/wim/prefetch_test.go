@@ -11,12 +11,12 @@ import (
 func prefetchFixture() (*Archive, *countingWIMFile, map[string]*File, []byte) {
 	a, source, resource, plain := solidBlobFixture()
 	a.blobCache = bytecache.New(2048)
-	a.images = []image{{index: 1, root: entry{path: "/image1", isDir: true}, byPath: map[string]entry{}}}
+	a.images = []image{{index: 1, root: entry{path: "/image1", isDir: true}, byPath: map[string]*entry{}}}
 	a.byHash = map[string]wimResourceLocation{}
 	files := map[string]*File{}
 	for name, offset := range map[string]int64{"/image1/early": 100, "/image1/late": 40000} {
 		file := blobFile(a, resource, plain, offset, 1000, name)
-		a.images[0].byPath[wimPathKey(name)] = file.entry
+		a.images[0].byPath[wimPathKey(name)] = &file.entry
 		a.byHash[string(file.entry.hash[:])] = *file.location
 		files[name] = file
 	}
@@ -27,8 +27,8 @@ func TestPrefetchWarmsExplicitFilesAndDeduplicatesAliases(t *testing.T) {
 	a, source, files, plain := prefetchFixture()
 	early := files["/image1/early"].entry
 	early.path = "/image1/alias"
-	a.images[0].byPath[wimPathKey(early.path)] = early
-	a.images[0].byPath[wimPathKey("/image1/empty")] = entry{path: "/image1/empty"}
+	a.images[0].byPath[wimPathKey(early.path)] = &early
+	a.images[0].byPath[wimPathKey("/image1/empty")] = &entry{path: "/image1/empty"}
 	paths := starlark.NewList([]starlark.Value{starlark.String("/image1/late"), starlark.String("/image1/alias"), starlark.String("/image1/early"), starlark.String("/image1/empty")})
 	result, err := a.prefetchBuiltin(nil, nil, starlark.Tuple{paths}, nil)
 	if err != nil {

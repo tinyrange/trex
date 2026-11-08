@@ -58,6 +58,8 @@ func Builtins() starlark.StringDict {
 		"test_signing_identity":            testSigningIdentityBuiltin,
 		"pe_sign":                          peSignBuiltin,
 		"pe_signature":                     peSignatureBuiltin,
+		"appx_signature":                   appxSignatureBuiltin,
+		"script_signature":                 scriptSignatureBuiltin,
 		"catalog_signature":                catalogSignatureBuiltin,
 		"certificate_chain":                certificateChainBuiltin,
 		"csp_registrations":                cspRegistrationsBuiltin,

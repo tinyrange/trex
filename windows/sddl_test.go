@@ -281,3 +281,25 @@ func TestCompileSDDLNativeRegistryNegation(t *testing.T) {
 		}
 	}
 }
+
+func TestCompileSDDLCryptoOperators(t *testing.T) {
+	// First two ACEs of Server 26100.32230 SYSTEM/ControlSet001/Control/
+	// Cryptography/Configuration/Local, paired with its manifest's CY alias.
+	raw, err := CompileSDDL("D:PAI(A;OICI;CCDCLCSWRPWPSDRC;;;CY)(A;OICIIO;SDGXGWGR;;;CY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, entries, err := ParseACL(raw[20:])
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("ACL: %v %v", entries, err)
+	}
+	expected := [][]byte{
+		[]byte("\x00\x03\x18\x00\x3f\x00\x03\x00\x01\x02\x00\x00\x00\x00\x00\x05\x20\x00\x00\x00\x39\x02\x00\x00"),
+		[]byte("\x00\x0b\x18\x00\x00\x00\x01\xe0\x01\x02\x00\x00\x00\x00\x00\x05\x20\x00\x00\x00\x39\x02\x00\x00"),
+	}
+	for i := range entries {
+		if !bytes.Equal(entries[i].Data, expected[i]) {
+			t.Fatalf("ACE%d: %x want %x", i, entries[i].Data, expected[i])
+		}
+	}
+}

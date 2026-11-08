@@ -3,12 +3,10 @@
 The XML reader supplies CDF input, not predicted registry effects. The actual
 DLL decides which writes to make; publication is bounded and atomic.
 """
-load("@stdlib//windows/servicing:installer.star", "run_http_installer")
+load("@stdlib//windows/servicing:installer.star", "run_http_installer", "select_basic_installer")
 
 _NS = "urn:schemas-microsoft-com:asm.v3"
 _SUFFIX = "/Services/HTTP/Parameters/UrlAclInfo"
-_HTTP_PATH = "/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.9703_none_875daae85585b1d5/httpai.dll"
-_HTTP_SHA256 = "cf6e64fe29b3726acd814dd56e1de9416d3ed97d6da119f99c44e5da339dfaa8"
 
 def http_reservations(document):
     """Parse the supported HTTPAI declaration shape into reservations; reject unsupported attributes or structure."""
@@ -99,9 +97,7 @@ def apply_update_http(root, runtime):
     jobs, reservations = http_installer_jobs(runtime)
     if not jobs:
         return dict(components=0, reservations=0, native_writes=0, values=0)
-    file = root.find(_HTTP_PATH)
-    if file == None or hex(digest(file, algorithm="sha256")) != _HTTP_SHA256:
-        fail("native HTTPAI requires exact serviced source bytes")
+    file,installer_sha256 = select_basic_installer(root,"http")
     source = root.find("/Windows/System32/config/SYSTEM")
     system = windows.hive(source)
     effects, executions = [], []
@@ -114,4 +110,4 @@ def apply_update_http(root, runtime):
     if digest(root.find("/Windows/System32/config/SYSTEM")) != digest(source):
         fail("HTTPAI source changed during native execution")
     patches = publish_http_effects(root, reservations, effects)
-    return dict(components=len(jobs), reservations=len(reservations), native_writes=len(effects), values=len(patches), changes=patches, executions=executions, seconds=seconds, installer_sha256=_HTTP_SHA256, policy="executed native offline HTTPAI; bounded paired queue, not complete CBS installation")
+    return dict(components=len(jobs), reservations=len(reservations), native_writes=len(effects), values=len(patches), changes=patches, executions=executions, seconds=seconds, installer_sha256=installer_sha256, policy="executed native offline HTTPAI; bounded paired queue, not complete CBS installation")

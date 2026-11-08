@@ -128,6 +128,7 @@ _KERNEL_SIGNATURES = {
     "getprofilestringw": 5,
     "getcurrentprocess": 0,
     "getfullpathnamew": 4,
+    "getfinalpathnamebyhandlew": 4,
     "getprocessaffinitymask": 3,
     "createiocompletionport": 4,
     "getqueuedcompletionstatus": 5,
@@ -160,6 +161,9 @@ _KERNEL_SIGNATURES = {
     "globaladdatomw": 1,
     "globalfindatoma": 1,
     "globalfindatomw": 1,
+    "getexitcodeprocess": 2,
+    "getprocessmitigationpolicy": 4,
+    "setprocessmitigationpolicy": 3,
     "getexitcodethread": 2,
     "getdrivetypea": 1,
     "getdrivetypew": 1,
@@ -697,7 +701,9 @@ def _version_condition_satisfied(actual, requested, condition):
     return False
 
 def _tracked_allocate(machine, allocations, size, name):
-    address = machine.allocate(size = max(1, size), name = name)
+    # CRT allocations are heap-backed too. Preserve the requested length for
+    # realloc while allowing native SIMD string reads within the backing page.
+    address = _heap_storage(machine, size, name)
     allocations[address] = size
     return address
 
@@ -1100,6 +1106,15 @@ def event_log_plugin():
                 argc = argc,
                 convention = "cdecl" if name == "tracemessage" else "stdcall",
             )
+        # Late-loaded images do not pass through the initial import-hook loop.
+        # Publish the observed API-set contracts into the same provider table.
+        contracts = {
+            "api-ms-win-eventing-classicprovider-l1-1-0.dll": ["registertraceguidsw", "unregistertraceguids", "tracemessage", "gettraceloggerhandle", "gettraceenableflags", "gettraceenablelevel"],
+            "api-ms-win-eventing-provider-l1-1-0.dll": ["eventregister", "eventunregister", "eventsetinformation"],
+        }
+        for contract, names in contracts.items():
+            for name in names:
+                machine.provide_export(callback, module=contract, name=name, argc=native_signatures[name], convention="cdecl" if name=="tracemessage" else "stdcall")
         for imported in machine.imports_named(native_signatures):
             name = imported.name.lower()
             if name in native_signatures and _event_log_provider_module(imported.module):
@@ -1746,7 +1761,7 @@ def _kernel_device_io_control(machine, state, args):
     return 0
 
 
-def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, on_process_create = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800, tls_slots = 0, on_module_map = None, api_set_namespace = None, on_loader_lookup = None, module_paths = {}):
+def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = {}, virtual_modules = [], files = {}, directories = [], prepared_file_entries = None, on_thread_create = None, on_module_load = None, on_process_create = None, command_line = "regsvr32.exe", thread_instruction_limit = 100000, on_system_query = None, system_query_provider = None, system_time = 946684800, tls_slots = 0, on_module_map = None, api_set_namespace = None, on_loader_lookup = None, module_paths = {}, maximum_file_size = 16 << 20, redirection_trust_policy = None):
     """Models deterministic allocation, strings, paths, files, and OS facts.
 
     `module_paths` maps module names to explicit guest filenames, preserving
@@ -1779,6 +1794,11 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     distinct NtCreateFile FILE_DELETE_ON_CLOSE option remains unsupported.
     Reparse links, drive aliases,
     full NT authorization, and resizing live mapped views are not modeled.
+    `redirection_trust_policy` explicitly supplies initial RedirectionGuard
+    flags (0..3) for this modeled process, not facts about a host or booted guest.
+    Only policy 16 get/set and a junction-free namespace are admitted; omitted
+    policy facts, other policies and reparse inputs fail closed. No junction
+    traversal, trust classification or audit-log implementation is implied.
     `on_thread_create(event, thread)` may schedule the captured start routine
     using emulator control APIs; no host thread is created implicitly.
     `on_system_query(machine, query)` may inspect one live, bounded diagnostic
@@ -1828,7 +1848,10 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     dns_host_name = environment.get("DNSHOSTNAME", environment.get("DnsHostName", computer_name))
     dns_domain = environment.get("USERDNSDOMAIN", environment.get("DNSDOMAIN", environment.get("DnsDomain", "")))
     volume_facts = {name[:2].upper(): dict(value) for name, value in volumes.items()}
-    maximum_file_size = 16 << 20
+    if type(maximum_file_size) != "int" or maximum_file_size < 1 or maximum_file_size > 512 << 20:
+        fail("virtual file write bound must be between 1 byte and 512 MiB")
+    if redirection_trust_policy != None and (type(redirection_trust_policy) != "int" or redirection_trust_policy < 0 or redirection_trust_policy & ~3):
+        fail("redirection_trust_policy must be None or explicit RedirectionGuard flags 0..3")
     maximum_source_file_size = (1 << 63) - 1
     paths = _virtual_file_entries(files, maximum_source_file_size, directories = directories) if prepared_file_entries == None else windows.clone_file_entries(prepared_file_entries)
     module_directory = normalized_module.rsplit("\\", 1)[0] if "\\" in normalized_module else windows_directory
@@ -1840,6 +1863,13 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
     # Paths name file objects. Open handles and mappings retain the object,
     # not a later occupant of its path. IDs are private to this kernel state
     # and are cloned together with that state; equal contents are not identity.
+    state["redirection_trust_policy"] = redirection_trust_policy
+    if redirection_trust_policy != None:
+        # This namespace cannot traverse junctions. Do not claim to enforce
+        # RedirectionGuard for an input requiring unmodeled reparse semantics.
+        for entry in paths.values():
+            if entry.get("attributes", 0) & 0x400 or entry.get("reparse_data") != None:
+                fail("RedirectionGuard requires a junction-free virtual namespace")
     state["next_file_id"] = max([entry.get("file_id", 0) for entry in paths.values()] or [0]) + 1
     state["pending_file_deletes"] = {}
     state["next_open_file_id"] = 1
@@ -3510,6 +3540,41 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             machine.write_pointer(args[3], overlapped)
             state["last_error"] = error
             return 1 if error == 0 else 0
+        if name == "getfinalpathnamebyhandlew":
+            opened = file_handle(args[0])
+            if opened == None:
+                state["last_error"] = 6
+                return 0
+            flags = args[3] & 0xffffffff
+            if flags != 0:
+                fail("GetFinalPathNameByHandle requires implemented volume/name flags", flags)
+            path = opened["path"]
+            # Only the owned, unreplaced path is established here. Reparse,
+            # renamed/deleted handles and alternate volume forms need their
+            # actual namespace mapping rather than a guessed destination.
+            if state["paths"].get(path) != opened["file"]:
+                fail("GetFinalPathNameByHandle requires an unchanged owned path")
+            slash = chr(92)
+            extended = slash * 2 + "?" + slash
+            if path.startswith(extended):
+                dos = path[len(extended):]
+                if not (len(dos) >= 3 and dos[1:3] == ":" + slash or dos.startswith("unc" + slash)):
+                    fail("unsupported final-path namespace")
+            elif len(path) >= 3 and path[1:3] == ":" + slash:
+                path = extended + path
+            elif path.startswith(slash * 2):
+                path = extended + "UNC" + slash + path[2:]
+            else:
+                fail("final path is not an absolute DOS/UNC path")
+            encoded = _encoded(path, True)
+            length = len(encoded) // 2 - 1
+            if args[2] & 0xffffffff <= length:
+                return length + 1
+            if not args[1]:
+                state["last_error"] = 87
+                return 0
+            machine.write(args[1], encoded)
+            return length
         if name == "getfullpathnamew":
             source, capacity, output, file_part = args
             path = _dos_nt_path(machine.read_cstring(source, encoding = "utf16le"), state["current_directory"])
@@ -3735,6 +3800,47 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 else:
                     on_thread_create(event, thread)
             return previous
+        if name in ["getprocessmitigationpolicy", "setprocessmitigationpolicy"]:
+            querying = name == "getprocessmitigationpolicy"
+            if querying:
+                handle, policy, output, length = args
+                entry = state["handles"].get(handle)
+                pseudo = (1 << (machine.pointer_size * 8)) - 1
+                if handle != pseudo and not (type(entry) == "dict" and entry.get("kind") == "process_reference" and entry["value"].get("id") == 4):
+                    state["last_error"] = 6
+                    return 0
+            else:
+                policy, output, length = args
+            if policy & 0xffffffff != 16:
+                fail("process mitigation policy is not modeled", policy & 0xffffffff)
+            if not output or length != 4:
+                state["last_error"] = 87
+                return 0
+            flags = state["redirection_trust_policy"]
+            if flags == None:
+                fail("ProcessRedirectionTrustPolicy requires explicit initial policy facts")
+            if querying:
+                machine.write_u32le(output, flags)
+            else:
+                flags = machine.read_u32le(output)
+                if flags & ~3:
+                    state["last_error"] = 87
+                    return 0
+                state["redirection_trust_policy"] = flags
+            state["process_queries"].append({"kind": "mitigation", "operation": "get" if querying else "set", "policy": 16, "flags": flags})
+            return 1
+        if name == "getexitcodeprocess":
+            entry = state["handles"].get(args[0])
+            current = current_process_handle(args[0])
+            if not current and (type(entry) != "dict" or entry.get("kind") != "process_reference"):
+                state["last_error"] = 6
+                return 0
+            if not args[1]:
+                state["last_error"] = 87
+                return 0
+            code = state["process_exit_code"] if current else entry["value"].get("exit_code")
+            machine.write_u32le(args[1], 259 if code == None else code & 0xffffffff)
+            return 1
         if name == "getexitcodethread":
             entry = state["handles"].get(args[0])
             if type(entry) != "dict" or entry.get("kind") != "thread" or not args[1]:
@@ -5329,18 +5435,16 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if args[0]:
                 machine.write(args[0], b"\x00" * 172)
             return 0  # TIME_ZONE_ID_UNKNOWN
-        if name in ["getsystemwindowsdirectorya", "getsystemwindowsdirectoryw"]:
+        if name in ["getsystemdirectorya", "getsystemdirectoryw", "getsystemwindowsdirectorya", "getsystemwindowsdirectoryw"]:
             # This process model has one explicit system Windows directory;
             # no per-user Terminal Services Windows directory is modeled.
             wide = name.endswith("w")
-            data = _encoded(windows_directory, wide)
+            data = _encoded(system_directory if name in ["getsystemdirectorya", "getsystemdirectoryw"] else windows_directory, wide)
             required = len(data) // (2 if wide else 1)
             if (args[1] & 0xffffffff) < required:
                 return required
             machine.write(args[0], data)
             return required - 1
-        if name in ["getsystemdirectorya", "getsystemdirectoryw"]:
-            return _write_string(machine, args[0], system_directory, name.endswith("w"), args[1])
         if name in ["getwindowsdirectorya", "getwindowsdirectoryw"]:
             return _write_string(machine, args[0], windows_directory, name.endswith("w"), args[1])
         if name in ["getversionexa", "getversionexw", "rtlgetversion"]:
@@ -5723,6 +5827,10 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if loaded == None:
                 query["stop"] = "module-not-found"
                 state["last_error"] = 126  # ERROR_MOD_NOT_FOUND
+                # A delay thunk jumps to this result. Returning NULL would look
+                # like the emulator's call-return sentinel, not a load failure.
+                # Native failure hooks/exception dispatch are not modeled here.
+                machine.stop("missing-import", "delay-load module: " + requested)
                 return 0
             lookup = machine.read_pointer(names + index * pointer_size)
             if lookup & (1 << (pointer_size * 8 - 1)):
@@ -5744,6 +5852,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             if not resolved:
                 query["stop"] = "procedure-not-found"
                 state["last_error"] = 127
+                machine.stop("missing-import", "delay-load procedure: " + requested + "!" + procedure)
                 return 0
             machine.write_pointer(module_slot, loaded["handle"])
             machine.write_pointer(thunk, resolved)
@@ -6955,7 +7064,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             providers = ["ntdll.dll"] if function.startswith("rtl") or function.startswith("nt") or function.startswith("zw") or function.startswith("ldr") or function.startswith("dbg") or function.startswith("etw") or function == "vdbgprintexwithprefix" else ["kernel32.dll", "kernelbase.dll"]
             # Win9x exposes the RTL memory helpers through Kernel32, while NT
             # exports the same contract from NTDLL.
-            if function in ["rtlfillmemory", "rtlmovememory", "rtlzeromemory", "rtlcapturestackbacktrace"]:
+            if function in ["rtlfillmemory", "rtlmovememory", "rtlzeromemory", "rtlcapturestackbacktrace", "rtlpctofileheader"]:
                 providers = ["kernel32.dll", "ntdll.dll"]
             for provider in providers:
                 machine.provide_export(callback, module = provider, name = function, argc = argc, convention = "cdecl" if function == "vdbgprintexwithprefix" else "stdcall")
@@ -7008,7 +7117,9 @@ def _version_node(data, offset):
     value_offset = (key_end + 2 + 3) & ~3
     value_size = value_length * 2 if value_type == 1 else value_length
     children_offset = (value_offset + value_size + 3) & ~3
-    if value_offset + value_size > offset + size or children_offset > offset + size:
+    # A leaf length excludes the padding before its next sibling. Its
+    # aligned child cursor may therefore lie just beyond its declared end.
+    if value_offset + value_size > offset + size:
         return None
     return {
         "offset": offset,
@@ -7113,12 +7224,13 @@ def version_plugin(file, module_path = "", module_files = {}):
         "verqueryvaluea": 4,
         "verqueryvaluew": 4,
     }
+    providers = ["version.dll", "kernelbase.dll", "api-ms-win-core-version-l1-1-0.dll"]
     def install(machine):
-        machine.provide_exports(callback, module = "version.dll", signatures = signatures)
-        machine.provide_exports(callback, module = "kernelbase.dll", signatures = signatures)
+        for provider in providers:
+            machine.provide_exports(callback, module = provider, signatures = signatures)
         for imported in machine.imports_named(signatures):
             name = imported.name.lower()
-            if name in signatures and imported.module.lower() in ["version.dll", "kernelbase.dll"]:
+            if name in signatures and imported.module.lower() in providers:
                 machine.hook(callback, address = imported.address, argc = signatures[name])
     return emulator.plugin(install, name = "windows.version", state = state)
 
@@ -7822,7 +7934,7 @@ def ole32_plugin(on_class_registration = None, on_class_activation = None, on_se
         if name in ["stringfromclsid", "stringfromiid"]:
             text = _guid_text(event.machine, args[0])
             address = event.machine.allocate(value = _encoded(text, True), name = "StringFromGUID")
-            event.machine.write_u32le(args[1], address)
+            event.machine.write_pointer(args[1], address)
             return 0
         return 0
 
@@ -13244,6 +13356,8 @@ def security_plugin(user_name = "Administrator", user_sid = [21, 1, 2, 3, 500], 
                     machine.provide_export(callback,module=host,name=function,argc=argc)
             if function in ["openprocesstoken", "openthreadtoken", "setthreadtoken"]:
                 machine.provide_export(callback, module = "api-ms-win-core-processthreads-l1-1-0.dll", name = function, argc = argc)
+            if function == "convertstringsecuritydescriptortosecuritydescriptorw":
+                machine.provide_export(callback, module = "api-ms-win-security-sddl-l1-1-0.dll", name = function, argc = argc)
             if function in security_base:
                 machine.provide_export(callback, module = "api-ms-win-security-base-l1-1-0.dll", name = function, argc = argc)
         for imported in machine.imports:
@@ -13352,7 +13466,13 @@ def resource_plugin(file, module_files = {}, kernel = None):
     def identifier(machine, value, wide):
         if value <= 0xffff:
             return "#" + str(value)
-        return machine.read_cstring(value, encoding = "utf16le" if wide else "ascii")
+        text = machine.read_cstring(value, encoding = "utf16le" if wide else "ascii")
+        # KernelBase FindResourceExW normalizes both named identifiers through
+        # RtlUpcaseUnicodeChar before LdrFindResource_U. Keep the same bounded
+        # ASCII policy as that semantic API, rather than a host Unicode fold.
+        if any([ord(c) >= 128 for c in text.elems()]):
+            fail("resource identifier: non-ASCII names require a native NLS upcase table")
+        return text.upper()
 
     def callback_identifier(machine, value, wide):
         if value.startswith("#"):

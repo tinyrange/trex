@@ -10,6 +10,10 @@ import (
 // Each block contains signed-magnitude (add length, insert length, source seek)
 // values, followed by additive difference bytes and literal insertion bytes.
 func applyBSDiff(source []byte, targetSize uint64, patch []byte) ([]byte, error) {
+	return applyBSDiffTraced(source, targetSize, patch, nil)
+}
+
+func applyBSDiffTraced(source []byte, targetSize uint64, patch []byte, trace *patchTraceCollector) ([]byte, error) {
 	if targetSize > uint64(int(^uint(0)>>1)) {
 		return nil, errors.New("msdelta: binary-delta target is too large")
 	}
@@ -35,6 +39,9 @@ func applyBSDiff(source []byte, targetSize uint64, patch []byte) ([]byte, error)
 		if addLength > uint64(len(patch)-patchOffset) {
 			return nil, errors.New("msdelta: truncated binary-delta difference data")
 		}
+		if trace != nil {
+			trace.addBinary("add", targetOffset, int(addLength), sourceOffset)
+		}
 		for index := uint64(0); index < addLength; index++ {
 			var sourceByte byte
 			if sourceOffset <= int64(^uint64(0)>>1)-int64(index) {
@@ -54,6 +61,9 @@ func applyBSDiff(source []byte, targetSize uint64, patch []byte) ([]byte, error)
 		}
 		if insertLength > uint64(len(patch)-patchOffset) {
 			return nil, errors.New("msdelta: truncated binary-delta insertion data")
+		}
+		if trace != nil {
+			trace.addBinary("literal", targetOffset, int(insertLength), -1)
 		}
 		copy(target[targetOffset:targetOffset+int(insertLength)], patch[patchOffset:patchOffset+int(insertLength)])
 		patchOffset += int(insertLength)

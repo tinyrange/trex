@@ -47,6 +47,29 @@ func TestMainPSFDirectDeltaTarget(t *testing.T) {
 	item := graph.Payloads[0]
 	item.Basis = &ContentDescriptor{Name: "basis", Length: int64(len(source)), SHA256: sha256.Sum256(source)}
 	stage := &CumulativeStage{PSF: reader, assemblyResolver: func(d ContentDescriptor) (storage.Reader, error) { return &starfile.Bytes{Data: source}, nil }}
+	stage.expressByTarget = map[string]DeltaPayload{normalizeCIXName(stem): item}
+	inputs, err := stage.InspectExpressDeltaInputs(stem)
+	if err != nil || inputs.PSFRecord || !bytes.Equal(inputs.Source, source) || !bytes.Equal(inputs.Delta, delta) || inputs.Target != item.Target {
+		t.Fatalf("diagnostic inputs: %+v %v", inputs, err)
+	}
+	if len(stage.canonicalCache) != 0 {
+		t.Fatal("inspection reconstructed a target")
+	}
+	bad := item
+	bad.Record.SHA256[0] ^= 1
+	stage.expressByTarget[normalizeCIXName(stem)] = bad
+	if _, err := stage.InspectExpressDeltaInputs(stem); err == nil {
+		t.Fatal("inspection accepted corrupt delta record")
+	}
+	bad = item
+	basis := *item.Basis
+	basis.SHA256[0] ^= 1
+	bad.Basis = &basis
+	stage.expressByTarget[normalizeCIXName(stem)] = bad
+	if _, err := stage.InspectExpressDeltaInputs(stem); err == nil {
+		t.Fatal("inspection accepted corrupt basis")
+	}
+	stage.expressByTarget[normalizeCIXName(stem)] = item
 	got, err := stage.materializeExpress(item)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("direct reconstruction: %v", err)

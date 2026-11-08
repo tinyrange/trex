@@ -16,28 +16,78 @@ def _cabinet_file(data):
     builder.append(data)
     return builder.file()
 
-def _notification(machine, user, filename, size, handle = 0):
-    encoded_name = binary.encode(filename, encoding = "ascii", nul = True)
+def _notification(machine, user, filename, size, metadata, handle = 0):
+    encoded_name = binary.encode(filename, encoding = "utf8" if metadata["attributes"] & 0x80 else "ascii", nul = True)
     name_address = machine.allocate(value = encoded_name, name = "FDI notification filename")
-    record = binary.builder(capacity = 40)
+    # FDINOTIFICATION has pointer-sized strings, context and INT_PTR handle.
+    record = binary.builder(capacity = 64 if machine.pointer_size == 8 else 40)
     record.u32le(size)
-    record.u32le(name_address)
+    if machine.pointer_size == 8:
+        record.u32le(0)
+    for pointer in [name_address, 0, 0, user, handle]:
+        if machine.pointer_size == 8:
+            record.u64le(pointer & 0xffffffffffffffff)
+        else:
+            record.u32le(pointer & 0xffffffff)
+    for field in ["date", "time", "attributes", "set_id", "cabinet", "folder"]:
+        record.u16le(metadata[field])
     record.u32le(0)
-    record.u32le(0)
-    record.u32le(user)
-    record.u32le(handle & 0xffffffff)
-    record.reserve(16)
     address = machine.allocate(value = record.bytes(), name = "FDINOTIFICATION")
     return {"address": address, "name": name_address}
 
 def _invoke(machine, address, arguments, label):
     result = machine.invoke(address, args = arguments)
     if result.reason != "return":
-        fail("{} stopped with {}: {}".format(label, result.reason, result.detail))
+        fail("{} stopped with {} at {} after {} steps: {}".format(label, result.reason, hex(result.pc), result.steps, result.detail))
     return result.value
 
+def _callback_cabinet(machine, context, path):
+    """Read one bounded cabinet through the caller's actual FDI I/O callbacks."""
+    if not all([context[name] for name in ["open", "read", "close"]]):
+        fail("FDI callback stream requires open/read/close together")
+    name = machine.allocate(value=binary.encode(path,encoding="ascii",nul=True))
+    handle = _invoke(machine, context["open"], [name, 0x8000, 0], "FDI open callback")
+    machine.free(name)
+    if handle == (1 << (machine.pointer_size*8))-1:
+        return dict(data=None, operation=1, error=2)
+    buffer = machine.allocate(size=65536,name="FDI input buffer")
+    data = binary.builder()
+    required = 36
+    invalid = False
+    operation = 4
+    while data.size < required:
+        requested = min(65536,required-data.size)
+        read = _invoke(machine,context["read"],[handle,buffer,requested],"FDI read callback") & 0xffffffff
+        if read == 0 or read > requested:
+            invalid = True
+            break
+        data.append(machine.read(buffer,read))
+        if data.size == 36 and required == 36:
+            header = data.bytes()
+            if header[:4] != b"MSCF":
+                operation = 2
+                invalid = True
+                break
+            required = binary.read_u32le(header,8)
+            if required < 36 or required > 256 << 20:
+                invalid = True
+                break
+    closed = _invoke(machine,context["close"],[handle],"FDI close callback") & 0xffffffff
+    machine.free(buffer)
+    if closed != 0:
+        fail("FDI input close callback failed")
+    if invalid:
+        return dict(data=None,operation=operation,error=0)
+    return dict(data=data.bytes(),operation=0,error=0)
+
 def cabinet_plugin(kernel):
-    """Provides FDI extraction over native CAB files in the virtual file view."""
+    """Extract single cabinets from owned files or caller-supplied FDI streams.
+
+    Callback input is bounded at 256 MiB; decoded output at 512 MiB. Real native
+    read/write/notification callbacks execute in-process, including pointer-sized
+    FDINOTIFICATION fields and raw CAB timestamp/attribute metadata. No child
+    process or completion marker is implied by extraction.
+    """
     state = {"contexts": {}, "next_context": 0x5d000, "actions": []}
 
     def set_error(machine, context, operation, error):
@@ -73,12 +123,23 @@ def cabinet_plugin(kernel):
         cabinet_name = machine.read_cstring(event.args[1])
         cabinet_path = machine.read_cstring(event.args[2]) if event.args[2] else ""
         path = _joined_path(cabinet_path, cabinet_name)
-        entry = kernel.state["paths"].get(path)
-        if entry == None or entry.get("directory", False):
-            set_error(machine, context, 1, 2)
-            state["actions"].append({"api": "fdicopy", "path": path, "found": False})
-            return 0
-        data = kernel.state["file_data"](path)
+        if context["open"] or context["read"] or context["close"]:
+            # Preserve the caller's spelling: an FDI name can identify a memory
+            # stream rather than a filesystem path (MSRT uses this facility).
+            supplied = cabinet_path + cabinet_name
+            stream = _callback_cabinet(machine,context,supplied)
+            if stream["data"] == None:
+                set_error(machine,context,stream["operation"],stream["error"])
+                state["actions"].append(dict(api="fdicopy",path=path,found=False,operation=stream["operation"]))
+                return 0
+            data = stream["data"]
+        else:
+            entry = kernel.state["paths"].get(path)
+            if entry == None or entry.get("directory", False):
+                set_error(machine, context, 1, 2)
+                state["actions"].append({"api": "fdicopy", "path": path, "found": False})
+                return 0
+            data = kernel.state["file_data"](path)
         if len(data) < 4 or data[:4] != b"MSCF":
             # Setup may try FDICopy before falling back to an ordinary copy.
             # A non-cabinet is an FDI failure, not an emulator/parser failure.
@@ -91,11 +152,16 @@ def cabinet_plugin(kernel):
         cabinet = archive.cab(_cabinet_file(data))
         extracted = 0
         skipped = 0
+        total = 0
+        if len(cabinet.files) > 65536: fail("FDI member count exceeds bound")
         for archived_name in cabinet.files:
             filename = archived_name.replace("/", "\\").lstrip("\\")
             source = cabinet[archived_name]
             view = binary.view(source)
-            notice = _notification(machine, event.args[6], filename, view.size)
+            total += view.size
+            if total > 512 << 20: fail("FDI decoded data exceeds bound")
+            metadata = source.cab_metadata
+            notice = _notification(machine, event.args[6], filename, view.size, metadata)
             output = _invoke(machine, event.args[4], [2, notice["address"]], "FDI copy-file notification")
             machine.free(notice["address"])
             machine.free(notice["name"])
@@ -104,24 +170,27 @@ def cabinet_plugin(kernel):
             if output == 0:
                 skipped += 1
                 continue
-            if output == 0xffffffff:
-                set_error(machine, context, 2, 1)
+            if output == (1 << (machine.pointer_size*8))-1:
+                set_error(machine, context, 11, 0)  # FDIERROR_USER_ABORT
                 return 0
-            data = view.slice(0, view.size).bytes()
-            address = machine.allocate(value = data if data else b"\x00", name = "FDI decompressed file")
-            written = _invoke(machine, context["write"], [output, address, len(data)], "FDI write callback")
+            address = machine.allocate(size = 65536, name = "FDI output buffer")
+            for offset in range(0, view.size, 65536):
+                chunk = view.bytes(offset, min(65536, view.size-offset))
+                machine.write(address, chunk)
+                written = _invoke(machine, context["write"], [output, address, len(chunk)], "FDI write callback") & 0xffffffff
+                if written != len(chunk):
+                    machine.free(address)
+                    set_error(machine, context, 8, 112)  # FDIERROR_TARGET_FILE
+                    return 0
             machine.free(address)
-            if written != len(data):
-                set_error(machine, context, 3, 112)
-                return 0
-            close_notice = _notification(machine, event.args[6], filename, view.size, handle = output)
+            close_notice = _notification(machine, event.args[6], filename, view.size, metadata, handle = output)
             closed = _invoke(machine, event.args[4], [3, close_notice["address"]], "FDI close-file notification")
             machine.free(close_notice["address"])
             machine.free(close_notice["name"])
             if len(state["actions"]) < 256:
                 state["actions"].append({"api": "fdinotify", "type": "close", "file": filename, "result": closed})
             if closed == 0:
-                set_error(machine, context, 4, 1)
+                set_error(machine, context, 11, 0)  # FDIERROR_USER_ABORT
                 return 0
             extracted += 1
         state["actions"].append({

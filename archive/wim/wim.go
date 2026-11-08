@@ -106,7 +106,9 @@ type image struct {
 	security       [][]byte
 	root           entry
 	dirs           map[string][]entry
-	byPath         map[string]entry
+	// Path lookup points into immutable, fully sorted directory slices rather
+	// than allocating another complete entry for each path.
+	byPath map[string]*entry
 }
 
 type wimResource struct {
@@ -952,7 +954,7 @@ func (w *Archive) readImages() error {
 			security:       security,
 			root:           root,
 			dirs:           make(map[string][]entry),
-			byPath:         map[string]entry{wimPathKey(root.path): root},
+			byPath:         map[string]*entry{wimPathKey(root.path): &root},
 		})
 	}
 	return nil
@@ -1297,7 +1299,10 @@ func (w *Archive) cachedPath(image *image, key string) (entry, bool) {
 	w.directoryMu.Lock()
 	defer w.directoryMu.Unlock()
 	found, ok := image.byPath[key]
-	return found, ok
+	if !ok {
+		return entry{}, false
+	}
+	return *found, true
 }
 
 func (w *Archive) readWIMDir(image *image, dir entry) ([]entry, error) {
@@ -1350,7 +1355,8 @@ func (w *Archive) readWIMDir(image *image, dir entry) ([]entry, error) {
 		keys[i] = strings.ToLower(entries[i].name)
 	}
 	sort.Sort(foldedEntrySorter{entries, keys})
-	for _, child := range entries {
+	for i := range entries {
+		child := &entries[i]
 		key := wimPathKey(child.path)
 		if _, exists := image.byPath[key]; !exists {
 			image.byPath[key] = child

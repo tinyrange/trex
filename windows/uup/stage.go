@@ -376,14 +376,7 @@ func (s *CumulativeStage) releaseAssemblyFile(name string) {
 	s.canonicalMu.Unlock()
 }
 
-func (s *CumulativeStage) materializeExpress(payload DeltaPayload) ([]byte, error) {
-	key := normalizeCIXName(payload.Target.Name)
-	s.canonicalMu.Lock()
-	if cached := s.canonicalCache[key]; cached != nil {
-		s.canonicalMu.Unlock()
-		return cached, nil
-	}
-	s.canonicalMu.Unlock()
+func (s *CumulativeStage) readExpressRecord(payload DeltaPayload) ([]byte, error) {
 	if s.PSF == nil {
 		return nil, fmt.Errorf("uup servicing: express target %q has no PSF payload", payload.Target.Name)
 	}
@@ -396,6 +389,89 @@ func (s *CumulativeStage) materializeExpress(payload DeltaPayload) ([]byte, erro
 	}
 	if err := verifyContentDescriptor(payload.Record, record); err != nil {
 		return nil, fmt.Errorf("uup servicing: express record for %q: %w", payload.Target.Name, err)
+	}
+	return record, nil
+}
+
+func (s *CumulativeStage) expressPatch(payload DeltaPayload, record []byte) ([]byte, error) {
+	patch := record
+	switch payload.RecordType {
+	case "RAW":
+	case "PA30":
+		if payload.RecordTarget == nil {
+			return nil, fmt.Errorf("uup servicing: express target %q has no nested record target", payload.Target.Name)
+		}
+		basis, err := s.resolveExpressBasis(payload.RecordBasis)
+		if err != nil {
+			return nil, fmt.Errorf("uup servicing: resolve nested record basis for %q: %w", payload.Target.Name, err)
+		}
+		patch, err = msdelta.ApplyBounded(basis, record, uint64(defaultMaximumDeltaRecord))
+		if err != nil {
+			return nil, fmt.Errorf("uup servicing: reconstruct nested record for %q: %w", payload.Target.Name, err)
+		}
+		if err := verifyContentDescriptor(*payload.RecordTarget, patch); err != nil {
+			return nil, fmt.Errorf("uup servicing: nested record for %q: %w", payload.Target.Name, err)
+		}
+	default:
+		return nil, fmt.Errorf("uup servicing: target %q uses unsupported record type %q", payload.Target.Name, payload.RecordType)
+	}
+	return patch, nil
+}
+
+// ExpressDeltaInputs exposes verified inputs, not a reconstructed target.
+// It is for bounded native decoder diagnostics. Literal, carried and canonical
+// targets are not express delta edges and are rejected. Input resolution may
+// read predecessor records but never publishes an unverified target.
+type ExpressDeltaInputs struct {
+	Source, Delta []byte
+	PSFRecord     bool
+	Target        ContentDescriptor
+}
+
+func (s *CumulativeStage) InspectExpressDeltaInputs(name string) (*ExpressDeltaInputs, error) {
+	if s == nil {
+		return nil, fmt.Errorf("uup servicing: nil stage")
+	}
+	payload, ok := s.expressByTarget[normalizeCIXName(name)]
+	if !ok || payload.Literal {
+		return nil, fmt.Errorf("uup servicing: target %q is not an express delta", name)
+	}
+	if payload.Target.Length < 0 || payload.Target.Length > maximumCanonicalTarget {
+		return nil, fmt.Errorf("uup servicing: diagnostic target exceeds bound")
+	}
+	record, err := s.readExpressRecord(payload)
+	if err != nil {
+		return nil, err
+	}
+	patch := record
+	if payload.DirectDelta {
+		if payload.RecordType != "PA30" || payload.RecordBasis != nil || payload.RecordTarget != nil {
+			return nil, fmt.Errorf("uup servicing: direct target has nested reconstruction fields")
+		}
+	} else {
+		patch, err = s.expressPatch(payload, record)
+		if err != nil {
+			return nil, err
+		}
+	}
+	basis, err := s.resolveExpressBasis(s.nameExpressBasis(payload.Target.Name, payload.Basis))
+	if err != nil {
+		return nil, err
+	}
+	return &ExpressDeltaInputs{Source: basis, Delta: patch, PSFRecord: !payload.DirectDelta, Target: payload.Target}, nil
+}
+
+func (s *CumulativeStage) materializeExpress(payload DeltaPayload) ([]byte, error) {
+	key := normalizeCIXName(payload.Target.Name)
+	s.canonicalMu.Lock()
+	if cached := s.canonicalCache[key]; cached != nil {
+		s.canonicalMu.Unlock()
+		return cached, nil
+	}
+	s.canonicalMu.Unlock()
+	record, err := s.readExpressRecord(payload)
+	if err != nil {
+		return nil, err
 	}
 	if payload.Literal {
 		if payload.DirectDelta || payload.RecordType != "RAW" || payload.Basis != nil || payload.RecordBasis != nil || payload.RecordTarget != nil {
@@ -423,27 +499,9 @@ func (s *CumulativeStage) materializeExpress(payload DeltaPayload) ([]byte, erro
 		}
 		return s.retainTarget(key, target, maximumCanonicalRetainedTarget), nil
 	}
-	patch := record
-	var err error
-	switch payload.RecordType {
-	case "RAW":
-	case "PA30":
-		if payload.RecordTarget == nil {
-			return nil, fmt.Errorf("uup servicing: express target %q has no nested record target", payload.Target.Name)
-		}
-		basis, err := s.resolveExpressBasis(payload.RecordBasis)
-		if err != nil {
-			return nil, fmt.Errorf("uup servicing: resolve nested record basis for %q: %w", payload.Target.Name, err)
-		}
-		patch, err = msdelta.ApplyBounded(basis, record, uint64(defaultMaximumDeltaRecord))
-		if err != nil {
-			return nil, fmt.Errorf("uup servicing: reconstruct nested record for %q: %w", payload.Target.Name, err)
-		}
-		if err := verifyContentDescriptor(*payload.RecordTarget, patch); err != nil {
-			return nil, fmt.Errorf("uup servicing: nested record for %q: %w", payload.Target.Name, err)
-		}
-	default:
-		return nil, fmt.Errorf("uup servicing: target %q uses unsupported record type %q", payload.Target.Name, payload.RecordType)
+	patch, err := s.expressPatch(payload, record)
+	if err != nil {
+		return nil, err
 	}
 	basis, err := s.resolveExpressBasis(s.nameExpressBasis(payload.Target.Name, payload.Basis))
 	if err != nil {
@@ -722,6 +780,17 @@ func OpenCanonicalStage(name string, reader storage.Reader) (*CumulativeStage, e
 // remain lazy archive members; logical payloads are reconstructed from the
 // canonical cabinet's bounded RAW/PA30 DAG and verified by target SHA-256.
 func (s *CumulativeStage) OpenPlannedFile(effect StageFileEffect) (storage.Reader, error) {
+	file, err := s.openPlannedFile(effect)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyLegacyFileDigest(file, effect); err != nil {
+		return nil, err
+	}
+	return file, nil
+}
+
+func (s *CumulativeStage) openPlannedFile(effect StageFileEffect) (storage.Reader, error) {
 	switch effect.SourceMode {
 	case "metadata":
 		return s.openMetadataFile(effect.SourceName)

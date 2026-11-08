@@ -29,6 +29,63 @@ _PROFILES = {
     "timezone-resource": ("timezoneai.dll", "F8ECBFA28DCD5DBE0D5ED7A282B221291", "2a702873068d40498cd5e33ddaffd52b"),
 }
 
+
+# Exact native ABI executions qualify each source independently.
+_QUALIFIED_SOURCES = {
+    "fve": [
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..gstack-boot-onecore_31bf3856ad364e35_10.0.26100.9703_none_f1685e26209a4f4c/fveupdateai.dll",
+            "397f7b87707990f2c34cf76bfde3debb674f8fabb3b16375380ddab609bfc012",
+            "6078D4184146ECF04107D2EDE2EF118F1",
+        ),
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..gstack-boot-onecore_31bf3856ad364e35_10.0.26100.33634_none_a1c5eefd1831fd58/fveupdateai.dll",
+            "1ff28931f1a35fdd3ea524e0bb08218afc874bb78645ab83719c6d9b84816f04",
+            "C2D914E918CDBFCDC22A205ECF7CC53B1",
+        ),
+    ],
+    "secureboot": [
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..gstack-boot-onecore_31bf3856ad364e35_10.0.26100.9703_none_f1685e26209a4f4c/securebootai.dll",
+            "d53e98ff790852c2db27a4cdaafa1996a808e9e43f921f9bf487f23c93d3e5e1",
+            "C3294AD35CE6D6E6EBC6439C065A5FFB1",
+        ),
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..gstack-boot-onecore_31bf3856ad364e35_10.0.26100.33634_none_a1c5eefd1831fd58/securebootai.dll",
+            "484051fcb40d931da6dc528ac083b1a856f259023501c67792bfbbc483c019b4",
+            "C635F57EC160C59EA462DA221384A2E21",
+        ),
+    ],
+    "http": [
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.9703_none_875daae85585b1d5/httpai.dll",
+            "cf6e64fe29b3726acd814dd56e1de9416d3ed97d6da119f99c44e5da339dfaa8",
+            "2312C802846EF509E0355F875B1414A71",
+        ),
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.33634_none_37bb3bbf4d1d5fe1/httpai.dll",
+            "ebd0f3c34e7b77852c79edf80eec485cdd526acf51a975f7b1ab3d181765ab8b",
+            "FA49CAB8BBD40597AC1ADA338E2CE56D1",
+        ),
+    ],
+    "timezone": [
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.9703_none_875daae85585b1d5/timezoneai.dll",
+            "12228f33047d2bf84e6ceb1431020419d31d91fa4d1bdebce899348aadad83a8",
+            "F8ECBFA28DCD5DBE0D5ED7A282B221291",
+        ),
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.33634_none_37bb3bbf4d1d5fe1/timezoneai.dll",
+            "601d9296d4a461623efd260ef6fb46af477d4160522ad4302ea85ddacc6fbae8",
+            "1D4ED37F23398F741867E4D0DE9BA1801",
+        ),
+    ],
+}
+
+
+def select_basic_installer(root,profile):
+    """Select one present, hash-qualified source; never guess between versions."""
+    family="timezone" if profile.startswith("timezone") else profile
+    candidates=[(root.find(path),expected) for path,expected,key in _QUALIFIED_SOURCES[family] if root.find(path)!=None]
+    if len(candidates)!=1:
+        fail("native basic installer requires one qualified source: "+profile)
+    file,expected=candidates[0]
+    if hex(digest(file,algorithm="sha256"))!=expected:
+        fail("native basic installer source hash differs: "+profile)
+    return file,expected
+
 def run_basic_installer(file, profile, hives, rows=[], files={}, instruction_limit=500000, operation="install", phase=10):
     """Execute an identity-qualified basic installer for supported install/uninstall phases under explicit instruction limits; return native outcomes and effects."""
     if (operation,phase) not in [("install",10),("uninstall",8)]:
@@ -36,8 +93,14 @@ def run_basic_installer(file, profile, hives, rows=[], files={}, instruction_lim
     module_name, codeview, identifier = _PROFILES[profile]
     system = hives["SYSTEM"]
     pe = windows.pe(file)
-    if pe.info["machine"] != 0x8664 or pe.codeview == None or pe.codeview["key"] != codeview:
-        fail("CSI adapter requires the inspected 26100.9703 installer ABI")
+    family="timezone" if profile.startswith("timezone") else profile
+    if family in _QUALIFIED_SOURCES:
+        source_hash=hex(digest(file,algorithm="sha256"))
+        admitted=[key for path,expected,key in _QUALIFIED_SOURCES[family] if source_hash==expected]
+    else:
+        admitted=[codeview]
+    if pe.info["machine"] != 0x8664 or pe.codeview == None or pe.codeview["key"] not in admitted:
+        fail("CSI adapter requires an inspected installer ABI")
     if type(instruction_limit)!="int" or instruction_limit<1 or instruction_limit>500000:
         fail("invalid CSI instruction bound")
     if len(rows)>4096: fail("CSI CDF table exceeds bound")

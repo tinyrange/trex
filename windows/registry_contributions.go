@@ -365,8 +365,11 @@ func registryContributionDecodeKey(attrs map[string]string, architecture string)
 			return registryContributionValueKey{}, fmt.Errorf("unsupported registry value preparation attributes: %s", name)
 		}
 	}
-	for _, name := range []string{"name", "valueType", "value"} {
-		if _, ok := attrs[name]; !ok {
+	// An omitted name denotes the default value in .NET assembly manifests.
+	// A missing REG_SZ value is an empty string (for example .NET user-agent
+	// markers). Other kinds still require explicit data; type is mandatory.
+	for _, name := range []string{"valueType", "value"} {
+		if _, ok := attrs[name]; !ok && !(name == "value" && attrs["valueType"] == "REG_SZ") {
 			return registryContributionValueKey{}, fmt.Errorf("registry value preparation requires %s", name)
 		}
 	}
