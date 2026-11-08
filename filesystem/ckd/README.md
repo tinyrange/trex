@@ -1,7 +1,7 @@
 # Native CKD and z/OS readers
 
-Portable, read-only Go support for uncompressed `CKD_P370` images through
-`storage.Reader`. Compose with ISO9660 and gzip readers without mounting,
+Portable, read-only Go support for uncompressed `CKD_P370` and compressed
+`CKD_C370` base images through `storage.Reader`. Compose with ISO9660 and gzip readers without mounting,
 extracting, launching host parsers, or booting a guest. Source-specific media
 selection, corpus assertions and audit reports belong in the private recipe
 repository; this package contains format readers and synthetic fixtures only.
@@ -22,10 +22,151 @@ repository; this package contains format readers and synthetic fixtures only.
 
 This is not universal logical z/OS support. Variable RRDS, ESDS-based alternate
 indexes, extended index addressing, multivolume assembly, true sparse HFS file
-placement, ISAM, encrypted/compressed datasets, format-8 DSCBs and compressed
-CCKD containers remain unsupported. zFS backing/copy-on-write objects and other
+placement, ISAM, encrypted/compressed datasets and format-8 DSCBs remain unsupported. zFS backing/copy-on-write objects and other
 geometries also remain unsupported. Unknown variants fail explicitly; raw
 allocation access remains independent of logical decoding.
+
+## Compressed CKD
+
+`OpenCompressed` presents a `CKD_C370` base image as the equivalent
+`CKD_P370` image (same device header with the P370 signature, every track
+padded to the declared size), so `Open`, `auto()` and every reader above compose
+unchanged; `Open` does this automatically. Layout: device header, compressed
+header at 512 (version 0, either byte order, cylinder count at 40, null format at
+44), level-1 table at 1024, 256-entry level-2 tables of offset/length/size, and
+stored tracks beginning with a compression byte and CCHH. Raw and zlib tracks are
+supported; the zlib checksum and exact stream end are verified, decoded size is
+bounded by the track size and the stored address must match. Missing level-2
+tables use the header null format; null level-2 entries carry their own format
+in length and size. Formats 0 (record zero plus EOF record) and 1 (record zero
+only) are supported. Shadow files (`CKD_S370`), shadow-base references, bzip2
+tracks, other null formats and FBA images are rejected. Only the last decoded
+track and the level-2 tables are retained. Free-space chains are not needed
+for reading and are not validated.
+
+`filesystem.ckd_scan(file, max_errors=N)` parses every track and returns
+per-track failures instead of stopping, for distinguishing isolated media damage
+from systematic decoding faults.
+
+## CMS EDF minidisks
+
+`OpenCMS(disk, cylinder, extent)` reads a z/VM CMS enhanced-disk-format
+minidisk. A minidisk is a cylinder-aligned extent of fixed-size block records
+(512, 1024, 2048 or 4096 bytes; record zero excluded). Block n (1-based) is
+record `(n-1)%N+1` of minidisk track `(n-1)/N`, where N is taken from the
+minidisk's first track (12, 33 and 49 on 3390 for 4K, 1K and 512). Block 3 is
+the `CMS1` label: ID at 4, block size 12, directory origin 16, formatted and
+maximum cylinders 20/24, blocks 28, used 32, FST size 36 (64) and FSTs per
+block 40, packed creation date 44. `extent` (cylinders, from the CP directory)
+is authoritative: z/VM volumes carry stale labels from earlier layouts, and a
+label is rejected if it claims more cylinders than its extent.
+
+The directory is a fixed-format file of 64-byte FSTs whose first entry
+(name `00000001 00000000`, type `DIRECTOR`) describes the directory itself and
+must begin at the label's origin; `ALLOCMAP` follows. FST fields: name 0, type 8,
+mode 24, record format 30 (`F`/`V` EBCDIC), flags 31, LRECL 32, origin 40, data
+blocks 44, records 48, pointer levels 52, pointer size 53 (4 for F, 12 for V),
+packed date YYMMDDHHMMSS 54, byte 60 preserved uninterpreted. The 16-bit legacy
+fields are zero on observed media and ignored; the directory's own data-block
+count is not used for length.
+
+With zero levels the origin is the only data block; otherwise it is the top of
+a pointer tree. Fixed-file pointers are 4-byte block numbers; a zero pointer at
+level L is (blocksize/4)^L unallocated zero blocks. Content is
+`records*LRECL` bytes. Variable-file pointers are 12 bytes: block, number of the
+last record that begins in it (or its subtree), and displacement. For data
+blocks the displacement is the offset of the first record beginning there,
+`0xffffffff` where none does, except that a final block where none does records
+the end of data. Upper entries carry 0, or `0xffffffff` when no record begins in
+the subtree. Pointer blocks are dense. Data block zero is an all-zero
+unallocated block inside a long record. Records are a 2-byte length plus data
+and run across block boundaries; each length must be nonzero and at most LRECL.
+`Content` returns that stream verbatim, verifying every count and displacement.
+Content is not converted from EBCDIC.
+
+Validated against z/VM 4.4 ADCD volumes: driven by the active CP object
+directory, 130,178 files (3.6 GB) on 330 minidisks decode with no format
+failures; the remaining 35 file failures lie on damaged CCKD tracks.
+
+## CMS libraries and packed files
+
+`ParseCMSLibrary` reads LIBPDS libraries: F 80 content whose first record is
+`LIBPDS` (EBCDIC), with the directory length at 8, the directory's first record
+at 12 and two words at 16/20 kept uninterpreted (zero in MACLIBs; in TXTLIBs a
+byte count equal to sixteen times the following count). The directory fills the
+final records with 16-byte entries: name, flags word, 1-based start record.
+Entry points and aliases share a member; a member ends before the next record
+beginning X'61FFFF61'. MACLIB, TXTLIB, HELPLIB and VMDTDATA libraries use it.
+DMSLIB TXTLIBs, LOADLIBs (LIBPDS inside V records) and CSLLIBs (`VMLIB`) are not
+decoded yet.
+
+`UnpackCMS` decodes COPYFILE PACK files (F 1024): header X'000140', original
+record format and 4-byte LRECL, then the codes in `cms_pack.go`. Each of blanks,
+repeated byte and literal has a short form, an 8-bit and a 16-bit count form,
+and (for V) an end-of-record form. X'FF' ends the data; the rest of the final
+container record is blank or repeats the stream 1024 bytes earlier (the
+packer's chunk buffer). Packed streams may also be held in variable-format
+container records (`UnpackCMSRecords`). Unobserved codes are rejected.
+
+Validated on z/VM 4.4 ADCD, over every minidisk the active CP directory
+defines: 334 LIBPDS/DMSLIB libraries (57,748 members) and 12,234 packed files
+decode with every structural check enabled. Packed files on one third-party
+product disk (VELOCITY 191) share the header but use a different packer and
+are not decoded.
+
+## CMS executables, load libraries and object decks
+
+`ParseCMSModule` reads GENMOD modules (see `cms_module.go`): fixed modules are
+bare images; variable modules are one or more segments of an 80-byte header,
+core-image records summing exactly to end-origin, and a trailer holding the
+loader table, relocation list and optional extra records (service history).
+Header halfword 0x28 counts loader entries; byte 0x2D marks a relocation list
+(X'80') and 5-byte entries (X'40'). Loader entries are 20 or 24 bytes, chosen by
+validation; further segments (CP's CPLOAD nucleus) are found structurally.
+`ParseCMSCallableLibrary` reads CSLLIBs: a 56-byte header then one module
+segment per routine. `ParseCMSLoadLibrary` reads LOADLIBs: a LIBPDS header
+record, OS PDS directory entries (indicator byte: alias X'80', user-data
+halfwords; entry padded to 16) in the final records, and members of OS load
+module records ended by X'61FFFF61'. `ParseCMSLibrary` also reads the older
+DMSLIB TXTLIB format. `ParseObjectDeck` reads object cards (ESD, XSD, TXT, RLD,
+END, SYM) following IBM's published object module format, validates ESDID
+references and assembles sections. `filesystem.program_object` exposes
+`OpenStoredProgramObject` for IEWPLMH trailers.
+
+Validated on z/VM 4.4 ADCD, over every minidisk the active CP directory
+defines: 2,342 modules (2,348 segments), 83 LOADLIBs, 18 CSLLIBs and 34,515
+object decks (335,076 symbols, 53,726 sections). Loader names may be any
+printable EBCDIC (compiler-generated labels use '+', ':', '>', '?' and '='),
+and TXT/RLD data may run to column 80 in decks without sequence numbers.
+Unsupported on that media: one module (ICKSADSF) with an older header whose
+records fall 216 bytes short, two version-1 IEWPLMH objects and four GOFF
+object files. `scripts/inspect/zvm_adcd.star` in tinyrangex reproduces these
+runs.
+
+## CP object directory
+
+`OpenCPDirectory` reads the compiled z/VM user directory (see `cp_directory.go`)
+from CP-formatted 4096-byte pages, whose record numbers run across a
+cylinder's tracks; pointers are cylinder, record and a zero byte. VOL1 offset
+0x34 selects the active root index page; the root's entries (high key, leaf)
+must match the leaf chain. Leaf entries locate each user's 0x220-byte block
+(own device count at 0x200) and 80-byte device blocks (type X'80' MDISK, X'40'
+LINK, X'08' SPOOL/CONSOLE, X'10' DEDICATE; owner after "DDEV" at 0x44).
+Device streams continue on the next page whose blocks belong to the same
+owner; each block also links (0x38) to the next device of the user's resolved
+configuration, own devices then INCLUDEd profile devices. User-block fields
+(storage, classes, machine mode, account, distribution, IPL, AUTOLOG, SHARE,
+MAXCONN, POSIX identity, options), the IUCV and NAMESAVE chains, device
+modes and password flags, unit-record types and spool classes, and the
+header's profile table and POSIX GID index are documented in
+`cp_directory_fields.go`; each was checked against USER DIRECT for every user
+whose compiled and source entries agree. Passwords are salted by user ID and
+are not decoded. On the ADCD media this yields 165 users
+and 1,206 devices; the previous generation is rejected because its pages were
+reused. It differs from the USER DIRECT source on MAINT 2CC (an edit never
+compiled): driving the CMS corpus from the active directory gives 330
+minidisks and 130,178 files with failures only on damaged CCKD tracks, while the
+source's MAINT 194/3B2 extents on 440W01 are stale, unallocated minidisks.
 
 ## Physical and dataset APIs
 

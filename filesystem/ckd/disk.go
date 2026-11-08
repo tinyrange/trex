@@ -1,4 +1,5 @@
-// Package ckd reads uncompressed CKD_P370 disk images through portable readers.
+// Package ckd reads CKD_P370 and compressed CKD_C370 disk images through
+// portable readers.
 // Implemented independently from observed IBM distribution media; no GPL source
 // was consulted or used. See README.md for provenance and supported scope.
 package ckd
@@ -42,6 +43,13 @@ func Open(source storage.Reader) (*Disk, error) {
 	var h [512]byte
 	if _, err := io.ReadFull(io.NewSectionReader(source, 0, 512), h[:]); err != nil {
 		return nil, fmt.Errorf("ckd header: %w", err)
+	}
+	if IsCompressed(h[:]) {
+		c, err := OpenCompressed(source)
+		if err != nil {
+			return nil, err
+		}
+		return Open(c)
 	}
 	if string(h[:8]) != "CKD_P370" {
 		return nil, fmt.Errorf("ckd: unsupported signature %q", h[:8])
