@@ -75,3 +75,25 @@ func TestApplyBSDiffRejectsMalformedPatch(t *testing.T) {
 		})
 	}
 }
+
+// A clipped inspection must retain the additive source coordinate, including
+// an initially negative seek, rather than reporting the whole control block.
+func TestBSDiffTraceClipsAddAndLiteralSpans(t *testing.T) {
+	patch := appendBSDiffTestBlock(nil, 0, 1, -2, nil, []byte{'!'})
+	patch = appendBSDiffTestBlock(patch, 5, 2, 0, []byte{1, 2, 3, 4, 5}, []byte{'x', 'y'})
+	trace := &patchTraceCollector{start: 2, end: 7}
+	got, err := applyBSDiffTraced([]byte{10, 20, 30}, 8, patch, trace)
+	if err != nil || !bytes.Equal(got, []byte{'!', 1, 2, 13, 24, 35, 'x', 'y'}) {
+		t.Fatalf("decoded = %v, %v", got, err)
+	}
+	if len(trace.matches) != 2 {
+		t.Fatalf("matches = %#v", trace.matches)
+	}
+	add, literal := trace.matches[0], trace.matches[1]
+	if add.Kind != "add" || add.TargetStart != 2 || add.TargetEnd != 6 || add.CombinedStart != -1 {
+		t.Fatalf("add = %#v", add)
+	}
+	if literal.Kind != "literal" || literal.TargetStart != 6 || literal.TargetEnd != 7 || literal.CombinedStart != -1 {
+		t.Fatalf("literal = %#v", literal)
+	}
+}

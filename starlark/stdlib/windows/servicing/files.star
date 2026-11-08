@@ -32,10 +32,11 @@ def prepare_update_file_hierarchy(runtime, hives, driver_projection_candidates=F
     projected = prepare_servicing_projected_files(resolved, analyze_servicing_file_security(runtime), hashes, policy)
     if projected["unresolved"]:
         fail("file hierarchy has unresolved destinations")
-    reduced = reduce_servicing_file_declarations(projected["records"], prepare_servicing_unprojected_files(resolved, hashes, policy))
+    collision_policy = servicing_filemap_collision_policy(software, components)
+    reduced = reduce_servicing_file_declarations(projected["records"], prepare_servicing_unprojected_files(resolved, hashes, policy), collision_policy=collision_policy)
     files = preprocess_servicing_file_declarations(reduced)
     directories = preprocess_servicing_directory_declarations(reduce_servicing_directory_declarations(resolve_servicing_directory_paths(analyze_servicing_directories(runtime, "amd64"), roots)))
-    return dict(hierarchy=preprocess_servicing_path_hierarchy(directories, files), sources=reduced["sources"], policy=policy, collision_policy=servicing_filemap_collision_policy(software, components))
+    return dict(hierarchy=preprocess_servicing_path_hierarchy(directories, files), sources=reduced["sources"], policy=policy, collision_policy=collision_policy)
 
 
 def _map_identity(identity):

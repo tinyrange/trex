@@ -55,10 +55,11 @@ type signatureIndirect struct {
 	}
 }
 type verifiedPEIntegrity struct {
-	signer       *x509.Certificate
-	certificates []*x509.Certificate
-	unsigned     []byte
-	signature    []byte
+	signer              *x509.Certificate
+	certificates        []*x509.Certificate
+	unsigned            []byte
+	signature           []byte
+	secondarySignatures int
 }
 
 func signatureDER(data []byte, value any) error {
@@ -208,7 +209,11 @@ func verifySignedContent(sd signatureSignedData, expectedType asn1.ObjectIdentif
 	if err := signer.CheckSignature(x509.SHA256WithRSA, attrs, si.Signature); err != nil {
 		return nil, fmt.Errorf("Authenticode signature: %w", err)
 	}
-	return &verifiedPEIntegrity{signer: signer, certificates: certificates, unsigned: si.Unsigned.FullBytes, signature: si.Signature}, nil
+	secondary, err := secondarySignatureCount(si.Unsigned.FullBytes)
+	if err != nil {
+		return nil, err
+	}
+	return &verifiedPEIntegrity{signer: signer, certificates: certificates, unsigned: si.Unsigned.FullBytes, signature: si.Signature, secondarySignatures: secondary}, nil
 }
 func peSignatureBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
@@ -252,12 +257,13 @@ func signatureIntegrityProjection(result *verifiedPEIntegrity, timestamp *verifi
 		certs = append(certs, starlark.Bytes(cert.Raw))
 	}
 	return starfile.NewRecord(starlark.StringDict{
-		"signer":              starlark.Bytes(result.signer.Raw),
-		"certificates":        starlark.NewList(certs),
-		"signature":           starlark.Bytes(result.signature),
-		"unsigned_attributes": starlark.Bytes(result.unsigned),
-		"timestamp":           timestampValue,
-		"digest_algorithm":    starlark.String("sha256"),
+		"signer":                    starlark.Bytes(result.signer.Raw),
+		"certificates":              starlark.NewList(certs),
+		"signature":                 starlark.Bytes(result.signature),
+		"unsigned_attributes":       starlark.Bytes(result.unsigned),
+		"secondary_signature_count": starlark.MakeInt(result.secondarySignatures),
+		"timestamp":                 timestampValue,
+		"digest_algorithm":          starlark.String("sha256"),
 	})
 }
 

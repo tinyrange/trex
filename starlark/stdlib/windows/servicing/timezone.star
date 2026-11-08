@@ -1,10 +1,8 @@
 """Native offline timezone installer admission and atomic effect publication."""
 load("@stdlib//windows/servicing:runtime.star", "select_servicing_file_hash")
-load("@stdlib//windows/servicing:installer.star", "run_basic_installer")
+load("@stdlib//windows/servicing:installer.star", "run_basic_installer", "select_basic_installer")
 
 _ZONES = "/Microsoft/Windows NT/CurrentVersion/Time Zones"
-_INSTALLER_PATH = "/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.9703_none_875daae85585b1d5/timezoneai.dll"
-_INSTALLER_SHA256 = "12228f33047d2bf84e6ceb1431020419d31d91fa4d1bdebce899348aadad83a8"
 
 def _values(key):
     return {n.lower():(r.type,key.values[n]) for n,r in key.value_records.items()} if key!=None else {}
@@ -98,9 +96,7 @@ def apply_update_timezone(root,runtime):
             fail("final timezone resource differs from its admitted manifest")
         entries=windows.pe(resource).strings
         if not entries or any([e.lang!="#1033" for e in entries]): fail("ambiguous timezone string-table language")
-    installer=root.find(_INSTALLER_PATH)
-    if installer==None or hex(digest(installer,algorithm="sha256"))!=_INSTALLER_SHA256:
-        fail("timezone installer requires exact serviced source bytes")
+    installer,installer_sha256=select_basic_installer(root,"timezone")
     executions=[]
     for transition in primary:
         identity=windows.csi_identity(transition["component_identities"]["after"])
@@ -118,4 +114,4 @@ def apply_update_timezone(root,runtime):
     for hive,source in files.items():
         if digest(root.find("/Windows/System32/config/"+hive))!=digest(source): fail("timezone source changed during emulation")
     patches=publish_timezone_effects(root,effects)
-    return dict(resource_components=len(changes),primary_components=len(primary),resource_sha256=hex(digest(resource,algorithm="sha256")) if resource!=None else None,installer_sha256=_INSTALLER_SHA256,values=len(patches["SOFTWARE"])+len(patches["SYSTEM"]),native_writes=len(effects),changes=patches,executions=executions,seconds=clock.monotonic()-started,policy="executed native offline timezone handlers; not complete CBS installation")
+    return dict(resource_components=len(changes),primary_components=len(primary),resource_sha256=hex(digest(resource,algorithm="sha256")) if resource!=None else None,installer_sha256=installer_sha256,values=len(patches["SOFTWARE"])+len(patches["SYSTEM"]),native_writes=len(effects),changes=patches,executions=executions,seconds=clock.monotonic()-started,policy="executed native offline timezone handlers; not complete CBS installation")

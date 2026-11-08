@@ -762,6 +762,40 @@ def test_ordinary_stale_hive_and_priority_ties_reject():
 
 
 
+def test_ordinary_explicit_profile_values():
+    path = chr(92) + chr(92).join(["registry","user","software","microsoft","uev","agent"])
+    records = [dict(path=path,scope="user",side=side,identity="fixture",descriptor=None,key_attributes={}) for side in ["before","after"]]
+    reduced = ordinary_runtime["reduce_servicing_registry_keys"](records,scope="user")
+    user = ordinary_runtime["preprocess_servicing_registry_keys"](reduced,{path:True},{})
+    keys = dict(system={},user=user)
+    old,new = b"old",b"new"
+    groups = {("user",path,"version"): ([(0,3,old,"true","",False)],[(0,3,new,"true","",False)])}
+    root = directory()
+    profiles = ["/Users/Default/NTUSER.DAT","/Users/Existing/NTUSER.DAT"]
+    key = "/software/microsoft/uev/agent"
+    security = windows.compile_sddl("O:SYG:SYD:P(A;CI;KA;;;SY)")
+    for file,value in zip(profiles,[old,b"custom"]):
+        root.write(file,windows.hive_from_patches("NTUSER",[dict(key=key,name="version",type="REG_BINARY",value=value)],keys=[dict(key=key,security=security)]))
+    root.write("/Windows/System32/config/DEFAULT",root.find(profiles[0]))
+    default_hash = digest(root.find("/Windows/System32/config/DEFAULT"))
+    build = ordinary["plan_update_ordinary_registry"]
+    args = [root,keys,groups,{0:0},"controlset001"]
+    raises(build,args=args,message="explicit profile bindings")
+    raises(build,args=args,kwargs=dict(profile_hives=[profiles[0],profiles[0].lower()]),message="duplicate")
+    raises(build,args=args,kwargs=dict(profile_hives=["/Windows/System32/config/DEFAULT"]),message="canonical hive paths")
+    result = build(root,keys,groups,{0:0},"controlset001",profile_hives=profiles)
+    equal(windows.hive(root.find(profiles[0])).find(key).values["version"],old)
+    commit["apply_update_registry_effects"](root,result["plans"])
+    equal(windows.hive(root.find(profiles[0])).find(key).values["version"],new)
+    equal(windows.hive(root.find(profiles[1])).find(key).values["version"],b"custom")
+    equal(windows.hive(root.find(profiles[0])).find(key).security,security)
+    equal(digest(root.find("/Windows/System32/config/DEFAULT")),default_hash)
+    equal(result["report"]["set_values"],1)
+    equal(result["report"]["preserved_values"],1)
+    root.write(profiles[0],windows.hive_from_patches("NTUSER",[]))
+    raises(build,args=args,kwargs=dict(profile_hives=[profiles[0]]),message="existing keys")
+
+
 def test_driver_open_access_policy():
     policy = testing.module("@stdlib//windows/servicing:registry_access.star")["update_driver_key_open_access"]
     def access(sddl, mask):
@@ -871,6 +905,7 @@ TEST_SUITE = suite("private/nt6_update_registry", [
     case("driver_open_access_policy", test_driver_open_access_policy),
     case("driver_open_access_handles", test_driver_open_access_handle_lifetime),
     case("ordinary_security_and_retirement", test_ordinary_key_security_and_physical_retirement),
+    case("ordinary_explicit_profile_values", test_ordinary_explicit_profile_values),
     case("ordinary_cleanup_preflight", test_ordinary_unestablished_cleanup_rejects_without_publication),
     case("ordinary_stale_and_tied", test_ordinary_stale_hive_and_priority_ties_reject),
     case("completed_host_retirement", test_completed_driver_host_retirement_persists_real_handles_and_rejects_early_close),

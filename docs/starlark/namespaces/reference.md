@@ -935,13 +935,20 @@ Runs one target export or executable using semantic system-DLL plugins.
     import graph is initialized lazily if COM or SCM activates the module.
     Set `executable` when the primary image is a process: dependency DLLs still
     receive process attach, but the PE entry point is not called as DllMain.
+    `redirection_trust_policy` declares initial policy-16 flags for the modeled
+    process. It admits get/set only in a junction-free virtual namespace and
+    is not evidence of a real service process mitigation configuration.
+    `maximum_file_size` explicitly bounds virtual file writes (16 MiB by default,
+    at most 512 MiB); increasing it does not relax the emulator memory limit.
     `command_line` is returned by both GetCommandLine variants. `environment`
     augments a minimal standard Windows process environment and may override
     any of its values. `process_create_provider(machine, request)` supplies a
     bounded semantic result for child-process creation. Each `plugin_factories`
     callback runs after the core
     runtime plugins are constructed and receives a record containing `crt`,
-    `cryptoapi`, `kernel`, and `module_files`; it must return one emulator plugin. This lets callers add
+    `cryptoapi`, `bcrypt`, `kernel`, `registry`, and `module_files`; it must return
+    one emulator plugin. Registry security changes must use the registry plugin
+    so subsequent operations and returned effects share the same state. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
     `object_directories` maps exact NT directory names to explicit allowed access
     masks (or records with access and explicit self-relative security bytes).
@@ -1662,7 +1669,12 @@ In-memory Cabinet.dll extraction services for setup-time execution.
 
 ### `cabinet_plugin`
 
-Provides FDI extraction over native CAB files in the virtual file view.
+Extract single cabinets from owned files or caller-supplied FDI streams.
+
+    Callback input is bounded at 256 MiB; decoded output at 512 MiB. Real native
+    read/write/notification callbacks execute in-process, including pointer-sized
+    FDINOTIFICATION fields and raw CAB timestamp/attribute metadata. No child
+    process or completion marker is implied by extraction.
 
 ## `windows/selfreg/comcat.star`
 
@@ -1970,13 +1982,20 @@ Runs one target export or executable using semantic system-DLL plugins.
     import graph is initialized lazily if COM or SCM activates the module.
     Set `executable` when the primary image is a process: dependency DLLs still
     receive process attach, but the PE entry point is not called as DllMain.
+    `redirection_trust_policy` declares initial policy-16 flags for the modeled
+    process. It admits get/set only in a junction-free virtual namespace and
+    is not evidence of a real service process mitigation configuration.
+    `maximum_file_size` explicitly bounds virtual file writes (16 MiB by default,
+    at most 512 MiB); increasing it does not relax the emulator memory limit.
     `command_line` is returned by both GetCommandLine variants. `environment`
     augments a minimal standard Windows process environment and may override
     any of its values. `process_create_provider(machine, request)` supplies a
     bounded semantic result for child-process creation. Each `plugin_factories`
     callback runs after the core
     runtime plugins are constructed and receives a record containing `crt`,
-    `cryptoapi`, `kernel`, and `module_files`; it must return one emulator plugin. This lets callers add
+    `cryptoapi`, `bcrypt`, `kernel`, `registry`, and `module_files`; it must return
+    one emulator plugin. Registry security changes must use the registry plugin
+    so subsequent operations and returned effects share the same state. This lets callers add
     semantic system APIs without coupling the public runner to target policy.
     `object_directories` maps exact NT directory names to explicit allowed access
     masks (or records with access and explicit self-relative security bytes).
@@ -2167,6 +2186,11 @@ Models deterministic allocation, strings, paths, files, and OS facts.
     distinct NtCreateFile FILE_DELETE_ON_CLOSE option remains unsupported.
     Reparse links, drive aliases,
     full NT authorization, and resizing live mapped views are not modeled.
+    `redirection_trust_policy` explicitly supplies initial RedirectionGuard
+    flags (0..3) for this modeled process, not facts about a host or booted guest.
+    Only policy 16 get/set and a junction-free namespace are admitted; omitted
+    policy facts, other policies and reparse inputs fail closed. No junction
+    traversal, trust classification or audit-log implementation is implied.
     `on_thread_create(event, thread)` may schedule the captured start routine
     using emulator control APIs; no host thread is created implicitly.
     `on_system_query(machine, query)` may inspect one live, bounded diagnostic
@@ -2830,7 +2854,8 @@ Select actual descendants of already-bound component source roots.
 
 Native offline event publisher/channel and shared-autologger registration.
 
-This models the bounded Admin/Operational registration delta, not the whole
+This models shared Admin/Operational and new disabled System Debug channels,
+not the whole
 advanced-installer queue. Event definitions remain in hash-qualified PE payloads.
 No host wevtutil invocation or installer emulator participates in construction.
 
@@ -3000,11 +3025,12 @@ Resolve amd64 runtime paths, hashes and security against explicit baseline hives
 
 ## `windows/servicing/gac.star`
 
-Guarded refresh of existing CLR4 GAC assemblies from CSI declarations.
+Guarded refresh of existing legacy/CLR4 GAC assemblies from CSI declarations.
 
 This is not Fusion registration or NGEN completion. New cache directories,
 assembly identity changes and removals require their own installer phases and
-are rejected. No oracle paths, hashes or registry results enter this planner.
+are rejected. New companion files may be linked into an existing cache identity
+only when absent and backed by an exact declared staged hash. No oracle paths, hashes or registry results enter this planner.
 
 ### `apply_update_gac`
 
@@ -3086,6 +3112,10 @@ Execute an identity-qualified basic installer for supported install/uninstall ph
 ### `run_http_installer`
 
 Run the bounded native HTTP profile with explicit SYSTEM bytes, rows, operation and phase; return captured effects.
+
+### `select_basic_installer`
+
+Select one present, hash-qualified source; never guess between versions.
 
 ## `windows/servicing/key_flags.star`
 
@@ -3532,9 +3562,11 @@ later against the actual candidate hives, never against a declaration count.
 Plan complete ordinary keys/values against the actual constructed image.
 
     No hive is published until every target passes native readback. Unchanged
-    user-profile trees require no binding. Changed profiles, atomic mutable
-    trees and nonempty retired-security cleanup fail closed, never get reported
-    as completed. Literal key components are retained, including dot and slash.
+    user-profile trees require no binding. Changed profiles require explicit
+    hive paths and support existing-key value changes only: profile key creation,
+    security assignment and cleanup remain fail-closed. The caller owns complete
+    profile enumeration; HKCU is never substituted with HKU/.DEFAULT. Atomic
+    mutable trees and nonempty retired-security cleanup also remain fail-closed. Literal key components are retained, including dot and slash.
 
 ### `prepare_update_registry_keys`
 
@@ -3692,10 +3724,12 @@ Build the bounded SYSTEM creation descriptor before WCP's setter.
     SYSTEM owner/primary group and SYSTEM integrity. This is not a general
     token-dependent SeAssignSecurityEx implementation. The native NTFS path
     takes auto-DACL inheritance only when the parent has DACL_AUTO_INHERITED.
-    Noninheritable ordinary parent audit ACEs do not propagate. If no DACL
+    Ordinary audit ACEs inherit when the parent SACL is auto-inherited;
+    noninheritable parent audit ACEs do not propagate. If no DACL
     inherits, the caller must explicitly supply the subject token default DACL.
     Only nonpropagating allow ACEs with mapped file rights are supported there;
-    legacy inheritance and other token/SACL policies remain fail-closed.
+    legacy propagating SACL inheritance and other token/SACL policies
+    remain fail-closed.
 
 ### `build_servicing_directory_security_request`
 
@@ -3703,7 +3737,7 @@ Build a bounded explicit or selected-default directory request.
 
     This is WCP's directory setter input, not creation-time inheritance or
     authorization. Covers protected DACLs, explicit unprotected DACLs and
-    noninheritable ordinary audit SACLs observed in the pinned update.
+    ordinary audit SACLs, including OI/CI/NP/IO/ID inheritance flags.
     Other control/SACL forms fail closed until separately established.
 
 ### `build_servicing_file_security_request`
@@ -3922,9 +3956,11 @@ Reduce explicit native ProcessFile inputs; do not infer installer flags.
     Each input must supply process_flags and source_hash (None or a native
     digest_method/transform/digest record). This supports ordinary primary/link calls
     with flags 1, 2, 8, 10, 20 and 40 only, not repair, filters, external
-    sources or collision policy. Repeated same-side destinations/primary
-    sources fail closed. Hashes live on interned sources, so links use their
-    primary's hashes even when the primary has another destination.
+    sources. With an explicit non-strict ownership policy, ordinary primary
+    overlaps with identical metadata reduce in call order, as native ProcessFile
+    does. Mixed metadata, writable/link overlaps, strict-policy overlaps and
+    repeated primary sources remain unsupported. Hashes live on interned sources,
+    so links use their primary's hashes even at another destination.
 
 ### `reduce_servicing_registry_keys`
 
@@ -3993,10 +4029,10 @@ Select native file-loop candidates, not an execution schedule.
 
 Bounded CmsGetFileHashInformation projection, not payload verification.
 
-    All files in the exact current transition use a single nested SHA256 with
-    Identity transform and no legacy hash. Native parsed enum 1 maps to digest
-    method 2; transform enum 0 maps to transform 1. Other shapes require their
-    own native selection/validation and are rejected, not guessed or ignored.
+    Select the nested SHA256 Identity digest for file projection. .NET may
+    additionally retain an obsolete build-time SHA1 attribute. Its syntax is
+    checked, but the nested digest is binding; native readers verify SHA256.
+    Other algorithms/transforms remain unsupported.
 
 ### `select_servicing_new_registry_multi_action`
 
@@ -4125,11 +4161,12 @@ Bounded native FileInfo key, NOT an exact payload/store identity.
 
 ### `servicing_filemap_collision_policy`
 
-Select the ordinary direct transaction's directory collision gate.
+Select the ordinary direct transaction's ownership strictness gate.
 
     Coordinator initialization ORs 0x4800 for SingleResourceOwnership and the
     raw SmiHiveUpdates DWORD into its flags. InitializeCFileInstaller copies
-    bit 0x800 to the strict-directory byte. Ordinary primitive flags cannot
+    bit 0x800 to the ownership byte (also used by ReportFileCollision).
+    The historical strict_directories key names this shared gate. Primitive flags cannot
     supply that bit. This is not a repair/custom-coordinator policy.
 
 ### `servicing_filemap_collision_status`
@@ -4573,7 +4610,7 @@ Decodes a bounded version-0x30 Office UnityDB into frozen literal tables. Checks
 
 `archive.cab(file, cache=True) -> cab`
 
-Parses a Microsoft Cabinet file and exposes its members as file views. Folder decompression is shared when caching is enabled, so several entries in one compressed folder need not decode it repeatedly.
+Parses a Microsoft Cabinet file and exposes its members as file views. Folder decompression is shared when caching is enabled, so several entries in one compressed folder need not decode it repeatedly. Each member exposes frozen cab_metadata containing raw DOS date/time, attributes, folder index, set_id and cabinet index; reading metadata does not decompress the member.
 
 ### `archive.cab_set`
 
@@ -6107,11 +6144,23 @@ Creates an experimental in-process software x86 PC backend from Renvo x86.rfe. J
 
 Returns a bounded read-only snapshot of the running Go allocation sampler, not a per-recipe ownership graph. limit defaults to 20 and must be 1..100. Returns sample_rate_bytes, total sampled_bytes/sampled_objects, stack_count, and entries ordered by retained sampled bytes. Each entry has sampled_bytes, sampled_objects and stack frames (function, line); paths and addresses are omitted. Raw counts are unscaled samples. Additional estimated_bytes/estimated_objects fields on entries and totals apply the inverse sampling probability from mean sampled object size; these are statistical estimates, not exact ownership measurements. order_by accepts sampled_bytes (default) or estimated_bytes. Counts and estimates may lag up to two GC cycles. Does not force collection or change sampling, GC policy, memory limits or guest timing. Bounds stack inventory to 1048576 and retries a changing inventory at most three times; failure returns no partial snapshot.
 
+### `runtime.host_memory`
+
+`runtime.host_memory(pid=current_process) -> record`
+
+Read-only native host diagnostic snapshot: platform, pid, files and errors. On Linux reads fixed procfs status/stat/meminfo/vmstat/cgroup paths for the positive 32-bit pid (default this process) and memory counters at the mounted /sys/fs/cgroup root and up to 16 process-membership ancestors, bounded to 64 KiB per file; each failure is explicit. Raw texts permit bounded policy-side inspection without host tools. The mounted cgroup root need not be the process leaf; consult membership before interpreting scope. Samples are not atomic, PIDs may be reused, counters are cumulative, and an OOM increment alone does not identify its victim. Other platforms return empty files/errors. Does not change limits, collect garbage, reserve memory or launch processes.
+
 ### `runtime.release_memory`
 
 `runtime.release_memory() -> None`
 
 Explicitly runs a process-wide Go garbage collection and requests that unused heap pages be returned to the operating system. Drop unneeded construction references before calling it at a phase boundary. Reachable readers, caches and guest resources are not closed or evicted. Does not change GC policy or the memory limit and does not guarantee an RSS reduction or a hard memory bound. May pause concurrent work; include its elapsed time in end-to-end measurements.
+
+### `runtime.set_memory_limit`
+
+`runtime.set_memory_limit(bytes) -> int`
+
+Explicitly sets the process-wide Go soft memory limit and returns the previous limit in bytes. The positive limit applies to Go-managed memory, not guest RAM mappings, other native allocations, or other processes. Set an appropriate budget at construction/boot phase boundaries; restore the returned value when done. This is not a reservation or hard RSS bound, cannot reclaim reachable data, and may cause severe GC overhead below the live working set. Affects concurrent work in the same process; use only when the caller owns process memory policy.
 
 ### `runtime.stats`
 
@@ -6371,6 +6420,12 @@ Decodes a raw v6 API-set namespace (.apiset section bytes or a file slice), limi
 
 Constructs identity-scoped WindowsApps package DACLs from a native parent DACL. family is a package family name; kind is root, directory or file. By default adds conditional Users execute access bound to WIN://SYSAPPID, the derived family capability SID and Users read access. framework=True instead adds native shared-framework read/execute grants for both AppContainer groups and Users. Both policies inherit parent grants. Unsupported inheritable ACE types/flags and missing inherited grants fail closed. Does not construct an owner/SACL or register packages. No host security APIs.
 
+### `windows.appx_signature`
+
+`windows.appx_signature(file) -> record`
+
+Verifies single-signer RSA/SHA-256 APPX/MSIX package integrity, all AXPC/AXCD/AXCT/AXBM and optional AXCI digest domains, and recognized RFC3161 timestamp integrity. Returns the same signature metadata as pe_signature. Supports bounded single-disk, comment-free ZIP/ZIP64 packages with a final signature entry; rejects unsupported layouts and bundles. Input limit 64 MiB, signature 4 MiB, footprint 16 MiB, 4096 entries. Does not establish publisher, chain, expiry or revocation trust. No host tools, roots, clock or network.
+
 ### `windows.assembly_declarations`
 
 `windows.assembly_declarations(root) -> record`
@@ -6513,7 +6568,7 @@ Evaluates CBS parent states without modifying an image. packages is a list of di
 
 `windows.cbs_parent_update_scopes(packages, candidates) -> list`
 
-Selects available parent packages for CBS update-name queries without modifying an image. packages is a list of dicts with manifest (file or bytes) and comparisons (one explicit runtime descriptor per parent block in preorder). Descriptors require major_minor, build, revision (EQ/NE/GE/GT/LE/LT) and ignore_revision. candidates is a list of canonical package identity strings. Returns one sorted, deduplicated list of matching package identities per input. Exact top-level references use exact lookup even when revision is ignored; ranged top-level references seed related families, then any root or nested rule can accept a candidate. Nested-only families do not seed candidates. Missing packages are skipped. This is not parent-state reduction: no state filter, disposition, standalone bypass or staged-Baseline revision relaxation applies. It does not enumerate updates, reproduce native release-type ordering, populate runtime descriptors, or perform a servicing transaction. Lists are bounded to 65536 inputs and 1048576 total results; manifests to 32 MiB each and 256 MiB total. Errors return no partial results. No host tools, registry writes or network access.
+Selects available parent packages for CBS update-name queries without modifying an image. packages is a list of dicts with manifest (file or bytes) and comparisons (one explicit runtime descriptor per parent block in preorder). Descriptors require major_minor, build, revision (EQ/NE/GE/GT/LE/LT) and ignore_revision. candidates is a list of canonical package identity strings. Returns one sorted, deduplicated list of matching package identities per input. Exact top-level references use exact lookup even when revision is ignored; ranged top-level references seed related families, then any root or nested rule can accept a candidate. Nested-only families do not seed candidates. Missing packages are skipped. This is not parent-state reduction: no state filter, disposition, standalone bypass or staged-Baseline revision relaxation applies. It does not enumerate updates, reproduce native release-type ordering, populate runtime descriptors, or perform a servicing transaction. Lists are bounded to 131072 inputs and 1048576 total results; manifests to 32 MiB each and 256 MiB total. Errors return no partial results. No host tools, registry writes or network access.
 
 ### `windows.cbs_update_index`
 
@@ -6567,7 +6622,7 @@ Computes a bounded no-hash FileMap ownership transition without mutating inputs.
 
 `windows.certificate(value) -> certificate record`
 
-Parses one DER X.509 certificate and returns its DER bytes, subject, issuer, SHA-1 and SHA-256 fingerprints and a subject/issuer-equality flag named self_signed. That flag is not cryptographic signature verification.
+Parses one DER X.509 certificate and returns its DER bytes, subject, issuer, SHA-1 and SHA-256 fingerprints and a subject/issuer-equality flag named self_signed. Also exposes exact subject_public_key_info DER, public_key_algorithm OID, public_key_parameters DER, public_key_bits and public_key_bit_length without re-encoding the signed key material. These fields and self_signed do not establish signature verification or trust.
 
 ### `windows.certificate_chain`
 
@@ -6753,9 +6808,11 @@ PSF framing checks.
 Inspects the selected reconstructed byte range before PE restoration, without
 enforcing the target digest. Source identity and input bounds remain checked.
 This is a diagnostic API, not an image-construction replacement for
-`windows.delta_apply`. Set `pe_transforms=False` for byte-only inspection of
-LZMS-backed direct or nested binary deltas; these return empty match and PE
-transform lists because LZMS match provenance is not yet implemented.
+`windows.delta_apply`. LZMS-backed direct payloads report literal spans; nested binary deltas report
+clipped `add` spans with signed source offsets and literal insertion spans.
+Additive spans may reference bytes outside the source, which contribute zero.
+These are binary-delta spans, not LZMS compression matches. Set
+`pe_transforms=False` to omit PE normalization events for broad byte comparisons.
 Supply both prepared-source bounds to also return `prepared_source`, a copy
 of that source window after preprocessing and before patch matching, plus
 `prepared_source_start`. The window must be nonempty and within the input
@@ -7196,7 +7253,7 @@ Signs a PE32 or PE32+ file with RSA/SHA-256 Authenticode entirely in memory and 
 
 `windows.pe_signature(file) -> record`
 
-Verifies embedded single-signer RSA/SHA-256 Authenticode image integrity using bounded native PE and PKCS#7 parsing. Returns signer DER, embedded certificate DER list, signature bytes, raw unsigned attributes, digest_algorithm and timestamp. A recognized Microsoft RFC3161 SHA-256 timestamp is checked for signature integrity and binding to the primary signature; timestamp contains unix seconds, signer DER and certificates, or None when absent. Input is limited to 256 MiB, certificate table to 4 MiB and certificates to 32. Rejects unsigned images, unsupported signature forms and mismatched image/content/signature digests. This is NOT certificate-chain, timestamp-authority trust, expiry, revocation, publisher or Windows trust-policy validation. Other unsigned attributes and CMS v1 attribute certificates are not authenticated or used as trust material. No host roots, clock or network are consulted.
+Verifies embedded single-signer RSA/SHA-256 Authenticode image integrity using bounded native PE and PKCS#7 parsing. Returns signer DER, embedded certificate DER list, signature bytes, raw unsigned attributes, digest_algorithm, timestamp and secondary_signature_count. The count describes advertised nested signatures, not verified secondary signatures. A recognized Microsoft RFC3161 SHA-256 timestamp is checked for signature integrity and binding to the primary signature; timestamp contains unix seconds, signer DER and certificates, or None when absent. Input is limited to 256 MiB, certificate table to 4 MiB and certificates to 32. Rejects unsigned images, unsupported signature forms and mismatched image/content/signature digests. This is NOT certificate-chain, timestamp-authority trust, expiry, revocation, publisher or Windows trust-policy validation. Other unsigned attributes and CMS v1 attribute certificates are not authenticated or used as trust material. No host roots, clock or network are consulted.
 
 ### `windows.pkcs7_certificates`
 
@@ -7293,6 +7350,12 @@ Decodes the binary SID vector in an NT5 SAM alias C value supplied as bytes or a
 `windows.sam_alias_with_members(source, members) -> bytes`
 
 Returns an NT5 SAM alias C value with its member SID vector replaced, preserving unrelated record fields. Accepts a source value bounded to 16 MiB and a list of checked binary SIDs; rejects duplicates. The caller must update the SAM reverse-membership indexes and counts in the same hive construction operation.
+
+### `windows.script_signature`
+
+`windows.script_signature(file, format='powershell') -> record`
+
+Verifies SHA-256 Authenticode PowerShell or CDXML script integrity and recognized RFC3161 timestamp integrity. format is powershell or xml. Accepts strict UTF-8 or BOM-marked UTF-16LE, CRLF signature framing, and no trailing unsigned data. Input limit 16 MiB. Returns pe_signature-compatible metadata, not a certificate-chain or publisher trust decision. No host roots, clock or network.
 
 ### `windows.sdk_inf_plan`
 
@@ -7413,7 +7476,7 @@ Defaults to local-only replay of cached raw catalog responses for the exact call
 
 ### `windows.update_media`
 
-`windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, servicing_only=False, while_preparing=None, installed_stage_limit=0, base=None, image="", bootsect=None) -> update_media`
+`windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, servicing_only=False, while_preparing=None, installed_stage_limit=0, base=None, image="", bootsect=None, additional_cabinets={}, additional_msus={}, additional_stage_order=[]) -> update_media`
 
 Prepares an explicitly selected catalog offer as referenced UUP media, not a complete disk image. catalog must come from update_catalog, and offer must be an original offer from that same catalog. architecture, edition, language, metadata_name (exact aggregated metadata payload name) and target_compdb (composition database name/source) are required caller choices. There is no rescan, fallback offer, ranking or client/preview filter. Dependency closure and signed-location renewal retain the original catalog, request profile, selected revision, declared hashes and sizes. Inspection modes expose metadata or plans without full image construction; servicing uses mandatory reconstructed target hashes. TinyRangeX recipes apply those effects and construct the filesystem, registry and bootable disk.
 

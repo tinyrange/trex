@@ -43,8 +43,10 @@ const (
 	maximumWIMChunkCache     = int64(2 << 30)
 	maximumServicingWIMCache = int64(256 << 20)
 	// Only the RAM hot cache is bounded. Downloaded source ranges persist
-	// without eviction in the native UUP cache across readers and runs.
-	maximumHTTPRangeCache = int64(256 << 20)
+	// without eviction in the native UUP cache across readers and runs. A
+	// small range window avoids retaining a second large copy alongside
+	// decoded WIM chunks and the verified staged-content cache.
+	maximumHTTPRangeCache = int64(32 << 20)
 	maximumCabinetWorkers = 4
 )
 
@@ -87,6 +89,8 @@ func (b *sharedByteBudget) Release(size int64) {
 func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var catalogArg, offerArg starlark.Value
 	var whilePreparing starlark.Value = starlark.None
+	var additionalCabinets, additionalMSUs *starlark.Dict
+	var additionalOrder *starlark.List
 	var architecture, edition, language, metadataName, targetCompDB string
 	var baseArg starlark.Value = starlark.None
 	var bootsectArg starlark.Value = starlark.None
@@ -109,8 +113,27 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		"while_preparing?", &whilePreparing,
 		"installed_stage_limit?", &installedStageLimit,
 		"base?", &baseArg, "image?", &imagePath, "bootsect?", &bootsectArg,
+		"additional_cabinets?", &additionalCabinets,
+		"additional_msus?", &additionalMSUs,
+		"additional_stage_order?", &additionalOrder,
 	); err != nil {
 		return nil, err
+	}
+	additional, err := unpackAdditionalCabinets(additionalCabinets, servicingOnly)
+	if err != nil {
+		return nil, err
+	}
+	msus, err := unpackAdditionalMSUs(additionalMSUs, servicingOnly)
+	if err != nil {
+		return nil, err
+	}
+	additional = append(additional, msus...)
+	additional, err = orderAdditionalStages(additional, additionalOrder)
+	if err != nil {
+		return nil, err
+	}
+	if len(additional) > 32 {
+		return nil, fmt.Errorf("update_media: at most 32 additional stages are allowed")
 	}
 	install, err := externalServicingBase(baseArg, imagePath, bootsectArg)
 	if err != nil {
@@ -161,7 +184,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		metadataName: metadataName, targetCompDB: targetCompDB, imagePath: imagePath,
 		bootsect: bootsectArg, indexOnly: indexOnly, planOnly: planOnly,
 		metadataOnly: metadataOnly, stateOnly: stateOnly, servicingOnly: servicingOnly,
-		installedStageLimit: installedStageLimit,
+		installedStageLimit: installedStageLimit, additionalCabinets: additional,
 	}
 	return runMediaPreparation(thread, callback, func(progress func(string)) (starlark.Value, error) {
 		return prepareSelectedMedia(resources, catalog, offer, install, options, progress)
@@ -169,6 +192,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 }
 
 type mediaPreparationOptions struct {
+	additionalCabinets                                                     []additionalCabinet
 	architecture, edition, language, metadataName, targetCompDB, imagePath string
 	bootsect                                                               starlark.Value
 	indexOnly, planOnly, metadataOnly, stateOnly, servicingOnly            bool
@@ -297,6 +321,10 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 	updateStages, err := uup.PlanUpdateStagesFromSources(databases, updateSources, architecture)
 	if err != nil {
 		return nil, fmt.Errorf("update_media: update stages: %w", err)
+	}
+	updateStages, err = appendAdditionalStages(updateStages, options.additionalCabinets)
+	if err != nil {
+		return nil, err
 	}
 	progress(fmt.Sprintf("update_media: reason graph resolved after %s", time.Since(mediaStarted).Round(time.Millisecond)))
 	updateStageValues := make([]starlark.Value, 0, len(updateStages))
@@ -473,9 +501,27 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 		if installedStageLimit != 0 && len(installedStages) >= installedStageLimit {
 			break
 		}
-		opened, metadata, err := openInstalledUpdateStages(resources, rangePool, updateContainers, servicingCache, []uup.UpdateStagePlan{updateStage}, func(plan uup.UpdateStagePlan, phase string) {
-			progress(fmt.Sprintf("update_media: stage %s %s after %s", plan.FeatureID, phase, time.Since(started).Round(time.Millisecond)))
-		})
+		var opened []*uup.CumulativeStage
+		var metadata []uup.UpdateStagePlan
+		var additional *additionalCabinet
+		for _, cabinet := range options.additionalCabinets {
+			if cabinet.feature == updateStage.FeatureID {
+				additional = &cabinet
+				break
+			}
+		}
+		if additional != nil {
+			var stage *uup.CumulativeStage
+			stage, err = openAdditionalStage(*additional, servicingCache)
+			if err == nil {
+				opened = []*uup.CumulativeStage{stage}
+				metadata = []uup.UpdateStagePlan{updateStage}
+			}
+		} else {
+			opened, metadata, err = openInstalledUpdateStages(resources, rangePool, updateContainers, servicingCache, []uup.UpdateStagePlan{updateStage}, func(plan uup.UpdateStagePlan, phase string) {
+				progress(fmt.Sprintf("update_media: stage %s %s after %s", plan.FeatureID, phase, time.Since(started).Round(time.Millisecond)))
+			})
+		}
 		if err != nil {
 			return nil, fmt.Errorf("update_media: open installed-OS update stage %q: %w", updateStage.FeatureID, err)
 		}

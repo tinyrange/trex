@@ -39,6 +39,18 @@ def test_pending_order_architecture_and_preservation():
     # A previous identical command is not deduplicated across transactions.
     equal(len(plan_update_ngen(root,runtime)['records']),8)
 
+def test_server_target_annotation_preserves_native_default_dispatch():
+    plain=_manifest(parameter='/NoDependencies /queue:2')
+    expected=collect_update_ngen(dict(transitions=[dict(before=plain,after=plain)]))
+    for mode in ['64bitonly','64bitOnly']:
+        marked=plain.replace('<ngen ', '<ngen win64targetarch="'+mode+'" ')
+        commands=collect_update_ngen(dict(transitions=[dict(before=marked,after=marked)]))
+        equal(commands,expected)
+        equal((len(commands['Win32']),len(commands['Win64'])),(2,2))
+    for arch,mode in [('msil','unknown'),('msil',''),('msil','32bitonly'),('amd64','64bitonly')]:
+        marked=_manifest(arch).replace('<ngen ', '<ngen win64targetarch="'+mode+'" ')
+        raises(collect_update_ngen,args=[dict(transitions=[dict(before=None,after=marked)])],message='unsupported NGEN win64targetarch')
+
 def test_atomic_epoch_and_bad_declarations():
     root,runtime=_fixture()
     plan=plan_update_ngen(root,runtime)
@@ -50,7 +62,37 @@ def test_atomic_epoch_and_bad_declarations():
         raises(collect_update_ngen,args=[dict(transitions=[dict(before=None,after=_manifest(parameter=parameter))])],message='unsupported NGEN parameters')
     raises(collect_update_ngen,args=[dict(transitions=[dict(before=None,after=_manifest('arm64'))])],message='unsupported NGEN target')
 
+
+def test_explicit_gac_architecture_controls_ngen():
+    for component, managed, counts in [('amd64','msil',(2,2)),('wow64','x86',(2,0)),('amd64','amd64',(0,2))]:
+        manifest=_manifest(component).replace('SAMPLE.dll','SAMPLE.exe').replace('<ngen ', '<ngen xmlns="urn:schemas-microsoft-com:asm.v3" ').replace('</file>','<gac clrarch="'+managed+'"/></file>')
+        commands=collect_update_ngen(dict(transitions=[dict(before=manifest,after=manifest)]))
+        equal((len(commands['Win32']),len(commands['Win64'])),counts)
+        for values in commands.values():
+            for command in values:
+                equal('processorArchitecture='+managed+'"' in command, True)
+    bad=_manifest().replace('</file>','<gac clrarch="unknown"/></file>')
+    raises(collect_update_ngen,args=[dict(transitions=[dict(before=None,after=bad)])],message='NGEN CLR architecture')
+
+
+def test_global_update_directive_is_not_an_assembly_command():
+    root,runtime=_fixture()
+    directive=_manifest('amd64','IssueNgenUpdate').replace('SAMPLE.dll','clr.dll')
+    runtime['transitions'].extend([dict(before=directive,after=directive),dict(before=None,after=directive)])
+    plan=plan_update_ngen(root,runtime)
+    for platform in ['Win32','Win64']:
+        commands=[command for target,command in plan['records'] if target==platform]
+        equal(len([c for c in commands if c=='update /queue']),1)
+        equal(len(commands),4)
+        equal(any(['IssueNgenUpdate' in c or 'clr.dll' in c for c in commands]),False)
+        equal(commands[-2:],["update /queue","persisted command"])
+    commands=collect_update_ngen(dict(transitions=[dict(before=directive,after=None)]))
+    equal(commands,{'Win32':['update /queue'],'Win64':['update /queue']})
+
 TEST_SUITE=suite('nt6_update_ngen',[
+    case('global_update_directive',test_global_update_directive_is_not_an_assembly_command),
+    case('explicit_gac_architecture',test_explicit_gac_architecture_controls_ngen),
+    case('server_target_annotation',test_server_target_annotation_preserves_native_default_dispatch),
     case('pending_order_and_architecture',test_pending_order_architecture_and_preservation),
     case('atomic_epoch_and_validation',test_atomic_epoch_and_bad_declarations),
 ])

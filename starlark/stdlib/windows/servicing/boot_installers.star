@@ -1,14 +1,8 @@
 """Native offline FVE/SecureBoot admission; not firmware or CBS completion."""
-load("@stdlib//windows/servicing:installer.star", "run_basic_installer")
+load("@stdlib//windows/servicing:installer.star", "run_basic_installer", "select_basic_installer")
 
 _NS = "urn:schemas-microsoft-com:asm.v3"
 _SYSTEM = "/Windows/System32/config/SYSTEM"
-_BOOT = "/Windows/WinSxS/amd64_microsoft-windows-s..gstack-boot-onecore_31bf3856ad364e35_10.0.26100.9703_none_f1685e26209a4f4c/"
-_INSTALLERS = {
-    "fve": ("fveupdateai.dll", "397f7b87707990f2c34cf76bfde3debb674f8fabb3b16375380ddab609bfc012"),
-    "secureboot": ("securebootai.dll", "d53e98ff790852c2db27a4cdaafa1996a808e9e43f921f9bf487f23c93d3e5e1"),
-}
-
 def boot_installer_jobs(runtime):
     """Collect supported offline FVE and SecureBoot jobs from admitted runtime transitions; reject unsupported declarations."""
     jobs=[]
@@ -80,10 +74,7 @@ def apply_update_boot_installers(root,runtime):
     hive=windows.hive(source)
     installers={}
     for profile in {j["profile"]:True for j in jobs}:
-        name,expected=_INSTALLERS[profile]
-        file=root.find(_BOOT+name)
-        if file==None or hex(digest(file,algorithm="sha256"))!=expected:
-            fail("boot installer requires exact serviced source bytes")
+        file,expected=select_basic_installer(root,profile)
         installers[profile]=file
     executions=[]
     effects=[]

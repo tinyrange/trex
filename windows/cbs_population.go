@@ -288,7 +288,7 @@ func cbsSelectedExecutionsBuiltin(executions []uup.CBSOrdinaryExecution, names m
 		if err := starlark.UnpackArgs("selected_executions", args, kwargs, "packages", &packages, "actions?", &actions); err != nil {
 			return nil, err
 		}
-		if packages.Len() > 65536 {
+		if packages.Len() > uup.MaxCBSPackageContexts {
 			return nil, fmt.Errorf("selected_executions: too many package names")
 		}
 		var actionSet map[uint32]bool

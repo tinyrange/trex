@@ -74,6 +74,56 @@ def test_stage_does_not_admit_superseded_family():
           {e.package:e.intended_state for e in installed.executions})
 
 
+
+def test_reinstall_selects_highest_superseded_predecessor():
+    prefix = "/Microsoft/Windows/CurrentVersion/Component Based Servicing/"
+    def name(package, version):
+        return package + "~31bf3856ad364e35~amd64~~" + version
+    def identity(package, version):
+        return '<assemblyIdentity name="%s" version="%s" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral"/>' % (package, version)
+    old = name("Root", "10.0.1.0")
+    new = name("Root", "10.0.2.0")
+    leaf = name("Leaf", "10.0.3.0")
+    high = name("Leaf", "10.0.2.0")
+    low = name("Leaf", "10.0.1.0")
+    files = directory()
+    manifests = {}
+    # Deliberately enumerate the greatest predecessor before the lesser one.
+    for n in [old, new, leaf, high, low]:
+        body = '<update name="leaf"><package>%s</package></update>' % identity("Leaf", "10.0.3.0") if n == old else ""
+        files.write("/" + n, '<assembly xmlns="urn:schemas-microsoft-com:asm.v3">%s<package identifier="test" releaseType="Update">%s</package></assembly>' % (identity(n.split("~")[0], n.split("~")[-1]), body))
+        manifests[n] = files.find("/" + n)
+    patches = [dict(key=prefix+k, name="fixture", type="REG_DWORD", value=0) for k in ["Packages", "PackageDetect", "UpdateDetect", "PackageIndex", "CapabilityIndex"]]
+    for n, state in [(old,112),(leaf,112),(high,80),(low,80)]:
+        patches.append(dict(key=prefix+"Packages/"+n, name="CurrentState", type="REG_DWORD", value=state))
+    patches.append(dict(key=prefix+"Packages/"+leaf+"/Owners", name=old, type="REG_DWORD", value=(2<<16)|112))
+    software = windows.hive(windows.hive_from_patches("SOFTWARE", patches))
+    components = windows.hive_from_patches("COMPONENTS", [dict(key=k, name="fixture", type="REG_DWORD", value=0) for k in ["/CanonicalData/Deployments", "/DerivedData/Components"]])
+    closure = dict(files=manifests, xmls={n:binary.xml(f).root for n,f in manifests.items()}, software=software, roots=[new])
+    result = policy["plan_servicing_population"](None, "", closure, hives={"COMPONENTS":components})
+    executions = {e.package:e for e in result.executions}
+    equal(high in executions, True)
+    equal(low in executions, False)
+    equal(executions[high].intended_state, 112)
+    equal(executions[high].owners, [])
+    equal(software.find(prefix+"Packages/"+high).values["CurrentState"], 80)
+
+def test_capability_reference_versions():
+    version_filter = policy["_capability_version_filter"]
+    matches = policy["_capability_version_matches"]
+    equal(version_filter(dict(name="XPS.Viewer", version="1.0")), 65536)
+    for identity in [dict(name="XPS.Viewer"), dict(name="XPS.Viewer", version="0.0")]:
+        equal(matches(version_filter(identity), "0.0.1.0"), True)
+    selected = version_filter(dict(name="XPS.Viewer", version="1.0"))
+    equal(matches(selected, "0.0.1.0"), True)
+    equal(matches(selected, "4.7.1.0"), True)
+    equal(matches(selected, "0.0.2.0"), False)
+    equal(matches(selected, "0.0.1.1"), False)
+    raises(matches, args=[selected, "1.0"], message="version")
+    for value in ["1", "1.0.0.0", "-1.0", "65536.0", "1."]:
+        raises(version_filter, args=[dict(name="XPS.Viewer", version=value)], message="version")
+    raises(version_filter, args=[dict(name="XPS.Viewer", language="en-US")], message="language")
+
 def test_complete_closure_not_payload_selection():
     files, available, open_entry = _fixtures()
     result = close_metadata([], ["Root" + _SUFFIX], available, open_entry, 3)
@@ -217,6 +267,7 @@ def test_offline_registry_path_roots():
     equal(roots["roots"][0x3e], "/Homes")
     equal(roots["roots"][0xc0000], "/Homes/Public")
     equal(roots["roots"][0xb0000], "/WinNT/AppPatch")
+    equal(roots["roots"][0x50000], "/WinNT/System")
     equal(roots["roots"][7], "/Data/Microsoft/Windows/Start Menu/Programs/Startup")
     equal(roots["roots"][0x100000], "/")
     fixture = _runtime_files('<file name="source.dat" destinationName="mutable.dat" destinationPath="$(runtime.system32)\\config\" writeableType="systemData"/>', "wow64")
@@ -616,9 +667,68 @@ def test_native_directory_audit_security():
         equal(windows.security_descriptor_parts(request["descriptor"]), golden)
         expected = dict(golden, control = 0x9c14)
         equal(windows.security_descriptor_parts(assign(selected, request)), expected)
-    propagating = windows.compile_sddl(sddl.replace("AU;FASA;", "AU;OICIFASA;"))
-    raises(build, args = [propagating, selected], message = "selected SACL")
-    raises(build, args = [selected, propagating], message = "parent SACL")
+    unsupported = windows.compile_sddl("O:SYG:SYD:P(A;;FA;;;SY)S:(ML;OICI;NW;;;LW)")
+    raises(build, args = [unsupported, selected], message = "selected SACL")
+    raises(build, args = [selected, unsupported], message = "parent SACL")
+
+
+def test_native_directory_inheritable_audit():
+    runtime = testing.module("@stdlib//windows/servicing:runtime.star")
+    build = runtime["build_servicing_directory_security_request"]
+    assign = runtime["assign_servicing_directory_security"]
+    # Server NTDLL RtlNewSecurityObjectEx, then kernel
+    # SeSetSecurityDescriptorInfoEx flags4000: full component comparison passes.
+    # The SYSTEM subject owns the descriptor; no security decision is hooked.
+    vectors = [("SAFA", [0xc0]), ("OISAFA", [0xc1, 0xd9]),
+               ("CISAFA", [0xc2, 0xd2]), ("OICISAFA", [0xc3, 0xd3]),
+               ("OICINPSAFA", [0xc7, 0xd0]), ("OICIIOSAFA", [0xcb, 0xd3]),
+               ("OICIIDSAFA", [0xd3])]
+    for flags, expected in vectors:
+        audit = "S:(AU;" + flags + ";0x010d0000;;;WD)"
+        selected = windows.compile_sddl("O:SYG:SYD:P(A;OICI;FA;;;SY)" + audit)
+        parent = windows.compile_sddl("O:SYG:SYD:AI(A;OICI;FA;;;SY)" + audit)
+        request = build(selected, parent)
+        parts = windows.security_descriptor_parts(request["descriptor"])
+        equal(request["security_information"], 0x9000000f)
+        equal(parts["control"], 0x9f14)
+        aces = windows.acl_entries(parts["sacl"])["entries"]
+        equal([(a["type"], a["flags"], a["mask"]) for a in aces], [(2, f, 0x010d0000) for f in expected])
+        equal(windows.security_descriptor_parts(assign(parent, request)), dict(parts, control=0x9c14))
+    # Legacy creation inheritance remains separate from the setter path;
+    # it must not silently discard propagating audits.
+    raises(runtime["build_servicing_created_security"], args=[parent], message="parent SACL")
+
+
+def test_native_creation_inheritable_audit():
+    build = testing.module("@stdlib//windows/servicing:runtime.star")["build_servicing_created_security"]
+    # Native Server 26100.32230 SeAssignSecurityEx, SYSTEM subject and
+    # mapping, flags4003, NULL file creator / O:SYG:SY directory creator.
+    # Independent native captures compare all descriptor components.
+    vectors = [("SAFA", None, None), ("OISAFA", 0xd0, 0xd9),
+               ("CISAFA", None, 0xd2), ("OICISAFA", 0xd0, 0xd3),
+               ("OICINPSAFA", 0xd0, 0xd0), ("OICIIOSAFA", 0xd0, 0xd3),
+               ("OICIIDSAFA", 0xd0, 0xd3)]
+    system = windows.security_descriptor_parts(windows.compile_sddl("O:SYG:SY"))
+    for flags, file_flags, directory_flags in vectors:
+        parent = windows.compile_sddl("O:SYG:SYD:AI(A;OICI;FA;;;SY)S:AI(AU;" + flags + ";0x010d0000;;;WD)")
+        for directory, expected in [(False, file_flags), (True, directory_flags)]:
+            parts = windows.security_descriptor_parts(build(parent, directory = directory))
+            equal(parts["owner"], system["owner"])
+            equal(parts["group"], system["group"])
+            equal(parts["control"], 0x8c04 if expected == None else 0x8c14)
+            equal(parts["resource_manager_control"], 0)
+            dacl = windows.security_descriptor_parts(windows.compile_sddl("D:(A;" + ("OICIID" if directory else "ID") + ";FA;;;SY)"))["dacl"]
+            equal(parts["dacl"], dacl)
+            if expected == None:
+                equal(parts["sacl"], None)
+            else:
+                entries = windows.acl_entries(parts["sacl"])["entries"]
+                equal([(e["type"], e["flags"], e["mask"], e["sid"]) for e in entries], [(2, expected, 0x010d0000, windows.security_descriptor_parts(windows.compile_sddl("O:WD"))["owner"])])
+    # Legacy propagation differs: native flags4001 emits c0 rather than d0.
+    legacy = windows.compile_sddl("O:SYG:SYD:AI(A;OICI;FA;;;SY)S:(AU;OISAFA;FA;;;WD)")
+    raises(build, args = [legacy], message = "parent SACL")
+    unsupported = windows.compile_sddl("O:SYG:SYD:AI(A;OICI;FA;;;SY)S:AI(ML;OICI;NW;;;LW)")
+    raises(build, args = [unsupported], message = "parent SACL")
 
 
 def test_native_directory_contribution_reduction():
@@ -846,6 +956,41 @@ def test_native_file_record_reduction():
     raises(reduce, args = [[bad, dict(bad)]], message = "collision policy")
 
 
+def test_native_file_overlap_reduction():
+    runtime = testing.module("@stdlib//windows/servicing:runtime.star")
+    reduce = runtime["reduce_servicing_file_declarations"]
+    identity = "Microsoft-Windows-Printing-AdminScripts.Resources, Culture=en-US, Version=10.0.26100.32860, PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=%s, versionScope=nonSxS"
+    ids = [bytes(identity % arch) for arch in ["wow64", "x86"]]
+    tolerant = dict(strict_directories=False)
+    # Captured from Server WCP bf948: last identity, operation, flags93/94/95.
+    # Architecture changes do not coalesce FileInfo, even with equal hashes.
+    for side, flags, expected in [("after", 1, [1, 8, 0x80, 0x20]), ("before", 0, [2, 8, 8, 1])]:
+        for order in [ids, list(reversed(ids))]:
+            records = [_native_file_record(side, flags, ident) for ident in order]
+            result = reduce(records, collision_policy=tolerant)
+            path = result["paths"]["/windows/system32/test.dll"]
+            equal(path[side]["component_identity"], order[-1])
+            equal([path[k] for k in ["operation", "security_flags", "directory_flags", "file_flags"]], expected)
+            equal(len(result["sources"]), 2)
+            equal(path["contributions"], records)
+            # Content equality is not the policy: native selects in call order.
+            records[1]["source_hash"]["digest"] = b"different"
+            result = reduce(records, collision_policy=tolerant)
+            selected = result["paths"]["/windows/system32/test.dll"][side]["source_key"]
+            equal(result["sources"][selected][side]["hash"]["digest"], b"different")
+            raises(reduce, args=[records], message="collision policy")
+            raises(reduce, args=[records, (), dict(strict_directories=True)], message="collision policy")
+            raises(reduce, args=[records, (), {}], message="collision policy")
+    for flags in [8, 0x10, 0x11]:
+        records = [_native_file_record("after", flags, ident) for ident in ids]
+        raises(reduce, args=[records, (), tolerant], message="writable or link")
+    records = [_native_file_record("after", 1, ident) for ident in ids]
+    records[1]["attributes"] |= 2
+    raises(reduce, args=[records, (), tolerant], message="mixed-metadata")
+    repeated = _native_file_record("after", 1, ids[0])
+    raises(reduce, args=[[repeated, dict(repeated)], (), tolerant], message="primary file source")
+
+
 def test_native_link_primary_hash_sharing():
     policy = testing.module("@stdlib//windows/servicing:runtime.star")
     identity = b"Microsoft-Windows-explorer, Culture=neutral, Version=10.0.26100.9444, PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=amd64, versionScope=nonSxS"
@@ -882,6 +1027,8 @@ def test_native_selected_file_hash():
     # 1 and these 32 decoded bytes in the direct parsed-structure control.
     file = windows.assembly_manifest(tree.find("/manifest")).files[0]
     equal(select(file), dict(digest_method = 2, transform = 1, digest = binary.decode(digest_text, "base64")))
+    tree.write("/dual", xml.replace('name="tar.exe"', 'name="tar.exe" hash="3316ab326411981bd20925f0591c26bc99126437" hashalg="SHA1"'))
+    equal(select(windows.assembly_manifest(tree.find("/dual")).files[0]), select(file))
     tree.write("/legacy", xml.replace('name="tar.exe"', 'name="tar.exe" hash="0011" hashalg="SHA1"'))
     raises(select, args = [windows.assembly_manifest(tree.find("/legacy")).files[0]], message = "hash shape")
     tree.write("/transform", xml.replace("HashTransforms.Identity", "HashTransforms.Unknown"))
@@ -1161,6 +1308,8 @@ def test_native_immutable_inherit_selection():
         result = build(item, parent)
         equal(result["security_information"], 0x3000000f)
         equal(windows.security_descriptor_parts(result["descriptor"]), windows.security_descriptor_parts(expected))
+        boot = dict(item, after = dict(item["after"], process_flags = 0x43))
+        equal(build(boot, parent), result)
         raises(build, args = [dict(item, security_flags = 0x88 if operation == 3 else 0xc0), parent], message = "selection disagrees")
         raises(build, args = [dict(item, after = dict(item["after"], state = 1)), parent], message = "transition")
         raises(build, args = [dict(item, own_changed = False), parent], message = "transition")
@@ -1555,6 +1704,8 @@ def test_native_registry_string_expansion():
         ("%SystemRoot%\\$(runtime.windows)", "%SystemRoot%\\Z:\\FixtureOS"),
         ("$(runtime.windows)|$(runtime.system32)", "Z:\\FixtureOS|Z:\\FixtureOS\\System32"),
         ("@{$(build.PackageMoniker)?resource}", "@{$(build.PackageMoniker)?resource}"),
+        ("$$(assembly.empty)(Registry:HKLM/key)", "$(Registry:HKLM/key)"),
+        ("before$(Assembly.Empty)after", "beforeafter"),
         ("$(runtime.windows)\\Name", "Z:\\FixtureOS\\Name"),
     ]:
         equal(expand(value, roots, "amd64", "amd64"), expected)
@@ -1998,7 +2149,7 @@ def test_native_registry_collector_rejections():
         '<registryValue name="x" valueType="REG_QWORD" value="00"/>',
         '<registryValue name="x" valueType="REG_SZ" value="x" mutable="True"/>',
         '<registryValue name="x" valueType="REG_SZ" value="x" operationHint="unknown"/>',
-        '<registryValue name="x" valueType="REG_SZ"/>',
+        '<registryValue name="x" valueType="REG_DWORD"/>',
         '<registryValue name="x" valueType="REG_SZ" value="x">text</registryValue>',
         '<registryValue name="x" valueType="REG_SZ" value="x"><child/></registryValue>',
         '<registryValue xmlns:q="foreign" q:name="x" valueType="REG_SZ" value="x"/>',
@@ -2022,7 +2173,23 @@ def test_native_registry_collector_rejections():
     equal(native(invalid_runtime,0x100,source_roots,'amd64'),dict(groups={},keys={}))
     equal(testing.attempt(native,args=[invalid_runtime,0x133,source_roots,'amd64']).ok,False)
 
+def test_manifest_identity_spelling():
+    files, available, open_entry = _fixtures()
+    # Canonical CAB filenames are lowercase while the MUM identities and
+    # native population callbacks retain their original spelling.
+    available = {key: [(name.lower(), catalog, path) for name,catalog,path in entries] for key,entries in available.items()}
+    for batched in [False, True]:
+        def open_entries(entries):
+            return [open_entry(*entry) for entry in entries]
+        result = close_metadata([], ["Root" + _SUFFIX], available, open_entry, 10, open_entries=open_entries if batched else None)
+        equal(sorted(result["files"]), sorted([n + _SUFFIX for n in ["Root", "Child", "Leaf"]]))
+        equal(sorted(result["xmls"]), sorted(result["files"]))
+        equal(sorted(result["origins"]), sorted(result["files"]))
+        equal(result["missing"], {"Unavailable" + _SUFFIX: [("Leaf" + _SUFFIX, "missing")]})
+
 TEST_SUITE = suite("nt6/servicing", [
+    case("manifest_identity_spelling", test_manifest_identity_spelling),
+    case("reinstall_highest_predecessor", test_reinstall_selects_highest_superseded_predecessor),
     case("registry_collector_differential", test_native_registry_collector_differential),
     case("registry_collector_rejections", test_native_registry_collector_rejections),
     case("compiled_registry_path_mapping", test_compiled_registry_path_mapping),
@@ -2062,6 +2229,7 @@ TEST_SUITE = suite("nt6/servicing", [
     case("native_writable_projection_preservation", test_native_writable_projection_preservation),
     case("native_file_source_interning", test_native_file_source_interning),
     case("native_file_record_reduction", test_native_file_record_reduction),
+    case("native_file_overlap_reduction", test_native_file_overlap_reduction),
     case("native_link_primary_hash_sharing", test_native_link_primary_hash_sharing),
     case("runtime_side_specific_source_identity", test_runtime_side_specific_source_identity),
     case("native_subtree_preprocessing", test_native_subtree_preprocessing),
@@ -2069,6 +2237,7 @@ TEST_SUITE = suite("nt6/servicing", [
     case("native_servicing_descriptor_comparison", test_native_servicing_descriptor_comparison),
     case("native_directory_contribution_reduction", test_native_directory_contribution_reduction),
     case("stage_population_supersedence", test_stage_does_not_admit_superseded_family),
+    case("capability_reference_versions", test_capability_reference_versions),
     case("complete_metadata_closure", test_complete_closure_not_payload_selection),
     case("batched_metadata_closure", test_batched_closure_order_and_provenance),
     case("identity_and_duplicate_provenance", test_identity_and_duplicate_provenance),
@@ -2086,6 +2255,8 @@ TEST_SUITE = suite("nt6/servicing", [
     case("native_servicing_creation_security", test_native_servicing_creation_security),
     case("native_default_directory_security", test_native_default_directory_security),
     case("native_directory_audit_security", test_native_directory_audit_security),
+    case("native_directory_inheritable_audit", test_native_directory_inheritable_audit),
+    case("native_creation_inheritable_audit", test_native_creation_inheritable_audit),
     case("native_unprotected_directory_request", test_native_unprotected_directory_request),
     case("native_interned_directory_preprocessing", test_native_interned_directory_preprocessing),
 ])

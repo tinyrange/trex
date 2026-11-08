@@ -47,6 +47,8 @@ assertions.append(len(fresh["groups"][prefix+("word",)][1]) == 2)
 # Side-specific architecture is a decoding/path-cache input.
 x86 = collect([row(body, "after", 0, "x86")], resolve, expand)
 assertions.append(("system",r"\registry\machine\software\wow6432node\fixture","x86") in x86["groups"])
+managed = collect([row(body, "after", 0, "msil")], resolve, expand)
+assertions.append(("system",r"\registry\machine\software\fixture","msil") in managed["groups"])
 `)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +68,7 @@ collect([dict(root=root,architecture="msil",side="after",owner=0)],resolve,expan
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = registryCollectorScript(t, registryCollectorPrelude+`collect([row('',architecture="msil")],resolve,expand)`)
+	_, err = registryCollectorScript(t, registryCollectorPrelude+`collect([row('',architecture="unsupported")],resolve,expand)`)
 	if err == nil || !strings.Contains(err.Error(), "unsupported registry architecture") {
 		t.Fatal("key bypassed mapper validation:", err)
 	}
@@ -128,6 +130,30 @@ assertions.append(collect(inputs,resolve,expand,capture_key_records=True)["key_r
 	for assertion := range globals["assertions"].(*starlark.List).Elements() {
 		if assertion != starlark.True {
 			t.Fatal("key capture invariant failed:", globals["assertions"])
+		}
+	}
+}
+
+func TestRegistryContributionsOmittedNameIsDefault(t *testing.T) {
+	globals, err := registryCollectorScript(t, registryCollectorPrelude+`
+a = collect([row('<registryValue valueType="REG_SZ" value="ICatalogServices"/>')],resolve,expand)
+b = collect([row('<registryValue name="" valueType="REG_SZ" value="ICatalogServices"/>')],resolve,expand)
+c = collect([row('<registryValue name=".NET4.0E" valueType="REG_SZ"/>')],resolve,expand)
+d = collect([row('<registryValue name=".NET4.0E" valueType="REG_SZ" value=""/>')],resolve,expand)
+assertions = [a == b, c == d, len(a["groups"]) == 1, ("system",r"\registry\machine\software\fixture","") in a["groups"]]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for assertion := range globals["assertions"].(*starlark.List).Elements() {
+		if assertion != starlark.True {
+			t.Fatal("unnamed default differs", globals["assertions"])
+		}
+	}
+	for _, body := range []string{`<registryValue value="x"/>`, `<registryValue valueType="REG_DWORD"/>`} {
+		_, err := registryCollectorScript(t, registryCollectorPrelude+`collect([row('`+body+`')],resolve,expand)`)
+		if err == nil {
+			t.Fatal("accepted missing required value/type")
 		}
 	}
 }

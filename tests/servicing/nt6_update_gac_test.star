@@ -34,6 +34,64 @@ def test_cache_and_companions_use_exact_store_objects():
         equal(root.get_metadata(p["path"]).hard_link_id, root.get_metadata(p["source"]).hard_link_id)
         equal(root.get_security(p["path"]), root.get_security(p["source"]))
 
+def test_companion_addition_is_hash_guarded_and_atomic():
+    root, runtime, stems, cache = _fixture()
+    transition = runtime["transitions"][0]
+    # Drop only the companion's declaration and cached file from the baseline.
+    text = transition["before"]
+    start = text.index('<file name="data.json"')
+    transition["before"] = text[:start] + text[text.index('</file>', start)+7:]
+    root.remove(cache+"/data.json")
+    plans = gac["plan_update_gac"](root, runtime, stems)
+    equal([p["before"] for p in plans if p["path"].endswith('/data.json')], [None])
+    root.write(cache+"/data.json", "concurrent creation")
+    raises(gac["apply_update_gac"], args=[root, plans], message="destination appeared")
+    equal(root.find(cache+"/Example.dll").read(), "old")
+    raises(gac["plan_update_gac"], args=[root, runtime, stems], message="destination already exists")
+    root.remove(cache+"/data.json")
+    gac["apply_update_gac"](root, gac["plan_update_gac"](root, runtime, stems))
+    equal(root.find(cache+"/data.json").read(), "new companion")
+    equal(root.get_metadata(cache+"/data.json").hard_link_id, root.get_metadata('/Windows/WinSxS/exact/data.json').hard_link_id)
+    transition["before"], transition["after"] = transition["after"], transition["before"]
+    raises(gac["plan_update_gac"], args=[root, runtime, stems], message="companion removal")
+
+def test_legacy_cache_is_distinct_and_cannot_cross_clr_stores():
+    root, runtime, stems, cache = _fixture()
+    transition = runtime["transitions"][0]
+    legacy = cache.replace("/Microsoft.NET", "").replace("/v4.0_", "/")
+    for name, content in [("Example.dll", "old"), ("data.json", "old companion")]:
+        root.write(legacy+"/"+name, content)
+    transition["after"] = transition["after"].replace(' clrversion="4.0"', '')
+    raises(gac["plan_update_gac"], args=[root, runtime, stems], message="Fusion lifecycle")
+    transition["before"] = transition["before"].replace(' clrversion="4.0"', '')
+    plans = gac["plan_update_gac"](root, runtime, stems)
+    gac["apply_update_gac"](root, plans)
+    equal(root.find(legacy+"/Example.dll").read(), "new")
+    equal(root.find(cache+"/Example.dll").read(), "old")
+    raises(gac["_managed_declaration"], args=[_manifest("a", "b").replace('clrversion="4.0"', 'clrversion="9.0"')], message="unsupported GAC CLR version")
+
+def test_blank_parameter_is_not_an_identity_override():
+    manifest = _manifest("old", "companion")
+    plain = gac["_managed_declaration"](manifest)
+    for parameter in ["", " "]:
+        equal(gac["_managed_declaration"](manifest.replace('<gac ', '<gac parameter="'+parameter+'" ')), plain)
+    for parameter in ["/unknown", " /queue:1"]:
+        raises(gac["_managed_declaration"], args=[manifest.replace('<gac ', '<gac parameter="'+parameter+'" ')], message="unsupported GAC parameters")
+    raises(gac["_managed_declaration"], args=[manifest.replace('<gac ', '<gac name="Other" ')], message="unsupported GAC identity override")
+
+def test_source_identity_case_does_not_weaken_source_guards():
+    root, runtime, stems, cache = _fixture()
+    runtime["transitions"][0]["component_identities"]["after"] = "Example, versionScope=NonSxS"
+    stems = {"example, versionscope=nonsxs":"exact"}
+    equal(len(gac["plan_update_gac"](root, runtime, stems)), 2)
+    stems["Example, versionScope=NonSxS"] = "other"
+    raises(gac["plan_update_gac"], args=[root, runtime, stems], message="conflicting managed staged source identity")
+    equal(root.find(cache+"/Example.dll").read(), "old")
+    stems = {"example, versionscope=nonsxs":"exact"}
+    root.write("/Windows/WinSxS/exact/Example.dll", "wrong source")
+    raises(gac["plan_update_gac"], args=[root, runtime, stems], message="source hash mismatch")
+    equal(root.find(cache+"/Example.dll").read(), "old")
+
 def test_preflight_rejects_corruption_and_preserves_whole_batch():
     root, runtime, stems, cache = _fixture()
     root.write("/Windows/WinSxS/exact/data.json", "corrupt")
@@ -82,7 +140,37 @@ def test_fusion_notification_uses_file_time_and_one_transaction_counter():
     raises(gac['apply_update_gac_notifications'],args=[root,plan],message='changed before notification')
     equal(digest(root.find(path)),before)
 
+
+def test_explicit_clr_architecture_and_no_copy():
+    root, runtime, stems, cache = _fixture()
+    for side in ["before", "after"]:
+        runtime["transitions"][0][side] = runtime["transitions"][0][side].replace('processorArchitecture="msil"', 'processorArchitecture="amd64"').replace('<gac ', '<gac xmlns="urn:schemas-microsoft-com:asm.v3" clrarch="msil" fileCopy="false" ')
+    raises(gac["plan_update_gac"], args=[root, runtime, stems], message="pre-published")
+    equal(root.find(cache+"/Example.dll").read(), "old")
+    for name in ["Example.dll", "data.json"]:
+        root.remove(cache+"/"+name)
+        root.hardlink("/Windows/WinSxS/exact/"+name, cache+"/"+name)
+    plans = gac["plan_update_gac"](root, runtime, stems)
+    epochs = [root.get_metadata(p["path"]).write_order for p in plans]
+    result = gac["apply_update_gac"](root, plans)
+    equal(result["refreshed_files"], 0)
+    equal(result["verified_files"], 2)
+    equal([root.get_metadata(p["path"]).write_order for p in plans], epochs)
+    manifest = runtime["transitions"][0]["after"]
+    parsed = gac["_managed_declaration"](manifest.replace("Example.dll", "Example.exe"))
+    equal(parsed["path"], cache)
+    equal(parsed["architecture"], "MSIL")
+    equal(parsed["assembly_file"], "Example.exe")
+    for field, value, error in [("clrarch", "arm64", "CLR architecture"), ("fileCopy", "maybe", "fileCopy value")]:
+        original = 'clrarch="msil"' if field == "clrarch" else 'fileCopy="false"'
+        raises(gac["_managed_declaration"], args=[manifest.replace(original, field+'="'+value+'"')], message=error)
+
 TEST_SUITE = suite("nt6_update_gac", [
+    case("explicit_clr_no_copy", test_explicit_clr_architecture_and_no_copy),
+    case("companion_addition", test_companion_addition_is_hash_guarded_and_atomic),
+    case("legacy_cache", test_legacy_cache_is_distinct_and_cannot_cross_clr_stores),
+    case("blank_parameter", test_blank_parameter_is_not_an_identity_override),
+    case("source_identity_case", test_source_identity_case_does_not_weaken_source_guards),
     case("fusion_notifications", test_fusion_notification_uses_file_time_and_one_transaction_counter),
     case("cache_and_companions", test_cache_and_companions_use_exact_store_objects),
     case("batch_preflight", test_preflight_rejects_corruption_and_preserves_whole_batch),

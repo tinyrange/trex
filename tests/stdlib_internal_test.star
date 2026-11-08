@@ -1980,19 +1980,34 @@ def test_crt_api_set_contracts():
 
 def test_event_log_exports_support_late_loaded_modules():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
-    machine = emulator.x86(code = b"\xc3")
-    provider = module["event_log_plugin"]()
-    machine.use([provider])
-    handle_pointer = machine.allocate(8)
-    register = machine.resolve_export("advapi32.dll", name = "RegisterTraceGuidsW")
-    unregister = machine.resolve_export("advapi32.dll", name = "UnregisterTraceGuids")
-    true(register != 0)
-    true(unregister != 0)
-    equal(machine.call(register, args = [0, 0, 0, 0, 0, 0, 0, handle_pointer]).value, 0)
-    handle = machine.read_u64le(handle_pointer)
-    true(handle != 0)
-    equal(machine.call(unregister, args = [handle & 0xffffffff, handle >> 32]).value, 0)
-    equal(provider.state["trace_providers"], {})
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code=b"\xc3", architecture=architecture)
+        provider = module["event_log_plugin"]()
+        machine.use([provider])
+        output = machine.allocate(value=b"\xaa"*16)
+        classic = "api-ms-win-eventing-classicprovider-l1-1-0.dll"
+        modern = "api-ms-win-eventing-provider-l1-1-0.dll"
+        register = machine.resolve_export(classic, name="RegisterTraceGuidsW")
+        unregister = machine.resolve_export("advapi32.dll", name="UnregisterTraceGuids")
+        result = machine.call(register, args=[0,0,0,0,0,0,0,output])
+        equal(result.reason,"return",result.detail)
+        equal(result.value,0)
+        handle = machine.read_u64le(output)
+        true(handle != 0)
+        equal(machine.read(output+8,8),b"\xaa"*8)
+        args = [handle] if architecture=="amd64" else [handle & 0xffffffff,handle>>32]
+        equal(machine.call(unregister,args=args).value,0)
+        equal(machine.call(machine.resolve_export(classic,name="UnregisterTraceGuids"),args=args).value,6)
+        guid = machine.allocate(value=b"\x00"*16)
+        result = machine.call(machine.resolve_export(modern,name="EventRegister"),args=[guid,0,0,output])
+        equal(result.reason,"return",result.detail)
+        equal(result.value,0)
+        handle = machine.read_u64le(output)
+        args = [handle] if architecture=="amd64" else [handle & 0xffffffff,handle>>32]
+        equal(machine.call(machine.resolve_export(modern,name="EventSetInformation"),args=args+[0,0,0]).value,0)
+        equal(machine.call(machine.resolve_export("ntdll.dll",name="EtwEventUnregister"),args=args).value,0)
+        equal(machine.call(machine.resolve_export(modern,name="EventSetInformation"),args=args+[0,0,0]).value,6)
+        equal(provider.state["trace_providers"],{})
 
 def test_security_native_allow_ace_ex_contract():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -2275,6 +2290,117 @@ def test_kernel_integer_to_char_native_boundaries():
             equal(result.value, status)
             equal(machine.read(output, len(data)), data)
             equal(machine.read(output + len(data), 40 - len(data)), b"Z" * (40 - len(data)))
+
+def test_kernel_explicit_file_write_bound():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86","amd64"]:
+        machine = emulator.machine(code=b"\xc3",architecture=architecture)
+        kernel = module["kernel32_plugin"](files={"C:/bound.bin":b""},maximum_file_size=32)
+        machine.use([kernel])
+        path = machine.allocate(value=binary.encode("C:/bound.bin",encoding="utf16le",nul=True))
+        handle = machine.call(machine.resolve_export("kernel32.dll",name="CreateFileW"),args=[path,0x40000000,7,0,3,0,0]).value
+        buffer = machine.allocate(value=b"X"*33)
+        count = machine.allocate(value=b"ZZZZ")
+        write = machine.resolve_export("kernel32.dll",name="WriteFile")
+        equal(machine.call(write,args=[handle,buffer,33,count,0]).value,0)
+        equal(kernel.state["file_data"](r"c:\bound.bin"),b"")
+        equal(machine.read(count,4),b"ZZZZ")
+        equal(machine.call(write,args=[handle,buffer,7,count,0]).value,1)
+        equal(machine.call(write,args=[handle,buffer,25,count,0]).value,1)
+        equal(kernel.state["file_data"](r"c:\bound.bin"),b"X"*32)
+        equal(machine.call(write,args=[handle,buffer,1,count,0]).value,0)
+        equal(kernel.state["last_error"],112)
+        equal(kernel.state["file_data"](r"c:\bound.bin"),b"X"*32)
+    for limit in [0,513<<20]:
+        raises(module["kernel32_plugin"],kwargs={"maximum_file_size":limit},message="virtual file write bound")
+
+def test_cabinet_callback_stream_and_native_notifications():
+    win32 = testing.module("@stdlib//windows/selfreg:win32.star")
+    cabinet = testing.module("@stdlib//windows/selfreg:cabinet.star")
+    payload = b"native callback cabinet payload"
+    name = b"sample.bin\x00"
+    data_offset = 44+16+len(name)
+    fixture = binary.builder()
+    fixture.append(b"MSCF")
+    fixture.u32le(0)
+    fixture.u32le(data_offset+8+len(payload))
+    fixture.u32le(0)
+    fixture.u32le(44)
+    fixture.u32le(0)
+    fixture.append(b"\x03\x01")
+    for value in [1,1,0,0x1234,7]: fixture.u16le(value)
+    fixture.u32le(data_offset)
+    fixture.u16le(1)
+    fixture.u16le(0)
+    fixture.u32le(len(payload))
+    fixture.u32le(0)
+    for value in [0,0x5d41,0x7283,0x21]: fixture.u16le(value)
+    fixture.append(name)
+    fixture.u32le(0)
+    fixture.u16le(len(payload))
+    fixture.u16le(len(payload))
+    fixture.append(payload)
+    contents = fixture.bytes()
+    for architecture in ["x86","amd64"]:
+        for mode in ["copy","truncated","abort"]:
+            machine = emulator.machine(code=b"\xc3",architecture=architecture)
+            kernel = win32["kernel32_plugin"]()
+            plugin = cabinet["cabinet_plugin"](kernel)
+            machine.use([kernel,plugin])
+            state = dict(position=0,closed=0,output=b"",notices=[])
+            handle = 0x10000001234 if architecture=="amd64" else 0x1234
+            user = machine.allocate(size=8)
+            maximum = (1 << (machine.pointer_size*8))-1
+            source = contents[:-3] if mode=="truncated" else contents
+            def open_input(event):
+                equal(event.machine.read_cstring(event.args[0]),"memory:CaseSensitive")
+                equal(event.args[1],0x8000)
+                return handle
+            def read_input(event):
+                equal(event.args[0],handle)
+                start = state["position"]
+                chunk = source[start:start+min(7,event.args[2])]
+                event.machine.write(event.args[1],chunk)
+                state["position"] += len(chunk)
+                return len(chunk)
+            def close_input(event):
+                equal(event.args[0],handle)
+                state["closed"] += 1
+                return 0
+            def write_output(event):
+                equal(event.args[0],handle+1)
+                state["output"] = binary.concat([state["output"],event.machine.read(event.args[1],event.args[2])]).bytes()
+                return event.args[2]
+            def notify(event):
+                m = event.machine
+                kind,address = event.args
+                p = 8 if m.pointer_size==8 else 4
+                equal(m.read_u32le(address),len(payload))
+                equal(m.read_cstring(m.read_pointer(address+p)),"sample.bin")
+                equal(m.read_pointer(address+p*4),user)
+                tail = address+p*6
+                equal([m.read_u16le(tail+i*2) for i in range(6)],[0x5d41,0x7283,0x21,0x1234,7,0])
+                state["notices"].append(kind)
+                if kind==2: return maximum if mode=="abort" else handle+1
+                equal(kind,3)
+                equal(m.read_pointer(address+p*5),handle+1)
+                return 1
+            callbacks = {}
+            for label,callback,argc in [("open",open_input,3),("read",read_input,3),("close",close_input,1),("write",write_output,3),("notify",notify,2)]:
+                callbacks[label] = machine.provide_export(callback,module="test-fdi.dll",name=label,argc=argc,convention="cdecl")
+            error = machine.allocate(size=12)
+            context = machine.call(machine.resolve_export("cabinet.dll",name="FDICreate"),args=[0,0,callbacks["open"],callbacks["read"],callbacks["write"],callbacks["close"],0,0xffffffff,error]).value
+            path = machine.allocate(value=b"memory:\x00")
+            name_address = machine.allocate(value=b"CaseSensitive\x00")
+            result = machine.call(machine.resolve_export("cabinet.dll",name="FDICopy"),args=[context,name_address,path,0,callbacks["notify"],0,user])
+            equal(result.reason,"return",result.detail)
+            equal(result.value,1 if mode=="copy" else 0)
+            equal(state["closed"],1)
+            equal(state["output"],payload if mode=="copy" else b"")
+            equal(state["notices"],[2,3] if mode=="copy" else [2] if mode=="abort" else [])
+            equal(machine.read_u32le(error+8),0 if mode=="copy" else 1)
+            equal(machine.read_u32le(error),0 if mode=="copy" else 11 if mode=="abort" else 4)
+            equal(machine.call(machine.resolve_export("cabinet.dll",name="FDIDestroy"),args=[context]).value,1)
 
 def test_cabinet_non_cabinet_copy_reports_fdi_error():
     win32 = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -2760,6 +2886,120 @@ def test_kernel_find_failure_handle_native_width():
             equal(machine.call(find, args = [0, output]).value, invalid)
             equal(kernel.state["last_error"], 87)
 
+def test_kernel_child_process_exit_code_and_handle_lifetime():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    def child(machine, request):
+        equal(request["command_line"], "bounded-child")
+        return {"process_id": 16, "thread_id": 20, "exit_code": 0x80070005}
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        kernel = module["kernel32_plugin"](on_process_create = child)
+        machine.use(kernel)
+        width = machine.pointer_size
+        command = machine.allocate(value = binary.encode("bounded-child", encoding = "utf16le", nul = True))
+        info_size = 2 * width + 8
+        info = machine.allocate(value = b"Z" * (info_size + 4))
+        output = machine.allocate(value = b"Z" * 8)
+        create = machine.resolve_export("kernel32.dll", name = "CreateProcessW")
+        query = machine.resolve_export("kernel32.dll", name = "GetExitCodeProcess")
+        wait = machine.resolve_export("kernel32.dll", name = "WaitForSingleObject")
+        close = machine.resolve_export("kernel32.dll", name = "CloseHandle")
+        error = machine.resolve_export("kernel32.dll", name = "GetLastError")
+        result = machine.call(create, args = [0, command, 0, 0, 0, 0, 0, 0, 0, info])
+        equal(result.reason, "return", result.detail)
+        equal(result.value, 1)
+        equal(machine.read(info + info_size, 4), b"ZZZZ")
+        process = machine.read_pointer(info)
+        thread = machine.read_pointer(info + width)
+        equal(machine.call(wait, args = [process, 0]).value, 0)
+        equal(machine.call(query, args = [process, output]).value, 1)
+        equal(machine.read_u32le(output), 0x80070005)
+        equal(machine.read(output + 4, 4), b"ZZZZ")
+        # A running process is not a completed zero-exit child.
+        current = (1 << (8 * width)) - 1
+        equal(machine.call(query, args = [current, output]).value, 1)
+        equal(machine.read_u32le(output), 259)
+        equal(machine.call(query, args = [process, 0]).value, 0)
+        equal(machine.call(error).value, 87)
+        invalid = [thread, 0, process + (1 << 32)] if width == 8 else [thread, 0]
+        for handle in invalid:
+            machine.write(output, b"Z" * 8)
+            equal(machine.call(query, args = [handle, output]).value, 0)
+            equal(machine.call(error).value, 6)
+            equal(machine.read(output, 8), b"Z" * 8)
+        duplicate = machine.allocate(size = width)
+        equal(machine.call(machine.resolve_export("kernel32.dll", name = "DuplicateHandle"), args = [current, process, current, duplicate, 0, 0, 2]).value, 1)
+        retained = machine.read_pointer(duplicate)
+        equal(machine.call(close, args = [process]).value, 1)
+        equal(machine.call(query, args = [process, output]).value, 0)
+        equal(machine.call(error).value, 6)
+        equal(machine.call(query, args = [retained, output]).value, 1)
+        equal(machine.read_u32le(output), 0x80070005)
+        equal(machine.call(close, args = [retained]).value, 1)
+        equal(machine.call(close, args = [thread]).value, 1)
+
+def test_kernel_redirection_trust_policy():
+    factory = testing.module("@stdlib//windows/selfreg:win32.star")["kernel32_plugin"]
+    for invalid in [-1, 4, True, "0"]:
+        raises(factory, kwargs = {"redirection_trust_policy": invalid}, message = "explicit RedirectionGuard")
+    for entry in [{"directory": True, "attributes": 0x400}, {"directory": True, "reparse_data": b"x"}]:
+        raises(factory, kwargs = {"redirection_trust_policy": 0, "prepared_file_entries": {"c:\\junction": entry}}, message = "junction-free")
+    for architecture in ["x86", "amd64"]:
+        for initial in [0, 1, 2, 3]:
+            machine = emulator.machine(code = b"\xc3", architecture = architecture)
+            kernel = factory(redirection_trust_policy = initial)
+            machine.use(kernel)
+            query = machine.resolve_export("kernel32.dll", name = "GetProcessMitigationPolicy")
+            change = machine.resolve_export("kernel32.dll", name = "SetProcessMitigationPolicy")
+            error = machine.resolve_export("kernel32.dll", name = "GetLastError")
+            current = (1 << (8 * machine.pointer_size)) - 1
+            output = machine.allocate(value = b"Z" * 8)
+            result = machine.call(query, args = [current, 16, output, 4])
+            equal(result.reason, "return", result.detail)
+            equal(result.value, 1)
+            equal(machine.read_u32le(output), initial)
+            equal(machine.read(output + 4, 4), b"ZZZZ")
+            # Execute the same read/enable/write/read transition as the native
+            # SecurityHealth helper; audit mode must survive enabling enforcement.
+            machine.write_u32le(output, initial | 1)
+            equal(machine.call(change, args = [16, output, 4]).value, 1)
+            machine.write(output, b"Z" * 8)
+            equal(machine.call(query, args = [current, 16, output, 4]).value, 1)
+            equal(machine.read_u32le(output), initial | 1)
+            equal(machine.read(output + 4, 4), b"ZZZZ")
+            for length in [0, 3, 8] + ([0x100000004] if machine.pointer_size == 8 else []):
+                machine.write(output, b"Z" * 8)
+                equal(machine.call(query, args = [current, 16, output, length]).value, 0)
+                equal(machine.call(error).value, 87)
+                equal(machine.read(output, 8), b"Z" * 8)
+                equal(machine.call(change, args = [16, output, length]).value, 0)
+                equal(kernel.state["redirection_trust_policy"], initial | 1)
+            equal(machine.call(query, args = [current, 16, 0, 4]).value, 0)
+            equal(machine.call(change, args = [16, 0, 4]).value, 0)
+            machine.write_u32le(output, 4)
+            equal(machine.call(change, args = [16, output, 4]).value, 0)
+            equal(machine.call(error).value, 87)
+            equal(kernel.state["redirection_trust_policy"], initial | 1)
+            wrong = [0, current - 1] + ([0xffffffff] if machine.pointer_size == 8 else [])
+            for handle in wrong:
+                machine.write(output, b"Z" * 8)
+                equal(machine.call(query, args = [handle, 16, output, 4]).value, 0)
+                equal(machine.call(error).value, 6)
+                equal(machine.read(output, 8), b"Z" * 8)
+            unsupported = machine.call(query, args = [current, 7, output, 4])
+            true(unsupported.reason != "return")
+            true("not modeled" in unsupported.detail)
+        # Unspecified initial policy is an explicit missing fact, never success.
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use(factory())
+        output = machine.allocate(value = b"Z" * 8)
+        query = machine.resolve_export("kernel32.dll", name = "GetProcessMitigationPolicy")
+        current = (1 << (8 * machine.pointer_size)) - 1
+        result = machine.call(query, args = [current, 16, output, 4])
+        true(result.reason != "return")
+        true("explicit initial policy" in result.detail)
+        equal(machine.read(output, 8), b"Z" * 8)
+
 def test_kernel_mutex_handle_independence():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     for architecture in ["x86", "amd64"]:
@@ -3138,20 +3378,21 @@ def test_kernel_system_windows_directory_capacity():
     for architecture in ["x86", "amd64"]:
         machine = emulator.machine(code = b"\xc3", architecture = architecture)
         machine.use(module["kernel32_plugin"](environment = {"SystemRoot": "D:/OS"}))
-        for suffix, encoding, width in [("A", "ascii", 1), ("W", "utf16le", 2)]:
-            export = machine.resolve_export("kernel32.dll", name = "GetSystemWindowsDirectory" + suffix)
-            expected = binary.encode("D:\\OS", encoding = encoding, nul = True)
-            required = len(expected) // width
-            equal(machine.call(export, args = [0, 0]).value, required)
-            output = machine.allocate(size = len(expected) + 4)
-            machine.write(output, b"Z" * (len(expected) + 4))
-            equal(machine.call(export, args = [output, required - 1]).value, required)
-            equal(machine.read(output, len(expected) + 4), b"Z" * (len(expected) + 4))
-            result = machine.call(export, args = [output, required])
-            equal(result.reason, "return")
-            equal(result.value, required - 1)
-            equal(machine.read(output, len(expected)), expected)
-            equal(machine.read(output + len(expected), 4), b"ZZZZ")
+        for api, directory in [("GetSystemWindowsDirectory", r"D:\OS"), ("GetSystemDirectory", r"D:\OS\system32")]:
+            for suffix, encoding, width in [("A", "ascii", 1), ("W", "utf16le", 2)]:
+                export = machine.resolve_export("kernel32.dll", name = api + suffix)
+                expected = binary.encode(directory, encoding = encoding, nul = True)
+                required = len(expected) // width
+                equal(machine.call(export, args = [0, 0]).value, required)
+                output = machine.allocate(size = len(expected) + 4)
+                machine.write(output, b"Z" * (len(expected) + 4))
+                equal(machine.call(export, args = [output, required - 1]).value, required)
+                equal(machine.read(output, len(expected) + 4), b"Z" * (len(expected) + 4))
+                result = machine.call(export, args = [output, required])
+                equal(result.reason, "return")
+                equal(result.value, required - 1)
+                equal(machine.read(output, len(expected)), expected)
+                equal(machine.read(output + len(expected), 4), b"ZZZZ")
 
 def test_kernel_unicode_string_ex_native_boundaries():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -3541,6 +3782,19 @@ def test_kernel_resolves_rva_delay_imports():
             if raw_flags:
                 equal(kernel.state["delay_load_queries"][-1]["raw_flags"], raw_flags)
         equal(machine.call(resolver, args = [image, descriptor, 0, 0, iat + 1, 0]).value, 0)
+        # A missing delayed export must not turn the thunk's JMP NULL into a
+        # successful top-level return, or publish any loader table changes.
+        machine.write(import_name, b"\x00\x00Absent\x00")
+        before = machine.read(iat, machine.pointer_size * 2)
+        result = machine.call(resolver, args = [image, descriptor, 0, 0, iat, 0])
+        equal(result.reason, "missing-import")
+        true("sample.dll!Absent" in result.detail)
+        equal(machine.read(iat, machine.pointer_size * 2), before)
+        machine.write(dll_name, b"absent.dll\x00")
+        result = machine.call(resolver, args = [image, descriptor, 0, 0, iat, 0])
+        equal(result.reason, "missing-import")
+        true("absent.dll" in result.detail)
+        equal(machine.read(iat, machine.pointer_size * 2), before)
 
 def test_ole_com_contract_aliases_share_state():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -4015,10 +4269,30 @@ def test_create_service_default_account():
         {"hive": "SYSTEM", "key": "/ControlSet001/Services/ExampleSvc/Parameters", "name": "ServiceDll", "type": "REG_EXPAND_SZ", "value": "%SystemRoot%\\system32\\example.dll"},
         {"hive": "SYSTEM", "key": "/ControlSet001/Services/ExampleSvc/Parameters", "name": "ServiceMain", "type": "REG_SZ", "value": "ExampleMain"},
     ])
+    registry.set_value("SYSTEM", "/ControlSet001/Services/ExistingSvc", "Type", "REG_DWORD", 0x10)
     service = module["service_manager_plugin"](registry)
     machine.use([service])
     true(machine.resolve_export("advapi32.dll", name = "OpenSCManagerW") != 0)
     manager = machine.call(machine.resolve_export("advapi32.dll", name = "OpenSCManagerW"), args = [0, 0, 0]).value
+    open_service = machine.resolve_export("advapi32.dll", name = "OpenServiceW")
+    existing_name = machine.allocate(value = binary.encode("existingsvc", encoding = "utf16le", nul = True))
+    missing_name = machine.allocate(value = binary.encode("MissingSvc", encoding = "utf16le", nul = True))
+    equal(machine.call(open_service, args = [0, existing_name, 0]).value, 0)
+    equal(machine.call(open_service, args = [manager, missing_name, 0]).value, 0)
+    existing_service = machine.call(open_service, args = [manager, existing_name, 0]).value
+    true(existing_service != 0)
+    status_ex = machine.resolve_export("advapi32.dll", name = "QueryServiceStatusEx")
+    status_size = machine.allocate(size = 4)
+    status_data = machine.allocate(size = 36)
+    equal(machine.call(status_ex, args = [existing_service, 0, 0, 0, status_size]).value, 0)
+    equal(machine.read_u32le(status_size), 36)
+    equal(service.state["last_error"], 122)
+    equal(machine.call(status_ex, args = [existing_service, 1, status_data, 36, status_size]).value, 0)
+    equal(service.state["last_error"], 124)
+    equal(machine.call(status_ex, args = [existing_service, 0, status_data, 36, status_size]).value, 1)
+    equal([machine.read_u32le(status_data+i*4) for i in range(9)], [0x10, 1, 0, 0, 0, 0, 0, 0, 0])
+    equal(machine.call(machine.resolve_export("advapi32.dll", name = "DeleteService"), args = [existing_service]).value, 1)
+    equal(machine.call(open_service, args = [manager, existing_name, 0]).value, 0)
     service_name = machine.allocate(value = binary.encode("QuerySvc", encoding = "utf16le", nul = True))
     image_path = machine.allocate(value = binary.encode("C:\\query.exe", encoding = "utf16le", nul = True))
     query_service = machine.call(machine.resolve_export("advapi32.dll", name = "CreateServiceW"), args = [manager, service_name, 0, 0, 0x10, 2, 1, image_path, 0, 0, 0, 0, 0]).value
@@ -4051,6 +4325,44 @@ def test_create_service_default_account():
     true(scheduler_service.state["pump_execution_slice"](scheduler_machine))
     equal(scheduler_service.state["execution_results"][0].reason, "return")
     equal(scheduler_service.state["execution_results"][0].value, 2)
+
+def test_service_dispatcher_pointer_width():
+    service_module = testing.module("@stdlib//windows/selfreg:service.star")
+    registry_module = testing.module("@stdlib//windows/selfreg:registry.star")
+    for architecture in ["x86", "amd64"]:
+        for wide in [False, True]:
+            machine = emulator.machine(code = b"\xc3", architecture = architecture)
+            service = service_module["service_manager_plugin"](registry_module["registry_plugin"]())
+            machine.use(service)
+            width = machine.pointer_size
+            high = 0x100000000 if width == 8 else 0
+            # Native ServiceMain validates argc, then returns argv[0]. Both
+            # the table's name and code pointers exceed DWORD on Win64.
+            code = b"\x83\xf9\x01\x75\x04\x48\x8b\x02\xc3\x31\xc0\xc3" if width == 8 else b"\x83\x7c\x24\x04\x01\x75\x09\x8b\x44\x24\x08\x8b\x00\xc2\x08\x00\x31\xc0\xc2\x08\x00"
+            target = machine.allocate(value = code, address = high + 0x200000, executable = True)
+            encoding = "utf16le" if wide else "ascii"
+            name = "WideService" if wide else "AnsiService"
+            name_pointer = machine.allocate(value = binary.encode(name, encoding = encoding, nul = True), address = high + 0x210000)
+            table = machine.allocate(size = 4 * width, address = high + 0x220000)
+            machine.write_pointer(table, name_pointer)
+            machine.write_pointer(table + width, target)
+            dispatch = machine.resolve_export("advapi32.dll", name = "StartServiceCtrlDispatcherW" if wide else "StartServiceCtrlDispatcherA")
+            result = machine.call(dispatch, args = [table])
+            equal(result.reason, "return", result.detail)
+            equal(result.value, 1)
+            equal(len(service.state["activations"]), 1)
+            activation = service.state["activations"][0]
+            equal(activation["service"], name)
+            equal(activation["result"], "return", activation["detail"])
+            true(activation["value"] != 0)
+            equal(machine.read_cstring(activation["value"], encoding = encoding), name)
+            equal(machine.read_pointer(table), name_pointer)
+            equal(machine.read_pointer(table + width), target)
+            # A null entry must not launch another service.
+            machine.write_pointer(table + width, 0)
+            equal(machine.call(dispatch, args = [table]).value, 0)
+            equal(service.state["activations"][-1]["result"], "invalid-table")
+            equal(len(service.state["executions"]), 1)
 
 def test_automation_registration_signatures():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -5131,6 +5443,23 @@ def test_binary_xml_round_trip():
     equal(binary.xml(output).root.children[0].text, "three & four")
     equal(binary.base64(b"binary\x00data"), "YmluYXJ5AGRhdGE=")
 
+
+def test_com_guid_string_uses_pointer_sized_output():
+    module=testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86","amd64"]:
+        machine=emulator.machine(code=b"\xc3",architecture=architecture)
+        machine.use(module["ole32_plugin"]())
+        guid=machine.allocate(value=binary.decode("33221100554477668899aabbccddeeff","hex"))
+        out=machine.allocate(size=machine.pointer_size+4)
+        for name in ["StringFromCLSID","StringFromIID"]:
+            machine.write(out,b"Z"*(machine.pointer_size+4))
+            result=machine.call(machine.resolve_export("ole32.dll",name=name),args=[guid,out])
+            equal(result.reason,"return")
+            equal(result.value,0)
+            address=machine.read_pointer(out)
+            equal(machine.read_cstring(address,encoding="utf16le").lower(),"{00112233-4455-6677-8899-aabbccddeeff}")
+            equal(machine.read(out+machine.pointer_size,4),b"ZZZZ")
+
 def test_win32_tracked_reallocate():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
     machine = emulator.x86(code = b"\xc3")
@@ -5141,6 +5470,22 @@ def test_win32_tracked_reallocate():
     equal(machine.read(replacement, 8), b"data\x00\x00\x00\x00")
     true(original not in allocations)
     equal(allocations[replacement], 8)
+
+    # Native UCRT scans UTF-16 with PCMPEQW before testing its terminator.
+    # The final vector may extend beyond malloc's logical size, but remains
+    # inside its heap page. Realloc must still copy only the logical bytes.
+    native = emulator.machine(code = b"\x66\x0f\xef\xc0\x66\x0f\x75\x01\x66\x0f\xd7\xc0\xc3", architecture = "amd64")
+    tracked = {}
+    text = module["_tracked_allocate"](native, tracked, 40, "CRT string")
+    native.write(text, binary.encode("A" * 19, encoding = "utf16le", nul = True))
+    scan = native.call(native.entry, args = [text + 32])
+    equal(scan.reason, "return")
+    equal(scan.value, 0xffc0)
+    native.write(text + 40, b"padding!")
+    grown = module["_tracked_reallocate"](native, tracked, text, 64, "grown CRT string")
+    equal(tracked[grown], 64)
+    equal(native.read(grown + 40, 8), b"\x00" * 8)
+
 
 def test_binary_hex():
     equal(binary.hex(b"\x00\xab\xff"), "00abff")
@@ -5387,6 +5732,113 @@ def test_registration_compatible_dc_and_typelib_attributes():
     attr = machine.read_u32le(output)
     equal(machine.read(attr, 16), testing.module("@stdlib//windows/selfreg:facts.star")["guid_bytes"](guid).bytes())
     equal(machine.read(attr + 16, 16), b"\x00\x00\x00\x00\x01\x00\x00\x00\x01\x00\x02\x00\x08\x00\x00\x00")
+
+
+
+
+def test_kernel_final_path_owned_handle():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code=b"\xc3", architecture=architecture)
+        kernel = module["kernel32_plugin"](files={r"C:\test\sample.txt": b"data"})
+        machine.use([kernel])
+        source = machine.allocate(value=binary.encode(r"C:\test\sample.txt", encoding="utf16le", nul=True))
+        handle = machine.call(machine.resolve_export("kernel32.dll", name="CreateFileW"), args=[source,0,7,0,3,0,0]).value
+        target = machine.resolve_export("kernelbase.dll", name="GetFinalPathNameByHandleW")
+        expected = binary.encode(r"\\?\c:\test\sample.txt", encoding="utf16le", nul=True)
+        required = len(expected)//2
+        equal(machine.call(target,args=[handle,0,0,0]).value,required)
+        output = machine.allocate(value=b"\xaa"*(len(expected)+4))
+        equal(machine.call(target,args=[handle,output,required-1,0]).value,required)
+        equal(machine.read(output,len(expected)+4),b"\xaa"*(len(expected)+4))
+        equal(machine.call(target,args=[handle,output,required,0]).value,required-1)
+        equal(machine.read(output,len(expected)),expected)
+        equal(machine.read(output+len(expected),4),b"\xaa"*4)
+        machine.call(machine.resolve_export("kernel32.dll",name="CloseHandle"),args=[handle])
+        equal(machine.call(target,args=[handle,output,required,0]).value,0)
+        equal(kernel.state["last_error"],6)
+
+def test_version_resource_mixed_providers():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    # Leaf lengths exclude sibling alignment padding. Both an intermediate
+    # and a final unaligned leaf must remain queryable, without allowing a
+    # declared value to extend beyond its node.
+    leaf = binary.builder()
+    for value in [18, 3, 1]:
+        leaf.u16le(value)
+    leaf.append(binary.encode("K", encoding = "utf16le", nul = True))
+    leaf.u16le(0)
+    leaf.append(binary.encode("ab", encoding = "utf16le", nul = True))
+    last = binary.builder()
+    for value in [18, 3, 1]:
+        last.u16le(value)
+    last.append(binary.encode("Z", encoding = "utf16le", nul = True))
+    last.u16le(0)
+    last.append(binary.encode("cd", encoding = "utf16le", nul = True))
+    root = binary.builder()
+    for value in [78, 0, 0]:
+        root.u16le(value)
+    root.append(binary.encode("VS_VERSION_INFO", encoding = "utf16le", nul = True))
+    root.u16le(0)
+    root.append(leaf.bytes())
+    root.u16le(0)
+    root.append(last.bytes())
+    data = root.bytes()
+    for key, expected in [("K", "ab"), ("Z", "cd")]:
+        node = module["_version_query"](data, key)
+        true(node != None)
+        equal(binary.text(data[node["value_offset"]:node["value_offset"] + 4], encoding = "utf16le"), expected)
+    equal(module["_version_node"](leaf.bytes()[:-1], 0), None)
+    block = binary.builder()
+    block.u16le(92)
+    block.u16le(52)
+    block.u16le(0)
+    block.append(binary.encode("VS_VERSION_INFO", encoding = "utf16le", nul = True))
+    block.u16le(0)
+    for value in [0xfeef04bd, 0x10000, 0x000a0000, 0x66000001, 0, 0, 0x3f, 0, 0x40004, 2, 0, 0, 0]:
+        block.u32le(value)
+    image = windows.pe(binary.view(windows.pe32_executable(section = b"\xc3", labels = {"entry": 0}, fixups = []))).with_resources([
+        {"type": "#16", "name": "#1", "lang": "#1033", "data": block.bytes()},
+    ])
+    for architecture in ["x86", "amd64"]:
+        machine = emulator.machine(code = b"\xc3", architecture = architecture)
+        machine.use([module["version_plugin"](image, module_path = "sample.dll")])
+        path = machine.allocate(value = binary.encode("sample.dll", encoding = "utf16le", nul = True))
+        query = machine.allocate(value = binary.encode("\\", encoding = "utf16le", nul = True))
+        data = machine.allocate(size = 92)
+        output = machine.allocate(value = b"\xaa" * 16)
+        length = machine.allocate(size = 4)
+        def call(provider, name, args):
+            result = machine.call(machine.resolve_export(provider, name = name), args = args)
+            equal(result.reason, "return", result.detail)
+            return result.value
+        equal(call("version.dll", "GetFileVersionInfoSizeW", [path, 0]), 92)
+        equal(call("kernelbase.dll", "GetFileVersionInfoW", [path, 0, 92, data]), 1)
+        equal(call("api-ms-win-core-version-l1-1-0.dll", "VerQueryValueW", [data, query, output, length]), 1)
+        pointer_size = 8 if architecture == "amd64" else 4
+        address = machine.read_u64le(output) if architecture == "amd64" else machine.read_u32le(output)
+        equal(address, data + 40)
+        equal(machine.read_u32le(address), 0xfeef04bd)
+        equal(machine.read_u32le(length), 52)
+        equal(machine.read(output + pointer_size, 16 - pointer_size), b"\xaa" * (16 - pointer_size))
+
+def test_registration_named_resource_case():
+    module = testing.module("@stdlib//windows/selfreg:win32.star")
+    image = windows.pe(binary.view(windows.pe32_executable(section = b"\xc3", labels = {"entry": 0}, fixups = []))).with_resources([
+        {"type": "#10", "name": "SECURITYHEALTHCORE.DLL", "lang": "#0", "data": b"checked resource bytes"},
+    ])
+    machine = emulator.x86(image = image)
+    machine.use([module["resource_plugin"](image)])
+    name = machine.allocate(value = binary.encode("SecurityHealthCore.dll", encoding = "utf16le", nul = True))
+    resource = machine.call(machine.resolve_export("kernel32.dll", name = "FindResourceW"), args = [0, name, 10])
+    equal(resource.reason, "return")
+    true(resource.value != 0)
+    size = machine.call(machine.resolve_export("kernel32.dll", name = "SizeofResource"), args = [0, resource.value]).value
+    loaded = machine.call(machine.resolve_export("kernel32.dll", name = "LoadResource"), args = [0, resource.value]).value
+    address = machine.call(machine.resolve_export("kernel32.dll", name = "LockResource"), args = [loaded]).value
+    equal(machine.read(address, size), b"checked resource bytes")
+    missing = machine.allocate(value = binary.encode("Absent.dll", encoding = "utf16le", nul = True))
+    equal(machine.call(machine.resolve_export("kernel32.dll", name = "FindResourceW"), args = [0, missing, 10]).value, 0)
 
 def test_registration_load_bitmap_resource():
     module = testing.module("@stdlib//windows/selfreg:win32.star")
@@ -5960,11 +6412,15 @@ TEST_SUITE = suite("stdlib/internal", [
     case("kernel_virtual_file_entries", test_kernel_virtual_file_entries),
     case("profile_section_parser", test_profile_section_parser),
     case("event_log_provider_recognizes_api_set_contracts", test_event_log_provider_recognizes_api_set_contracts),
+    case("event_log_exports_support_late_loaded_modules", test_event_log_exports_support_late_loaded_modules),
+    case("cabinet_callback_stream_and_native_notifications", test_cabinet_callback_stream_and_native_notifications),
+    case("kernel_explicit_file_write_bound", test_kernel_explicit_file_write_bound),
     case("security_reports_required_sid_length", test_security_reports_required_sid_length),
     case("security_native_allow_ace_ex_contract", test_security_native_allow_ace_ex_contract),
     case("security_native_descriptor_validation", test_security_native_descriptor_validation),
     case("security_native_absolute_to_self_relative", test_security_native_absolute_to_self_relative),
     case("create_service_default_account", test_create_service_default_account),
+    case("service_dispatcher_pointer_width", test_service_dispatcher_pointer_width),
     case("automation_registration_signatures", test_automation_registration_signatures),
     case("com_target_invocation_continues_budget", test_com_target_invocation_continues_budget),
     case("virtual_protect_restores_image_execution", test_virtual_protect_restores_image_execution),
@@ -5988,12 +6444,16 @@ TEST_SUITE = suite("stdlib/internal", [
     case("user32_wsprintf_reads_all_variadic_arguments", test_user32_wsprintf_reads_all_variadic_arguments),
     case("binary_floating_point_codecs", test_binary_floating_point_codecs),
     case("binary_xml_round_trip", test_binary_xml_round_trip),
+    case("com_guid_string_pointer_width", test_com_guid_string_uses_pointer_sized_output),
     case("win32_tracked_reallocate", test_win32_tracked_reallocate),
     case("binary_hex", test_binary_hex),
     case("installshield5_conventional_component_locations", test_installshield5_conventional_component_locations),
     case("registration_ui_object_handles", test_registration_ui_object_handles),
     case("registration_bitmap_ownership", test_registration_bitmap_ownership),
     case("registration_compatible_dc_and_typelib_attributes", test_registration_compatible_dc_and_typelib_attributes),
+    case("kernel_final_path_owned_handle", test_kernel_final_path_owned_handle),
+    case("version_resource_mixed_providers", test_version_resource_mixed_providers),
+    case("registration_named_resource_case", test_registration_named_resource_case),
     case("registration_load_bitmap_resource", test_registration_load_bitmap_resource),
     case("registration_activation_context_lifetime", test_registration_activation_context_lifetime),
     case("registration_registry_delete_tree", test_registration_registry_delete_tree),
@@ -6020,6 +6480,8 @@ TEST_SUITE = suite("stdlib/internal", [
     case("kernel_ansi_char_native_pointer_advance", test_kernel_ansi_char_native_pointer_advance),
     case("kernel_upcase_unicode_char_parameter_width", test_kernel_upcase_unicode_char_parameter_width),
     case("kernel_find_failure_handle_native_width", test_kernel_find_failure_handle_native_width),
+    case("kernel_child_process_exit_code_and_handle_lifetime", test_kernel_child_process_exit_code_and_handle_lifetime),
+    case("kernel_redirection_trust_policy", test_kernel_redirection_trust_policy),
     case("kernel_mutex_handle_independence", test_kernel_mutex_handle_independence),
     case("kernel_guid_from_counted_string_native_effects", test_kernel_guid_from_counted_string_native_effects),
     case("crt_integer_end_pointer_native_width", test_crt_integer_end_pointer_native_width),

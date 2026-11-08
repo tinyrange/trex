@@ -545,3 +545,46 @@ func TestDisasmX64DoesNotUseRawExtentAsGlobalRVACutoff(t *testing.T) {
 		t.Fatal("valid late function excluded by conflating raw and RVA extents")
 	}
 }
+
+func TestAMD64MarkExcludesNonExecutableRuntimeFunctions(t *testing.T) {
+	// Native msdelta.dll E32BE8BEF55EFAEF0F9F03062F6C72DA1:
+	// MarkNonExe::Transform at 0x15780 marks non-executable raw sections
+	// without a machine check. The AMD64 runner at 0x13790 honors that map.
+	// securekernel's TRNS LEA must remain untouched; msdtcuiu's executable
+	// image-base LEA must still be mapped. A zero-RVA special case is wrong.
+	for _, mark := range []bool{false, true} {
+		data := make([]byte, 0x200)
+		layout := peLayout{machine: 0x8664, imageBaseSize: 8, headerSize: 0x20,
+			timestampOffset: 8, imageBaseOffset: 16,
+			sections: []peSection{
+				{rawStart: 0x40, rawSize: 0x40, rva: 0x1000, virtualSize: 0x40, characteristics: 0x60000020},
+				{rawStart: 0x80, rawSize: 0x40, rva: 0x2000, virtualSize: 0x40, characteristics: 0xc0000020},
+				{rawStart: 0x100, rawSize: 0x40, rva: 0x3000, virtualSize: 0x40, characteristics: 0x40000040},
+			},
+			directories: [16]peDirectory{3: {rva: 0x3000, size: 24}},
+		}
+		for i, off := range []int{0x40, 0x80} {
+			rva := uint32((i + 1) * 0x1000)
+			copy(data[off:], []byte{0x4c, 0x8d, 0x2d})
+			put32(data, off+3, 0-rva-7)
+			put32(data, 0x100+i*12, rva)
+			put32(data, 0x104+i*12, rva+7)
+		}
+		rift := riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1000, target: 0x6000}}}
+		flags := peTransformDisasmX64
+		if mark {
+			flags |= peTransformMarkCode
+		}
+		transformPESource(data, layout, rift, flags, peRestore{})
+		if got := get32(data, 0x43); got != uint32(0xffff9ff9) {
+			t.Fatalf("executable LEA = %#x", got)
+		}
+		want := uint32(0xffff8ff9)
+		if mark {
+			want = 0xffffdff9
+		}
+		if got := get32(data, 0x83); got != want {
+			t.Fatalf("MARK=%t non-executable LEA = %#x, want %#x", mark, got, want)
+		}
+	}
+}

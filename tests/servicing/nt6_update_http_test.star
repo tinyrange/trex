@@ -82,7 +82,21 @@ def test_unexpected_native_write_is_atomic():
     raises(publish_http_effects,args=[root,reservations,effects[:-1]],message="complete admitted table")
     equal(digest(root.find(_PATH)),before)
 
+
+def test_qualified_installer_sources_fail_closed():
+    adapter=testing.module("@stdlib//windows/servicing:installer.star")
+    select=adapter["select_basic_installer"]
+    for family in ["http","timezone"]:
+        root=directory()
+        raises(select,args=[root,family],message="one qualified source")
+        paths=[record[0] for record in adapter["_QUALIFIED_SOURCES"][family]]
+        root.write(paths[0],"not the qualified DLL")
+        raises(select,args=[root,family],message="hash differs")
+        root.write(paths[1],"another unqualified DLL")
+        raises(select,args=[root,family],message="one qualified source")
+
 TEST_SUITE = suite("nt6/update-http", [
+    case("qualified_sources", test_qualified_installer_sources_fail_closed),
     case("unchanged_declarations_repair_physical_state", test_unchanged_declarations_repair_physical_state),
     case("unsupported_transition_is_atomic", test_unsupported_transition_is_atomic),
     case("missing_key_does_not_invent_security", test_missing_key_does_not_invent_security),

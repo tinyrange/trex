@@ -135,6 +135,7 @@ func sddlSID(text string) ([]byte, error) {
 		"SU": "S-1-5-6", "UD": "S-1-5-84-0-0-0-0-0",
 		"AN": "S-1-5-7", "BG": "S-1-5-32-546", "CG": "S-1-3-1",
 		"OW": "S-1-3-4", "SO": "S-1-5-32-549",
+		"CY": "S-1-5-32-569", // SDDL_CRYPTO_OPERATORS, DOMAIN_ALIAS_RID_CRYPTO_OPERATORS (0x239).
 	}
 	if value, ok := aliases[text]; ok {
 		text = value

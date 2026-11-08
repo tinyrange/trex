@@ -52,7 +52,7 @@ func TestSolidLargeBlobSegmentsSurviveChunkAndHotEviction(t *testing.T) {
 	// Prefetch must prepare every segment, not just the first byte of a large
 	// file. Afterwards no range (including the tail) may consult the source.
 	archive.blobCache = bytecache.New(4 << 20)
-	archive.images = []image{{index: 1, root: entry{path: "/image1", isDir: true}, byPath: map[string]entry{wimPathKey("/image1/large"): f.entry}}}
+	archive.images = []image{{index: 1, root: entry{path: "/image1", isDir: true}, byPath: map[string]*entry{wimPathKey("/image1/large"): &f.entry}}}
 	archive.byHash = map[string]wimResourceLocation{string(f.entry.hash[:]): *f.location}
 	paths := starlark.NewList([]starlark.Value{starlark.String("/image1/large")})
 	prepared, err := archive.prefetchBuiltin(nil, nil, starlark.Tuple{paths}, nil)

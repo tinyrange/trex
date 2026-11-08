@@ -833,7 +833,7 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			c.resultFlags(value, width)
 			err = write(value)
-		case x86asm.XORPS, x86asm.PXOR, x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PADDD, x86asm.PUNPCKLDQ, x86asm.PUNPCKLQDQ, x86asm.UNPCKLPD, x86asm.UNPCKHPD, x86asm.PSHUFLW, x86asm.PSHUFD:
+		case x86asm.XORPS, x86asm.PXOR, x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PADDD, x86asm.PSUBQ, x86asm.PUNPCKLDQ, x86asm.PUNPCKLQDQ, x86asm.UNPCKLPD, x86asm.UNPCKHPD, x86asm.PSHUFLW, x86asm.PSHUFD:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
 				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
@@ -896,6 +896,12 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 					for offset := 0; offset < 16; offset += 4 {
 						sum := binary.LittleEndian.Uint32(register[offset:]) + binary.LittleEndian.Uint32(value[offset:])
 						binary.LittleEndian.PutUint32(register[offset:], sum)
+					}
+				} else if inst.Op == x86asm.PSUBQ {
+					register := &c.xmm[destination-x86asm.X0]
+					for offset := 0; offset < 16; offset += 8 {
+						difference := binary.LittleEndian.Uint64(register[offset:]) - binary.LittleEndian.Uint64(value[offset:])
+						binary.LittleEndian.PutUint64(register[offset:], difference)
 					}
 				} else if inst.Op == x86asm.PUNPCKLDQ {
 					before := c.xmm[destination-x86asm.X0]

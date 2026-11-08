@@ -112,11 +112,17 @@ func (p *cbsSnapshotTable[V]) changed(changes map[string]V, deletes []string) cb
 // Package identities are interned once. Snapshots copy only touched pointer
 // pages; they never rehash a long identity to choose a bucket or clone maps of
 // unrelated packages. The immutable dictionaries are shared by all snapshots.
+// MaxCBSPackageContexts bounds the complete metadata universe, not the set of
+// admitted packages. Server cumulative updates exceed 65,536 exact identities.
+const MaxCBSPackageContexts = 1 << 17
+
+const cbsPackageGroups = MaxCBSPackageContexts >> 10
+
 type cbsPackageContexts struct {
 	byKey      map[string]uint32
 	byIdentity map[cbsIdentityFields]uint32
 	keys       []string
-	groups     [64]*cbsPackageGroup
+	groups     [cbsPackageGroups]*cbsPackageGroup
 	count      int
 }
 type cbsPackageGroup [64]*cbsPackageLeaf
@@ -181,8 +187,8 @@ func (p *cbsPackageContexts) all() iter.Seq2[string, *cbsUpdateContext] {
 }
 func (p *cbsPackageContexts) with(changes map[string]*cbsUpdateContext) cbsPackageContexts {
 	next := *p
-	var copiedGroups [64]bool
-	var copiedLeaves [64]uint64
+	var copiedGroups [cbsPackageGroups]bool
+	var copiedLeaves [cbsPackageGroups]uint64
 	for key, value := range changes {
 		slot, ok := p.byKey[key]
 		if !ok {

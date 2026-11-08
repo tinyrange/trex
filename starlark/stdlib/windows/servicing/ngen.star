@@ -7,6 +7,8 @@ _QUEUE='/Microsoft/.NETFramework/NGenQueue'
 def _attrs(node):
     result={}
     for item in node.attributes:
+        if item['name']=='xmlns' and item['namespace']=='xmlns' and item['value']==node.namespace:
+            continue
         if item['namespace'] or item['name'] in result:
             fail('unsupported NGEN attribute')
         result[item['name']]=item['value']
@@ -25,19 +27,43 @@ def _declarations(document):
     identities=[_attrs(n) for n in tree.children if n.namespace==_NS and n.name=='assemblyIdentity']
     if len(identities)!=1: fail('NGEN requires one component identity')
     identity=identities[0]
-    arch=identity.get('processorArchitecture')
-    # WCP 9703 CreateRegKeysForNGen dispatches x86/amd64/MSIL;
-    # WOW64 declarations do not dispatch another native-image command.
-    targets={'amd64':['Win64'],'x86':['Win32'],'wow64':[],'msil':['Win32','Win64']}.get(arch)
-    if targets==None: fail('unsupported NGEN target architecture')
-    arch='x86' if arch=='wow64' else arch
     result=[]
     for node,child in marked:
+        arch=identity.get('processorArchitecture')
+        # WCP GetAssemblySpecificInfo applies gac.clrarch before storing the
+        # AssemblyInfo architecture used by CreateRegKeysForNGen. In .NET
+        # updates an amd64 component can own an MSIL assembly; an explicit
+        # x86 override on a WOW64 component dispatches to Win32.
+        gacs=[c for c in node.children if c.namespace==_NS and c.name=='gac']
+        if len(gacs)>1: fail('multiple GAC declarations for NGEN assembly')
+        if gacs:
+            override=_attrs(gacs[0]).get('clrarch')
+            if override!=None:
+                if override not in ['amd64','x86','msil']: fail('unsupported NGEN CLR architecture')
+                arch=override
+        targets={'amd64':['Win64'],'x86':['Win32'],'wow64':[],'msil':['Win32','Win64']}.get(arch)
+        if targets==None: fail('unsupported NGEN target architecture')
+        arch='x86' if arch=='wow64' else arch
         attrs=_attrs(child)
-        if child.children or any([k not in ['managedversion','managedculture','parameter'] for k in attrs]):
+        if child.children or any([k not in ['managedversion','managedculture','parameter','win64targetarch'] for k in attrs]):
             fail('unsupported NGEN declaration')
+        if 'win64targetarch' in attrs:
+            # WCP 26100.33634 ModifyGacFiles validates this annotation using
+            # ordinal case-insensitive comparison, but does not assign it to
+            # AssemblyInfo's target-mode field. That field stays at default 0;
+            # CreateRegKeysForNGen consequently queues MSIL on both platforms.
+            # Do not infer Win64-only dispatch from the attribute's spelling.
+            # Admit only the observed Server shape; other modes need proof.
+            if arch!='msil' or attrs['win64targetarch'].lower()!='64bitonly':
+                fail('unsupported NGEN win64targetarch')
+        # Native ModifyGacFiles treats this exact directive as a transaction
+        # flag, not an assembly identity or an ngen.exe argument. CommitChanges
+        # issues one global update /queue per supported target platform.
+        if attrs.get('parameter')=='IssueNgenUpdate':
+            result.append(dict(update=True))
+            continue
         name=_safe(_attrs(node)['name'])
-        if not name.lower().endswith('.dll'): fail('NGEN requires DLL assembly identity')
+        if not name.lower().endswith('.dll') and not name.lower().endswith('.exe'): fail('NGEN requires DLL or EXE assembly identity')
         version=attrs.get('managedversion','')
         if len(version.split('.'))!=4 or any([not p or not all([c in '0123456789' for c in p.elems()]) for p in version.split('.')]):
             fail('invalid NGEN managed version')
@@ -58,9 +84,13 @@ def _declarations(document):
 def collect_update_ngen(runtime):
     """Collect supported NGEN declarations from runtime transitions, retaining architecture and native ordering."""
     commands={'Win32':[],'Win64':[]}
+    update=False
     for transition in runtime['transitions']:
         for phase,operation in [('before','uninstall'),('after','install')]:
             for item in _declarations(transition[phase]):
+                if item.get('update',False):
+                    update=True
+                    continue
                 parameter=item['parameter']
                 # Native removal drops the priority switch, retaining any
                 # separating whitespace. Do not apply install priority on removal.
@@ -70,6 +100,9 @@ def collect_update_ngen(runtime):
                 command=operation+' "'+item['identity']+'"'+(' '+parameter if parameter else '')
                 for target in item['targets']:
                     commands[target].append(command)
+    if update:
+        for platform in commands:
+            commands[platform].append('update /queue')
     return commands
 
 def plan_update_ngen(root,runtime):
@@ -89,7 +122,7 @@ def plan_update_ngen(root,runtime):
     if any(commands.values()):
         removed=any([c.startswith('uninstall ') for items in commands.values() for c in items])
         for platform in ['Win32','Win64']:
-            if removed: commands[platform].append('update /queue')
+            if removed and 'update /queue' not in commands[platform]: commands[platform].append('update /queue')
             persisted=hive.find(_QUEUE+'/'+platform+'/PersistedPriorities')
             if persisted==None: fail('NGEN persisted priorities parent is missing')
             for name,value in persisted.value_records.items():

@@ -4,18 +4,20 @@ import "fmt"
 
 // MARK claims the CLI method header and code, but not alignment padding or
 // trailing exception sections. Like the token enumerator, it stops before the
-// final MethodDef row. Unclaimed bytes remain eligible for native x86 scans.
+// final MethodDef row. Eligibility is header-only, including native methods
+// whose bytes happen to form a bounded CLI header. Invalid headers are skipped.
+// Unclaimed bytes remain eligible for native x86 scans.
 func markCLIMethodBodies(marker, source []byte, pe peLayout, metadata *cliMetadata) error {
 	for row := uint32(0); row+1 < metadata.Rows[6]; row++ {
 		off := metadata.tableOffsets[6] + int(row)*metadata.rowSizes[6]
 		rva := get32(source, off)
-		if rva == 0 || get16(source, off+4)&3 != 0 {
+		if rva == 0 {
 			continue
 		}
 		start, backed := pe.rawOffset(rva)
 		_, end, valid := cliMethodCode(source, pe, rva)
 		if !backed || !valid || end > len(marker) {
-			return fmt.Errorf("msdelta: invalid CLI method %d marking at RVA %#x", row+1, rva)
+			continue
 		}
 		for i := start; i < end; i++ {
 			marker[i] |= 3
@@ -45,17 +47,20 @@ func transformCLIMethodTokens(dst, source []byte, pe peLayout, metadata *cliMeta
 	for row := uint32(0); row+1 < metadata.Rows[6]; row++ {
 		off := metadata.tableOffsets[6] + int(row)*metadata.rowSizes[6]
 		rva := get32(source, off)
-		// MethodImplAttributes.CodeTypeMask: only IL has a CLI method header.
-		if rva == 0 || get16(source, off+4)&3 != 0 {
+		// Native MSDelta checks the bytes for a CLI header, not the
+		// MethodImplAttributes code type. In mixed-mode images a native RET
+		// (C2) can be accepted as a tiny header and expose apparent IL tokens.
+		if rva == 0 {
 			continue
 		}
 		start, end, ok := cliMethodCode(source, pe, rva)
 		if !ok || end > len(dst) {
-			return fmt.Errorf("msdelta: invalid CLI method %d body at RVA %#x", row+1, rva)
+			continue
 		}
-		if err := transformCLIInstructions(dst[start:end], dst[start:end], &remap); err != nil {
-			return fmt.Errorf("msdelta: CLI method %d: %w", row+1, err)
-		}
+		// The native walker stops this body at an incomplete operand, retaining
+		// earlier token rewrites, then proceeds to the next MethodDef. Keep the
+		// instruction helper strict for inspection callers.
+		_ = transformCLIInstructions(dst[start:end], dst[start:end], &remap)
 	}
 	return nil
 }

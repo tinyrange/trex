@@ -39,6 +39,12 @@ def test_parent_update_index_and_special_release_indexes():
     })
     equal(("Product", "Example" + _SUFFIX) in _entries(plan_servicing_package_indexes(_file("", 'releaseType="Product"')), "PackageIndex"), True)
 
+def test_multiple_parent_detector_indexes_are_not_applicability_pruned():
+    body = '<update name="Here"><applicable><detectUpdate><parent name="Server-Gui-Mgmt"/><parent name="RSATClient-ServerManager"/><update name="Local"/><parent name="Server-Gui-Mgmt"/></detectUpdate></applicable></update>'
+    entries = _entries(plan_servicing_package_indexes(_file(body)), "UpdateDetect")
+    equal(entries, {(parent, "Example" + _SUFFIX): ("REG_DWORD", 0) for parent in ["Server-Gui-Mgmt", "RSATClient-ServerManager"]})
+    raises(plan_servicing_package_indexes, args=[_file(body.replace('<update name="Local"/>', '<unknown/>'))], message="parent/local references")
+
 def test_component_index_uses_native_key_and_base_elevation():
     # Native ComponentDetect fixture: full family hash is dc711313304a06dc,
     # not the version-omitting Winners hash. Alternative targets store @8,
@@ -300,6 +306,7 @@ def test_resident_owner_deletion_and_unsupported_transition_are_atomic():
     equal(digest(root.find(path)),before)
 
 TEST_SUITE = suite("nt6_package_store", [
+    case("multiple_parent_detector_indexes", test_multiple_parent_detector_indexes_are_not_applicability_pruned),
     case("resident_owner_delete_and_atomic_failure", test_resident_owner_deletion_and_unsupported_transition_are_atomic),
     case("resident_supersession", test_resident_supersession_is_published_not_normalized_or_ignored),
     case("inventory_audit_contradictions", test_inventory_audit_detects_downgrades_and_missing_metadata),

@@ -85,7 +85,7 @@ type CBSUpdateState struct {
 // states. It does not infer parent scopes, perform execution scheduling, or
 // authorize removals. Pending states and unspecified targets are rejected.
 func NewCBSUpdateStateIndex(inputs []CBSPackageIntent) (*CBSUpdateStateIndex, error) {
-	if len(inputs) > 1<<16 {
+	if len(inputs) > MaxCBSPackageContexts {
 		return nil, fmt.Errorf("CBS update context count exceeds bound")
 	}
 	g := cbsUpdateIntents{memo: map[cbsUpdateQuery]uint32{}, visiting: map[cbsUpdateQuery]bool{}}
@@ -478,52 +478,61 @@ func (g *cbsUpdateIntents) predicate(ctx *cbsUpdateContext, q cbsUpdateQuery, d 
 		if _, err := cbsConditionAttributes(d); err != nil {
 			return cbsUpdateDetection{}, err
 		}
-		if len(d.Children) != 1 {
-			return cbsUpdateDetection{}, fmt.Errorf("CBS detectUpdate requires one reference")
-		}
-		r := d.Children[0]
-		a, err := cbsConditionAttributes(r, "name")
-		if err != nil {
-			return cbsUpdateDetection{}, err
-		}
-		if len(r.Children) != 0 || a["name"] == "" {
-			return cbsUpdateDetection{}, fmt.Errorf("invalid CBS update reference")
-		}
-		name := strings.ToLower(a["name"])
-		switch r.Name {
-		case "update":
-			// CDetectUpdate::Initialize removes local references exactly equal
-			// (case-sensitive UTF-16 comparison) to the containing update name.
-			// Evaluate treats the resulting empty detector list as satisfied.
-			// Lookup remains case-insensitive for references not removed here.
-			if a["name"] == ctx.updates[q.update].Name {
-				return cbsUpdateDetection{state: CBSStateInstalled, match: true}, nil
-			}
-			s, err := g.update(cbsUpdateQuery{q.pack, name}, depth)
+		// Native initialization removes exact local self references. Evaluate
+		// ORs the remaining references and retains the greatest observed state.
+		result.state = CBSStateAbsent
+		remaining := 0
+		for _, r := range d.Children {
+			a, err := cbsConditionAttributes(r, "name", "set")
 			if err != nil {
 				return cbsUpdateDetection{}, err
 			}
-			result.state, result.match = s, s >= CBSStateInstalled
-		case "parent":
-			result.state = CBSStateAbsent
-			for _, p := range ctx.input.Parents {
-				parent := g.packages.get(g.packages.keyForIdentity(p))
-				if _, ok := parent.updates[name]; !ok {
-					continue
-				}
-				s, err := g.update(cbsUpdateQuery{g.packages.keyForIdentity(p), name}, depth)
+			if len(r.Children) != 0 || a["name"] == "" {
+				return cbsUpdateDetection{}, fmt.Errorf("invalid CBS update reference")
+			}
+			// cbscore retains set but queries parent updates by name alone.
+			if set, present := a["set"]; present && (r.Name != "parent" || set != "display") {
+				return cbsUpdateDetection{}, fmt.Errorf("unsupported CBS update reference set %q", set)
+			}
+			name := strings.ToLower(a["name"])
+			if r.Name == "update" && a["name"] == ctx.updates[q.update].Name {
+				continue
+			}
+			remaining++
+			switch r.Name {
+			case "update":
+				s, err := g.update(cbsUpdateQuery{q.pack, name}, depth)
 				if err != nil {
 					return cbsUpdateDetection{}, err
 				}
-				s = min(s, parent.input.IntendedState)
 				result.state = max(result.state, s)
 				result.match = s >= CBSStateInstalled
-				if result.match {
-					break
+			case "parent":
+				for _, p := range ctx.input.Parents {
+					parent := g.packages.get(g.packages.keyForIdentity(p))
+					if _, ok := parent.updates[name]; !ok {
+						continue
+					}
+					s, err := g.update(cbsUpdateQuery{g.packages.keyForIdentity(p), name}, depth)
+					if err != nil {
+						return cbsUpdateDetection{}, err
+					}
+					s = min(s, parent.input.IntendedState)
+					result.state = max(result.state, s)
+					result.match = s >= CBSStateInstalled
+					if result.match {
+						break
+					}
 				}
+			default:
+				return cbsUpdateDetection{}, fmt.Errorf("unsupported CBS detectUpdate reference %q", r.Name)
 			}
-		default:
-			return cbsUpdateDetection{}, fmt.Errorf("unsupported CBS detectUpdate reference %q", r.Name)
+			if result.match {
+				break
+			}
+		}
+		if remaining == 0 {
+			return cbsUpdateDetection{state: CBSStateInstalled, match: true}, nil
 		}
 	default:
 		return cbsUpdateDetection{}, fmt.Errorf("unsupported CBS update predicate %q", d.Name)

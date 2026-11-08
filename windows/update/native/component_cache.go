@@ -8,7 +8,7 @@ import (
 
 // Keep this closure independent of the staging plan: observing a live disk's
 // cache must not retain its no-longer-needed construction inventories.
-func componentCacheStatsBuiltin(cache *bytecache.Cache) *starlark.Builtin {
+func componentCacheStatsBuiltin(cache interface{ Stats() bytecache.Stats }) *starlark.Builtin {
 	return starlark.NewBuiltin("component_staging.cache_stats", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		if err := starlark.UnpackArgs("component_staging.cache_stats", args, kwargs); err != nil {
 			return nil, err

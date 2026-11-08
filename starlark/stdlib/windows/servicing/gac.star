@@ -1,8 +1,9 @@
-"""Guarded refresh of existing CLR4 GAC assemblies from CSI declarations.
+"""Guarded refresh of existing legacy/CLR4 GAC assemblies from CSI declarations.
 
 This is not Fusion registration or NGEN completion. New cache directories,
 assembly identity changes and removals require their own installer phases and
-are rejected. No oracle paths, hashes or registry results enter this planner.
+are rejected. New companion files may be linked into an existing cache identity
+only when absent and backed by an exact declared staged hash. No oracle paths, hashes or registry results enter this planner.
 """
 load("@stdlib//windows/servicing:runtime.star", "select_servicing_file_hash")
 load("@stdlib//windows/servicing:registry_effects.star", "plan_update_registry_effects", "apply_update_registry_effects")
@@ -12,6 +13,8 @@ _NS = "urn:schemas-microsoft-com:asm.v3"
 def _attrs(node):
     result = {}
     for a in node.attributes:
+        if a["name"] == "xmlns" and a["namespace"] == "xmlns" and a["value"] == node.namespace:
+            continue
         if a["namespace"] or a["name"] in result:
             fail("unsupported managed declaration attributes")
         result[a["name"]] = a["value"]
@@ -42,10 +45,22 @@ def _managed_declaration(document):
         fail("managed component requires one identity")
     identity = _attrs(ids[0])
     file, gac = managed[0]
-    if any([k not in ["clrversion", "managedversion", "managedculture"] for k in gac]):
+    if any([k not in ["clrversion", "clrarch", "fileCopy", "managedversion", "managedculture", "parameter"] for k in gac]):
         fail("unsupported GAC identity override")
-    if gac.get("clrversion") != "4.0":
-        fail("only CLR4 GAC refresh is supported")
+    # The native GAC parser has no parameter identity field. Admit only the
+    # empty/single-space annotation present in the serviced Server manifests;
+    # do not turn arbitrary command text into silently ignored configuration.
+    if gac.get("parameter", "") not in ["", " "]:
+        fail("unsupported GAC parameters")
+    copy = gac.get("fileCopy", "true")
+    if copy not in ["true", "false"]:
+        fail("unsupported GAC fileCopy value")
+    clr_arch = gac.get("clrarch")
+    if clr_arch != None and clr_arch not in ["amd64", "x86", "msil"]:
+        fail("unsupported GAC CLR architecture")
+    clr = gac.get("clrversion")
+    if clr not in [None, "4.0"]:
+        fail("unsupported GAC CLR version")
     version = gac.get("managedversion", "")
     if len(version.split(".")) != 4 or any([not p or not all([c in "0123456789" for c in p.elems()]) for p in version.split(".")]):
         fail("invalid managed version")
@@ -55,14 +70,18 @@ def _managed_declaration(document):
     token = identity.get("publicKeyToken", "").lower()
     if len(token) != 16 or any([c not in "0123456789abcdef" for c in token.elems()]):
         fail("invalid managed public key token")
-    architecture = {"amd64":"64", "wow64":"32", "x86":"32", "msil":"MSIL"}.get(identity.get("processorArchitecture", ""))
+    architecture = {"amd64":"64", "wow64":"32", "x86":"32", "msil":"MSIL"}.get(clr_arch if clr_arch != None else identity.get("processorArchitecture", ""))
     if architecture == None:
         fail("unsupported managed component architecture")
     name = _leaf(file["name"])
-    if not name.lower().endswith(".dll"):
-        fail("managed cache refresh requires a DLL assembly")
+    if not name.lower().endswith(".dll") and not name.lower().endswith(".exe"):
+        fail("managed cache refresh requires a DLL or EXE assembly")
     assembly = _leaf(name[:-4])
-    path = "/Windows/Microsoft.NET/assembly/GAC_" + architecture + "/" + assembly + "/v4.0_" + version + "_" + culture + "_" + token
+    # No clrversion is the legacy Fusion store, not an implicit CLR4 request.
+    # Only refresh already existing identities; never create/choose a cache.
+    prefix = "/Windows/Microsoft.NET/assembly/GAC_" if clr == "4.0" else "/Windows/assembly/GAC_"
+    version_prefix = "v4.0_" if clr == "4.0" else ""
+    path = prefix + architecture + "/" + assembly + "/" + version_prefix + version + "_" + culture + "_" + token
     # Fusion caches the component's companion files as well as the marked DLL.
     files = {}
     for item in manifest.files:
@@ -70,10 +89,18 @@ def _managed_declaration(document):
         if name.lower() in files:
             fail("duplicate managed companion file")
         files[name.lower()] = dict(name=name, hash=select_servicing_file_hash(item)["digest"])
-    return dict(path=path, files=files, assembly_file=_leaf(file["name"]), notification=identity["name"]+","+version+","+culture+","+token+","+{"64":"amd64","32":"x86","MSIL":"msil"}[architecture], architecture=architecture)
+    return dict(path=path, files=files, copy=copy == "true", assembly_file=_leaf(file["name"]), notification=identity["name"]+","+version+","+culture+","+token+","+{"64":"amd64","32":"x86","MSIL":"msil"}[architecture], architecture=architecture)
 
 def plan_update_gac(root, runtime, component_stems):
     """Plan qualified Fusion cache refreshes from runtime transitions and exact component stems; retain source/destination guards."""
+    # CSI identity comparison is case-insensitive, including versionScope.
+    # Keep the exact admitted stem; never derive a store path from an identity.
+    stems = {}
+    for identity, stem in component_stems.items():
+        key = str(identity).lower()
+        if key in stems and stems[key].lower() != stem.lower():
+            fail("conflicting managed staged source identity")
+        stems[key] = stem
     names = root.path_names(lower=True)
     plans = []
     destinations = {}
@@ -84,26 +111,31 @@ def plan_update_gac(root, runtime, component_stems):
             continue
         if before == None or after == None or before["path"].lower() != after["path"].lower():
             fail("GAC addition/removal or identity change requires Fusion lifecycle")
-        if set(before["files"]) != set(after["files"]):
-            fail("GAC companion addition/removal requires Fusion lifecycle")
+        if any([key not in after["files"] for key in before["files"]]):
+            fail("GAC companion removal requires Fusion lifecycle")
         parent = names.get(after["path"].lower())
         if parent == None:
             fail("managed cache directory is absent")
         identity = transition["component_identities"]["after"]
-        stem = component_stems.get(identity)
+        stem = stems.get(str(identity).lower())
         if stem == None:
             fail("managed component lacks exact staged source identity")
         _leaf(stem)
         for key, item in after["files"].items():
             destination = names.get((after["path"] + "/" + item["name"]).lower())
             source = names.get(("/Windows/WinSxS/" + stem + "/" + item["name"]).lower())
-            if source == None or destination == None:
-                fail("managed refresh requires existing cache and staged source files")
+            added = key not in before["files"]
+            if source == None or (destination == None and not added):
+                fail("managed refresh requires existing cache and staged source files: " + str(identity) + "/" + item["name"])
+            if added:
+                if destination != None:
+                    fail("new managed companion destination already exists")
+                destination = parent + "/" + item["name"]
             if destination.lower() in destinations:
                 fail("conflicting managed destination")
             destinations[destination.lower()] = True
-            current = digest(root.find(destination), algorithm="sha256")
-            if current not in [before["files"][key]["hash"], item["hash"]]:
+            current = None if added else digest(root.find(destination), algorithm="sha256")
+            if not added and current not in [before["files"][key]["hash"], item["hash"]]:
                 fail("managed cache content differs from declared baseline")
             if digest(root.find(source), algorithm="sha256") != item["hash"]:
                 fail("managed source hash mismatch")
@@ -111,7 +143,9 @@ def plan_update_gac(root, runtime, component_stems):
             if security == None:
                 fail("managed source has no security descriptor")
             windows.security_descriptor_parts(security)
-            plans.append(dict(path=destination, source=source, before=current, after=item["hash"], security=security, source_order=root.get_metadata(source).write_order, destination_order=root.get_metadata(destination).write_order))
+            if not after["copy"] and (added or current != item["hash"]):
+                fail("GAC fileCopy=false requires pre-published cache files")
+            plans.append(dict(copy=after["copy"], parent=parent, parent_order=root.get_metadata(parent).write_order, path=destination, source=source, before=current, after=item["hash"], security=security, source_order=root.get_metadata(source).write_order, destination_order=None if added else root.get_metadata(destination).write_order))
     return plans
 
 def apply_update_gac(root, plans):
@@ -120,18 +154,26 @@ def apply_update_gac(root, plans):
     for p in plans:
         source = root.find(p["source"])
         destination = root.find(p["path"])
-        if source == None or destination == None:
+        added = p["before"] == None
+        if root.get_metadata(p["parent"]).write_order != p["parent_order"]:
+            fail("managed cache directory changed after planning")
+        if source == None or (destination == None and not added):
             fail("managed refresh path disappeared after planning")
-        if root.get_metadata(p["source"]).write_order != p["source_order"] or root.get_metadata(p["path"]).write_order != p["destination_order"]:
+        if added and destination != None:
+            fail("new managed companion destination appeared after planning")
+        if root.get_metadata(p["source"]).write_order != p["source_order"] or (not added and root.get_metadata(p["path"]).write_order != p["destination_order"]):
             fail("managed refresh path changed after planning")
-        if root.get_security(p["source"]) != p["security"] or digest(source, algorithm="sha256") != p["after"] or digest(destination, algorithm="sha256") != p["before"]:
+        if root.get_security(p["source"]) != p["security"] or digest(source, algorithm="sha256") != p["after"] or (not added and digest(destination, algorithm="sha256") != p["before"]):
             fail("managed refresh content/security changed after planning")
     for p in plans:
-        root.remove(p["path"])
+        if not p["copy"]:
+            continue
+        if p["before"] != None:
+            root.remove(p["path"])
         root.hardlink(p["source"], p["path"])
         if not root.get_metadata(p["path"]).hard_link_id or root.get_metadata(p["path"]).hard_link_id != root.get_metadata(p["source"]).hard_link_id:
             fail("managed cache is not the staged file object")
-    return dict(refreshed_files=len(plans), validation="runtime Fusion/NGen validation not performed by this file-publication helper")
+    return dict(refreshed_files=len([p for p in plans if p["copy"]]), verified_files=len([p for p in plans if not p["copy"]]), validation="runtime Fusion/NGen validation not performed by this file-publication helper")
 
 
 def plan_update_gac_notifications(root, runtime):

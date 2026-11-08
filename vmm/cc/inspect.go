@@ -199,7 +199,13 @@ func (p *pc) inspectState() (starlark.Value, error) {
 			regs[name] = int64(v)
 		}
 		stats := n.controller.IOStatistics()
-		nvmeState = map[string]any{"read_commands": stats.ReadCommands, "read_bytes": stats.ReadBytes, "write_commands": stats.WriteCommands, "write_bytes": stats.WriteBytes, "config": fmt.Sprintf("%x", n.config[:]), "registers": regs, "intx_pending": n.pending}
+		failureCount, failures := n.backingFailures.snapshot()
+		completionFailures := make([]any, len(stats.RecentFailures))
+		for i, f := range stats.RecentFailures {
+			completionFailures[i] = map[string]any{"sqid": f.SQID, "cid": f.CID, "status": f.Status}
+		}
+		maximum, slowCount, slowOperations := n.backingTiming.snapshot()
+		nvmeState = map[string]any{"backing_max_nanoseconds": maximum, "backing_slow_count": slowCount, "backing_slow_operations": slowOperations, "failed_completions": stats.FailedCompletions, "completion_failures": completionFailures, "backing_failure_count": failureCount, "backing_failures": failures, "read_commands": stats.ReadCommands, "read_bytes": stats.ReadBytes, "write_commands": stats.WriteCommands, "write_bytes": stats.WriteBytes, "config": fmt.Sprintf("%x", n.config[:]), "registers": regs, "intx_pending": n.pending}
 	}
 	var pciIDE any
 	if d := p.pciIDE; d != nil {

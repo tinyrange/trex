@@ -253,14 +253,14 @@ func TestApplyDispatchesLZMSContainer(t *testing.T) {
 		t.Fatalf("target = %q", got)
 	}
 	inspection, err := InspectPatchRangeBytesBounded(nil, delta, 1, 4, uint64(len(want)))
-	if err != nil || !bytes.Equal(inspection.Decoded, want[1:4]) || len(inspection.Matches) != 0 || len(inspection.PETransforms) != 0 {
+	if err != nil || !bytes.Equal(inspection.Decoded, want[1:4]) || len(inspection.Matches) != 1 || inspection.Matches[0].Kind != "literal" || inspection.Matches[0].CombinedStart != -1 || len(inspection.PETransforms) != 0 {
 		t.Fatalf("byte-only inspection = %#v, %v", inspection, err)
 	}
 	if _, err := InspectPatchRangeBytesBounded(nil, delta, 0, len(want), uint64(len(want)-1)); err == nil {
 		t.Fatal("LZMS inspection ignored target size bound")
 	}
-	if _, err := InspectPatchRangeBounded(nil, delta, 0, len(want), uint64(len(want))); err == nil {
-		t.Fatal("LZMS inspection claimed unsupported match provenance")
+	if traced, err := InspectPatchRangeBounded(nil, delta, 1, 4, uint64(len(want))); err != nil || len(traced.Matches) != 1 || traced.Matches[0].TargetStart != 1 || traced.Matches[0].TargetEnd != 4 {
+		t.Fatalf("LZMS literal provenance = %#v, %v", traced, err)
 	}
 }
 
@@ -302,7 +302,7 @@ func TestApplyDispatchesLZMSBinaryDelta(t *testing.T) {
 		t.Fatalf("target = %q", got)
 	}
 	inspection, err := InspectPatchRangeBytesBounded([]byte("unused"), delta, 1, 4, 64)
-	if err != nil || !bytes.Equal(inspection.Decoded, want[1:4]) || len(inspection.Matches) != 0 {
+	if err != nil || !bytes.Equal(inspection.Decoded, want[1:4]) || len(inspection.Matches) != 1 || inspection.Matches[0].Kind != "literal" || inspection.Matches[0].CombinedStart != -1 {
 		t.Fatalf("nested byte-only inspection = %#v, %v", inspection, err)
 	}
 }

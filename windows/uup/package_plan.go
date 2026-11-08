@@ -249,7 +249,18 @@ func (planner *AssemblyPlanner) BindFinalStageContent(stage *CumulativeStage) er
 	stage.assemblyReadOrder = planner.content.snapshotReadOrder()
 	stage.assemblyNameReadOrder = planner.content.snapshotNameReadOrder()
 	stage.assemblyDictionary = planner.content.dictionaryResolver()
-	state := planner.state
+	// The sealed stage only needs predecessor lookup. Do not capture package
+	// admission/activation indexes through every lazy component reader.
+	original := planner.state
+	state := &assemblyImageState{
+		exactComponentInventory:      original.exactComponentInventory,
+		latestExactComponentByStable: original.latestExactComponentByStable,
+		latestComponentByFamily:      original.latestComponentByFamily,
+		absentComponentFamilies:      original.absentComponentFamilies,
+		componentCandidates:          original.componentCandidates,
+		familyAbbreviated:            original.familyAbbreviated,
+		familyAbbreviatedLocale:      original.familyAbbreviatedLocale,
+	}
 	var mu sync.Mutex // latestInstalledComponent may memoize abbreviated families.
 	stage.bindComponentPredecessor = func(identity AssemblyIdentity, stem string) {
 		mu.Lock()
@@ -354,18 +365,15 @@ func planAssemblyStagesFromInventory(packageNames, componentNames []string, stag
 // reconstruction. A stage receives a snapshot containing the base image and
 // only stages whose CBS closure has already completed.
 type assemblyContentState struct {
-	base      *wim.Archive
-	imagePath string
-	prior     []completedAssemblyStage
-	reverse   *reverseAssemblyResolver
-	dictOnce  sync.Once
-	dict      storage.Reader
-	dictErr   error
+	base       *wim.Archive
+	imagePath  string
+	prior      []completedAssemblyStage
+	reverse    *reverseAssemblyResolver
+	dictionary *assemblyDictionarySource
 }
 
 type completedAssemblyStage struct {
 	stage             *CumulativeStage
-	plan              StageAssemblyPlan
 	predecessorByStem map[string]string
 }
 
@@ -376,7 +384,10 @@ func newCompletedAssemblyStage(stage *CumulativeStage, plan StageAssemblyPlan) c
 			predecessors[normalizeCIXName(component.Stem)] = component.PreviousStem
 		}
 	}
-	return completedAssemblyStage{stage: stage, plan: plan, predecessorByStem: predecessors}
+	// Payload reconstruction needs only the stage and predecessor names. Keeping
+	// the complete plan here pins parsed package manifests and install graphs
+	// for every prior update throughout the lifetime of all lazy image files.
+	return completedAssemblyStage{stage: stage, predecessorByStem: predecessors}
 }
 
 func (state *assemblyContentState) snapshotResolver() func(ContentDescriptor) (storage.Reader, error) {
@@ -458,12 +469,26 @@ func (state *assemblyContentState) snapshotNameResolver() func(string) (storage.
 	}
 }
 
+// A dictionary resolver must not capture the growing predecessor-stage list.
+// Each lazy component needs the same dictionary, not the whole planner owner.
+type assemblyDictionarySource struct {
+	base      *wim.Archive
+	imagePath string
+	once      sync.Once
+	file      storage.Reader
+	err       error
+}
+
 func (state *assemblyContentState) dictionaryResolver() func() (storage.Reader, error) {
+	if state.dictionary == nil {
+		state.dictionary = &assemblyDictionarySource{base: state.base, imagePath: state.imagePath}
+	}
+	dictionary := state.dictionary
 	return func() (storage.Reader, error) {
-		state.dictOnce.Do(func() {
-			state.dict, state.dictErr = openDCMDictionary(state.base, state.imagePath)
+		dictionary.once.Do(func() {
+			dictionary.file, dictionary.err = openDCMDictionary(dictionary.base, dictionary.imagePath)
 		})
-		return state.dict, state.dictErr
+		return dictionary.file, dictionary.err
 	}
 }
 

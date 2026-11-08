@@ -27,7 +27,8 @@ type codeSet struct {
 
 // PatchMatchInfo describes one decoded patch match overlapping an inspected
 // target range. CombinedStart uses the virtual source-plus-target history
-// coordinate space used by the patch decoder; literals report -1.
+// coordinate space used by the patch decoder; literals report -1. For binary
+// deltas, add spans use signed source offsets (out-of-range bytes are zero).
 type PatchMatchInfo struct {
 	Kind                    string
 	TargetStart, TargetEnd  int
@@ -49,6 +50,19 @@ type PatchRangeInfo struct {
 type patchTraceCollector struct {
 	start, end int
 	matches    []PatchMatchInfo
+}
+
+// addBinary records a clipped binary-delta span. Add spans preserve signed
+// source coordinates; bytes outside the source contribute zero.
+func (trace *patchTraceCollector) addBinary(kind string, start, length int, source int64) {
+	lo, hi := max(start, trace.start), min(start+length, trace.end)
+	if lo >= hi {
+		return
+	}
+	if kind == "add" {
+		source += int64(lo - start)
+	}
+	trace.matches = append(trace.matches, PatchMatchInfo{Kind: kind, TargetStart: lo, TargetEnd: hi, CombinedStart: source})
 }
 
 func (trace *patchTraceCollector) add(match deltaMatch, targetStart int, combinedStart, distance, riftOffset int64) {
@@ -134,8 +148,8 @@ func InspectPreparedSourceRange(source, delta []byte, start, end int) ([]byte, e
 }
 
 // InspectPatchRangeBytesBounded omits PE transform-event collection when only
-// reconstructed bytes are needed for a broad comparison. For LZMS-backed
-// patches it returns bytes without match provenance, before PE restoration.
+// reconstructed bytes are needed for a broad comparison. Results are taken
+// before PE restoration, including for LZMS-backed binary deltas.
 func InspectPatchRangeBytesBounded(source, delta []byte, start, end int, maximumTargetSize uint64) (PatchRangeInfo, error) {
 	return inspectPatchRangeBounded(source, delta, start, end, maximumTargetSize, false)
 }
@@ -175,18 +189,13 @@ func inspectPatchRangeBounded(source, delta []byte, start, end int, maximumTarge
 			return PatchRangeInfo{}, err
 		}
 	}
-	if len(header.Patch) >= 4 && binary.LittleEndian.Uint32(header.Patch[:4]) == lzms.CompressionAPIMagic {
-		if includeTransforms {
-			return PatchRangeInfo{}, errors.New("msdelta: LZMS match tracing is not supported; use byte-only inspection")
-		}
-		target, _, _, err := decodeLZMSPatch(source, header.Patch, header.TargetSize, maximumTargetSize)
-		if err != nil {
-			return PatchRangeInfo{}, err
-		}
-		return PatchRangeInfo{Start: start, End: end, Decoded: append([]byte(nil), target[start:end]...)}, nil
-	}
 	trace := &patchTraceCollector{start: start, end: end}
-	target, err := decodePatchMappedTraced(source, header.Patch, header.TargetSize, preprocess, trace)
+	var target []byte
+	if len(header.Patch) >= 4 && binary.LittleEndian.Uint32(header.Patch[:4]) == lzms.CompressionAPIMagic {
+		target, _, _, err = decodeLZMSPatchTraced(source, header.Patch, header.TargetSize, maximumTargetSize, trace)
+	} else {
+		target, err = decodePatchMappedTraced(source, header.Patch, header.TargetSize, preprocess, trace)
+	}
 	if err != nil {
 		return PatchRangeInfo{}, err
 	}
@@ -195,12 +204,13 @@ func inspectPatchRangeBounded(source, delta []byte, start, end int, maximumTarge
 		type sourceInterval struct{ start, end int64 }
 		intervals := make([]sourceInterval, 0, len(trace.matches))
 		for _, match := range trace.matches {
-			if match.CombinedStart < 0 || match.CombinedStart >= int64(len(source)) {
+			if match.Kind == "literal" || match.CombinedStart >= int64(len(source)) {
 				continue
 			}
+			start := max(int64(0), match.CombinedStart)
 			end := min(int64(len(source)), match.CombinedStart+int64(match.TargetEnd-match.TargetStart))
-			if end > match.CombinedStart {
-				intervals = append(intervals, sourceInterval{start: match.CombinedStart, end: end})
+			if end > start {
+				intervals = append(intervals, sourceInterval{start: start, end: end})
 			}
 		}
 		sort.Slice(intervals, func(i, j int) bool { return intervals[i].start < intervals[j].start })
@@ -338,14 +348,21 @@ func decodePatch(source, patch []byte, targetSize uint64) ([]byte, error) {
 }
 
 func decodeLZMSPatch(source, patch []byte, targetSize, maximumTargetSize uint64) ([]byte, bool, int, error) {
+	return decodeLZMSPatchTraced(source, patch, targetSize, maximumTargetSize, nil)
+}
+
+func decodeLZMSPatchTraced(source, patch []byte, targetSize, maximumTargetSize uint64, trace *patchTraceCollector) ([]byte, bool, int, error) {
 	payload, err := lzms.DecompressContainer(patch, maximumTargetSize)
 	if err != nil {
 		return nil, false, 0, fmt.Errorf("msdelta: LZMS container: %w", err)
 	}
 	if uint64(len(payload)) == targetSize {
+		if trace != nil {
+			trace.addBinary("literal", 0, len(payload), -1)
+		}
 		return payload, false, len(payload), nil
 	}
-	target, err := applyBSDiff(source, targetSize, payload)
+	target, err := applyBSDiffTraced(source, targetSize, payload, trace)
 	if err != nil {
 		return nil, true, len(payload), fmt.Errorf("msdelta: LZMS binary delta: %w", err)
 	}

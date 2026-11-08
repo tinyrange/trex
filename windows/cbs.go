@@ -12,7 +12,7 @@ func cbsPackageNames(values *starlark.List) ([]uup.AssemblyIdentity, error) {
 	if values == nil {
 		return nil, nil
 	}
-	if values.Len() > 1<<16 {
+	if values.Len() > uup.MaxCBSPackageContexts {
 		return nil, fmt.Errorf("CBS package list exceeds bound")
 	}
 	out := make([]uup.AssemblyIdentity, 0, values.Len())
@@ -72,7 +72,7 @@ func cbsUpdateInputs(packages, editionValues *starlark.List) ([]uup.CBSPackageIn
 			editions = append(editions, name)
 		}
 	}
-	if packages.Len() > 1<<16 {
+	if packages.Len() > uup.MaxCBSPackageContexts {
 		return nil, fmt.Errorf("CBS update context: package count exceeds bound")
 	}
 	inputs := make([]uup.CBSPackageIntent, 0, packages.Len())

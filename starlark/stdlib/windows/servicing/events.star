@@ -1,6 +1,7 @@
 """Native offline event publisher/channel and shared-autologger registration.
 
-This models the bounded Admin/Operational registration delta, not the whole
+This models shared Admin/Operational and new disabled System Debug channels,
+not the whole
 advanced-installer queue. Event definitions remain in hash-qualified PE payloads.
 No host wevtutil invocation or installer emulator participates in construction.
 """
@@ -129,12 +130,36 @@ def _event_channel_refs(item):
 
 def _event_channel_values(guid,channel):
     attrs=channel["attributes"]
+    if attrs.get("type")=="Debug":
+        if channel["configuration"] or any([n not in ["name","type","isolation","enabled","value","access"] for n in attrs]) or attrs.get("isolation")!="System" or attrs.get("enabled","false")!="false":
+            fail("unsupported Debug event channel policy")
+        access=attrs.get("access",_SYSTEM_ACCESS)
+        if not access or chr(0) in access:
+            fail("invalid Debug channel access")
+        windows.compile_sddl(access)
+        return dict(Type=3,Isolation=1,Enabled=0,OwningPublisher=guid,ChannelAccess=access)
     if channel["configuration"] or any([n not in ["name","type","isolation","enabled","value"] for n in attrs]):
         fail("event channel configuration requires separate policy")
     if attrs.get("type") not in ["Admin","Operational"] or attrs.get("isolation","Application") not in ["Application","System"] or attrs.get("enabled","false") not in ["true","false"]:
         fail("unsupported changed event channel kind or policy")
     isolation = int(attrs.get("isolation","Application")=="System")
     return dict(Type=int(attrs["type"]=="Operational"),Isolation=isolation,Enabled=int(attrs.get("enabled","false")=="true"),OwningPublisher=guid,ChannelAccess=_SYSTEM_ACCESS if isolation else _APPLICATION_ACCESS)
+
+
+def _event_disabled_debug_session(system,control_set,name):
+    # Native EtwSessionForChannel: EventLog- prefix, slash normalization,
+    # uppercase UTF-16LE SHA256; first 16 bytes with byte 7 high nibble 5.
+    # Restrict casing to ASCII rather than guessing Windows Unicode mapping.
+    if not name or any([ord(name[i])<32 or ord(name[i])>126 for i in range(len(name))]):
+        fail("unsupported Debug channel session name")
+    session="EventLog-"+name.replace("/","-").replace(chr(92),"-")
+    h=binary.hex(digest(binary.encode(session.upper(),encoding="utf16le")))
+    guid=h[6:8]+h[4:6]+h[2:4]+h[:2]+"-"+h[10:12]+h[8:10]+"-5"+h[15:16]+h[12:14]+"-"+h[16:20]+"-"+h[20:32]
+    if system.find([control_set,"Control","WMI","Autologger",session])!=None:
+        fail("disabled Debug channel has existing dedicated session")
+    security=system.find([control_set,"Control","WMI","Security"])
+    if security!=None and any([n.lower().strip("{}") == guid for n in security.values]):
+        fail("disabled Debug channel has existing session security")
 
 
 def _event_expected_publisher(item):
@@ -241,6 +266,12 @@ def plan_update_event_registry(root,declarations,control_set):
                     values=current.values
                 else:
                     values=_event_channel_values(guid,channel)
+                    if values["Type"]==3:
+                        # Only a new disabled dedicated channel is established.
+                        # Never silently omit native deletion of existing state.
+                        if side!="after" or old!=None or current!=None:
+                            fail("Debug channel replacement requires separate policy")
+                        _event_disabled_debug_session(system,control_set,name)
                     if side=="before":
                         if current==None or current.values!=values or current.children:
                             fail("changed channel has unestablished current configuration")
@@ -258,6 +289,8 @@ def plan_update_event_registry(root,declarations,control_set):
                         for field,value in values.items():
                             _event_write(effects,"SOFTWARE",cparts,field,value)
                         report["channels"]+=1
+                if values["Type"]==3:
+                    continue
                 session="EventLog-System" if values["Isolation"] else "EventLog-Application"
                 pair=sessions.setdefault((session,guid),dict(before=0,after=0))
                 if values["Enabled"]:

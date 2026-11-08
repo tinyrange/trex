@@ -1232,7 +1232,7 @@ cache (`+0x4b0`). Do not replace these lists with all final-state relationships.
 Capability deployment current state first enumerates matching store packages
 with exact name, architecture and language filters (`CheckCapabilityMatch`,
 `0xa90d4`; empty fields are exact empty matches in this mode). The optional
-version filter compares the high version word. `QueryPackageIntendedState`'s
+version filter compares the low DWORD (build/revision) of the stored version. `QueryPackageIntendedState`'s
 boolean permits smart-pending lookup; it does **not** mean original-only state:
 when there is no smart-pending result it falls back to session target lookup.
 Enumeration considers staged and above, with CBSCDS controlling inclusion of
