@@ -5688,9 +5688,9 @@ Enumerates the bounded active IGW attribute tree of an allocated-page file throu
 
 ### `filesystem.ckd_scan`
 
-`filesystem.ckd_scan(file, max_tracks=16777216) -> record`
+`filesystem.ckd_scan(file, max_tracks=16777216, max_errors=0) -> record`
 
-Validates every physical CKD track and exact cylinder-aligned EOF through a portable file. Returns tracks, records, data_bytes, key_bytes and image_bytes; max_tracks bounds the scan. Reads free space and record zero too, and propagates source checksum errors. Does not claim logical dataset decoding.
+Validates every physical CKD track and exact cylinder-aligned EOF through a portable file. Returns tracks, records, data_bytes, key_bytes and image_bytes; max_tracks bounds the scan. Reads free space and record zero too, and propagates source checksum errors. Accepts uncompressed CKD_P370 and compressed CKD_C370 base images. With max_errors > 0 (at most 1M), every track implied by the cylinder-aligned image size is parsed and per-track failures are returned as errors (track, error) instead of stopping, failing only beyond max_errors; tracks counts successful tracks. Does not claim logical dataset decoding.
 
 ### `filesystem.ckd_vsam_records`
 
@@ -5703,6 +5703,48 @@ Reads a resolved immutable VSAM data component through portable files. ESDS pres
 `filesystem.ckd_vvr(data) -> record`
 
 Parses an observed primary Z VVDS volume record, returning component, cluster and catalog names, index/data flags, index root RBA, CI size, high-used and allocated byte bounds, control-area geometry, maximum record length and key position/length. Reports ci_addressed and converts qualified extended data-component CI counts to 64-bit byte bounds. Rejects incompatible headers, cell bounds and geometry; extended index roots and multivolume layout remain unsupported.
+
+### `filesystem.cms`
+
+`filesystem.cms(file, cylinder, cylinders=0, directory_origin=0, max_files=100000) -> record`
+
+Opens the CMS EDF minidisk whose CMS1 label is record 3 of the given cylinder's first track in a CKD_P370/CKD_C370 image. cylinders, when nonzero, is the authoritative extent (for example from a CP directory MDISK statement); the label must fit it, so stale or overlapping labels fail. directory_origin selects an alternate directory block. Returns id, block_size, blocks, used_blocks, cylinders, maximum_cylinders, blocks_per_track, directory_origin, created (YYMMDDHHMMSS), label, files and the methods read(index, max_bytes=64MiB) -> file and verify(max_bytes=64MiB) -> record(files, bytes, errors). files entries expose name, type, mode, record_format (F or V), record_length, records, data_blocks, origin, levels, flags, date, century and fst. read returns EBCDIC content unchanged: fixed files are records*record_length bytes with unallocated blocks as zeros; variable files are the 2-byte length-prefixed record stream. Pointer-tree record counts and displacements are verified. Minidisk discovery, CP directory parsing and code page conversion stay in Starlark.
+
+### `filesystem.cms_csllib`
+
+`filesystem.cms_csllib(file, max_entries=16000000, max_bytes=512MiB) -> record`
+
+Decodes a CMS callable services library (CSLLIB). Returns name, date, time, identifiers, header and segments (one module segment per routine, in the cms_module segment shape; each Extra holds the routine's descriptor record, and the final one also holds the library index).
+
+### `filesystem.cms_library`
+
+`filesystem.cms_library(file, max_entries=1000000, max_bytes=512MiB) -> record`
+
+Decodes a CMS LIBPDS library (MACLIB, TXTLIB and other F 80 libraries) from its fixed-format content, such as cms(...).read(index). Returns format, directory_bytes, directory_record, reserved (two header words kept uninterpreted) and entries with name, raw_name, flags, record, records and data. Several entries may name one member (for example TXTLIB entry points); a member ends before the next record beginning with X'61FFFF61'. Member data stays EBCDIC card images. DMSLIB-format TXTLIBs, LOADLIBs and CSLLIBs are rejected.
+
+### `filesystem.cms_loadlib`
+
+`filesystem.cms_loadlib(file, max_entries=1000000, max_bytes=512MiB) -> record`
+
+Decodes a variable-format CMS LOADLIB (OS PDS simulation). Returns directory_bytes, directory_record, header and entries with name, raw_name, alias, record, records, user_data (OS load module attributes) and data (the member's load module records as a 2-byte length-prefixed stream). The directory is read from its own records; record 1's truncated copy is ignored. Members end before the X'61FFFF61' delimiter.
+
+### `filesystem.cms_module`
+
+`filesystem.cms_module(file, record_format='V', max_entries=16000000, max_bytes=512MiB) -> record`
+
+Decodes CMS MODULE content such as cms(...).read(index). Fixed modules are one headerless image. Variable modules return segments, each with header, entry, origin, end, end2, image, loader_table (name, raw_name, words), relocation_count, relocation_width (0, 4 or 5), relocation_data (raw entries), extra (records after the relocation list such as service history, or trailer bytes when there is none), program_object (raw IEWPLMH trailer or None) and trailer. Core-image records must sum exactly to end-origin; further segments (as in CP's CPLOAD) are found structurally. Loader entry size (20 or 24) is chosen by validation and ambiguity is rejected.
+
+### `filesystem.cms_unpack`
+
+`filesystem.cms_unpack(file, record_format='F', max_bytes=256MiB) -> record`
+
+Decodes CMS packed (COPYFILE PACK) content, such as cms(...).read(index), from F 1024 container records (record_format='F') or variable container records (record_format='V'). Returns record_format (F or V), record_length, records, maximum_record and data: fixed records concatenated, or the 2-byte length-prefixed variable stream used by cms read. Verifies the end marker, whole fixed records, LRECL-bounded variable records and that the final container record's tail is blank or repeats the stream 1024 bytes earlier. Unobserved codes are rejected.
+
+### `filesystem.cp_directory`
+
+`filesystem.cp_directory(file, root=0, max_users=100000) -> record`
+
+Reads the z/VM CP object directory (DIRECTXA output) of a CKD volume, by default the active one selected by the VOL1 label (root overrides it with a page pointer: 2-byte cylinder, record, zero). Returns root, header, users, profiles (from the directory header; their devices are owned by SYSTEM) and groups (POSIX GID, name). Each user has name, flags, word (POSIX UID), device_count, block, devices (own), configuration (resolved chain: own then INCLUDEd profile devices), iucv (target, resource, message_limit, priority, ident_flags), namesave, distribution, account, acigroup, include, ipl, password_date, autolog, machine (XA, ESA, XC), nolog, classes (bit 31 = class A), storage_kb, maximum_storage_kb, maxconn, share_absolute, share_relative, posix_uid, posix_gid, posix_group and options (only option bits verified on media). Devices have address, type (X'80' MDISK, X'40' LINK, X'08' unit record, X'10' DEDICATE), owner, start, end, volume, mode, mode_code, password_flags, target_user, target_address, link_mode, device_type, spool_class, real_address and raw. Passwords stay encoded. The root's leaf chain, high keys, device counts, block owners and configuration order are verified; a superseded generation whose pages were reused fails. This is the directory CP runs with, which may differ from USER DIRECT source.
 
 ### `filesystem.diskdupe`
 
@@ -5850,6 +5892,12 @@ ones expose `allocated_size`, `initialized_size` and `runs` containing
 automatically reconstructed streams. This inspection remains usable when an
 unrelated invalid attribute list prevents a complete namespace read.
 
+### `filesystem.object_deck`
+
+`filesystem.object_deck(file, max_cards=10000000, max_bytes=256MiB) -> record`
+
+Decodes F 80 object card content (TEXT files, TXTLIB members). Returns symbols (module, name, raw_name, type, id, owner, address, value, flags, extended, kind) from ESD and XSD cards, ends, sections (SD/PC/CM sections assembled from TXT data with a symbol and data file), text_cards, relocations and other_cards (SYM, loader and control cards). TXT and RLD ESDIDs must be defined; ESDIDs restart after each END; XSD long names may span cards.
+
 ### `filesystem.ods2`
 
 `filesystem.ods2(file, maximum_entries=1M, maximum_depth=64) -> record`
@@ -5861,6 +5909,12 @@ Reads Files-11 ODS-2 version1 home blocks, index headers and versioned directory
 `filesystem.openbsd_label(file, label_offset=512) -> record`
 
 Reads a version-1 OpenBSD or legacy version-0 BSD disklabel at label_offset, an explicit byte offset in the complete disk. The default 512 is the common standalone amd64 label location; for an MBR image pass the OpenBSD partition offset plus 512. Validates both magic values, XOR checksum, partition count, 48-bit sector addresses, declared disk/partition bounds and FFS geometry. Legacy labels use 32-bit sector addresses and explicit fragment geometry rather than the OpenBSD packed fields. Sector size is declared by the label, including 4096-byte sectors. Returns sector_size, total_sectors, bound_start, bound_end, uid, type_name, pack_name and partitions. Partitions preserve index, a-z/A-Z name, absolute start_sector, sectors, type, block_size, fragment_size, cylinders_per_group and borrowed read-only data. Empty slots have data=None; overlapping raw c remains present. Requires the complete declared disk; does not guess offsets, mount, repair, construct images or accept other disklabel versions.
+
+### `filesystem.program_object`
+
+`filesystem.program_object(file) -> file`
+
+Validates a stored binder program object (IEWPLMH versions 2-5), such as a CMS module segment's program_object, and returns it as a file. Version 1 objects are rejected.
 
 ### `filesystem.raw_cd`
 

@@ -11,7 +11,7 @@ import (
 
 func init() {
 	auto.Register("ckd", 20, func(p []byte, r storage.Reader, o auto.Options) (auto.View, error) {
-		if len(p) < 8 || string(p[:8]) != "CKD_P370" {
+		if len(p) < 8 || (string(p[:8]) != "CKD_P370" && !IsCompressed(p)) {
 			return nil, auto.ErrNoMatch
 		}
 		d, e := Open(r)
