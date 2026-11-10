@@ -25,9 +25,9 @@ func TestUnlistedI386PointersBoundsAndMarkers(t *testing.T) {
 		{"directory marker excluded", 32, 0x10000100, 2, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			data, marker := make([]byte, 96), make([]byte, 96)
+			data, marker := make([]byte, 96), newPEMarker(96)
 			put32(data, test.off, test.value)
-			marker[test.off+3] = test.mark // Any of the four bytes can exclude it.
+			marker.set(test.off+3, test.mark) // Any of the four bytes can exclude it.
 			transformRelocations(data, layout, rift, 0x20000000, marker)
 			want := test.value
 			if test.maps {
@@ -37,7 +37,7 @@ func TestUnlistedI386PointersBoundsAndMarkers(t *testing.T) {
 				t.Fatalf("got %#x, want %#x", got, want)
 			}
 			if test.maps {
-				for _, mark := range marker[test.off : test.off+4] {
+				for _, mark := range marker.values()[test.off : test.off+4] {
 					if mark&1 == 0 {
 						t.Fatal("candidate not marked")
 					}
@@ -48,21 +48,21 @@ func TestUnlistedI386PointersBoundsAndMarkers(t *testing.T) {
 }
 
 func TestUnlistedI386PointersSkipClaimedCandidateWidth(t *testing.T) {
-	data, marker := make([]byte, 32), make([]byte, 32)
+	data, marker := make([]byte, 32), newPEMarker(32)
 	layout := peLayout{machine: 0x14c, imageBaseSize: 4, imageBase: 0x10000000, imageSize: 0x2000000, headerSize: 16}
 	put32(data, 16, 0x10001000)
 	data[20] = 0x10 // The overlapping value at17 would also qualify.
-	marker[16] = 2
+	marker.set(16, 2)
 	want := get32(data, 17)
 	transformRelocations(data, layout, riftTable{}, 0x20000000, marker)
-	if get32(data, 17) != want || marker[17] != 0 {
+	if get32(data, 17) != want || marker.get(17) != 0 {
 		t.Fatal("marked candidate did not consume four bytes")
 	}
 }
 
 func TestUnlistedI386PointersDoNotReplaceExplicitRelocationsOrAMD64(t *testing.T) {
 	for _, machine := range []uint16{0x14c, 0x8664} {
-		data, marker := make([]byte, 256), make([]byte, 256)
+		data, marker := make([]byte, 256), newPEMarker(256)
 		layout := peLayout{machine: machine, imageBaseSize: 4, imageBase: 0x10000000, imageSize: 0x2000, headerSize: 16,
 			sections: []peSection{{rva: 0x1000, rawStart: 16, rawSize: 240, virtualSize: 240}},
 		}

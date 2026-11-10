@@ -35,7 +35,7 @@ def plan_update_media_categories(root, jobs, ks_source, subject_group):
                 fail('KS registration lacks explicit ks.inf include')
             requested.append((job['inf_source'],section))
     if not requested: return None
-    names=root.path_names(lower=True)
+    names=root.path_index(lower=True)
     ks_path=names.get('/windows/inf/ks.inf')
     if ks_path==None or digest(root.find(ks_path))!=digest(ks_source):
         fail('KS source differs from admitted baseline INF')
@@ -65,7 +65,7 @@ def plan_update_media_categories(root, jobs, ks_source, subject_group):
             patches.append({k:v for k,v in patch.items() if k!='hive'})
             if hive.find(key)==None: keys[key.lower()]=dict(key=key,security=descriptor)
     if not patches: fail('requested KS registration has no MediaCategories declarations')
-    file=windows.hive_from_patches('SYSTEM',patches,keys=list(keys.values()),source=source)
+    file=windows.patch_hive(source,patches,keys=list(keys.values()))
     after=windows.hive(file)
     for key in keys.values():
         if windows.security_descriptor_parts(after.find(key['key']).security)!=windows.security_descriptor_parts(descriptor):

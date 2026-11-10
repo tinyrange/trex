@@ -4,18 +4,35 @@ import (
 	"fmt"
 	"github.com/tinyrange/trex/windows/catalog"
 	"go.starlark.net/starlark"
+	"strings"
 )
 
 func catalogEntriesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
-	if err := starlark.UnpackArgs("catalog_entries", args, kwargs, "file", &value); err != nil {
+	var nameValue starlark.Value = starlark.None
+	if err := starlark.UnpackArgs("catalog_entries", args, kwargs, "file", &value, "name_value?", &nameValue); err != nil {
 		return nil, err
+	}
+	filter := ""
+	if nameValue != starlark.None {
+		var ok bool
+		filter, ok = starlark.AsString(nameValue)
+		if !ok || filter == "" {
+			return nil, fmt.Errorf("catalog_entries: name_value must be a nonempty string or None")
+		}
+		filter = strings.ToLower(filter)
 	}
 	data, err := bytesForBinaryValueLimited(value, 64<<20)
 	if err != nil {
 		return nil, err
 	}
-	version, entries, err := catalog.ParseEntries(data)
+	var version int
+	var entries []catalog.Entry
+	if nameValue == starlark.None {
+		version, entries, err = catalog.ParseEntries(data)
+	} else {
+		version, entries, err = catalog.ParseEntriesWithNameValue(data, filter)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("catalog_entries: %w", err)
 	}

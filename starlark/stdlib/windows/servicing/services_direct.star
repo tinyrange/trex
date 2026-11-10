@@ -37,9 +37,7 @@ def _children(n,name):
     return [c for c in n.children if c.namespace==_NS and c.name==name]
 
 def _walk(n,name):
-    found=[n] if n.namespace==_NS and n.name==name else []
-    for c in n.children: found.extend(_walk(c,name))
-    return found
+    return n.select_descendants([name], namespace=_NS, include_self=True)[name]
 
 def _leaf(value):
     if not value or value in ['.','..'] or any([c in value for c in ['/',chr(92),chr(0),'$(']]):
@@ -60,11 +58,12 @@ def collect_direct_services(runtime):
         for side,document in transition.get('documents',{}).items():
             root=document[1]
             identity=windows.csi_identity(transition['component_identities'][side])
-            declarations=_walk(root,'serviceData')
+            nodes=root.select_descendants(['serviceData','securityDescriptorDefinition','categoryMembership'], namespace=_NS, include_self=True)
+            declarations=nodes['serviceData']
             if declarations and identity.processor_architecture not in ['amd64','wow64','x86']:
                 fail('service declaration requires explicit target architecture')
             definitions={}
-            for d in _walk(root,'securityDescriptorDefinition'):
+            for d in nodes['securityDescriptorDefinition']:
                 a=_attrs(d)
                 if a['name'] in definitions and definitions[a['name']]!=a['sddl']:
                     fail('conflicting service security definition')
@@ -88,7 +87,7 @@ def collect_direct_services(runtime):
                 record=dict(attrs=attrs,children=children,security=security,architecture=identity.processor_architecture,
                     signature=json.encode((sorted(attrs.items()),[_shape(c) for c in n.children],security)))
                 services[side].setdefault(name,[]).append(record)
-            for membership in _walk(root,'categoryMembership'):
+            for membership in nodes['categoryMembership']:
                 ids=_children(membership,'id')
                 if len(ids)!=1 or _attrs(ids[0]).get('typeName')!='SvcHost': continue
                 category=_attrs(ids[0])
@@ -192,7 +191,7 @@ def plan_direct_services(root,runtime):
     """Plan qualified service/group changes against actual SYSTEM and SOFTWARE state, preserving unrelated configuration and security."""
     declarations=collect_direct_services(runtime)
     sources={h:root.find(p) for h,p in [('SYSTEM',_SYSTEM),('SOFTWARE',_SOFTWARE)]}
-    hives={h:windows.hive(f) for h,f in sources.items()}
+    hives={h:windows.hive(f, snapshot=True) for h,f in sources.items()}
     current=hives['SYSTEM'].find('/Select').values['Current']
     if type(current)!='int' or current<1 or current>999: fail('invalid service control set')
     prefix='/ControlSet'+('00'+str(current))[-3:]+'/Services/'

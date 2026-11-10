@@ -146,11 +146,15 @@ def test_explicit_clr_architecture_and_no_copy():
     for side in ["before", "after"]:
         runtime["transitions"][0][side] = runtime["transitions"][0][side].replace('processorArchitecture="msil"', 'processorArchitecture="amd64"').replace('<gac ', '<gac xmlns="urn:schemas-microsoft-com:asm.v3" clrarch="msil" fileCopy="false" ')
     raises(gac["plan_update_gac"], args=[root, runtime, stems], message="pre-published")
+    raises(gac["plan_update_gac"], args=[root, runtime, stems], kwargs=dict(audit=False), message="pre-published")
     equal(root.find(cache+"/Example.dll").read(), "old")
     for name in ["Example.dll", "data.json"]:
         root.remove(cache+"/"+name)
         root.hardlink("/Windows/WinSxS/exact/"+name, cache+"/"+name)
     plans = gac["plan_update_gac"](root, runtime, stems)
+    lazy = gac["plan_update_gac"](root, runtime, stems, audit=False)
+    equal(all([p["shared"] and not p["audited"] for p in lazy]), True)
+    equal(gac["apply_update_gac"](root, lazy, audit=False)["verified_files"], 2)
     epochs = [root.get_metadata(p["path"]).write_order for p in plans]
     result = gac["apply_update_gac"](root, plans)
     equal(result["refreshed_files"], 0)
@@ -165,7 +169,31 @@ def test_explicit_clr_architecture_and_no_copy():
         original = 'clrarch="msil"' if field == "clrarch" else 'fileCopy="false"'
         raises(gac["_managed_declaration"], args=[manifest.replace(original, field+'="'+value+'"')], message=error)
 
+def test_non_audit_publication_is_lazy_and_epoch_guarded():
+    root, runtime, stems, cache = _fixture()
+    reads = clock.read_profiler()
+    for path in list(root.files):
+        root.write(path, reads.file(root.find(path), path))
+    plans = gac["plan_update_gac"](root, runtime, stems, audit=False)
+    equal(reads.snapshot()["total"]["calls"], 0)
+    raises(gac["apply_update_gac"], args=[root, plans], message="requires audited planning")
+    root.write(plans[1]["source"], "concurrent source replacement")
+    raises(gac["apply_update_gac"], args=[root, plans], kwargs=dict(audit=False), message="path changed")
+    equal(root.find(cache+"/Example.dll").read(), "old")
+    root, runtime, stems, cache = _fixture()
+    reads = clock.read_profiler()
+    for path in list(root.files):
+        root.write(path, reads.file(root.find(path), path))
+    plans = gac["plan_update_gac"](root, runtime, stems, audit=False)
+    gac["apply_update_gac"](root, plans, audit=False)
+    equal(reads.snapshot()["total"]["calls"], 0)
+    equal(root.find(cache+"/Example.dll").read(), "new")
+    equal(root.find(cache+"/data.json").read(), "new companion")
+    for p in plans:
+        equal(root.get_metadata(p["path"]).hard_link_id, root.get_metadata(p["source"]).hard_link_id)
+
 TEST_SUITE = suite("nt6_update_gac", [
+    case("lazy_epoch_guarded_publication", test_non_audit_publication_is_lazy_and_epoch_guarded),
     case("explicit_clr_no_copy", test_explicit_clr_architecture_and_no_copy),
     case("companion_addition", test_companion_addition_is_hash_guarded_and_atomic),
     case("legacy_cache", test_legacy_cache_is_distinct_and_cannot_cross_clr_stores),

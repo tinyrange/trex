@@ -37,11 +37,13 @@ func cbsUpdateIndexRecord(index *uup.CBSUpdateStateIndex) starlark.Value {
 	return &cbsIndexValue{index: index}
 }
 func (v *cbsIndexValue) AttrNames() []string {
-	return []string{"ordinary_population", "package_state", "package_states", "with_components", "state", "applicable", "with_updates", "with_states", "package_state_vector"}
+	return []string{"initial_component_states", "ordinary_population", "package_state", "package_states", "with_components", "state", "applicable", "with_updates", "with_states", "package_state_vector"}
 }
 func (v *cbsIndexValue) Attr(name string) (starlark.Value, error) {
 	index := v.index
 	switch name {
+	case "initial_component_states":
+		return cbsInitialComponentsBuiltin(index), nil
 	case "ordinary_population":
 		return cbsPopulationBuiltin(index), nil
 	case "package_state":

@@ -79,7 +79,7 @@ func unpackAdditionalMSUs(value *starlark.Dict, servicingOnly bool) ([]additiona
 
 func openAdditionalStage(input additionalCabinet, cache *uup.StageMetadataCache) (*uup.CumulativeStage, error) {
 	if !input.msu {
-		return uup.OpenCanonicalStage(input.feature, input.file)
+		return uup.OpenCanonicalStageCache(input.feature, input.file, cache)
 	}
 	// Catalog MSUs use an outer WIM containing one express metadata WIM and
 	// one PSF. Ignore deployment helpers, but never silently choose between

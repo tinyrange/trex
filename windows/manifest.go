@@ -49,7 +49,7 @@ func (v *assemblyManifestValue) Freeze() {
 	}
 }
 func (v *assemblyManifestValue) AttrNames() []string {
-	return []string{"deployment", "files", "identity", "references", "registry_keys"}
+	return []string{"deployment", "files", "identity", "references", "registry_keys", "top_level", "file_elements"}
 }
 func (v *assemblyManifestValue) Attr(name string) (starlark.Value, error) {
 	v.mu.Lock()
@@ -71,6 +71,16 @@ func (v *assemblyManifestValue) Attr(name string) (starlark.Value, error) {
 }
 func assemblyManifestProjection(manifest *uup.AssemblyManifest, name string) starlark.Value {
 	switch name {
+	case "top_level", "file_elements":
+		names := manifest.TopLevel
+		if name == "file_elements" {
+			names = manifest.FileElements
+		}
+		values := make([]starlark.Value, len(names))
+		for i, name := range names {
+			values[i] = starlark.String(name)
+		}
+		return starlark.NewList(values)
 	case "identity":
 		attributes := make([]starlark.Value, len(manifest.Identity.Attributes))
 		for index, attribute := range manifest.Identity.Attributes {

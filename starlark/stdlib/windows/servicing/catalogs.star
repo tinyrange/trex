@@ -1,7 +1,7 @@
-"""Signed package catalog preparation and candidate publication.
+"""Package catalog preparation and candidate publication.
 
-Trust is qualified against the unchanged baseline ROOT inventory and signed
-MUM membership, not a fabricated database or a blanket Windows trust claim.
+Optional signature auditing qualifies trust against unchanged ROOT anchors.
+MUM membership is always checked; neither mode fabricates a trust verdict.
 """
 load("@stdlib//windows/servicing:package_store.star", "package_metadata_executions")
 load("@stdlib//windows/servicing:package_security.star", "new_package_manifest_security", "new_package_catalog_security")
@@ -19,8 +19,12 @@ def _replace(root, path, file, names, new_security=None):
         root.set_security(actual, security)
     names[path.lower()] = actual
 
-def prepare_package_catalogs(root, source, features, population, manifests=None, while_opening=None):
-    """Capture signed catalog/MUM evidence without changing the candidate tree."""
+def prepare_package_catalogs(root, source, features, population, manifests=None, while_opening=None, audit=True):
+    """Capture catalog/MUM bytes and membership without changing the tree.
+
+    Signature/timestamp-chain auditing defaults on. Explicit non-audit mode
+    requires caller-admitted transport sources and never asserts trust.
+    """
     indexes = {}
     feature_by_package = {}
     feature_indexes = {}
@@ -46,16 +50,18 @@ def prepare_package_catalogs(root, source, features, population, manifests=None,
     prepared = []
     resident = 0
     memberships = 0
-    software = windows.hive(root.find("/Windows/System32/config/SOFTWARE"))
-    anchors = software.find("/Microsoft/SystemCertificates/ROOT/Certificates")
-    if anchors == None or not anchors.children or len(anchors.children) > 64:
-        fail("catalog validation requires the bounded unchanged ROOT inventory")
     roots = []
-    for key in anchors.children:
-        certificate = windows.serialized_certificate(key.values["Blob"]).certificate
-        if certificate.sha1 != key.name.lower():
-            fail("catalog ROOT key disagrees with its certificate fingerprint")
-        roots.append(certificate.der)
+    if audit:
+        software = windows.hive(root.find("/Windows/System32/config/SOFTWARE"))
+        anchors = software.find("/Microsoft/SystemCertificates/ROOT/Certificates")
+        if anchors == None or not anchors.children or len(anchors.children) > 64:
+            fail("catalog validation requires the bounded unchanged ROOT inventory")
+        roots = []
+        for key in anchors.children:
+            certificate = windows.serialized_certificate(key.values["Blob"]).certificate
+            if certificate.sha1 != key.name.lower():
+                fail("catalog ROOT key disagrees with its certificate fingerprint")
+            roots.append(certificate.der)
     # Only immutable source readers run in parallel. Registry planning stays on
     # this caller thread and reads unchanged baseline hives. Join every worker
     # before validating signatures or publishing any catalog/file effects.
@@ -99,27 +105,28 @@ def prepare_package_catalogs(root, source, features, population, manifests=None,
         # Transport WIMs use large solid LZMS chunks: retaining tiny lazy CAT
         # readers makes every later CSI/index/hash pass decompress those chunks
         # again after eviction. This is owned in-memory content, not a host
-        # intermediate or a trust shortcut; all checks below still run.
+        # intermediate. Membership checks and requested audits still run.
         if catalog.size > 64 << 20:
             fail("update catalog exceeds the native parser bound")
         catalog = windows.catalog(catalog)
         if manifest.size > 16 << 20:
             fail("update package manifest exceeds the native parser bound")
         manifest = binary.concat([manifest.bytes()])
-        signature = windows.catalog_signature(catalog)
-        if signature.timestamp == None:
-            fail("update catalog has no authenticated timestamp")
-        timestamp = signature.timestamp
-        chain_key = (signature.signer, tuple(signature.certificates), timestamp.signer, tuple(timestamp.certificates), timestamp.unix)
-        if chain_key not in chains:
-            windows.certificate_chain(timestamp.signer, roots, timestamp.certificates, timestamp.unix, "timestamping")
-            windows.certificate_chain(signature.signer, roots, signature.certificates, timestamp.unix, "code_signing")
-            chains[chain_key] = True
+        if audit:
+            signature = windows.catalog_signature(catalog)
+            if signature.timestamp == None:
+                fail("update catalog has no authenticated timestamp")
+            timestamp = signature.timestamp
+            chain_key = (signature.signer, tuple(signature.certificates), timestamp.signer, tuple(timestamp.certificates), timestamp.unix)
+            if chain_key not in chains:
+                windows.certificate_chain(timestamp.signer, roots, timestamp.certificates, timestamp.unix, "timestamping")
+                windows.certificate_chain(signature.signer, roots, signature.certificates, timestamp.unix, "code_signing")
+                chains[chain_key] = True
         if digest(manifest, algorithm="sha256") not in windows.catalog_index(catalog)["sha256"]:
             fail("resolved MUM is outside its own signed catalog: " + package)
         memberships += 1
         prepared.append((package, manifest, catalog))
-    summary = dict(catalogs=len(prepared), resident_catalogs=resident, packages=sorted(selected), mum_memberships=memberships, chain_checks=len(chains), package_action_additions=sorted(wrappers), catalog_database_rebuilt=False, validation="signed MUM membership and authenticated timestamp certificate paths to unchanged ROOT; not full Windows trust-provider policy")
+    summary = dict(catalogs=len(prepared), resident_catalogs=resident, packages=sorted(selected), mum_memberships=memberships, chain_checks=len(chains), package_action_additions=sorted(wrappers), catalog_database_rebuilt=False, signature_audit="completed" if audit else "not-performed", validation="MUM membership; signature and timestamp chains audited" if audit else "MUM membership only; signature and chain audit not performed")
     return dict(files=prepared, summary=summary)
 
 def apply_package_catalogs(root, source, features, population, prepared=None):
@@ -132,13 +139,18 @@ def apply_package_catalogs(root, source, features, population, prepared=None):
     """
     if prepared == None:
         prepared = prepare_package_catalogs(root, source, features, population)
-    # All signatures, chains and MUM memberships have passed. Read-only
+    # MUM membership and requested audits have passed. Read-only
     # planning (and any explicit payload audit) has finished before publication.
     names = {p.lower(): p for p in root.files}
     manifest_security = new_package_manifest_security(root)
     installed = {a.package.lower():True for a in population.deployment_actions(changed_only=True) if a.action == 3}
     catalog_security = {flag:new_package_catalog_security(root, flag) for flag in [False, True]}
-    for package, manifest, catalog in prepared["files"]:
+    # All planning and admission checks have finished. Publish independently
+    # owned bytes, not parsed catalogs and their membership/signature indexes.
+    # A batch shares one bounded decoded cache across the entire metadata set.
+    packed = binary.snapshot_many([file for _, manifest, catalog in prepared["files"] for file in [manifest, catalog]], maximum=512<<20, cache_bytes=1<<20)
+    for i, (package, _, _) in enumerate(prepared["files"]):
+        manifest, catalog = packed[2*i], packed[2*i+1]
         _replace(root, "/Windows/servicing/Packages/" + package + ".mum", manifest, names, new_security=manifest_security)
         path = "/Windows/servicing/Packages/" + package + ".cat"
         new = path.lower() not in names
@@ -152,6 +164,6 @@ def apply_package_catalogs(root, source, features, population, prepared=None):
             names[target.lower()] = actual
         else:
             _replace(root, target, catalog, names)
-    print("signed package catalogs installed", prepared["summary"]["catalogs"])
+    print("package catalogs installed", prepared["summary"]["catalogs"])
     return prepared["summary"]
 

@@ -52,7 +52,7 @@ def plan_resident_package_dispositions(software, population):
     Only the observed installed-to-superseded transition is supported here;
     removal/reinstallation requires its own effects and must fail closed.
     """
-    hive = windows.hive(software)
+    hive = windows.hive(software, snapshot=True)
     registered = {n.name.lower(): n for n in hive.find(_CBS + "Packages").children}
     patches, deleted, audit = [], [], []
     for execution in population.selected_executions(list(registered)):
@@ -87,11 +87,12 @@ def plan_resident_package_dispositions(software, population):
     return dict(patches=patches, deleted_values=deleted, dispositions=audit)
 
 
-def publish_package_metadata(root, base, image, closure, population, analysis, catalogs, payloads=None):
+def publish_package_metadata(root, base, image, closure, population, analysis, catalogs, payloads=None, audit=True):
     """Publish new packages with their admitted stage/install dispositions.
 
     Called after file, registry, installer and CSI effects have been applied.
-    Audit exact signed metadata and emitted composition before publication.
+    Exact signed MUM membership is mandatory. Optional audit mode also reads
+    back emitted composition, payload bytes and serialized dispositions.
     Unchanged native packages are preserved; explicit resident transitions
     are persisted alongside new packages. Unsupported dispositions fail
     without writing a conservative placeholder into Windows' registry.
@@ -100,81 +101,79 @@ def publish_package_metadata(root, base, image, closure, population, analysis, c
         fail("resolved metadata requires complete signed MUM catalog membership")
     software_path = "/Windows/System32/config/SOFTWARE"
     software_file = root.find(software_path)
-    software = windows.hive(software_file)
+    software = windows.hive(software_file, snapshot=True)
     registered = {k.name.lower(): k for k in software.find(_CBS + "Packages").children}
     files = {name.lower(): file for name,file in closure["files"].items()}
     selected = {name.lower(): name for name in catalogs["packages"] if name.lower() not in registered}
     executions = {e.package.lower(): e for e in population.selected_executions(list(selected))}
-    components_hive = windows.hive(root.find("/Windows/System32/config/COMPONENTS"))
-    components = {str(k.values["identity"]).lower(): k for k in components_hive.find("/DerivedData/Components").children}
-    deployments = {k.name.lower(): k for k in components_hive.find("/CanonicalData/Deployments").children}
-    verified = {}
-    staged_manifests = _staged_manifest_sources(payloads)
-    member_catalogs = {}
-    encoded_new = 0
-    encoded_resident = 0
-    pins = 0
-    parsed_packages = {}
-    for action in population.deployment_actions(changed_only=True):
-        if not action.stage or action.package.lower() not in selected:
-            continue
-        identity = _identity_bytes(action.deployment)
-        key = str(identity).lower()
-        deployment_name = windows.csi_deployment_key(identity)
-        deployment = deployments.get(deployment_name.lower())
-        package = action.package.lower()
-        if package not in parsed_packages: parsed_packages[package] = windows.cbs_manifest(files[package])
-        data = windows.cbs_deployment_source_data(parsed_packages[package], action.update)
-        source = windows.cbs_deployment_source(data)
-        values = {n.lower(): v for n,v in deployment.values.items()} if deployment != None else {}
-        pin = values.get(("p!" + source.source_key).lower())
-        if pin == None or windows.cbs_deployment_source(pin).primary != source.primary:
-            fail("resolved package lacks its emitted exact manifest pin: " + action.package)
-        if key not in analysis["compositions"]:
-            fail("resolved source lacks its complete transitive composition")
-        if action.package.lower() not in member_catalogs:
-            file = root.find("/Windows/servicing/Packages/" + action.package + ".cat")
-            member_catalogs[action.package.lower()] = {h: True for h in windows.catalog_index(file)["sha256"]}
-        catalog_members = member_catalogs[action.package.lower()]
-        for member in analysis["compositions"][key]:
-            exact = str(member.identity).lower()
-            component = components.get(exact)
-            if component == None:
-                fail("resolved composition member is not persisted")
-            component_values = {n.lower(): v for n,v in component.values.items()}
-            if ("c!" + deployment_name).lower() not in component_values:
-                fail("resolved composition lacks its emitted ownership backlink")
-            if component_values.get("s256h") not in catalog_members:
-                fail("resolved transitive manifest is outside its source package catalog: " + action.package)
-            if exact in verified:
+    verified, encoded_new, encoded_resident, pins = {}, 0, 0, 0
+    if audit:
+        components_hive = windows.hive(root.find("/Windows/System32/config/COMPONENTS"))
+        components = {str(k.values["identity"]).lower(): k for k in components_hive.find("/DerivedData/Components").children}
+        deployments = {k.name.lower(): k for k in components_hive.find("/CanonicalData/Deployments").children}
+        staged_manifests = _staged_manifest_sources(payloads)
+        member_catalogs = {}
+        parsed_packages = {}
+        for action in population.deployment_actions(changed_only=True):
+            if not action.stage or action.package.lower() not in selected:
                 continue
-            expected = analysis["manifests"].get(exact) or analysis["resident_manifests"].get(exact)
-            if expected == None or digest(expected, algorithm="sha256") != component_values.get("s256h"):
-                fail("resolved manifest disagrees with emitted component digest")
-            path = "/Windows/WinSxS/Manifests/" + component.name + ".manifest"
-            actual = root.find(path)
-            if actual == None:
-                fail("resolved manifest is not present in the actual image")
-            if actual.size >= 4 and actual.bytes(0,4) == b"DCM\x01":
-                staged = staged_manifests.get(exact)
-                if staged != None:
-                    # The native exact staging plan retains the encoded manifest
-                    # and derives this digest by decoding that same source with
-                    # the stage's WCP dictionary. Bind BOTH forms; never compare
-                    # encoded DCM bytes directly to the decoded catalog digest.
-                    if staged["sha256"] != component_values["s256h"] or digest(actual,algorithm="sha256") != digest(staged["plan"].open(staged["index"]),algorithm="sha256"):
-                        fail("actual encoded manifest differs from its validated exact staging source: " + path)
-                    encoded_new += 1
-                else:
-                    # Resident DCM is bound to the unchanged base and dictionary,
-                    # whose decoded exact identity/digest analysis validated.
-                    if image + path not in base or digest(actual,algorithm="sha256") != digest(base[image + path],algorithm="sha256"):
-                        fail("resolved compressed manifest differs from validated resident source: " + path)
-                    encoded_resident += 1
-            elif digest(actual, algorithm="sha256") != component_values["s256h"]:
-                fail("actual resolved manifest bytes disagree with CSI metadata")
-            verified[exact] = True
-        pins += 1
+            identity = _identity_bytes(action.deployment)
+            key = str(identity).lower()
+            deployment_name = windows.csi_deployment_key(identity)
+            deployment = deployments.get(deployment_name.lower())
+            package = action.package.lower()
+            if package not in parsed_packages: parsed_packages[package] = windows.cbs_manifest(files[package])
+            data = windows.cbs_deployment_source_data(parsed_packages[package], action.update)
+            source = windows.cbs_deployment_source(data)
+            values = {n.lower(): v for n,v in deployment.values.items()} if deployment != None else {}
+            pin = values.get(("p!" + source.source_key).lower())
+            if pin == None or windows.cbs_deployment_source(pin).primary != source.primary:
+                fail("resolved package lacks its emitted exact manifest pin: " + action.package)
+            if key not in analysis["compositions"]:
+                fail("resolved source lacks its complete transitive composition")
+            if action.package.lower() not in member_catalogs:
+                file = root.find("/Windows/servicing/Packages/" + action.package + ".cat")
+                member_catalogs[action.package.lower()] = {h: True for h in windows.catalog_index(file)["sha256"]}
+            catalog_members = member_catalogs[action.package.lower()]
+            for member in analysis["compositions"][key]:
+                exact = str(member.identity).lower()
+                component = components.get(exact)
+                if component == None:
+                    fail("resolved composition member is not persisted")
+                component_values = {n.lower(): v for n,v in component.values.items()}
+                if ("c!" + deployment_name).lower() not in component_values:
+                    fail("resolved composition lacks its emitted ownership backlink")
+                if component_values.get("s256h") not in catalog_members:
+                    fail("resolved transitive manifest is outside its source package catalog: " + action.package)
+                if exact in verified:
+                    continue
+                expected = analysis["manifests"].get(exact) or analysis["resident_manifests"].get(exact)
+                if expected == None or digest(expected, algorithm="sha256") != component_values.get("s256h"):
+                    fail("resolved manifest disagrees with emitted component digest")
+                path = "/Windows/WinSxS/Manifests/" + component.name + ".manifest"
+                actual = root.find(path)
+                if actual == None:
+                    fail("resolved manifest is not present in the actual image")
+                if actual.size >= 4 and actual.bytes(0,4) == b"DCM\x01":
+                    staged = staged_manifests.get(exact)
+                    if staged != None:
+                        # The native exact staging plan retains the encoded manifest
+                        # and derives this digest by decoding that same source with
+                        # the stage's WCP dictionary. Bind BOTH forms; never compare
+                        # encoded DCM bytes directly to the decoded catalog digest.
+                        if staged["sha256"] != component_values["s256h"] or digest(actual,algorithm="sha256") != digest(staged["plan"].open(staged["index"]),algorithm="sha256"):
+                            fail("actual encoded manifest differs from its validated exact staging source: " + path)
+                        encoded_new += 1
+                    else:
+                        # Resident DCM is bound to the unchanged base and dictionary,
+                        # whose decoded exact identity/digest analysis validated.
+                        if image + path not in base or digest(actual,algorithm="sha256") != digest(base[image + path],algorithm="sha256"):
+                            fail("resolved compressed manifest differs from validated resident source: " + path)
+                        encoded_resident += 1
+                elif digest(actual, algorithm="sha256") != component_values["s256h"]:
+                    fail("actual resolved manifest bytes disagree with CSI metadata")
+                verified[exact] = True
+            pins += 1
     patches = []
     names = []
     owners_count = 0
@@ -227,11 +226,12 @@ def publish_package_metadata(root, base, image, closure, population, analysis, c
     patches.extend(resident["patches"])
     state_audit.extend(resident["dispositions"])
     updated = windows.patch_hive(software_file, patches, delete_values=resident["deleted_values"])
-    written = windows.hive(updated)
-    written_packages = {k.name.lower(): k for k in written.find(_CBS + "Packages").children}
-    for name in names:
-        key = written_packages.get(name.lower())
-        if key == None or key.values.get("CurrentState") != dispositions[name.lower()] or key.values.get("InstallName") != name + ".mum":
-            fail("serialized package disposition is missing")
+    if audit:
+        written = windows.hive(updated, snapshot=True)
+        written_packages = {k.name.lower(): k for k in written.find(_CBS + "Packages").children}
+        for name in names:
+            key = written_packages.get(name.lower())
+            if key == None or key.values.get("CurrentState") != dispositions[name.lower()] or key.values.get("InstallName") != name + ".mum":
+                fail("serialized package disposition is missing")
     root.write(software_path,updated)
-    return dict(packages=len(names),resident_transitions=len(resident["dispositions"]),manifest_pins=pins,verified_manifests=len(verified),encoded_new=encoded_new,encoded_resident=encoded_resident,published_owners=owners_count,dispositions=state_audit,policy="published admitted dispositions after construction; validation uncertainty is not a CBS state")
+    return dict(readback_audit="completed" if audit else "not-performed",packages=len(names),resident_transitions=len(resident["dispositions"]),manifest_pins=pins,verified_manifests=len(verified),encoded_new=encoded_new,encoded_resident=encoded_resident,published_owners=owners_count,dispositions=state_audit,policy="published admitted dispositions after construction; validation uncertainty is not a CBS state")

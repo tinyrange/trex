@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bytecache "github.com/tinyrange/trex/storage/cache"
@@ -15,10 +16,14 @@ import (
 const maximumStageCacheEntry = (512 << 20) + (1 << 20)
 
 // stageContentCache bounds compressed targets, not their decoded sizes. A
-// random disk read only inflates the requested 64-KiB chunks. Serialize misses
-// so concurrent disk requests cannot each allocate a full delta working set.
+// random disk read only inflates the requested 64-KiB chunks. At most two small
+// targets reconstruct concurrently; large targets retain exclusive admission.
 type stageContentCache struct {
 	mu          sync.Mutex
+	loadMu      sync.RWMutex
+	smallLoads  chan struct{}
+	flights     map[bytecache.Key]*stageContentFlight
+	nextSource  atomic.Uint64
 	codec       *retainedFileStore
 	limit, used int64
 	entries     map[bytecache.Key]*list.Element
@@ -26,6 +31,12 @@ type stageContentCache struct {
 	oversized   *stageContentEntry
 	stats       bytecache.Stats
 }
+type stageContentFlight struct {
+	done chan struct{}
+	file starfile.File
+	err  error
+}
+
 type stageContentEntry struct {
 	key    bytecache.Key
 	file   starfile.File
@@ -33,45 +44,88 @@ type stageContentEntry struct {
 }
 
 func newStageContentCache(limit int64) (*stageContentCache, error) {
-	codec, err := newRetainedFileStore()
+	codec, err := starfile.NewPackedFileStore(16<<20, false)
 	if err != nil {
 		return nil, err
 	}
 	// The LRU, not a permanent deduplication index, owns encoded chunks.
-	codec.chunks = nil
-	return &stageContentCache{codec: codec, limit: limit, entries: make(map[bytecache.Key]*list.Element)}, nil
+	return &stageContentCache{codec: codec, limit: limit, entries: make(map[bytecache.Key]*list.Element), smallLoads: make(chan struct{}, 2), flights: make(map[bytecache.Key]*stageContentFlight)}, nil
 }
-func (c *stageContentCache) get(r *reopenedStageReader) (starfile.File, error) {
+
+// lookup updates recency under the short metadata lock. It never waits for
+// reconstruction of another file; completed immutable files remain readable.
+func (c *stageContentCache) lookup(key bytecache.Key) starfile.File {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if entry := c.entries[r.key]; entry != nil {
+	return c.lookupLocked(key)
+}
+func (c *stageContentCache) lookupLocked(key bytecache.Key) starfile.File {
+	if entry := c.entries[key]; entry != nil {
 		c.stats.Hits++
 		c.lru.MoveToFront(entry)
-		return entry.Value.(stageContentEntry).file, nil
+		return entry.Value.(stageContentEntry).file
 	}
-	if entry := c.oversized; entry != nil && entry.key == r.key {
+	if entry := c.oversized; entry != nil && entry.key == key {
 		c.stats.Hits++
-		return entry.file, nil
+		return entry.file
 	}
+	return nil
+}
+func (c *stageContentCache) get(r *reopenedStageReader) (file starfile.File, err error) {
+	c.mu.Lock()
+	if file := c.lookupLocked(r.key); file != nil {
+		c.mu.Unlock()
+		return file, nil
+	}
+	if flight := c.flights[r.key]; flight != nil {
+		c.mu.Unlock()
+		<-flight.done
+		return flight.file, flight.err
+	}
+	flight := &stageContentFlight{done: make(chan struct{})}
+	c.flights[r.key] = flight
+	c.mu.Unlock()
+	// Publish even uncached results and errors to every joined reader. Eviction
+	// cannot cause a waiter to rebuild a result that is already in flight.
+	defer func() {
+		c.mu.Lock()
+		flight.file, flight.err = file, err
+		delete(c.flights, r.key)
+		close(flight.done)
+		c.mu.Unlock()
+	}()
+	if r.size < 8<<20 {
+		c.smallLoads <- struct{}{}
+		c.loadMu.RLock()
+		defer func() { c.loadMu.RUnlock(); <-c.smallLoads }()
+	} else {
+		c.loadMu.Lock()
+		defer c.loadMu.Unlock()
+	}
+	c.mu.Lock()
 	c.stats.Misses++
+	c.mu.Unlock()
 	started := time.Now()
-	defer func() { c.stats.LoadNanoseconds += uint64(time.Since(started)) }()
+	defer func() {
+		c.mu.Lock()
+		c.stats.LoadNanoseconds += uint64(time.Since(started))
+		c.mu.Unlock()
+	}()
 	data, err := loadStageContent(r)
 	if err != nil {
 		return nil, err
 	}
-	packed, err := c.codec.pack("staged content", data)
+	packed, err := c.codec.Pack("staged content", data)
 	if err != nil {
 		return nil, err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.stats.Loads++
 	c.stats.LoadedBytes += uint64(len(data))
 	weight := packed.Size() + 128
 	if chunks, ok := packed.(*retainedFile); ok {
-		weight = 128 + int64(len(chunks.chunks))*32
-		for _, chunk := range chunks.chunks {
-			weight += int64(len(chunk.data))
-		}
+		weight = chunks.RetainedBytes()
 	}
 	// Retain one oversized target separately from the ordinary LRU. Tiny DLL
 	// reads must not evict a large target between its paging/scanning requests:

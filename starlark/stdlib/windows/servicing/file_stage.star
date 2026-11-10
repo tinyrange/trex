@@ -25,7 +25,7 @@ def build_update_source_folder_security(parent):
     return assign_servicing_directory_security(created, request)
 
 
-def stage_update_payload_files(root, payloads):
+def stage_update_payload_files(root, payloads, audit=True):
     """Materialize admitted payload sources and their security/metadata on root; do not replay this after native driver publication."""
     names = image_path_names(root)
     folder_security = {"/": root.get_security("/")}
@@ -145,7 +145,7 @@ def stage_update_payload_files(root, payloads):
     recovery = plan_inherited_recovery(root, payloads)
     payloads["retained_recovery"] = apply_inherited_recovery(root, recovery)
     counts["inherited_recovery"] = len(recovery)
-    generated = plan_generated_recovery(root, payloads, SERVICING_RECOVERY_FILETIME)
+    generated = plan_generated_recovery(root, payloads, SERVICING_RECOVERY_FILETIME, audit=audit)
     generated_markers = apply_generated_recovery(root, generated)
     for stem, records in generated_markers.items():
         retained = payloads["retained_recovery"].setdefault(stem, {})

@@ -23,11 +23,11 @@ func TestCLIMethodMarkingLeavesExceptionDataAndFinalRowUnclaimed(t *testing.T) {
 	pe.machine = 0x14c
 	pe.imageSize = 0x2000
 	pe.sections[0].characteristics = 0x60000020
-	marker := make([]byte, len(source))
+	marker := newPEMarker(len(source))
 	if err := markCLIMethodBodies(marker, source, pe, m); err != nil {
 		t.Fatal(err)
 	}
-	for i, got := range marker {
+	for i, got := range marker.values() {
 		want := byte(0)
 		if i >= 0x500 && i < 0x512 {
 			want = 3

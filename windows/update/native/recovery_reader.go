@@ -21,7 +21,7 @@ func newRecoveryReader(cache *bytecache.Cache, key bytecache.Key, generate func(
 		return nil, fmt.Errorf("generated recovery exceeds read bound")
 	}
 	hash := sha256.Sum256(data)
-	return &reopenedStageReader{
+	reader := &reopenedStageReader{
 		size: int64(len(data)), expectedSHA256: &hash, cache: cache, key: key,
 		open: func() (storage.Reader, error) {
 			data, err := generate()
@@ -30,5 +30,10 @@ func newRecoveryReader(cache *bytecache.Cache, key bytecache.Key, generate func(
 			}
 			return &starfile.Bytes{Data: data}, nil
 		},
-	}, nil
+	}
+	// Generation has already supplied the complete immutable bytes and hash.
+	// Expose that proof immediately; ReadAt still checks every regeneration
+	// against this identity after cache eviction.
+	reader.verified.Store(true)
+	return reader, nil
 }

@@ -13,7 +13,7 @@ const (
 
 // DecompressContainer expands a bounded Windows Compression API LZMS frame.
 func DecompressContainer(data []byte, maximumOutputSize uint64) ([]byte, error) {
-	return wincontainer.Decode(data, maximumOutputSize, compressionAPIAlgorithm, Decompress)
+	return wincontainer.DecodeInto(data, maximumOutputSize, compressionAPIAlgorithm, decompressInto)
 }
 
 func containerHeaderCRC(header []byte) byte {

@@ -67,6 +67,11 @@ def test_predecessor_retirement_requires_exact_hash():
     p['retirements']=retired
     root.write(old,'modified')
     raises(m['_retirements'],args=[root,runtime,root.path_names(lower=True),{}],message='predecessor hash mismatch')
+    reads=clock.read_profiler()
+    root.write(old,reads.file(root.find(old),'retired'))
+    lazy=m['_retirements'](root,runtime,root.path_names(lower=True),{},audit=False)
+    equal([f['path'] for f in lazy],[old])
+    equal(reads.snapshot()['total']['calls'],0)
     raises(m['apply_update_backups'],args=[root,p],message='retirement changed')
     equal(root.find(p['files'][0]['path']),None)
     root.write(old,'abc')

@@ -90,7 +90,8 @@ def analyze_servicing_runtime(analysis):
 
 
 
-def _runtime_manifest_root(change, side):
+def servicing_runtime_manifest_root(change, side):
+    """Return the captured immutable XML root only while its transition source binding matches; otherwise parse the replacement."""
     # Runtime analysis owns immutable parsed manifest snapshots. Reuse its
     # immutable XML tree, but never apply it to a replaced transition input.
     captured = change.get("documents", {}).get(side)
@@ -103,7 +104,7 @@ def _runtime_declarations(change, side):
     cached = change.setdefault("declarations", {})
     captured = cached.get(side)
     if captured == None or captured[0] != change[side]:
-        captured = (change[side], windows.assembly_declarations(_runtime_manifest_root(change, side)))
+        captured = (change[side], windows.assembly_declarations(servicing_runtime_manifest_root(change, side)))
         cached[side] = captured
     return captured[1]
 
@@ -1336,17 +1337,7 @@ def servicing_file_source_key(identity, name):
     neither a transition label nor this intern key authorizes source bytes.
     Other scopes and non-ASCII comparison require additional native evidence.
     """
-    d = windows.csi_identity(identity)
-    if d.version_scope.lower() not in ["", "nonsxs"]:
-        fail("unsupported file source versionScope")
-    if not name or "/" in name or ":" in name or any([part in ["", ".", ".."] for part in name.split("\\")]):
-        fail("file source key requires a relative source name")
-    fields = [d.name, d.language, d.processor_architecture, d.public_key_token, d.type, d.version_scope, name]
-    for field in fields:
-        if any([ord(c) < 32 or ord(c) > 126 for c in field.elems()]):
-            fail("file source key requires bounded ASCII comparison")
-    version_family = () if d.version_scope.lower() == "nonsxs" else tuple([int(part) for part in d.version.split(".")[:2]])
-    return tuple([field.lower() for field in fields]) + (version_family,)
+    return windows.csi_file_source_key(identity, name)
 
 
 def prepare_servicing_unprojected_files(resolved, hashes, policy):
@@ -2415,7 +2406,7 @@ def _servicing_registry_admitted(change, override):
     return override or types[0] != "dualModeDriver"
 
 
-def collect_servicing_registry_contributions(runtime, driver_config_options, source_roots, target, key_prefix=None, capture_key_records=False):
+def collect_servicing_registry_contributions(runtime, driver_config_options, source_roots, target, key_prefix=None, capture_key_records=False, compact_key_records=False):
     """Decode admitted values in native loops; do not select or apply winners.
 
     Admission, version-specific path rules, macro roots and key capture policy
@@ -2436,10 +2427,10 @@ def collect_servicing_registry_contributions(runtime, driver_config_options, sou
             identity = change["component_identities"][side]
             if identity not in architectures:
                 architectures[identity] = windows.csi_identity(identity).processor_architecture
-            manifests.append(dict(root=_runtime_manifest_root(change, side), architecture=architectures[identity], side=side, owner=index))
+            manifests.append(dict(root=servicing_runtime_manifest_root(change, side), architecture=architectures[identity], side=side, owner=index))
     def expand(value, architecture):
         return expand_servicing_registry_string(value, source_roots, target, architecture)
-    return windows.registry_contributions(manifests, _SERVICING_REGISTRY_PATH_MAPPER, expand, key_prefix=key_prefix, capture_key_records=capture_key_records)
+    return windows.registry_contributions(manifests, _SERVICING_REGISTRY_PATH_MAPPER, expand, key_prefix=key_prefix, capture_key_records=capture_key_records, compact_key_records=compact_key_records)
 
 
 def analyze_servicing_registry_declarations(runtime, driver_config_options):
@@ -2470,7 +2461,7 @@ def analyze_servicing_registry_declarations(runtime, driver_config_options):
             manifest = change[side]
             if manifest == None:
                 continue
-            root = _runtime_manifest_root(change, side)
+            root = servicing_runtime_manifest_root(change, side)
             if root.namespace not in ["urn:schemas-microsoft-com:asm.v1", "urn:schemas-microsoft-com:asm.v3"]:
                 fail("unsupported runtime registry assembly namespace")
             definitions = _runtime_security_definitions(root)

@@ -36,6 +36,7 @@ type Directory struct {
 	// revision tracks namespace changes, not content writes (see WriteOrder).
 	revision         uint64
 	pathNames        [4]*starlark.Dict
+	pathIndexes      [4]*pathIndex
 	sortedFiles      []string
 	fileValues       []starlark.Value
 	children         map[string][]string
@@ -183,6 +184,8 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("set_times", d.setTimesBuiltin), nil
 	case "get_security":
 		return starlark.NewBuiltin("get_security", d.getSecurityBuiltin), nil
+	case "path_index":
+		return starlark.NewBuiltin("path_index", d.pathIndexBuiltin), nil
 	case "path_names":
 		return starlark.NewBuiltin("path_names", d.pathNamesBuiltin), nil
 	case "files":
@@ -193,7 +196,7 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (d *Directory) AttrNames() []string {
-	return []string{"clone", "fat_short_path", "files", "find", "get_metadata", "get_security", "hardlink", "list_dir", "mkdir", "path_names", "remove", "rmdir", "set_attributes", "set_extended_attributes", "set_file_attributes", "set_reparse", "set_security", "set_times", "write"}
+	return []string{"clone", "fat_short_path", "files", "find", "get_metadata", "get_security", "hardlink", "list_dir", "mkdir", "path_index", "path_names", "remove", "rmdir", "set_attributes", "set_extended_attributes", "set_file_attributes", "set_reparse", "set_security", "set_times", "write"}
 }
 
 func (d *Directory) hardlinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -750,6 +753,7 @@ func (d *Directory) namespaceEntryChanged(name string, present bool) {
 func (d *Directory) invalidateNamespace() {
 	d.revision++
 	d.pathNames = [4]*starlark.Dict{}
+	d.pathIndexes = [4]*pathIndex{}
 	d.sortedFiles = nil
 	d.fileValues = nil
 }

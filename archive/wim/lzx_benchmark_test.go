@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"sort"
 	"testing"
 
 	"github.com/tinyrange/trex/compression/lzx"
@@ -63,11 +64,23 @@ func BenchmarkLZXMedia(b *testing.B) {
 	}
 	var samples []sample
 	total := 0
-	for _, entry := range archive.lookup {
-		if entry.resource.flags&wimResourceCompressed == 0 {
+	// The parse-only lookup table is released after opening. Select unique
+	// resources from the retained content index in deterministic disk order.
+	resources := make([]wimResource, 0, len(archive.byHash))
+	seen := make(map[wimResource]bool)
+	for _, indexed := range archive.byHash {
+		location := archive.expandIndexed(indexed)
+		if !seen[location.resource] {
+			resources = append(resources, location.resource)
+			seen[location.resource] = true
+		}
+	}
+	sort.Slice(resources, func(i, j int) bool { return resources[i].offset < resources[j].offset })
+	for _, resource := range resources {
+		if resource.flags&wimResourceCompressed == 0 {
 			continue
 		}
-		chunks, err := archive.resourceChunks(entry.resource)
+		chunks, err := archive.resourceChunks(resource)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -76,7 +89,7 @@ func BenchmarkLZXMedia(b *testing.B) {
 				continue
 			}
 			input := make([]byte, chunk.inSize)
-			if _, err := archive.file.ReadAt(input, entry.resource.offset+chunk.inOffset); err != nil {
+			if _, err := archive.file.ReadAt(input, resource.offset+chunk.inOffset); err != nil {
 				b.Fatal(err)
 			}
 			out, err := lzx.DecompressWIMChunk(input, 15, chunk.outputSize)

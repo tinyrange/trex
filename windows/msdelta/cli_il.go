@@ -7,7 +7,7 @@ import "fmt"
 // final MethodDef row. Eligibility is header-only, including native methods
 // whose bytes happen to form a bounded CLI header. Invalid headers are skipped.
 // Unclaimed bytes remain eligible for native x86 scans.
-func markCLIMethodBodies(marker, source []byte, pe peLayout, metadata *cliMetadata) error {
+func markCLIMethodBodies(marker peMarker, source []byte, pe peLayout, metadata *cliMetadata) error {
 	for row := uint32(0); row+1 < metadata.Rows[6]; row++ {
 		off := metadata.tableOffsets[6] + int(row)*metadata.rowSizes[6]
 		rva := get32(source, off)
@@ -16,12 +16,10 @@ func markCLIMethodBodies(marker, source []byte, pe peLayout, metadata *cliMetada
 		}
 		start, backed := pe.rawOffset(rva)
 		_, end, valid := cliMethodCode(source, pe, rva)
-		if !backed || !valid || end > len(marker) {
+		if !backed || !valid || end > marker.size {
 			continue
 		}
-		for i := start; i < end; i++ {
-			marker[i] |= 3
-		}
+		marker.update(start, end, 3, 0)
 	}
 	return nil
 }

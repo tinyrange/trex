@@ -3,7 +3,6 @@ package filesystem
 import (
 	"fmt"
 	"go.starlark.net/starlark"
-	"sort"
 	"strings"
 )
 
@@ -49,21 +48,28 @@ func (d *Directory) pathNamesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, ar
 	return result, nil
 }
 
-func (d *Directory) buildPathNames(lower, includeEmpty bool) (*starlark.Dict, error) {
+func (d *Directory) buildPathIndex(lower, includeEmpty bool) (*pathIndex, error) {
 	names := make(map[string]string, len(d.files)+len(d.dirs))
 	names["/"] = "/"
-	files := d.sortedFileNames()
-	fileKeys := make(map[string]string, len(files))
-	for _, name := range files {
-		key := name
+	// Track the lexically first full descendant for each implied ancestor.
+	// This preserves sorted-file precedence without sorting the file set.
+	first := make(map[string]string, len(d.dirs))
+	for file := range d.files {
+		name, key := file, file
 		if lower {
 			key = strings.ToLower(key)
 		}
-		if previous, found := fileKeys[key]; found && previous != name {
-			return nil, fmt.Errorf("path_names: ambiguous lowercase files %q and %q", previous, name)
+		if previous, found := names[key]; found && previous != file {
+			if _, realFile := d.files[previous]; realFile {
+				left, right := previous, file
+				if left > right {
+					left, right = right, left
+				}
+				return nil, fmt.Errorf("path_names: ambiguous lowercase files %q and %q", left, right)
+			}
 		}
-		fileKeys[key] = name
-		names[key] = name
+		names[key] = file
+		delete(first, key)
 		for {
 			end := strings.LastIndexByte(name, '/')
 			if end <= 0 {
@@ -71,36 +77,50 @@ func (d *Directory) buildPathNames(lower, includeEmpty bool) (*starlark.Dict, er
 			}
 			name = name[:end]
 			key = key[:strings.LastIndexByte(key, '/')]
-			if _, found := names[key]; found {
-				break
+			if previous, found := names[key]; found {
+				if _, realFile := d.files[previous]; realFile {
+					continue
+				}
+				if first[key] <= file {
+					break
+				}
 			}
-			names[key] = name
+			names[key], first[key] = name, file
 		}
 	}
-	dirs := make([]string, 0, len(d.dirs))
 	if includeEmpty {
 		for name := range d.dirs {
-			dirs = append(dirs, name)
+			key := name
+			if lower {
+				key = strings.ToLower(key)
+			}
+			previous, found := names[key]
+			if !found {
+				names[key] = name
+				continue
+			}
+			if _, implied := first[key]; implied {
+				continue
+			}
+			if _, file := d.files[previous]; file {
+				continue
+			}
+			if name < previous {
+				names[key] = name
+			}
 		}
 	}
-	sort.Strings(dirs)
-	for _, name := range dirs {
-		key := name
-		if lower {
-			key = strings.ToLower(key)
-		}
-		if _, found := names[key]; !found {
-			names[key] = name
-		}
+	return &pathIndex{names: names}, nil
+}
+
+func (d *Directory) buildPathNames(lower, includeEmpty bool) (*starlark.Dict, error) {
+	index, err := d.pathIndex(lower, includeEmpty)
+	if err != nil {
+		return nil, err
 	}
-	keys := make([]string, 0, len(names))
-	for key := range names {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	result := starlark.NewDict(len(names))
-	for _, key := range keys {
-		if err := result.SetKey(starlark.String(key), starlark.String(names[key])); err != nil {
+	result := starlark.NewDict(index.Len())
+	for _, key := range index.sortedKeys() {
+		if err := result.SetKey(starlark.String(key), starlark.String(index.names[key])); err != nil {
 			return nil, err
 		}
 	}

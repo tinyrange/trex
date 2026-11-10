@@ -6,6 +6,7 @@ import (
 	"fmt"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"strings"
+	"unicode"
 	"unicode/utf16"
 
 	"go.starlark.net/starlark"
@@ -344,6 +345,7 @@ func parseINF(data string) (*starlark.Dict, error) {
 // cannot mistake reordered or interleaved repeated directives for equality.
 func parseINFDirectives(data string) (*starlark.Dict, *starlark.List, error) {
 	root := starlark.NewDict(0)
+	sections := make(map[string]*starlark.Dict)
 	var section *starlark.Dict
 	var sectionName starlark.String
 	directives := starlark.NewList(nil)
@@ -357,14 +359,13 @@ func parseINFDirectives(data string) (*starlark.Dict, *starlark.List, error) {
 			name := starlark.String(strings.TrimSpace(line[1:strings.Index(line, "]")]))
 			sectionName = name
 			directives.Append(starlark.Tuple{name, starlark.None, starlark.None})
-			existing, found, err := infSection(root, name.GoString())
-			if err != nil {
-				return nil, nil, err
-			}
+			folded := infSectionKey(name.GoString())
+			existing, found := sections[folded]
 			if found {
 				section = existing
 			} else {
 				section = starlark.NewDict(0)
+				sections[folded] = section
 				if err := root.SetKey(name, section); err != nil {
 					return nil, nil, err
 				}
@@ -438,6 +439,26 @@ func expandINFStrings(root *starlark.Dict) error {
 	return nil
 }
 
+// Canonicalize the same Unicode simple-fold classes used by EqualFold. Keep
+// this parse-local: callers can mutate the exposed dictionaries after parsing.
+func infSectionKey(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r < unicode.MaxASCII {
+			if r >= 'a' && r <= 'z' {
+				return r - 'a' + 'A'
+			}
+			return r
+		}
+		lowest := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < lowest {
+				lowest = next
+			}
+		}
+		return lowest
+	}, name)
+}
+
 func infSection(root *starlark.Dict, name string) (*starlark.Dict, bool, error) {
 	value, ok, err := root.Get(starlark.String(name))
 	if err != nil || ok {
@@ -447,12 +468,12 @@ func infSection(root *starlark.Dict, name string) (*starlark.Dict, bool, error) 
 		section, ok := value.(*starlark.Dict)
 		return section, ok, err
 	}
-	for _, item := range root.Items() {
-		key, ok := starlark.AsString(item[0])
+	for k, value := range root.Entries() {
+		key, ok := starlark.AsString(k)
 		if !ok || !strings.EqualFold(key, name) {
 			continue
 		}
-		section, ok := item[1].(*starlark.Dict)
+		section, ok := value.(*starlark.Dict)
 		return section, ok, nil
 	}
 	return nil, false, nil

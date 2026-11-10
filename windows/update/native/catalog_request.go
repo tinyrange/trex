@@ -35,12 +35,18 @@ func newCatalogRequest(resources *lifecycle.Resources, options windowsupdate.Sca
 	ctx, cancel := context.WithCancel(resources.Context())
 	request := &catalogRequest{cancel: cancel, done: make(chan struct{}), options: options, protocol: protocol}
 	// Register before launching so a closed execution cannot leak a scan.
-	if _, err := resources.Add(request); err != nil {
+	release, err := resources.Add(request)
+	if err != nil {
 		cancel()
 		return nil, err
 	}
 	go func() {
 		defer close(request.done)
+		defer cancel()
+		// Completed requests are owned by their callers, not the execution.
+		// Keeping this registration would pin the full protocol catalog and
+		// its Starlark projection throughout an unrelated running guest.
+		defer release()
 		request.catalog, request.err = scan(ctx)
 	}()
 	return request, nil

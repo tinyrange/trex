@@ -2,6 +2,7 @@ package registry
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"sync"
@@ -21,11 +22,19 @@ func OpenSnapshot(file storage.Reader, maximum int64) (*Hive, error) {
 	if err := readFullAt(file, data, 0); err != nil {
 		return nil, err
 	}
+	return OpenOwnedSnapshot(data)
+}
+
+// OpenOwnedSnapshot takes exclusive ownership of data. The caller must never
+// read or mutate that slice again. This is for native writers transferring a
+// completed private version; borrowed inputs must use OpenSnapshot instead.
+// Only read-only methods expose the resulting bytes and lazy indexes.
+func OpenOwnedSnapshot(data []byte) (*Hive, error) {
 	hive, err := Open(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
-	hive.snapshot = &snapshotIndex{}
+	hive.snapshot = &snapshotIndex{data: data}
 	return hive, nil
 }
 
@@ -34,9 +43,25 @@ func OpenSnapshot(file storage.Reader, maximum int64) (*Hive, error) {
 func (h *Hive) ReadAt(p []byte, off int64) (int, error) { return h.file.ReadAt(p, off) }
 func (h *Hive) Size() int64                             { return h.file.Size() }
 
+// IsSnapshot reports whether this reader owns an immutable source epoch.
+func (h *Hive) IsSnapshot() bool { return h.snapshot != nil }
+
+// VerifiedSHA256 hashes the owned bytes once. Live/borrowed readers never
+// advertise a cached digest, even when their current content looks unchanged.
+func (h *Hive) VerifiedSHA256() ([32]byte, bool) {
+	if h.snapshot == nil {
+		return [32]byte{}, false
+	}
+	h.snapshot.digestOnce.Do(func() { h.snapshot.digest = sha256.Sum256(h.snapshot.data) })
+	return h.snapshot.digest, true
+}
+
 type snapshotIndex struct {
-	keys     sync.Map // cell -> Key (no mutable fields)
-	children sync.Map // complete parent Key -> *snapshotChildren
+	data       []byte
+	digestOnce sync.Once
+	digest     [32]byte
+	keys       sync.Map // cell -> Key (no mutable fields)
+	children   sync.Map // complete parent Key -> *snapshotChildren
 }
 type snapshotChildren struct {
 	ordered []Key

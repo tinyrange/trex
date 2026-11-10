@@ -39,7 +39,7 @@ def prepare_update_native_driver_file_tree(root, runtime, hives, payloads, popul
     overwrite native security, aliases and deletions before qualification.
     """
     staged_root=root.clone()
-    staged=stage_update_payload_files(staged_root,payloads)
+    staged=stage_update_payload_files(staged_root,payloads,audit=audit_payloads)
     candidate=_run_update_native_driver_tree(staged_root,runtime,hives,payloads,population,analysis,version)
     result=finish_update_driver_file_tree(root,candidate,runtime,hives,payloads,while_verifying=while_verifying,audit_payloads=audit_payloads)
     result['files']['staged']=staged

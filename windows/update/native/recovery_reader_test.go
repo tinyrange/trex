@@ -2,6 +2,7 @@ package native
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"testing"
@@ -30,6 +31,9 @@ func TestRecoveryReadersSeparateTimestampsAndRevalidateAfterEviction(t *testing.
 	a, err := newRecoveryReader(cache, bytecache.Key{Index: 7, Source: 0}, loader)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if hash, verified := a.VerifiedSHA256(); !verified || hash != sha256.Sum256(expected) || calls != 1 {
+		t.Fatal("initial generation did not establish immutable content identity")
 	}
 	b, err := newRecoveryReader(cache, bytecache.Key{Index: 7, Source: 1}, func() ([]byte, error) {
 		return msdelta.CreateReversePSFRecord(source, target, 1, 1024)

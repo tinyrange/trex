@@ -95,7 +95,7 @@ def _publish_repository_aliases(root, jobs):
 def prepare_update_direct_driver_tree(root, runtime, hives, payloads, population, analysis, while_verifying=None, audit_payloads=False):
     """Clone root, stage payloads once and apply qualified direct driver/file changes; return the independent candidate and phase report."""
     updated=root.clone()
-    staged=stage_update_payload_files(updated,payloads)
+    staged=stage_update_payload_files(updated,payloads,audit=audit_payloads)
     return finish_update_direct_driver_tree(updated,staged,runtime,hives,payloads,population,analysis,while_verifying=while_verifying,audit_payloads=audit_payloads)
 
 def finish_update_direct_driver_tree(updated, staged, runtime, hives, payloads, population, analysis, while_verifying=None, audit_payloads=False):

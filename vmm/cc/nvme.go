@@ -30,6 +30,9 @@ type nvmeDisk struct {
 	timing   *diskIOTiming
 }
 
+// ConcurrentReads opts into bounded parallel reads only when the device permits them.
+func (d nvmeDisk) ConcurrentReads() bool { return d.disk.Device.Capabilities().Concurrent }
+
 func (d nvmeDisk) Size() int64 { return d.disk.Device.Geometry().Size }
 func (d nvmeDisk) ReadAt(b []byte, off int64) (int, error) {
 	started := time.Now()

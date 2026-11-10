@@ -258,8 +258,30 @@ func ApplyPSFRecordBounded(source, record []byte, maximumTargetSize uint64) ([]b
 	return applyBounded(source, record[4:], maximumTargetSize)
 }
 
+// ApplyOwnedBounded consumes an exclusively owned source buffer. The caller
+// must not read or reuse source after this call, including on error; delta must
+// not alias source. Native PE normalization can reuse this buffer instead of
+// retaining a second full image. All size, source and target checks are identical
+// to ApplyBounded. Managed normalization can still require a private copy.
+func ApplyOwnedBounded(source, delta []byte, maximumTargetSize uint64) ([]byte, error) {
+	return applyBoundedSource(source, delta, maximumTargetSize, true)
+}
+
+// ApplyPSFRecordOwnedBounded is ApplyPSFRecordBounded with the exclusive source
+// ownership contract of ApplyOwnedBounded. The PSF checksum is checked first.
+func ApplyPSFRecordOwnedBounded(source, record []byte, maximumTargetSize uint64) ([]byte, error) {
+	if _, err := ParsePSFRecord(record); err != nil {
+		return nil, err
+	}
+	return applyBoundedSource(source, record[4:], maximumTargetSize, true)
+}
+
 func applyBounded(source, delta []byte, maximumTargetSize uint64) ([]byte, error) {
-	target, header, err := reconstructBounded(source, delta, maximumTargetSize)
+	return applyBoundedSource(source, delta, maximumTargetSize, false)
+}
+
+func applyBoundedSource(source, delta []byte, maximumTargetSize uint64, owned bool) ([]byte, error) {
+	target, header, err := reconstructBoundedSource(source, delta, maximumTargetSize, owned)
 	if err != nil {
 		return nil, err
 	}
@@ -278,6 +300,10 @@ func reconstruct(source, delta []byte) ([]byte, *Header, error) {
 }
 
 func reconstructBounded(source, delta []byte, maximumTargetSize uint64) ([]byte, *Header, error) {
+	return reconstructBoundedSource(source, delta, maximumTargetSize, false)
+}
+
+func reconstructBoundedSource(source, delta []byte, maximumTargetSize uint64, owned bool) ([]byte, *Header, error) {
 	header, err := Parse(delta)
 	if err != nil {
 		return nil, nil, err
@@ -294,10 +320,9 @@ func reconstructBounded(source, delta []byte, maximumTargetSize uint64) ([]byte,
 		target, err := decodePlayback(source, header.Patch, header.TargetSize)
 		return target, header, err
 	}
-	originalSource := source
 	var preprocess *pePreprocess
 	if len(header.Preprocess) != 0 {
-		source, preprocess, err = preparePE(source, header.Preprocess, header.Flags)
+		source, preprocess, err = preparePETracedSource(source, header.Preprocess, header.Flags, nil, owned)
 		if err != nil {
 			return nil, header, fmt.Errorf("msdelta: preprocess file-type-set=%#x file-type=%#x flags=%#x preprocess=%d: %w", header.FileTypeSet, header.FileType, header.Flags, len(header.Preprocess), err)
 		}
@@ -334,7 +359,7 @@ func reconstructBounded(source, delta []byte, maximumTargetSize uint64) ([]byte,
 		if nestedLZMSDelta {
 			err = preprocess.restore(target)
 		} else if isLZMS {
-			err = restorePETimestamps(originalSource, target, preprocess.prefix.timestamp)
+			err = restorePETimestampValue(preprocess.sourceTimestamp, target, preprocess.prefix.timestamp)
 		}
 		if err != nil {
 			return nil, header, fmt.Errorf("msdelta: postprocess file-type-set=%#x file-type=%#x flags=%#x preprocess=%d lzms=%t nested=%t payload=%d target=%d: %w", header.FileTypeSet, header.FileType, header.Flags, len(header.Preprocess), isLZMS, nestedLZMSDelta, lzmsPayloadSize, header.TargetSize, err)

@@ -4,6 +4,7 @@ Retain unaffected entries in order, then append new declarations in transition
 order. This is a membership index; reference transaction enumeration order is
 not an input to construction.
 """
+load("@stdlib//windows/servicing:runtime.star", "servicing_runtime_manifest_root")
 _PATH = '/Windows/WinSxS/migration.xml'
 _NS = 'urn:schemas-microsoft-com:asm.v3'
 
@@ -41,7 +42,7 @@ def _rewrite(entries, removed, added):
 
 def plan_update_migration(root, runtime, payloads, baseline_components):
     """Plan migration-index membership from admitted payloads and baseline components, preserving source and manifest proofs."""
-    names = root.path_names(lower=True)
+    names = root.path_index(lower=True)
     path = names.get(_PATH.lower())
     if path == None:
         fail('baseline migration index is missing')
@@ -78,7 +79,8 @@ def plan_update_migration(root, runtime, payloads, baseline_components):
         document = transition['after']
         if document == None:
             continue
-        if not any([n.namespace == _NS and n.name == 'migration' for n in binary.xml(document).root.children]):
+        if 'migration' not in windows.assembly_manifest(document).top_level: continue
+        if not any([n.namespace == _NS and n.name == 'migration' for n in servicing_runtime_manifest_root(transition, "after").children]):
             continue
         source = admitted.get(str(transition['component_identities']['after']).lower())
         if source == None or digest(document, algorithm='sha256') != source['component'].manifest_sha256:
@@ -88,8 +90,9 @@ def plan_update_migration(root, runtime, payloads, baseline_components):
             fail('migration encoded manifest differs from admitted source')
         proofs.append(dict(path=source_path, hash=digest(root.find(source_path))))
         added.append(_filename(source['component'].stem + '.manifest'))
+    removed_names = {r.lower(): True for r in removed}
     content = _rewrite(entries, removed, added)
-    return dict(path=path, source_hash=digest(original), order=root.get_metadata(path).write_order, security=root.get_security(path), proofs=proofs, content=content, before=len(entries), after=len(_entries(content)), removed=len([n for n in entries if n.lower() in {r.lower(): True for r in removed}]), added=len(added))
+    return dict(path=path, source_hash=digest(original), order=root.get_metadata(path).write_order, security=root.get_security(path), proofs=proofs, content=content, before=len(entries), after=len(_entries(content)), removed=len([n for n in entries if n.lower() in removed_names]), added=len(added))
 
 def apply_update_migration(root, plan):
     """Validate the migration plan source/epoch and proofs before writing its replacement index; return membership counts."""

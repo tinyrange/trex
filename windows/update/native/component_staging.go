@@ -19,6 +19,9 @@ import (
 // hash verification as other planned content. Catalog trust, deployment state,
 // installed sources, driver operations and activation remain separate work.
 func exactComponentPlanBuiltin(stage *uup.CumulativeStage, index *uup.ComponentMetadataIndex) *starlark.Builtin {
+	return exactComponentPlanWithCacheBuiltin(stage, index, nil)
+}
+func exactComponentPlanWithCacheBuiltin(stage *uup.CumulativeStage, index *uup.ComponentMetadataIndex, contentCache *stageContentCache) *starlark.Builtin {
 	return starlark.NewBuiltin("servicing_metadata.plan_components", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var values, snapshots *starlark.List
 		if err := starlark.UnpackArgs("servicing_metadata.plan_components", args, kwargs, "identities", &values, "manifests?", &snapshots); err != nil {
@@ -69,14 +72,18 @@ func exactComponentPlanBuiltin(stage *uup.CumulativeStage, index *uup.ComponentM
 		if err != nil {
 			return nil, err
 		}
-		return componentStagingRecord(stage, plan, descriptions)
+		return componentStagingRecordWithCache(stage, plan, descriptions, contentCache)
 	})
 }
 
 func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan, descriptions []uup.CSIComponentRecord) (starlark.Value, error) {
+	return componentStagingRecordWithCache(stage, plan, descriptions, nil)
+}
+func componentStagingRecordWithCache(stage *uup.CumulativeStage, plan uup.StageEffectPlan, descriptions []uup.CSIComponentRecord, contentCache *stageContentCache) (starlark.Value, error) {
 	if len(plan.RegistryKeys) != 0 || len(plan.RegistryValues) != 0 {
 		return nil, fmt.Errorf("store-only component plan contains runtime registry effects")
 	}
+	var effectStore stagedEffectStore
 	files := make([]starlark.Value, len(plan.Files))
 	for i, effect := range plan.Files {
 		if len(effect.Destinations) != 0 {
@@ -107,7 +114,17 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 	// guest RAM. The compressed LRU also serializes full-target reconstruction.
 	// Oversized supported targets are admitted alone; ordinary entries share
 	// a smaller working set instead of occupying the maximum target budget.
-	contentCache, err := newStageContentCache(128 << 20)
+	if contentCache == nil {
+		var err error
+		contentCache, err = newStageContentCache(64 << 20)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Storage and miss serialization are shared, authorization is not. Every
+	// admitted plan has its own namespace even when byte identities match.
+	cacheSource := contentCache.nextSource.Add(1)
+	metadataStore, err := starvalue.NewPackedFileStore(8<<20, false)
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +179,10 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 		effect := plan.Files[i]
 		var file storage.Reader
 		if lazy {
+			// Tokens may borrow a complete manifest string. Lazy readers need
+			// only this effect, not that manifest's backing storage.
+			ownedEffect := effectStore.ownPointer(effect)
+			effect = *ownedEffect
 			// Borrow declared lengths without decoding unused payloads. Integrity
 			// is checked on first read and after shared-cache eviction.
 			size, digest, known := declaredStageContent(effect, declaredSizes, declaredHashes, normalize)
@@ -176,10 +197,18 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 			if size < 0 || size > 512<<20 {
 				return nil, fmt.Errorf("staged file exceeds lazy read bound")
 			}
-			reader := &reopenedStageReader{size: size, compressed: contentCache, key: bytecache.Key{Index: contentKeys[i]}, open: func() (storage.Reader, error) { return stage.OpenPlannedFile(effect) }}
-			if known {
-				reader.expectedSHA256 = &digest
+			openContent := func() (storage.Reader, error) { return stage.OpenPlannedFile(*ownedEffect) }
+			if !known && effect.SourceMode == "metadata" {
+				// Already opened to establish length. Preserve the immutable
+				// admitted member, not a namespace lookup that revives a whole
+				// metadata archive and its directory indexes during boot.
+				snapshot, err := metadataStore.Snapshot(effect.StorePath, file, 512<<20)
+				if err != nil {
+					return nil, err
+				}
+				openContent = func() (storage.Reader, error) { return snapshot, nil }
 			}
+			reader := effectStore.newReader(size, contentCache, bytecache.Key{Source: cacheSource, Index: contentKeys[i]}, openContent, digest, known)
 			return starvalue.NewReader(effect.StorePath, reader), nil
 		}
 		var err error
@@ -218,6 +247,26 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 			"target_size":   starlark.MakeInt64(inputs.Target.Length),
 			"target_sha256": starlark.Bytes(inputs.Target.SHA256[:]),
 		}), nil
+	})
+	isSource := starlark.NewBuiltin("component_staging.is_source", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var i int
+		var file starlark.Value
+		if err := starlark.UnpackArgs("component_staging.is_source", args, kwargs, "index", &i, "file", &file); err != nil {
+			return nil, err
+		}
+		if i < 0 || i >= len(plan.Files) {
+			return nil, fmt.Errorf("component staging index out of range")
+		}
+		wrapped, ok := file.(*starvalue.ReaderValue)
+		if !ok {
+			return starlark.False, nil
+		}
+		bound, ok := wrapped.StorageReader().(*reopenedStageReader)
+		// The source namespace is private to this admitted plan. Content keys are
+		// coalesced only for equal lengths and hashes; unknown sources and
+		// legacy hash constraints retain distinct keys. Never trust a digest
+		// supplied by an arbitrary reader as evidence of lazy provenance.
+		return starlark.Bool(ok && bound.compressed == contentCache && bound.key.Source == cacheSource && bound.key.Index == contentKeys[i]), nil
 	})
 	recoveryInfo := starlark.NewBuiltin("component_staging.recovery_info", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var i int
@@ -261,27 +310,65 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 	})
 	// Recovery records can total gigabytes. Keep only a shared bounded cache;
 	// evicted records are regenerated from the same admitted forward edge.
-	recoveryCache := bytecache.New(128 << 20)
+	// Separate audit modes so a prior non-audit cache hit cannot suppress a
+	// requested round-trip check. Each cache remains bounded and lazy-filled.
+	recoveryCaches := [3]*bytecache.Cache{bytecache.New(16 << 20), bytecache.New(16 << 20), bytecache.New(16 << 20)}
 	reverse := starlark.NewBuiltin("component_staging.create_recovery", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var i int
 		var fileTime uint64
 		var lazy bool
-		if err := starlark.UnpackArgs("component_staging.create_recovery", args, kwargs, "index", &i, "target_filetime", &fileTime, "lazy?", &lazy); err != nil {
+		audit := true
+		var literal bool
+		var installed starlark.Value = starlark.None
+		if err := starlark.UnpackArgs("component_staging.create_recovery", args, kwargs, "index", &i, "target_filetime", &fileTime, "lazy?", &lazy, "audit?", &audit, "literal?", &literal, "installed?", &installed); err != nil {
 			return nil, err
 		}
 		if i < 0 || i >= len(plan.Files) {
 			return nil, fmt.Errorf("component staging index out of range")
 		}
+		if literal {
+			if !lazy || audit {
+				return nil, fmt.Errorf("literal recovery requires lazy=true and audit=false")
+			}
+			// Only the exact immutable, hash-checking reader from this stage
+			// can establish the installed source binding without decoding it.
+			wrapped, ok := installed.(*starvalue.ReaderValue)
+			if !ok {
+				return nil, fmt.Errorf("literal recovery requires its staged installed reader")
+			}
+			bound, ok := wrapped.StorageReader().(*reopenedStageReader)
+			effect := effectStore.own(plan.Files[i])
+			if !ok || bound.compressed != contentCache || bound.key.Source != cacheSource || bound.key.Index != contentKeys[i] || bound.expectedSHA256 == nil || effect.ExpectedSHA256 == nil || *bound.expectedSHA256 != *effect.ExpectedSHA256 {
+				return nil, fmt.Errorf("literal recovery installed reader differs from admitted content")
+			}
+			size, err := stage.PlannedLiteralRecoverySize(effect)
+			if err != nil {
+				return nil, err
+			}
+			reader := &reopenedStageReader{size: size, cache: recoveryCaches[2], key: bytecache.Key{Source: fileTime, Index: i}, open: func() (storage.Reader, error) {
+				data, err := stage.CreatePlannedLiteralRecovery(effect, fileTime)
+				if err != nil {
+					return nil, err
+				}
+				return &starvalue.Bytes{Data: data}, nil
+			}}
+			return starvalue.NewReader("literal recovery", reader), nil
+		}
+		cacheIndex := 0
+		if audit {
+			cacheIndex = 1
+		}
 		if lazy {
-			reader, err := newRecoveryReader(recoveryCache, bytecache.Key{Source: fileTime, Index: i}, func() ([]byte, error) {
-				return stage.CreatePlannedRecovery(plan.Files[i], fileTime)
+			effect := effectStore.own(plan.Files[i])
+			reader, err := newRecoveryReader(recoveryCaches[cacheIndex], bytecache.Key{Source: fileTime, Index: i}, func() ([]byte, error) {
+				return stage.CreatePlannedRecoveryWithAudit(effect, fileTime, audit)
 			})
 			if err != nil {
 				return nil, err
 			}
 			return starvalue.NewReader("recovery", reader), nil
 		}
-		record, err := stage.CreatePlannedRecovery(plan.Files[i], fileTime)
+		record, err := stage.CreatePlannedRecoveryWithAudit(plan.Files[i], fileTime, audit)
 		if err != nil {
 			return nil, err
 		}
@@ -302,7 +389,7 @@ func componentStagingRecord(stage *uup.CumulativeStage, plan uup.StageEffectPlan
 	}
 	result := starvalue.NewRecord(starlark.StringDict{
 		"components": starlark.NewList(components), "files": starlark.NewList(files), "read_order": starlark.NewList(readOrder), "open": open,
-		"delta_inputs": deltaInputs, "cache_stats": componentCacheStatsBuiltin(contentCache), "recovery_info": recoveryInfo, "create_recovery": reverse, "inherited_recovery": inherited,
+		"is_source": isSource, "delta_inputs": deltaInputs, "cache_stats": componentCacheStatsBuiltin(contentCache), "recovery_info": recoveryInfo, "create_recovery": reverse, "inherited_recovery": inherited,
 	})
 	result.Freeze()
 	return result, nil

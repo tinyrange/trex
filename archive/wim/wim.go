@@ -75,37 +75,42 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 
 type Archive struct {
 	// directoryMu protects lazy directory and path indexes during concurrent reads.
-	directoryMu     sync.Mutex
-	legacyIDs       map[uint32][20]byte
-	file            storage.Reader
-	flags           uint32
-	chunkSize       int
-	partNumber      uint16
-	totalParts      uint16
-	imageCount      int
-	lookup          []wimLookupEntry
-	byHash          map[string]wimResourceLocation
-	locationsByHash map[string][]wimResourceLocation
-	xml             wimResource
-	boot            wimResource
-	images          []image
-	cacheStore      *bytecache.Cache
-	blobCache       *bytecache.Cache
-	blobHotCache    *bytecache.Cache
-	missMu          sync.Mutex
-	recentMisses    [64]string
-	missCount       uint64
-	cacheSource     uint64
+	directoryMu      sync.Mutex
+	legacyIDs        map[uint32][20]byte
+	file             storage.Reader
+	flags            uint32
+	chunkSize        int
+	partNumber       uint16
+	totalParts       uint16
+	imageCount       int
+	lookup           []wimLookupEntry
+	byHash           map[[20]byte]indexedResourceLocation
+	lastResource     *wimResourceBacking
+	resourceBackings []*wimResourceBacking
+	backingSlab      []wimResourceBacking
+	backingNext      int
+	locationsByHash  map[string][]wimResourceLocation // Only hashes with multiple locations.
+	xml              wimResource
+	boot             wimResource
+	images           []image
+	cacheStore       *bytecache.Cache
+	blobCache        *bytecache.Cache
+	blobHotCache     *bytecache.Cache
+	missMu           sync.Mutex
+	recentMisses     [64]string
+	missCount        uint64
+	cacheSource      uint64
 }
 
 type image struct {
-	index          int
-	resource       wimResource
-	metadata       []byte // Legacy metadata and explicitly constructed images.
-	metadataDigest [32]byte
-	security       [][]byte
-	root           entry
-	dirs           map[string][]entry
+	index           int
+	resource        wimResource
+	metadata        []byte // Legacy metadata and explicitly constructed images.
+	metadataDigest  [32]byte
+	compactMetadata bool
+	security        [][]byte
+	root            entry
+	dirs            map[string][]entry
 	// Path lookup points into immutable, fully sorted directory slices rather
 	// than allocating another complete entry for each path.
 	byPath map[string]*entry
@@ -196,7 +201,7 @@ func (w *Archive) ReadOrder(name string) (FileReadOrder, error) {
 	if entry.isDir {
 		return FileReadOrder{}, fmt.Errorf("wim: path %q is a directory", name)
 	}
-	location, ok := w.byHash[string(entry.hash[:])]
+	location, ok := w.lookupResource(entry.hash)
 	if !ok || location.external != nil || location.archive == nil {
 		return FileReadOrder{}, fmt.Errorf("wim: path %q has no ordered WIM resource", name)
 	}
@@ -291,15 +296,34 @@ func (w *Archive) addReferenceIndexes(store *bytecache.Cache, references []stora
 			return fmt.Errorf("wim: reference %d: %w", index, result.err)
 		}
 		reference := result.archive
-		for hash, locations := range reference.locationsByHash {
-			for _, location := range locations {
+		// Remap backing ordinals once, independently of randomized hash iteration.
+		base := uint64(len(w.resourceBackings))
+		if base+uint64(len(reference.resourceBackings)) > 1<<32 {
+			return fmt.Errorf("wim: too many resource backings")
+		}
+		w.resourceBackings = append(w.resourceBackings, reference.resourceBackings...)
+		for hash, compact := range reference.byHash {
+			if history := reference.locationsByHash[string(hash[:])]; len(history) == 0 {
+				if compact.blobSize() != 0 {
+					compact = compact.remapBacking(uint32(base))
+					w.addIndexedLocation(hash, compact)
+				}
+				continue
+			}
+			for _, location := range reference.resourceLocations(string(hash[:])) {
 				if location.blobSize == 0 {
 					continue
 				}
-				w.byHash[hash] = location
-				w.locationsByHash[hash] = append(w.locationsByHash[hash], location)
+				w.addResourceLocation(string(hash[:]), location)
 			}
 		}
+		// Locations retain only the reference's reading context. Its private
+		// lookup indexes have been imported; retaining them duplicates every
+		// hash entry for the rest of the image lifetime.
+		reference.byHash = nil
+		reference.resourceBackings = nil
+		reference.lastResource = nil
+		reference.locationsByHash = nil
 	}
 	return nil
 }
@@ -326,7 +350,7 @@ func (w *Archive) MissingResourceHashes() ([][20]byte, error) {
 				if child.hash == ([20]byte{}) {
 					continue
 				}
-				if _, found := w.byHash[string(child.hash[:])]; !found {
+				if _, found := w.lookupResource(child.hash); !found {
 					missing[child.hash] = struct{}{}
 				}
 			}
@@ -352,21 +376,20 @@ func (w *Archive) AddExternalResources(resources []ExternalResource) error {
 		}
 		location := wimResourceLocation{external: resource.File, blobSize: resource.File.Size()}
 		key := string(resource.SHA1[:])
-		w.byHash[key] = location
-		w.locationsByHash[key] = append(w.locationsByHash[key], location)
+		w.addResourceLocation(key, location)
 	}
 	for imageIndex := range w.images {
 		image := &w.images[imageIndex]
 		for directory, entries := range image.dirs {
 			for index := range entries {
-				if location, found := w.byHash[string(entries[index].hash[:])]; found {
+				if location, found := w.lookupResource(entries[index].hash); found {
 					entries[index].size = location.blobSize
 				}
 			}
 			image.dirs[directory] = entries
 		}
 		for name, entry := range image.byPath {
-			if location, found := w.byHash[string(entry.hash[:])]; found {
+			if location, found := w.lookupResource(entry.hash); found {
 				entry.size = location.blobSize
 				image.byPath[name] = entry
 			}
@@ -404,12 +427,15 @@ func openWithCache(file storage.Reader, store *bytecache.Cache, source uint64, r
 		partNumber:      binary.LittleEndian.Uint16(header[40:42]),
 		totalParts:      binary.LittleEndian.Uint16(header[42:44]),
 		imageCount:      int(binary.LittleEndian.Uint32(header[44:48])),
-		byHash:          make(map[string]wimResourceLocation),
+		byHash:          make(map[[20]byte]indexedResourceLocation),
 		locationsByHash: make(map[string][]wimResourceLocation),
 		xml:             parseWIMResource(header[72:96]),
 		boot:            parseWIMResource(header[96:120]),
 		cacheStore:      store, cacheSource: source,
 	}
+	// Construction-only input table: runtime lookup uses byHash/history and
+	// decoded images. No lazy reader needs this second full resource inventory.
+	defer func() { w.lookup = nil }()
 	compressionFlags := w.flags & (wimFlagXPRESS | wimFlagLZX | wimFlagLZMS)
 	if w.chunkSize == 0 {
 		if compressionFlags != 0 {
@@ -426,6 +452,7 @@ func openWithCache(file storage.Reader, store *bytecache.Cache, source uint64, r
 	if len(lookupData)%wimLookupEntrySize != 0 {
 		return nil, fmt.Errorf("wim: invalid lookup table size")
 	}
+	w.lookup = make([]wimLookupEntry, 0, len(lookupData)/wimLookupEntrySize)
 	for off := 0; off+wimLookupEntrySize <= len(lookupData); off += wimLookupEntrySize {
 		entry := wimLookupEntry{
 			resource: parseWIMResource(lookupData[off : off+24]),
@@ -450,11 +477,10 @@ func (w *Archive) indexLookupResources() error {
 	for index := 0; index < len(w.lookup); {
 		if w.lookup[index].resource.flags&wimResourceSolid == 0 {
 			entry := w.lookup[index]
-			w.byHash[string(entry.hash[:])] = wimResourceLocation{
+			w.addResourceLocation(string(entry.hash[:]), wimResourceLocation{
 				archive: w, resource: entry.resource, blobSize: entry.resource.originalSize,
 				lookupPart: entry.part, refCount: entry.refCount,
-			}
-			w.locationsByHash[string(entry.hash[:])] = append(w.locationsByHash[string(entry.hash[:])], w.byHash[string(entry.hash[:])])
+			})
 			index++
 			continue
 		}
@@ -505,8 +531,7 @@ func (w *Archive) indexSolidRun(entries []wimLookupEntry) error {
 					blobOffset: blobOffset - resource.base, blobSize: blobSize,
 					lookupPart: entry.part, refCount: entry.refCount,
 				}
-				w.byHash[string(entry.hash[:])] = location
-				w.locationsByHash[string(entry.hash[:])] = append(w.locationsByHash[string(entry.hash[:])], location)
+				w.addResourceLocation(string(entry.hash[:]), location)
 				located = true
 				break
 			}
@@ -766,7 +791,7 @@ func (w *Archive) missingResourcesBuiltin(_ *starlark.Thread, _ *starlark.Builti
 			if child.hash == ([20]byte{}) {
 				continue
 			}
-			if _, ok := w.byHash[string(child.hash[:])]; ok {
+			if _, ok := w.lookupResource(child.hash); ok {
 				continue
 			}
 			values = append(values, starfile.NewRecord(starlark.StringDict{
@@ -810,7 +835,7 @@ func (w *Archive) resourceEntriesBuiltin(_ *starlark.Thread, _ *starlark.Builtin
 					pending = append(pending, child)
 					continue
 				}
-				location, ok := w.byHash[string(child.hash[:])]
+				location, ok := w.lookupResource(child.hash)
 				if !ok || int(location.archive.cacheSource) != source || location.resource.chunkSize <= 0 || location.blobSize <= 0 {
 					continue
 				}
@@ -843,7 +868,7 @@ func (w *Archive) resourceLocationsBuiltin(_ *starlark.Thread, _ *starlark.Built
 	if err != nil || len(decoded) != 20 {
 		return nil, fmt.Errorf("resource_locations: sha1 must be 40 hexadecimal characters")
 	}
-	locations := w.locationsByHash[string(decoded)]
+	locations := w.resourceLocations(string(decoded))
 	values := make([]starlark.Value, 0, len(locations))
 	for _, location := range locations {
 		values = append(values, wimResourceLocationRecord(location))
@@ -1130,18 +1155,19 @@ func (w *Archive) applyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 		return nil, err
 	}
 	destination = storage.CleanPath(destination)
+	files := contentFileStore{archive: w}
 	if !root.isDir {
 		metadata := image.virtualMetadata(root, preserveHardLinks)
 		if root.reparseTag != 0 && preserveReparsePoints {
 			metadata.ReparseTag = root.reparseTag
-			metadata.ReparseData = w.newFile(root)
+			metadata.ReparseData = files.newFile(root)
 			target.PutFile(destination, virtualfs.FileRecord{})
 		} else {
 			metadata.FileAttributes &^= 0x400
 			if root.reparseTag != 0 {
 				target.PutFile(destination, virtualfs.FileRecord{})
 			} else {
-				target.PutFile(destination, virtualfs.FileRecord{File: w.newFile(root), Size: root.size})
+				target.PutFile(destination, virtualfs.FileRecord{File: files.newFile(root), Size: root.size})
 			}
 		}
 		target.SetMetadata(destination, metadata)
@@ -1151,7 +1177,7 @@ func (w *Archive) applyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 	rootMetadata := image.virtualMetadata(root, preserveHardLinks)
 	if root.reparseTag != 0 && preserveReparsePoints {
 		rootMetadata.ReparseTag = root.reparseTag
-		rootMetadata.ReparseData = w.newFile(root)
+		rootMetadata.ReparseData = files.newFile(root)
 	} else if root.reparseTag != 0 {
 		rootMetadata.FileAttributes &^= 0x400
 	}
@@ -1173,7 +1199,7 @@ func (w *Archive) applyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 			metadata := image.virtualMetadata(child, preserveHardLinks)
 			if child.reparseTag != 0 && preserveReparsePoints {
 				metadata.ReparseTag = child.reparseTag
-				metadata.ReparseData = w.newFile(child)
+				metadata.ReparseData = files.newFile(child)
 			} else if child.reparseTag != 0 {
 				metadata.FileAttributes &^= 0x400
 			}
@@ -1183,7 +1209,7 @@ func (w *Archive) applyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 			} else if child.reparseTag != 0 {
 				target.PutFile(childDestination, virtualfs.FileRecord{})
 			} else {
-				target.PutFile(childDestination, virtualfs.FileRecord{File: w.newFile(child), Size: child.size})
+				target.PutFile(childDestination, virtualfs.FileRecord{File: files.newFile(child), Size: child.size})
 			}
 			target.SetMetadata(childDestination, metadata)
 		}
@@ -1249,11 +1275,21 @@ func (w *Archive) lookupPath(name string) (entry, error) {
 			if part == "" {
 				continue
 			}
-			_, err := w.readWIMDir(image, current)
+			children, err := w.readWIMDir(image, current)
 			if err != nil {
 				return entry{}, err
 			}
 			child, found := w.cachedPath(image, wimPathKey(current.path+"/"+part))
+			if !found {
+				// A concurrent cache release must not turn a valid lookup
+				// into absence. The returned directory remains immutable.
+				for _, candidate := range children {
+					if strings.EqualFold(candidate.name, part) {
+						child, found = candidate, true
+						break
+					}
+				}
+			}
 			if !found {
 				return entry{}, fmt.Errorf("wim: path %q not found", name)
 			}
@@ -1318,35 +1354,43 @@ func (w *Archive) readWIMDir(image *image, dir entry) ([]entry, error) {
 	if w.legacyIDs != nil {
 		return w.readLegacyDir(image, dir)
 	}
-	data, err := w.imageMetadata(image)
-	if err != nil {
-		return nil, err
-	}
 	var entries []entry
-	for off := int(dir.subdirOff); ; {
-		if off+8 > len(data) || binary.LittleEndian.Uint64(data[off:off+8]) == 0 {
-			break
-		}
-		length := int(binary.LittleEndian.Uint64(data[off : off+8]))
-		if length < wimMetadataEntryBaseLen || off+length > len(data) {
-			break
-		}
-		entry, err := parseWIMEntry(data, off, dir.path)
+	if image.compactMetadata && image.metadata == nil {
+		var err error
+		entries, err = w.readPackedDirectory(image, dir)
 		if err != nil {
-			return nil, fmt.Errorf("entry at %#x under %s: %w", off, dir.path, err)
+			return nil, err
 		}
-		if entry.name == "" {
-			break
+	} else {
+		data, err := w.imageMetadata(image)
+		if err != nil {
+			return nil, err
 		}
-		if !validWIMName(entry.name) {
-			break
+		for off := int(dir.subdirOff); ; {
+			if off+8 > len(data) || binary.LittleEndian.Uint64(data[off:off+8]) == 0 {
+				break
+			}
+			length := int(binary.LittleEndian.Uint64(data[off : off+8]))
+			if length < wimMetadataEntryBaseLen || off+length > len(data) {
+				break
+			}
+			entry, err := parseWIMEntry(data, off, dir.path)
+			if err != nil {
+				return nil, fmt.Errorf("entry at %#x under %s: %w", off, dir.path, err)
+			}
+			if entry.name == "" {
+				break
+			}
+			if !validWIMName(entry.name) {
+				break
+			}
+			if location, ok := w.lookupResource(entry.hash); ok {
+				entry.size = location.blobSize
+			}
+			detachWIMEntry(&entry)
+			entries = append(entries, entry)
+			off += length
 		}
-		if location, ok := w.byHash[string(entry.hash[:])]; ok {
-			entry.size = location.blobSize
-		}
-		detachWIMEntry(&entry)
-		entries = append(entries, entry)
-		off += length
 	}
 	// Sorting large manifest directories must not allocate a folded name on
 	// every comparison. Keep the original directory-first, non-stable order.
@@ -1744,7 +1788,7 @@ func (w *Archive) newFile(entry entry) *File {
 	if w.legacyIDs != nil && entry.hash == ([20]byte{}) && entry.size == 0 {
 		return &File{archive: w, entry: entry, reader: &starfile.Bytes{Name: entry.path}}
 	}
-	location, ok := w.byHash[string(entry.hash[:])]
+	location, ok := w.lookupResource(entry.hash)
 	if !ok {
 		return &File{archive: w, entry: entry}
 	}
@@ -1767,76 +1811,12 @@ func readerForLocation(name string, location wimResourceLocation) storage.Reader
 const solidBlobSegmentSize int64 = 32 << 20
 
 func (f *File) ReadAt(p []byte, off int64) (int, error) {
-	if f.reader == nil {
-		return 0, fmt.Errorf("wim: resource for %q not found", f.entry.path)
-	}
-	if f.archive.blobCache == nil || f.location == nil || f.location.resource.flags&wimResourceSolid == 0 || f.location.resource.compression != 3 || f.entry.size <= 0 || off < 0 || off >= f.entry.size || len(p) == 0 {
-		return f.reader.ReadAt(p, off)
-	}
-	// Keep small files whole and large files in bounded segments. In particular,
-	// a resource just above the segment size must not fall back to decoding a
-	// whole solid chunk for each tiny paging read.
-	n := 0
-	for len(p) != 0 && off < f.entry.size {
-		start := off / solidBlobSegmentSize * solidBlobSegmentSize
-		size := min(solidBlobSegmentSize, f.entry.size-start)
-		data, err := f.cachedBlobSegment(start, size)
-		if err != nil {
-			return n, err
-		}
-		copied := copy(p, data[off-start:])
-		n += copied
-		off += int64(copied)
-		p = p[copied:]
-	}
-	if len(p) != 0 {
-		return n, io.EOF
-	}
-	return n, nil
+	content := contentFile{archive: f.archive, path: f.entry.path, hash: f.entry.hash,
+		size: f.entry.size, reader: f.reader,
+		solidLZMS: f.location != nil && f.location.resource.flags&wimResourceSolid != 0 && f.location.resource.compression == 3}
+	return content.ReadAt(p, off)
 }
 
-func (f *File) cachedBlobSegment(start, size int64) ([]byte, error) {
-	// WIM addresses blobs by their complete SHA-1. Preserve all 160 bits and
-	// separately key the segment ordinal, without host paths or truncated hashes.
-	key := bytecache.Key{Kind: 3, Offset: int64(binary.LittleEndian.Uint64(f.entry.hash[:8])), Size: int64(binary.LittleEndian.Uint64(f.entry.hash[8:16])), OriginalSize: int64(binary.LittleEndian.Uint32(f.entry.hash[16:]))}
-	if f.entry.size > solidBlobSegmentSize {
-		key.Kind = 5
-		key.Source = uint64(start / solidBlobSegmentSize)
-	}
-	load := func() ([]byte, error) {
-		var fresh []byte
-		encoded, err := f.archive.blobCache.Get(key, func() ([]byte, error) {
-			f.archive.noteBlobMiss(f.entry.path)
-			data := make([]byte, int(size))
-			n, err := f.reader.ReadAt(data, start)
-			if err != nil {
-				return nil, err
-			}
-			if n != len(data) {
-				return nil, io.ErrUnexpectedEOF
-			}
-			encoded, err := encodeCachedBlob(data)
-			if err == nil {
-				// Only this loader owns the expanded source buffer. Keep the
-				// encoded cache entry, but do not immediately decode our own
-				// just-encoded bytes. Waiters/hits still use the stored encoding.
-				fresh = data
-			}
-			return encoded, err
-		})
-		if err != nil {
-			return nil, err
-		}
-		if fresh != nil {
-			return fresh, nil
-		}
-		return decodeCachedBlob(encoded, size)
-	}
-	if f.archive.blobHotCache != nil {
-		return f.archive.blobHotCache.Get(key, load)
-	}
-	return load()
-}
 func (f *File) WriteAt(_ []byte, _ int64) (int, error) {
 	return 0, fmt.Errorf("wim entry %q is read-only", f.entry.path)
 }
@@ -1911,7 +1891,7 @@ func (f *File) verifyLocationsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, a
 	if err := starlark.UnpackArgs("verify_locations", args, kwargs); err != nil {
 		return nil, err
 	}
-	locations := f.archive.locationsByHash[string(f.entry.hash[:])]
+	locations := f.archive.resourceLocations(string(f.entry.hash[:]))
 	values := make([]starlark.Value, 0, len(locations))
 	for _, location := range locations {
 		reader := readerForLocation(f.entry.path, location)

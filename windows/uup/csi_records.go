@@ -92,7 +92,7 @@ func planCSIComponentDescriptions(components []PlannedComponent, open func(strin
 			return nil, err
 		}
 		record := CSIComponentRecord{Stem: component.Stem, Identity: identity}
-		record.ManifestSHA256 = sha256.Sum256(parsed.data)
+		record.ManifestSHA256 = sha256.Sum256([]byte(parsed.data))
 		names := make(map[string]bool)
 		for _, file := range manifest.Files {
 			if _, err := componentSourcePath(file); err != nil {

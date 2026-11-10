@@ -43,6 +43,7 @@ type peRestore struct {
 }
 
 type pePreprocess struct {
+	sourceTimestamp uint32
 	prefix          peRestore
 	targetRVAtoFile riftTable
 	rebuildChecksum bool
@@ -109,6 +110,10 @@ func preparePE(source, preprocess []byte, flags int64) ([]byte, *pePreprocess, e
 }
 
 func preparePETraced(source, preprocess []byte, flags int64, trace *peTransformTrace) ([]byte, *pePreprocess, error) {
+	return preparePETracedSource(source, preprocess, flags, trace, false)
+}
+
+func preparePETracedSource(source, preprocess []byte, flags int64, trace *peTransformTrace, owned bool) ([]byte, *pePreprocess, error) {
 	layout, err := parsePELayout(source)
 	if err != nil {
 		return nil, nil, fmt.Errorf("msdelta: PE preprocessing source: %w", err)
@@ -142,7 +147,14 @@ func preparePETraced(source, preprocess []byte, flags int64, trace *peTransformT
 		}
 	}
 
-	transformed := append([]byte(nil), source...)
+	sourceTimestamp := get32(source, int(layout.timestampOffset))
+	rebuildChecksum := get32(source, int(layout.checksumOffset)) != 0
+	transformed := source
+	// CLI token normalization observes the original method bytes as well as
+	// the transformed image. Keep its existing separate-buffer semantics.
+	if !owned || managedSource != nil {
+		transformed = bytes.Clone(source)
+	}
 	binary.LittleEndian.PutUint32(transformed[layout.checksumOffset:], 0)
 	if err := transformPESourceTraced(transformed, layout, sourceToTargetRVA, uint64(flags), prefix, trace, managedSource); err != nil {
 		return nil, nil, err
@@ -173,7 +185,8 @@ func preparePETraced(source, preprocess []byte, flags int64, trace *peTransformT
 	}
 	result := &pePreprocess{
 		prefix: prefix, targetRVAtoFile: targetRVAtoFile,
-		rebuildChecksum: binary.LittleEndian.Uint32(source[layout.checksumOffset:]) != 0,
+		rebuildChecksum: rebuildChecksum,
+		sourceTimestamp: sourceTimestamp,
 		targetToSource:  mapping,
 	}
 	return transformed, result, nil
@@ -403,7 +416,10 @@ func restorePETimestamps(source, target []byte, targetTimestamp uint32) error {
 	if err != nil {
 		return fmt.Errorf("msdelta: LZMS PE source: %w", err)
 	}
-	sourceTimestamp := get32(source, int(sourceLayout.timestampOffset))
+	return restorePETimestampValue(get32(source, int(sourceLayout.timestampOffset)), target, targetTimestamp)
+}
+
+func restorePETimestampValue(sourceTimestamp uint32, target []byte, targetTimestamp uint32) error {
 	if sourceTimestamp == 0 || sourceTimestamp == targetTimestamp {
 		return nil
 	}

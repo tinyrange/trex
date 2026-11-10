@@ -20,7 +20,7 @@ func TestStageEffectsRetainCBSRegistryKeysWithoutInventingValues(t *testing.T) {
 		payload := DeltaPayload{Target: descriptor, Record: descriptor, RecordType: "RAW", Literal: true}
 		stage := &CumulativeStage{
 			metadataCAB: &cab.Archive{}, Graph: &CumulativeGraph{Payloads: []DeltaPayload{payload}},
-			PSF: &starfile.Bytes{Data: data}, expressByTarget: map[string]DeltaPayload{normalizeCIXName(name): payload},
+			PSF: &starfile.Bytes{Data: data}, expressByTarget: map[string]*DeltaPayload{normalizeCIXName(name): &payload},
 		}
 		plan, err := PlanStageEffects(stage, StageAssemblyPlan{Components: []PlannedComponent{{
 			Path: name, Identity: AssemblyIdentity{Name: "Microsoft-UI-Xaml-CBS", Version: "10.0.26100.8328", ProcessorArchitecture: arch},
@@ -267,7 +267,7 @@ func TestStagedComponentRetainsStoreFileWithoutRuntimeProjection(t *testing.T) {
 	manifest := ContentDescriptor{Name: "optional.manifest", Length: int64(len(data)), SHA256: sha256.Sum256(data)}
 	payload := DeltaPayload{Target: manifest, Record: manifest, RecordType: "RAW", Literal: true}
 	for _, staged := range []bool{false, true} {
-		stage := &CumulativeStage{metadataCAB: &cab.Archive{}, PSF: &starfile.Bytes{Data: data}, Graph: &CumulativeGraph{Payloads: []DeltaPayload{payload, {Target: ContentDescriptor{Name: `optional\optional.dll`}}}}, expressByTarget: map[string]DeltaPayload{normalizeCIXName(manifest.Name): payload}}
+		stage := &CumulativeStage{metadataCAB: &cab.Archive{}, PSF: &starfile.Bytes{Data: data}, Graph: &CumulativeGraph{Payloads: []DeltaPayload{payload, {Target: ContentDescriptor{Name: `optional\optional.dll`}}}}, expressByTarget: map[string]*DeltaPayload{normalizeCIXName(manifest.Name): &payload}}
 		effects, err := PlanStageEffects(stage, StageAssemblyPlan{Components: []PlannedComponent{{Path: manifest.Name, Stem: "optional", Identity: AssemblyIdentity{Name: "optional", Version: "1.0", ProcessorArchitecture: "amd64"}, StagedOnly: staged}}})
 		if err != nil {
 			t.Fatal(err)

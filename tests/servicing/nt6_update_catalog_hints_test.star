@@ -81,4 +81,69 @@ def test_actual_hint_header_validation():
     root.write('/plain', 'no hint')
     equal(m['audit_catalog_hints'](root), dict(objects=0, matched=0, catalogs=0, chains=0))
 
-TEST_SUITE=suite('nt6_update_catalog_hints',[case('actual_hint_audit',test_actual_hint_audit_rejects_unregistered_catalog),case('actual_hint_header',test_actual_hint_header_validation),case('encoding_aliases',test_encoding_and_aliases),case('atomic_preflight',test_preflight),case('signed_paths',test_signed_paths)])
+
+def test_explicit_non_audit_preserves_guards():
+    root, plan = _fixture()
+    plan['hash'] = None
+    # Missing proof must not accidentally count as an audit success.
+    raises(m['apply_catalog_hints'], args=[root,[plan]], message='member changed')
+    equal(m['apply_catalog_hints'](root,[plan],audit=False),dict(files=1,objects=1))
+    equal(root.get_metadata('/alias').extended_attributes,plan['eas']+[plan['hint']])
+    for target,message in [('/member','member changed'),('/cat','proof changed')]:
+        root,plan=_fixture()
+        plan['hash']=None
+        root.write(target,'changed')
+        raises(m['apply_catalog_hints'],args=[root,[plan]],kwargs=dict(audit=False),message=message)
+        equal(root.get_metadata('/member').extended_attributes,plan['eas'])
+
+def _der(tag, content):
+    size=len(content)
+    length=binary.u8(size) if size<128 else binary.concat([b'\x81',binary.u8(size)]) if size<256 else binary.concat([b'\x82',binary.u16be(size)])
+    return binary.concat([binary.u8(tag),length,content]).bytes()
+
+def _unsigned_catalog(member_digest, hint='component/file.dll', attribute_name='Hint'):
+    # Real CTL member encoding, deliberately no signer: membership is not trust.
+    nv=_der(0x30,binary.concat([_der(30,binary.encode(attribute_name,encoding='utf16be')),b'\x02\x03\x01\x00\x01',_der(4,binary.encode(hint+chr(0),encoding='utf16le'))]).bytes())
+    attr=_der(0x30,binary.concat([binary.decode('060a2b0601040182370c0201','hex'),_der(0x31,nv)]).bytes())
+    entry=_der(0x30,binary.concat([_der(4,member_digest),_der(0x31,attr)]).bytes())
+    ctl=_der(0x30,binary.concat([_der(0x30,b''),_der(23,b'261022000000Z'),_der(0x30,binary.decode('060a2b0601040182370c0103','hex')),_der(0x30,entry)]).bytes())
+    content=_der(0x30,binary.concat([binary.decode('06092b0601040182370a01','hex'),_der(0xa0,ctl)]).bytes())
+    signed=_der(0x30,binary.concat([b'\x02\x01\x01',_der(0x31,b''),content,_der(0x31,b'')]).bytes())
+    return _der(0x30,binary.concat([binary.decode('06092a864886f70d010702','hex'),_der(0xa0,signed)]).bytes())
+
+def test_catalog_audit_is_explicit_not_fabricated_trust():
+    root=directory()
+    cat=_unsigned_catalog(digest('manifest'))
+    root.write('/Windows/servicing/Packages/fixture.cat',cat)
+    root.write('/Windows/servicing/Packages/fixture.mum','manifest')
+    root.write('/Windows/WinSxS/component/file.dll','member')
+    hints=m['plan_package_catalog_hints'](root,['fixture'],audit=False)
+    equal(hints['signature_audit'],'not-performed')
+    equal(hints['payload_audit'],'not-performed')
+    equal(len(hints['plans']),1)
+    equal(hints['plans'][0]['path'],'/Windows/WinSxS/component/file.dll')
+    m['apply_catalog_hints'](root,hints['plans'],audit=False)
+    equal(root.get_metadata('/Windows/WinSxS/component/file.dll').extended_attributes,[m['_hint']('fixture.cat')])
+    raises(windows.catalog_signature,args=[cat])
+    raises(m['plan_package_catalog_hints'],args=[root,['fixture']])
+    root.write('/Windows/servicing/Packages/fixture.cat','malformed')
+    raises(m['plan_package_catalog_hints'],args=[root,['fixture']],kwargs=dict(audit=False))
+
+def test_catalog_named_projection():
+    for name in ['Hint', 'hINT', 'Other']:
+        encoded=_unsigned_catalog(b'x'*32,attribute_name=name)
+        full=windows.catalog_entries(encoded)
+        equal(windows.catalog_entries(encoded,name_value=None),full)
+        selected=windows.catalog_entries(encoded,name_value='hint')
+        equal(selected,full if name.lower()=='hint' else dict(version=2,entries=[]))
+        equal(m['package_hint_paths'](selected),m['package_hint_paths'](full))
+        # Returned projections do not share mutable result lists.
+        selected['entries'].append('changed')
+        equal(windows.catalog_entries(encoded),full)
+    # Filtering does not excuse malformed metadata that would be omitted.
+    raises(windows.catalog_entries,args=[_unsigned_catalog(b'x'*32,attribute_name=chr(0))],kwargs=dict(name_value='Hint'))
+    raises(windows.catalog_entries,args=[_unsigned_catalog(b'x')],kwargs=dict(name_value='Absent'))
+    for value in ['', 7, []]:
+        raises(windows.catalog_entries,args=[_unsigned_catalog(b'x'*32)],kwargs=dict(name_value=value))
+
+TEST_SUITE=suite('nt6_update_catalog_hints',[case('named_projection',test_catalog_named_projection),case('catalog_audit_separation',test_catalog_audit_is_explicit_not_fabricated_trust),case('explicit_non_audit_guards',test_explicit_non_audit_preserves_guards),case('actual_hint_audit',test_actual_hint_audit_rejects_unregistered_catalog),case('actual_hint_header',test_actual_hint_header_validation),case('encoding_aliases',test_encoding_and_aliases),case('atomic_preflight',test_preflight),case('signed_paths',test_signed_paths)])

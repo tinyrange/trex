@@ -37,10 +37,15 @@ func NewComponentMetadataIndex(stage *CumulativeStage) (*ComponentMetadataIndex,
 func newComponentMetadataIndex(entries []stageMetadataEntry, open func(string) (storage.Reader, error), release func(string)) (*ComponentMetadataIndex, error) {
 	index := &ComponentMetadataIndex{byHash: map[string][]manifestPath{}, open: open, release: release}
 	seen := map[string]string{}
+	var records []manifestPath
+	names := graphStringStore{seen: make(map[string]string)}
 	for _, entry := range entries {
 		if !strings.EqualFold(path.Ext(entry.Name), ".manifest") {
 			continue
 		}
+		// Own densely stored immutable names, not one directory allocation per
+		// name. Parse only after ownership so identity substrings share it.
+		entry.Name, entry.Path = names.copy(entry.Name), names.copy(entry.Path)
 		component, err := ParseComponentManifestName(entry.Name)
 		if err != nil {
 			if _, _, contentErr := ParseComponentContentName(entry.Path); contentErr == nil {
@@ -60,6 +65,13 @@ func newComponentMetadataIndex(entries []stageMetadataEntry, open func(string) (
 		}
 		seen[key] = entry.Path
 		hash := strings.ToLower(component.Suffix)
+		if len(index.byHash[hash]) == 0 {
+			if len(records) == 0 {
+				records = make([]manifestPath, 128)
+			}
+			index.byHash[hash] = records[:0:1]
+			records = records[1:]
+		}
 		index.byHash[hash] = append(index.byHash[hash], manifestPath{Path: entry.Path, Component: component})
 	}
 	return index, nil

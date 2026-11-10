@@ -1,4 +1,5 @@
 """Manifest-owned deferred NGEN commands. Never runs ngen or marks it complete."""
+load("@stdlib//windows/servicing:runtime.star", "servicing_runtime_manifest_root")
 load('@stdlib//windows/servicing:registry_effects.star', 'plan_update_registry_effects', 'apply_update_registry_effects')
 _NS='urn:schemas-microsoft-com:asm.v3'
 _PATH='/Windows/System32/config/SOFTWARE'
@@ -19,9 +20,10 @@ def _safe(value):
         fail('unsafe NGEN identity field')
     return value
 
-def _declarations(document):
+def _declarations(document, change=None, side="after"):
     if document==None: return []
-    tree=binary.xml(document,discard_whitespace=True).root
+    if 'ngen' not in windows.assembly_manifest(document).file_elements: return []
+    tree=servicing_runtime_manifest_root(change, side) if change!=None else binary.xml(document,discard_whitespace=True).root
     marked=[(n,c) for n in tree.children if n.namespace==_NS and n.name=='file' for c in n.children if c.namespace==_NS and c.name=='ngen']
     if not marked: return []
     identities=[_attrs(n) for n in tree.children if n.namespace==_NS and n.name=='assemblyIdentity']
@@ -87,7 +89,7 @@ def collect_update_ngen(runtime):
     update=False
     for transition in runtime['transitions']:
         for phase,operation in [('before','uninstall'),('after','install')]:
-            for item in _declarations(transition[phase]):
+            for item in _declarations(transition[phase], transition, phase):
                 if item.get('update',False):
                     update=True
                     continue
@@ -110,11 +112,11 @@ def plan_update_ngen(root,runtime):
     commands=collect_update_ngen(runtime)
     source=root.find(_PATH)
     if source==None: fail('NGEN requires SOFTWARE hive')
-    hive=windows.hive(source)
+    hive=windows.hive(source, snapshot=True)
     components_path='/Windows/System32/config/COMPONENTS'
     components_source=root.find(components_path)
     if components_source==None: fail('NGEN requires COMPONENTS hive')
-    components=windows.hive(components_source)
+    components=windows.hive(components_source, snapshot=True)
     if components.find('/').values.get('StoreArchitecture')!=binary.u32le(9): fail('NGEN queue planner requires amd64 component store')
     # Native CreatePlatformSpecificNgenKey sets the priority-transfer flag
     # after every successful command write. Removal also requests update /queue

@@ -152,6 +152,10 @@ type AssemblyManifest struct {
 	RegistryKeys   []string
 	RegistryValues []AssemblyRegistryValue
 	TopLevel       []string
+	// FileElements lists local names of direct file children. It is a
+	// conservative presence filter only; consumers must validate namespaces,
+	// attributes and placement before interpreting a declaration.
+	FileElements []string
 }
 
 // ParseAssemblyManifest parses CBS MUM and component manifests while keeping
@@ -179,6 +183,7 @@ func parseAssemblyManifest(decoder *xml.Decoder) (*AssemblyManifest, error) {
 	var updateContexts []int
 	var driverContexts [][]ManifestAttribute
 	topLevel := make(map[string]struct{})
+	fileElements := make(map[string]bool)
 	elements := 0
 	for {
 		token, err := decoder.Token()
@@ -197,6 +202,10 @@ func parseAssemblyManifest(decoder *xml.Decoder) (*AssemblyManifest, error) {
 			parent := ""
 			if len(stack) != 0 {
 				parent = stack[len(stack)-1]
+			}
+			if parent == "file" && !fileElements[token.Name.Local] {
+				fileElements[token.Name.Local] = true
+				result.FileElements = append(result.FileElements, token.Name.Local)
 			}
 			if parent == "assembly" && token.Name.Local != "assemblyIdentity" {
 				if _, exists := topLevel[token.Name.Local]; !exists {

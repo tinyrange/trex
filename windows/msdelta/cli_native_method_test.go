@@ -42,11 +42,11 @@ func TestCLINativeMethodsUseHeaderOnlyEligibility(t *testing.T) {
 	if source[0x510] != 0x12 {
 		t.Fatal("source mutated")
 	}
-	marker := make([]byte, len(source))
+	marker := newPEMarker(len(source))
 	if err := markCLIMethodBodies(marker, source, pe, m); err != nil {
 		t.Fatal(err)
 	}
-	for i, got := range marker {
+	for i, got := range marker.values() {
 		want := byte(0)
 		if (i >= 0x500 && i < 0x531) || (i >= 0x550 && i < 0x557) {
 			want = 3

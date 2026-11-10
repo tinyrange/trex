@@ -12,7 +12,9 @@ def image_path_names(root, mutable=True):
     """Return the case-folded file-derived namespace, excluding empty directories; mutable=False requests a read-only index."""
     # Preserve the file-derived namespace used by the planner, without decoding
     # payloads or repeatedly synthesizing every ancestor in the interpreter.
-    return root.path_names(lower=True, include_empty=False, readonly=not mutable)
+    if not mutable:
+        return root.path_index(lower=True, include_empty=False)
+    return root.path_names(lower=True, include_empty=False)
 
 
 def plan_update_directories(root, prepared):

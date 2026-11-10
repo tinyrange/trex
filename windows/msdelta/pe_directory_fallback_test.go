@@ -8,13 +8,13 @@ func TestDirectoryMarkingFallsBackOnlyForUnbackedRVAs(t *testing.T) {
 			sections: []peSection{{rva: 0x100, rawStart: 0x20, rawSize: 0x80, virtualSize: 0x300}},
 		}
 		layout.directories[directory] = peDirectory{rva: 0x200, size: 0x40}
-		data, marker := make([]byte, 0x220), make([]byte, 0x220)
+		data, marker := make([]byte, 0x220), newPEMarker(0x220)
 		// The directory lies in the section's virtual tail, not its raw backing.
 		// Its in-file address instead owns the overlay, clipped at the file end.
 		put32(data, 0x205, 0x10000100)
 		put32(data, 0x125, 0x10000100) // not owned by a false virtual-tail mapping
 		markPEDirectories(marker, layout)
-		for i, got := range marker {
+		for i, got := range marker.values() {
 			want := byte(0)
 			if i < 0x20 || i >= 0x200 {
 				want = 3
@@ -29,16 +29,16 @@ func TestDirectoryMarkingFallsBackOnlyForUnbackedRVAs(t *testing.T) {
 		}
 		// Raw-backed RVAs still take precedence over the same numeric file offset.
 		layout.directories[directory] = peDirectory{rva: 0x120, size: 4}
-		clear(marker)
+		clear(marker.words)
 		markPEDirectories(marker, layout)
-		if marker[0x40] != 3 || marker[0x120] != 0 {
+		if marker.get(0x40) != 3 || marker.get(0x120) != 0 {
 			t.Fatal("raw RVA mapping did not take precedence")
 		}
 		// No invented backing for an address outside both section and file.
 		layout.directories[directory] = peDirectory{rva: 0x500, size: 0xffffffff}
-		clear(marker)
+		clear(marker.words)
 		markPEDirectories(marker, layout)
-		for _, got := range marker[0x20:] {
+		for _, got := range marker.values()[0x20:] {
 			if got != 0 {
 				t.Fatal("out-of-file fallback was marked")
 			}

@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -40,8 +38,9 @@ const (
 	// 335 font headers again decoded another 518 MiB. Keep a larger shared
 	// source working set, independently of the serviced-file cache. This is
 	// a lazy ceiling; callers must budget it alongside guest memory.
-	maximumWIMChunkCache     = int64(2 << 30)
-	maximumServicingWIMCache = int64(256 << 20)
+	maximumWIMChunkCache          = int64(2 << 30)
+	maximumServicingWIMCache      = int64(384 << 20) // Runtime shared WIM/CAB cache, not per stage.
+	constructionServicingWIMCache = int64(1536 << 20)
 	// Only the RAM hot cache is bounded. Downloaded source ranges persist
 	// without eviction in the native UUP cache across readers and runs. A
 	// small range window avoids retaining a second large copy alongside
@@ -91,7 +90,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	var whilePreparing starlark.Value = starlark.None
 	var additionalCabinets, additionalMSUs *starlark.Dict
 	var additionalOrder *starlark.List
-	var architecture, edition, language, metadataName, targetCompDB string
+	var architecture, edition, language, metadataName, targetCompDB, cacheDirectory string
 	var baseArg starlark.Value = starlark.None
 	var bootsectArg starlark.Value = starlark.None
 	var imagePath string
@@ -105,6 +104,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		"catalog", &catalogArg, "offer", &offerArg,
 		"architecture", &architecture, "edition", &edition, "language", &language,
 		"metadata_name", &metadataName, "target_compdb", &targetCompDB,
+		"cache?", &cacheDirectory,
 		"index_only?", &indexOnly,
 		"plan_only?", &planOnly,
 		"metadata_only?", &metadataOnly,
@@ -180,7 +180,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		return nil, fmt.Errorf("update_media: %w", err)
 	}
 	options := mediaPreparationOptions{
-		architecture: architecture, edition: edition, language: language,
+		architecture: architecture, edition: edition, language: language, cacheDirectory: cacheDirectory,
 		metadataName: metadataName, targetCompDB: targetCompDB, imagePath: imagePath,
 		bootsect: bootsectArg, indexOnly: indexOnly, planOnly: planOnly,
 		metadataOnly: metadataOnly, stateOnly: stateOnly, servicingOnly: servicingOnly,
@@ -192,6 +192,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 }
 
 type mediaPreparationOptions struct {
+	cacheDirectory                                                         string
 	additionalCabinets                                                     []additionalCabinet
 	architecture, edition, language, metadataName, targetCompDB, imagePath string
 	bootsect                                                               starlark.Value
@@ -229,11 +230,11 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 	// Declared digests and sizes are sufficient for cached source ranges.
 	// Obtain expiring locations only if a reader actually needs network bytes.
 	files := declaredPayloadFiles(closure)
-	cacheRoot, err := os.UserCacheDir()
+	cacheRoot, err := mediaCacheDirectory(options.cacheDirectory)
 	if err != nil {
-		return nil, fmt.Errorf("update_media: locate persistent UUP cache: %w", err)
+		return nil, err
 	}
-	diskCache, err := storagenative.NewHTTPRangeDiskCache(filepath.Join(cacheRoot, "tinyrangex", "uup"))
+	diskCache, err := storagenative.NewHTTPRangeDiskCache(cacheRoot)
 	if err != nil {
 		return nil, fmt.Errorf("update_media: initialize persistent UUP cache: %w", err)
 	}
@@ -241,10 +242,14 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 	if !catalog.allowNetwork {
 		rangePool, err = storagenative.NewOfflineHTTPRangePool(0, maximumHTTPRangeCache, diskCache)
 	} else {
+		// Lazy location renewal needs only the selected closure and profile.
+		// Do not retain the complete catalog or its Starlark projection for
+		// the lifetime of every source-backed file in the running guest.
+		protocol, scanOptions := catalog.protocol, catalog.options
 		rangePool, err = storagenative.NewPersistentHTTPRangePool(0, maximumHTTPRangeCache, httpClient,
 			payloadLocationResolver(files, func(ctx context.Context) ([]windowsupdate.File, error) {
 				started := time.Now()
-				resolved, err := catalog.protocol.ResolveFilesForOffers(ctx, catalog.options, closure)
+				resolved, err := protocol.ResolveFilesForOffers(ctx, scanOptions, closure)
 				progress(fmt.Sprintf("update_media: payload location lookup took %s", time.Since(started).Round(time.Millisecond)))
 				return resolved, err
 			}), diskCache)
@@ -467,9 +472,23 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 		}), nil
 	}
 	started := time.Now()
-	servicingCache, err := uup.NewStageMetadataCache(maximumServicingWIMCache)
+	servicingCacheBytes := maximumServicingWIMCache
+	if servicingOnly {
+		servicingCacheBytes = constructionServicingWIMCache
+	}
+	servicingCache, err := uup.NewStageMetadataCache(servicingCacheBytes)
 	if err != nil {
 		return nil, fmt.Errorf("update_media: servicing cache: %w", err)
+	}
+	// Source parsing does not depend on predecessor bindings. Overlap the
+	// independent additional packages with catalog-stage opening, but consume
+	// them below in the original order. Limited inspection keeps lazy admission.
+	var additionalBatch *additionalStageBatch
+	if servicingOnly && installedStageLimit == 0 {
+		additionalBatch = prefetchAdditionalStages(options.additionalCabinets, func(input additionalCabinet) (*uup.CumulativeStage, error) {
+			return openAdditionalStage(input, servicingCache)
+		})
+		defer additionalBatch.join()
 	}
 	assemblyPlanner, err := uup.NewAssemblyPlanner(install, imagePath)
 	if err != nil {
@@ -488,13 +507,7 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 	var assemblyPlans []uup.StageAssemblyPlan
 	var servicingEffectPlans []uup.StageEffectPlan
 	var servicingComponentStatePlans []uup.CSIComponentStatePlan
-	lastInstalledStage := -1
-	for i, stage := range updateStages {
-		if stage.Scope == "installed-os" {
-			lastInstalledStage = i
-		}
-	}
-	for stageIndex, updateStage := range updateStages {
+	for _, updateStage := range updateStages {
 		if updateStage.Scope != "installed-os" {
 			continue
 		}
@@ -512,7 +525,11 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 		}
 		if additional != nil {
 			var stage *uup.CumulativeStage
-			stage, err = openAdditionalStage(*additional, servicingCache)
+			if additionalBatch != nil {
+				stage, err = additionalBatch.get(additional.feature)
+			} else {
+				stage, err = openAdditionalStage(*additional, servicingCache)
+			}
 			if err == nil {
 				opened = []*uup.CumulativeStage{stage}
 				metadata = []uup.UpdateStagePlan{updateStage}
@@ -529,11 +546,7 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 			return nil, fmt.Errorf("update_media: stage %q did not open exactly once", updateStage.FeatureID)
 		}
 		if servicingOnly {
-			bind := assemblyPlanner.BindStageContent
-			if stageIndex == lastInstalledStage {
-				bind = assemblyPlanner.BindFinalStageContent
-			}
-			if err := bind(opened[0]); err != nil {
+			if err := assemblyPlanner.BindSourceStageContent(opened[0]); err != nil {
 				return nil, fmt.Errorf("update_media: stage %q content bindings: %w", updateStage.FeatureID, err)
 			}
 			installedStages = append(installedStages, opened[0])
@@ -575,6 +588,7 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 			"install":      install, "image": starlark.String(imagePath), "bootsect": bootsectArg,
 			"offer_id": starlark.String(offer.ID), "offer_revision": starlark.MakeInt(offer.Revision),
 			"servicing_metadata":       servicingMetadataBuiltin(installedStages, installedStageMetadata),
+			"release_read_caches":      releaseReadCachesBuiltin(install, installedStages, servicingCache),
 			"open_resident_component":  openResident,
 			"open_resident_components": openResidents,
 		}), nil
@@ -1006,6 +1020,7 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 		"open_payload":                 openOfferPayload,
 		"servicing_effects":            servicingEffects,
 		"servicing_metadata":           servicingMetadataBuiltin(installedStages, installedStageMetadata),
+		"release_read_caches":          releaseReadCachesBuiltin(install, installedStages, servicingCache),
 		"open_resident_component":      openResident,
 		"open_resident_components":     openResidents,
 		"inspect_servicing_files":      inspectFiles,
@@ -1269,7 +1284,7 @@ func openInstalledUpdateStages(resources *lifecycle.Resources, rangePool *storag
 			if observe != nil {
 				observe(plan, "payload-open")
 			}
-			stage, err = uup.OpenCanonicalStage(canonical[0].Source.Name, file)
+			stage, err = uup.OpenCanonicalStageCache(canonical[0].Source.Name, file, cache)
 			if err != nil {
 				return nil, nil, fmt.Errorf("feature %q canonical stage: %w", plan.FeatureID, err)
 			}
@@ -1374,7 +1389,7 @@ func addCanonicalCabinetResources(resources *lifecycle.Resources, rangePool *sto
 			if retained+int64(len(result.data)) > maximumCanonicalResources {
 				resourceLimitErr = fmt.Errorf("selected canonical resources exceed %d-byte bound", maximumCanonicalResources)
 			} else {
-				data, err := retainedFiles.pack(payload.Name+result.name, result.data)
+				data, err := retainedFiles.Pack(payload.Name+result.name, result.data)
 				if err != nil {
 					resourceLimitErr = fmt.Errorf("retain canonical resource %q: %w", result.name, err)
 				} else {

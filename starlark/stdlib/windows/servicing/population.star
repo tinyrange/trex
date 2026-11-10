@@ -31,7 +31,7 @@ def collect_servicing_metadata(base, image, source, features, roots, package_lim
     # bounded closure without pruning package metadata before applicability.
     if package_limit < 1 or package_limit > 131072 or not features or not roots:
         fail("servicing metadata needs bounded packages and explicit features/roots")
-    software = windows.hive(hives["SOFTWARE"] if hives != None else base[image + "/Windows/System32/config/SOFTWARE"])
+    software = windows.hive(hives["SOFTWARE"] if hives != None else base[image + "/Windows/System32/config/SOFTWARE"], snapshot=True)
     registered = software.find(_PACKAGES).children
     directory = image + "/Windows/servicing/Packages"
     available = {}
@@ -173,14 +173,16 @@ def _initial_servicing_component_state(records, primary):
     return 0
 
 def plan_servicing_population(base, image, closure, work_limit=2097152, hives=None, phase="install", editions=["Microsoft-Windows-ProfessionalEdition"]):
+    """Plan one independent phase from a complete immutable baseline."""
+    return prepare_servicing_population(base, image, closure, work_limit=work_limit, hives=hives, editions=editions)(phase)
+
+
+def prepare_servicing_population(base, image, closure, work_limit=2097152, hives=None, editions=["Microsoft-Windows-ProfessionalEdition"]):
     """Plan ordinary package admission; reject unsupported or unresolved policy.
 
     This does not apply a CSI transaction or authorize boot. Unknown nonzero
     references fail: the metadata closure is not an omission allowlist.
     """
-    if phase not in ["stage", "prestage", "install"]:
-        fail("unsupported servicing population phase")
-    stage_only = phase == "prestage"
     files = closure['files']
 
     xmls = closure['xmls']
@@ -238,7 +240,7 @@ def plan_servicing_population(base, image, closure, work_limit=2097152, hives=No
 
     relationshipmap={n:{p:True for p in relationships[i]} for i,n in enumerate(names)}
 
-    ch = windows.hive(hives["COMPONENTS"] if hives != None else base[image + "/Windows/System32/config/COMPONENTS"])
+    ch = windows.hive(hives["COMPONENTS"] if hives != None else base[image + "/Windows/System32/config/COMPONENTS"], snapshot=True)
 
     def ci_elevation(value):
         secondary = value.secondary
@@ -283,7 +285,6 @@ def plan_servicing_population(base, image, closure, work_limit=2097152, hives=No
     # PlanStaging limits the requested owner state, not the aggregate ceiling.
     # Native flag 0x40 preserves resident owners and caps only new update state;
     # package children inherit it. Final ordinary Plan remains independent.
-    root_requests=[dict(package=n,owner=n,state=112 if phase == "install" else 64,integration=2,ceiling=4096,stage_only=stage_only) for n in roots]
 
     parent_candidates = {n: sorted({candidate: True for block in parent_blocks(packages[n]) for identity in block.children_named('assemblyIdentity', namespace=ns) for candidate in families.get('~'.join(pkgname(identity).lower().split('~')[:-1]), [])}) for n in names}
 
@@ -338,22 +339,7 @@ def plan_servicing_population(base, image, closure, work_limit=2097152, hives=No
     update_nodes={n:{attrs(u)['name'].lower():u for u in packages[n].children_named('update',namespace=ns)} for n in names}
 
 
-    def id_key(a):
-        culture=a.get('language','neutral').lower()
-        if culture in ['', 'none']: culture='neutral'
-        return tuple([a.get(k,'').lower() for k in ['name','version','publicKeyToken','processorArchitecture']])+tuple([culture,a.get('versionScope','').lower(),a.get('type','').lower()])
-
-    deployment_ids={key:windows.csi_identity(values['appid']) for key,values in deployments.items()}
-
-    deployment_by_identity={id_key(dict(name=a.name,version=a.version,language=a.language,publicKeyToken=a.public_key_token,processorArchitecture=a.processor_architecture,versionScope=a.version_scope,type=a.type)):key for key,a in deployment_ids.items()}
-
-    def initial_component(identity,primary):
-        key=deployment_by_identity.get(identity)
-        if not key: return 0
-        records=source_records[key]
-        return _initial_servicing_component_state(records, primary)
-
-    component_initial_states={n:{un:[initial_component(id_key(attrs(a)),n+'.'+attrs(u)['name']) for c in u.children if c.name in ['component','driver'] for a in c.children if a.name=='assemblyIdentity'] for un,u in us.items()} for n,us in update_nodes.items()}
+    component_initial_states = index.initial_component_states(deployments, names)
 
     selection_values={n:{un.lower():value for child in pkeys[n.lower()].children if child.name.lower()=='updates' for un,value in child.values.items()} if n.lower() in pkeys else {} for n in names}
 
@@ -482,4 +468,14 @@ def plan_servicing_population(base, image, closure, work_limit=2097152, hives=No
     # Native AddPackageTask marks an LCU install session by the exact identity
     # name, before package admission. This is not inferred from missing files.
     lcu_session = any([n.split('~')[0].lower() == 'package_for_rollupfix' for n in roots])
-    return index.ordinary_population(lcu_session=lcu_session, store_loaded_packages=store_loaded, roots=root_requests, store_owners=storeowners, applicability=population_applicability, populate_mum=population_mum, work_limit=work_limit, allow_absent_references=True, watch=dict(initial_update=initial_update, dependents=(lambda e,snapshot: []) if stage_only else dependents, satellites=(lambda e,n,snapshot: []) if stage_only else satellites))
+    def run(phase="install"):
+        # The index and baseline facts are immutable; each native invocation
+        # creates independent execution/owner state. Do not share watch caches
+        # across phases, even though equal input vectors are deterministic.
+        if phase not in ["stage", "prestage", "install"]:
+            fail("unsupported servicing population phase")
+        stage_only = phase == "prestage"
+        parent_state_cache.clear()
+        root_requests=[dict(package=n,owner=n,state=112 if phase == "install" else 64,integration=2,ceiling=4096,stage_only=stage_only) for n in roots]
+        return index.ordinary_population(lcu_session=lcu_session, store_loaded_packages=store_loaded, roots=root_requests, store_owners=storeowners, applicability=population_applicability, populate_mum=population_mum, work_limit=work_limit, allow_absent_references=True, watch=dict(initial_update=initial_update, dependents=(lambda e,snapshot: []) if stage_only else dependents, satellites=(lambda e,n,snapshot: []) if stage_only else satellites))
+    return run

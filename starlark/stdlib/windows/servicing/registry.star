@@ -7,7 +7,19 @@ later against the actual candidate hives, never against a declaration count.
 
 load("@stdlib//windows/servicing:runtime.star", "select_servicing_registry_key_commit", "build_servicing_registry_security_request", "select_servicing_registry_value_action", "select_servicing_paired_registry_multi_action")
 
-load("@stdlib//windows/servicing:runtime.star", "reduce_servicing_registry_keys", "preprocess_servicing_registry_keys")
+load("@stdlib//windows/servicing:runtime.star", "reduce_servicing_registry_keys", "preprocess_servicing_registry_keys", "servicing_registry_security_matches_manifest")
+
+
+def changed_update_registry_values(groups):
+    """Retain only unequal complete value multisets, excluding provenance alone.
+
+    Call only after collecting and validating every admitted declaration. Keep
+    all contributors of changed values for later family arbitration; equal raw
+    bytes with different types, multiplicity, mutability, hints or unquoted-empty
+    semantics are NOT equal. This does not retire keys or suppress security work.
+    The detailed collector remains unchanged for inspection consumers.
+    """
+    return {key: pair for key, pair in groups.items() if sorted([v[1:] for v in pair[0]]) != sorted([v[1:] for v in pair[1]])}
 
 
 def prepare_update_registry_keys(runtime, groups, buckets, key_records, account_domain_sid=None):
@@ -20,6 +32,15 @@ def prepare_update_registry_keys(runtime, groups, buckets, key_records, account_
     """
     if sorted(buckets) != list(range(len(runtime["transitions"]))):
         fail("registry key planning requires every transition's family bucket")
+    if type(key_records) == "windows.registry_key_records":
+        changed = {}
+        for (scope, path, name), (before, after) in groups.items():
+            if sorted([v[1:] for v in before]) != sorted([v[1:] for v in after]):
+                changed[(scope, path)] = True
+        def compile_security(text):
+            return windows.compile_sddl(text, account_domain_sid=account_domain_sid)
+        families = [(buckets[i], c["component_identities"].get("before"), c["component_identities"].get("after")) for i, c in enumerate(runtime["transitions"])]
+        return windows.registry_key_plan(key_records, families, changed, compile_security, servicing_registry_security_matches_manifest)
     records = dict(system=[], user=[])
     tied = {}
     compiled = {}
@@ -138,10 +159,11 @@ def _registry_set_security(state, parts, selected, default, deferred, created):
     state["keys"][parts] = dict(key_parts=list(parts), security=assigned)
 
 
-def plan_update_ordinary_registry(root, keys, groups, buckets, control_set, profile_hives = None):
+def plan_update_ordinary_registry(root, keys, groups, buckets, control_set, profile_hives = None, audit=True):
     """Plan complete ordinary keys/values against the actual constructed image.
 
-    No hive is published until every target passes native readback. Unchanged
+    Audit mode reads back every serialized target; normal mode keeps source
+    and planning guards without that redundant decoding pass. Unchanged
     user-profile trees require no binding. Changed profiles require explicit
     hive paths and support existing-key value changes only: profile key creation,
     security assignment and cleanup remain fail-closed. The caller owns complete
@@ -187,7 +209,7 @@ def plan_update_ordinary_registry(root, keys, groups, buckets, control_set, prof
                 source = root.find(hpath)
                 if source == None:
                     fail("missing physical registry hive: "+target)
-                states[target] = dict(path=hpath, source=source, source_hash=digest(source), hive=windows.hive(source), nodes={}, keys={}, patches=[], deletes=[], removed={})
+                states[target] = dict(path=hpath, source=source, source_hash=digest(source), hive=windows.hive(source, snapshot=True), nodes={}, keys={}, patches=[], deletes=[], removed={})
             state = states[target]
             node = _registry_node(state,parts)
             if scope == "user" and (node == None or decision["security"] != "none" or decision["queue_empty_delete"]):
@@ -257,19 +279,23 @@ def plan_update_ordinary_registry(root, keys, groups, buckets, control_set, prof
             fail("nonempty retired key requires configured default-security propagation: "+target+":"+repr(parts))
     plans = []
     for target,state in states.items():
-        file = windows.hive_from_patches(target,state["patches"],source=state["source"],keys=list(state["keys"].values()),exclude_keys=[dict(key_parts=list(p)) for p in state["removed"]],exclude_values=state["deletes"])
-        actual = windows.hive(file)
-        for parts,expected in state["nodes"].items():
-            found = actual.find(list(parts))
-            if expected == None:
-                if found != None:
-                    fail("registry deletion readback disagrees")
-                continue
-            if found == None or found.security != expected["security"]:
-                fail("registry security readback disagrees")
-            values = {("" if name == "(default)" else name.lower()):dict(type=v.type,raw=v.raw) for name,v in found.value_records.items()}
-            if values != expected["values"] or sorted([c.name.lower() for c in found.children]) != sorted(expected["children"]):
-                fail("registry key contents readback disagrees")
+        if state["removed"]:
+            file = windows.patch_hive(state["source"],state["patches"],keys=list(state["keys"].values()),exclude_keys=[dict(key_parts=list(p)) for p in state["removed"]],exclude_values=state["deletes"])
+        else:
+            file = windows.patch_hive(state["source"],state["patches"],keys=list(state["keys"].values()),delete_values=state["deletes"])
+        if audit:
+            actual = windows.hive(file, snapshot=True)
+            for parts,expected in state["nodes"].items():
+                found = actual.find(list(parts))
+                if expected == None:
+                    if found != None:
+                        fail("registry deletion readback disagrees")
+                    continue
+                if found == None or found.security != expected["security"]:
+                    fail("registry security readback disagrees")
+                values = {("" if name == "(default)" else name.lower()):dict(type=v.type,raw=v.raw) for name,v in found.value_records.items()}
+                if values != expected["values"] or sorted([c.name.lower() for c in found.children]) != sorted(expected["children"]):
+                    fail("registry key contents readback disagrees")
         report["security_keys"] += len(state["keys"])
         plans.append(dict(target=target,path=state["path"],source_hash=state["source_hash"],file=file,values=len(state["patches"]),deleted_values=len(state["deletes"]),removed_keys=len(state["removed"])))
     return dict(plans=plans,report=report)

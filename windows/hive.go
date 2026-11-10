@@ -30,6 +30,9 @@ func hiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, k
 		return nil, fmt.Errorf("hive: got %s, want file", value.Type())
 	}
 	if snapshot {
+		if reader := sharedHiveSnapshot(file); reader != nil && reader.Size() <= 512<<20 {
+			return &registryHive{file: file, rootCell: reader.RootCell(), reader: reader}, nil
+		}
 		reader, err := registry.OpenSnapshot(file, 512<<20)
 		if err != nil {
 			return nil, err
@@ -61,6 +64,9 @@ type hiveKey struct {
 }
 
 func newRegistryHive(file starfile.File) (*registryHive, error) {
+	if reader := sharedHiveSnapshot(file); reader != nil {
+		return &registryHive{file: file, rootCell: reader.RootCell(), reader: reader}, nil
+	}
 	reader, err := registry.Open(file)
 	if err != nil {
 		return nil, err
