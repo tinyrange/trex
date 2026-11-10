@@ -126,8 +126,14 @@ def main(args):
     write_report(prefix, report)
     vm = vmm.start(machine, reactos(accelerator = options["accelerator"], block_transport = "nbd", display_frontend = "none", network = False))
     wait_duration(vm, 35)
-    launch = wait_for_command_surface(vm, "cmd.exe /c D:\\RUN.CMD", timeout = timeout, minimum_width = 800, minimum_height = 600)
+    # A boot-time desktop transition is not proof that the Run dialog opened.
+    # Confirm the empty modal launcher closes and reopens before typing once.
+    launch = wait_for_command_surface(vm, "cmd.exe /c D:\\RUN.CMD", timeout = timeout, minimum_width = 800, minimum_height = 600, confirm_launcher = True)
     write(prefix + "-launch.png", launch["image"])
+    write(prefix + "-boot.png", launch["boot_image"])
+    if "command_surface" in launch:
+        write(prefix + "-launcher.png", launch["command_surface"])
+    report["launch"] = {key: launch[key] for key in ["command", "passed", "reason", "detail", "attempts"]}
     report["phase"] = "guest-result"
     report["detail"] = launch["detail"]
     write_report(prefix, report)
