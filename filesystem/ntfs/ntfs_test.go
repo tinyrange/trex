@@ -1336,7 +1336,11 @@ func TestNTFSDefaultLogFileSizeTracksVolumeSize(t *testing.T) {
 
 func TestNTFSInitialLogFileHasValidRestartPages(t *testing.T) {
 	size := int64(0x290000)
-	log := ntfsInitialLogFile(size)
+	reader := &ntfsInitialLogReader{size: size, prefix: ntfsInitialLogPages(size)}
+	log, err := io.ReadAll(io.NewSectionReader(reader, 0, reader.Size()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if int64(len(log)) != size {
 		t.Fatalf("log size = %#x, want %#x", len(log), size)
 	}

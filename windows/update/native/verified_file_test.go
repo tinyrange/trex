@@ -71,7 +71,7 @@ func TestVerifiedFileBoundedEvictionAndRevalidation(t *testing.T) {
 	if n, err := first.ReadAt(got, 0); err == nil || n != 0 {
 		t.Fatal("served changed source bytes")
 	}
-	if cache.codec.chunks != nil {
+	if cache.codec.Deduplicates() {
 		t.Fatal("dedup index pins evicted chunks")
 	}
 }

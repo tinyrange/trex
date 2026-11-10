@@ -1,4 +1,4 @@
-package native
+package star
 
 import (
 	"bytes"
@@ -8,39 +8,38 @@ import (
 	"testing"
 
 	bytecache "github.com/tinyrange/trex/storage/cache"
-	starvalue "github.com/tinyrange/trex/storage/star"
 )
 
 func TestRetainedFileRandomReadsEvictionAndOwnership(t *testing.T) {
-	store, err := newRetainedFileStore()
+	store, err := NewPackedFileStore(64<<20, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.cache = bytecache.New(retainedChunkBytes) // Exactly one decoded chunk.
+	store.cache = bytecache.New(PackedChunkBytes) // Exactly one decoded chunk.
 	rng := rand.New(rand.NewPCG(12, 34))
-	input := make([]byte, retainedChunkBytes*3+13)
-	for i := 0; i < retainedChunkBytes; i++ {
+	input := make([]byte, PackedChunkBytes*3+13)
+	for i := 0; i < PackedChunkBytes; i++ {
 		input[i] = byte(rng.Uint32())
 	}
-	copy(input[retainedChunkBytes:], bytes.Repeat([]byte("verified PE output "), retainedChunkBytes/4))
+	copy(input[PackedChunkBytes:], bytes.Repeat([]byte("verified PE output "), PackedChunkBytes/4))
 	want := bytes.Clone(input)
-	file, err := store.pack("first", input)
+	file, err := store.Pack("first", input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	clear(input)
-	packed := file.(*retainedFile)
+	packed := file.(*PackedFile)
 	if !packed.chunks[0].raw || packed.chunks[1].raw {
 		t.Fatal("incompressible and compressed chunk selection")
 	}
 	// Reusing the encoder must neither alias prior chunks nor its decoded cache.
-	other, err := store.pack("other", bytes.Repeat([]byte{0x7a}, len(want)))
+	other, err := store.Pack("other", bytes.Repeat([]byte{0x7a}, len(want)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 100; i++ {
 		off := rng.IntN(len(want))
-		size := rng.IntN(retainedChunkBytes*2) + 1
+		size := rng.IntN(PackedChunkBytes*2) + 1
 		got := make([]byte, size)
 		n, err := file.ReadAt(got, int64(off))
 		expected := min(size, len(want)-off)
@@ -51,7 +50,7 @@ func TestRetainedFileRandomReadsEvictionAndOwnership(t *testing.T) {
 			t.Fatalf("cache namespace: %v", err)
 		}
 	}
-	if stats := store.cache.Stats(); stats.Bytes > retainedChunkBytes || stats.Evictions == 0 {
+	if stats := store.cache.Stats(); stats.Bytes > PackedChunkBytes || stats.Evictions == 0 {
 		t.Fatalf("cache not bounded/evicted: %+v", stats)
 	}
 	if _, err := file.WriteAt([]byte{1}, 0); err == nil {
@@ -69,16 +68,16 @@ func TestRetainedFileRandomReadsEvictionAndOwnership(t *testing.T) {
 }
 
 func TestRetainedFileConcurrentReadsAndCompactRetention(t *testing.T) {
-	store, err := newRetainedFileStore()
+	store, err := NewPackedFileStore(64<<20, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	input := bytes.Repeat([]byte("verified target instructions and metadata"), 16000)
-	file, err := store.pack("target", input)
+	file, err := store.Pack("target", input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	packed := file.(*retainedFile)
+	packed := file.(*PackedFile)
 	stored := 0
 	for _, chunk := range packed.chunks {
 		stored += len(chunk.data)
@@ -104,20 +103,20 @@ func TestRetainedFileConcurrentReadsAndCompactRetention(t *testing.T) {
 }
 
 func TestRetainedChunksShareExactImmutableContent(t *testing.T) {
-	store, err := newRetainedFileStore()
+	store, err := NewPackedFileStore(64<<20, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := bytes.Repeat([]byte("abcdefgh"), retainedChunkBytes/4)
-	first, err := store.pack("first", input)
+	input := bytes.Repeat([]byte("abcdefgh"), PackedChunkBytes/4)
+	first, err := store.Pack("first", input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.pack("second", input)
+	second, err := store.Pack("second", input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, b := first.(*retainedFile), second.(*retainedFile)
+	a, b := first.(*PackedFile), second.(*PackedFile)
 	if len(store.chunks) != 1 || &a.chunks[0].data[0] != &a.chunks[1].data[0] || &a.chunks[0].data[0] != &b.chunks[0].data[0] {
 		t.Fatal("identical regions were retained independently")
 	}
@@ -131,7 +130,7 @@ func TestRetainedChunksShareExactImmutableContent(t *testing.T) {
 	for key := range store.chunks {
 		store.chunks[key] = []byte("wrong bytes")
 	}
-	third, err := store.pack("collision", want)
+	third, err := store.Pack("collision", want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,20 +140,85 @@ func TestRetainedChunksShareExactImmutableContent(t *testing.T) {
 }
 
 func TestRetainedFileSmallAndEmpty(t *testing.T) {
-	store, err := newRetainedFileStore()
+	store, err := NewPackedFileStore(64<<20, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, input := range [][]byte{nil, []byte("small manifest")} {
 		want := bytes.Clone(input)
-		file, err := store.pack("small", input)
+		file, err := store.Pack("small", input)
 		if err != nil {
 			t.Fatal(err)
 		}
 		clear(input)
-		got, err := starvalue.ReadAll(file)
+		got, err := ReadAll(file)
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("small file: %q %v", got, err)
 		}
+	}
+}
+
+type snapshotSource struct {
+	data           []byte
+	calls, largest int
+	fail           bool
+}
+
+func (s *snapshotSource) Size() int64 { return int64(len(s.data)) }
+func (s *snapshotSource) ReadAt(p []byte, off int64) (int, error) {
+	s.calls++
+	s.largest = max(s.largest, len(p))
+	if s.fail {
+		return 0, io.ErrUnexpectedEOF
+	}
+	return bytes.NewReader(s.data).ReadAt(p, off)
+}
+
+func TestPackedSnapshotStreamingBoundsAndOwnership(t *testing.T) {
+	store, err := NewPackedFileStore(PackedChunkBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Repeat([]byte("snapshot test bytes"), 10000)
+	source := &snapshotSource{data: bytes.Clone(want)}
+	if _, err := store.Snapshot("too big", source, int64(len(want)-1)); err == nil || source.calls != 0 {
+		t.Fatal("bound must reject before reading")
+	}
+	file, err := store.Snapshot("snapshot", source, int64(len(want)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.largest > PackedChunkBytes || source.calls < 2 {
+		t.Fatal("unbounded read", source.largest, source.calls)
+	}
+	before := source.calls
+	clear(source.data)
+	source.fail = true
+	got, err := ReadAll(file)
+	if err != nil || !bytes.Equal(got, want) || source.calls != before {
+		t.Fatalf("snapshot retained source: %v", err)
+	}
+	if _, err := store.Snapshot("failed", source, int64(len(want))); err == nil {
+		t.Fatal("read failure accepted")
+	}
+	source.fail = false
+	// A failed snapshot must not poison subsequent source IDs/cache contents.
+	other, err := store.Snapshot("zeros", source, int64(len(want)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = ReadAll(other)
+	if err != nil || !bytes.Equal(got, source.data) {
+		t.Fatal("failed snapshot contaminated later content", err)
+	}
+	got, err = ReadAll(file)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatal("later snapshot contaminated first", err)
+	}
+	if stats := store.CacheStats(); stats.Bytes > PackedChunkBytes || stats.Evictions == 0 {
+		t.Fatal(stats)
+	}
+	if store.Deduplicates() {
+		t.Fatal("unbounded encoded dedup retention")
 	}
 }

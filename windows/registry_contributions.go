@@ -52,12 +52,12 @@ func (b *registryContributionBudget) text(value string) error {
 func registryContributionsBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var manifests *starlark.List
 	var resolve, expand starlark.Callable
-	var captureRecords bool
+	var captureRecords, compactRecords bool
 	prefix := starlark.Value(starlark.None)
 	maxRecords, maxBytes := registryContributionMaxRecords, registryContributionMaxBytes
 	if err := starlark.UnpackArgs("registry_contributions", args, kwargs,
 		"manifests", &manifests, "resolve_key", &resolve, "expand_string", &expand,
-		"key_prefix?", &prefix, "max_records?", &maxRecords, "max_bytes?", &maxBytes, "capture_key_records?", &captureRecords); err != nil {
+		"key_prefix?", &prefix, "max_records?", &maxRecords, "max_bytes?", &maxBytes, "capture_key_records?", &captureRecords, "compact_key_records?", &compactRecords); err != nil {
 		return nil, err
 	}
 	if manifests.Len() > 65536 || maxRecords < 1 || maxRecords > registryContributionMaxRecords || maxBytes < 1 || maxBytes > registryContributionMaxBytes {
@@ -107,6 +107,10 @@ func registryContributionsBuiltin(thread *starlark.Thread, _ *starlark.Builtin, 
 	groups := starlark.NewDict(0)
 	keys := starlark.NewDict(0)
 	keyRecords := starlark.NewDict(0)
+	compact := &registryKeyRecords{}
+	if compactRecords && !captureRecords {
+		return nil, fmt.Errorf("compact_key_records requires capture_key_records")
+	}
 	for _, input := range inputs {
 		if input.owner != lastOwner {
 			// Bound pure decoding memo to one contiguous contribution owner.
@@ -188,7 +192,14 @@ func registryContributionsBuiltin(thread *starlark.Thread, _ *starlark.Builtin, 
 					path.folded = strings.ToLower(path.path)
 					paths[pathKey] = path
 				}
-				if captureRecords {
+				if compactRecords {
+					owned, err := validateRegistryKeyAttributes(attrs)
+					if err != nil {
+						return nil, err
+					}
+					text, _ := starlark.AsString(selectedSecurity)
+					compact.rows = append(compact.rows, registryKeyRecord{path: path, side: input.side, transition: input.owner, owned: owned, text: text})
+				} else if captureRecords {
 					owner := starlark.MakeInt(input.owner)
 					rows, found, err := keyRecords.Get(owner)
 					if err != nil {
@@ -292,7 +303,11 @@ func registryContributionsBuiltin(thread *starlark.Thread, _ *starlark.Builtin, 
 	result.SetKey(starlark.String("groups"), groups)
 	result.SetKey(starlark.String("keys"), keys)
 	if captureRecords {
-		result.SetKey(starlark.String("key_records"), keyRecords)
+		if compactRecords {
+			result.SetKey(starlark.String("key_records"), compact)
+		} else {
+			result.SetKey(starlark.String("key_records"), keyRecords)
+		}
 	}
 	return result, nil
 }

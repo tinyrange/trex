@@ -187,7 +187,7 @@ func TestCABFolderCacheSharesDecodingAcrossEntries(t *testing.T) {
 	}
 }
 
-func mszipTestBlock(t *testing.T, data, dictionary []byte) []byte {
+func mszipTestBlock(t testing.TB, data, dictionary []byte) []byte {
 	t.Helper()
 	var compressed bytes.Buffer
 	compressed.WriteString("CK")
@@ -305,6 +305,14 @@ func TestCABMSZIPContinuesDeflateStreamAcrossBlocks(t *testing.T) {
 	want := append(append([]byte(nil), first...), second...)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("decoded continuation differs: got %d bytes, want %d", len(got), len(want))
+	}
+	archive.folders = []folder{{compression: 1, blocks: 2}}
+	archive.cache = true
+	archive.cacheStore = bytecache.New(1 << 20)
+	entry := &Entry{archive: archive, file: fileRecord{size: uint32(len(want))}}
+	got = make([]byte, 150)
+	if n, err := entry.readMSZIPAt(got, int64(len(first)-50)); err != nil || n != len(got) || !bytes.Equal(got, want[len(first)-50:len(first)+100]) {
+		t.Fatalf("indexed continued read %d %v", n, err)
 	}
 }
 

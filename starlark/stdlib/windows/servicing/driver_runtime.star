@@ -10,7 +10,7 @@ _REPOSITORY = '/Windows/System32/DriverStore/FileRepository/'
 
 def plan_direct_driver_runtime(root, jobs, repositories):
     """Select installed runtime aliases for explicitly bound driver repository replacements."""
-    names = root.path_names(lower=True)
+    names = root.path_index(lower=True)
     selected = {j['after'].lower():j.get('source', j['before']) for j in jobs}
     objects = {}
     for item in repositories['files']:

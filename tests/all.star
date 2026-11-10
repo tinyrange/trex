@@ -11,6 +11,7 @@ load(":scs_test.star", scs = "TEST_SUITE")
 load(":linux_test.star", linux = "TEST_SUITE")
 load(":macos_softwareupdate_test.star", macos_softwareupdate = "TEST_SUITE")
 
+load("//tests/servicing:nt6_compact_registry_test.star", nt6_compact_registry = "TEST_SUITE")
 load("//tests/servicing:nt6_package_store_test.star", nt6_package_store = "TEST_SUITE")
 load("//tests/servicing:nt6_update_appx_test.star", nt6_update_appx = "TEST_SUITE")
 load("//tests/servicing:nt6_update_backup_test.star", nt6_update_backup = "TEST_SUITE")
@@ -44,6 +45,7 @@ load("//tests/servicing:nt6_servicing_test.star", nt6_servicing = "TEST_SUITE")
 load("//tests/servicing:nt6_update_package_security_test.star", nt6_update_package_security = "TEST_SUITE")
 
 TEST_SUITES = [
+    nt6_compact_registry,
     nt6_update_package_security,
     nt6_servicing,
     nt6_package_store,

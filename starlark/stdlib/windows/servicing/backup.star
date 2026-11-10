@@ -5,12 +5,14 @@ FormatBackupFileNameWithReallocate (26c05c) uses the low 32 bits of
 RtlHashEncodedLBlob, lowercase, plus the sanitized component filename.
 Backups are independent files, not aliases of the protected source object.
 """
+load("@stdlib//windows/servicing:runtime.star", "servicing_runtime_manifest_root")
 load('@stdlib//windows/servicing:runtime.star', 'build_servicing_created_security', 'select_servicing_file_hash')
 _NAMESPACES=['urn:schemas-microsoft-com:asm.v1','urn:schemas-microsoft-com:asm.v3']
 _DIRECTORY='/Windows/WinSxS/Backup'
 
-def _needed(document):
-    tree=binary.xml(document,discard_whitespace=True).root
+def _needed(document, manifest=None, change=None, side="after"):
+    if manifest!=None and 'memberships' not in manifest.top_level: return False
+    tree=servicing_runtime_manifest_root(change, side) if change!=None else binary.xml(document,discard_whitespace=True).root
     for group in tree.children:
         if group.name!='memberships' or group.namespace not in _NAMESPACES: continue
         for membership in group.children:
@@ -36,8 +38,13 @@ def _filename(stem,name):
     for lane in lanes: h=(h*((1<<33)-9)+lane)&0xffffffffffffffff
     return stem+'_'+safe+'_'+('00000000'+hex(h&0xffffffff)[2:])[-8:]
 
-def plan_update_backups(root,runtime,payloads):
-    """Select BootRecovery copies and retirements from admitted manifests, checking exact staged hashes and retaining source/destination epochs."""
+def plan_update_backups(root,runtime,payloads,audit=True):
+    """Select BootRecovery copies and retirements with source/destination epochs.
+
+    Audit mode checks payload bytes, including obsolete backups before removal.
+    Non-audit mode uses admitted source identities and declaration-selected
+    retirements; it does not claim to verify the removed bytes.
+    """
     sources={}
     for plan in payloads['stages'].values():
         entries={entry.store_path.lower():i for i,entry in enumerate(plan.files)}
@@ -46,7 +53,7 @@ def plan_update_backups(root,runtime,payloads):
             identity=str(component.identity).lower()
             if identity in sources: fail('ambiguous backup component identity')
             sources[identity]=dict(component=component,plan=plan,entries=entries)
-    names=root.path_names(lower=True)
+    names=root.path_index(lower=True)
     parent=names.get(_DIRECTORY.lower())
     if parent==None: fail('backup directory is missing')
     parent_security=root.get_security(parent)
@@ -55,7 +62,7 @@ def plan_update_backups(root,runtime,payloads):
     destinations={}
     for transition in runtime['transitions']:
         doc=transition['after']
-        if doc==None or not _needed(doc): continue
+        if doc==None or not _needed(doc,windows.assembly_manifest(doc),transition): continue
         source=sources.get(str(transition['component_identities']['after']).lower())
         if source==None: fail('backup component lacks admitted staged source')
         component=source['component']
@@ -69,7 +76,8 @@ def plan_update_backups(root,runtime,payloads):
             index=source['entries'].get(source_path.lower())
             if path==None or index==None: fail('backup payload lacks exact staged file')
             data=root.find(path)
-            if digest(data)!=digest(source['plan'].open(index)): fail('backup payload differs from admitted source')
+            if audit or not source['plan'].is_source(index,data):
+                if digest(data)!=digest(source['plan'].open(index)): fail('backup payload differs from admitted source')
             destination=parent+'/'+filename
             if destination.lower() in destinations: fail('duplicate backup destination')
             destinations[destination.lower()]=True
@@ -79,10 +87,10 @@ def plan_update_backups(root,runtime,payloads):
                 if digest(root.find(old))!=digest(data): fail('conflicting existing backup')
             plans.append(dict(source=path,path=destination,order=root.get_metadata(path).write_order,
                 destination_order=root.get_metadata(old).write_order if old!=None else None))
-    retirements=_retirements(root,runtime,names,destinations)
+    retirements=_retirements(root,runtime,names,destinations,audit=audit)
     return dict(parent=parent,parent_security=parent_security,security=security,files=plans,retirements=retirements)
 
-def _retirements(root,runtime,names,retained):
+def _retirements(root,runtime,names,retained,audit=True):
     stems={}
     for path in names.values():
         if path.lower().startswith('/windows/winsxs/manifests/') and path.lower().endswith('.manifest'):
@@ -92,7 +100,7 @@ def _retirements(root,runtime,names,retained):
     seen={}
     for transition in runtime['transitions']:
         document=transition['before']
-        if document==None or not _needed(document): continue
+        if document==None or not _needed(document,windows.assembly_manifest(document),transition,"before"): continue
         candidates=stems.get(windows.csi_identity_hash(transition['component_identities']['before']),[])
         if len(candidates)!=1: fail('ambiguous backup predecessor stem')
         # Native removal queues payload deletion, but retains old manifests.
@@ -103,9 +111,10 @@ def _retirements(root,runtime,names,retained):
             if path==None: continue
             if path.lower() in seen: fail('duplicate backup retirement')
             seen[path.lower()]=True
-            old=root.find(path)
-            logical=archive.dcs(old) if old.size>=4 and old.slice(0,4).bytes()==b'DCS\x01' else old
-            if digest(logical)!=select_servicing_file_hash(file)['digest']: fail('backup predecessor hash mismatch')
+            if audit:
+                old=root.find(path)
+                logical=archive.dcs(old) if old.size>=4 and old.slice(0,4).bytes()==b'DCS\x01' else old
+                if digest(logical)!=select_servicing_file_hash(file)['digest']: fail('backup predecessor hash mismatch')
             result.append(dict(path=path,order=root.get_metadata(path).write_order))
     return result
 

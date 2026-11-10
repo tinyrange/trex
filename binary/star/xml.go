@@ -345,7 +345,7 @@ func (n *binaryXMLNode) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", n.Type())
 }
 func (n *binaryXMLNode) AttrNames() []string {
-	return []string{"attribute", "attribute_map", "attributes", "bytes", "child", "children", "children_named", "direct_text", "name", "namespace", "prefix", "qualified_name", "text", "with_children", "with_text"}
+	return []string{"attribute", "attribute_map", "attributes", "bytes", "child", "children", "children_named", "direct_text", "name", "namespace", "prefix", "qualified_name", "select_descendants", "text", "with_children", "with_text"}
 }
 func (n *binaryXMLNode) Attr(name string) (starlark.Value, error) {
 	switch name {
@@ -386,6 +386,8 @@ func (n *binaryXMLNode) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("attribute", n.attributeBuiltin), nil
 	case "child":
 		return starlark.NewBuiltin("child", n.childBuiltin), nil
+	case "select_descendants":
+		return starlark.NewBuiltin("select_descendants", n.selectDescendantsBuiltin), nil
 	case "children_named":
 		return starlark.NewBuiltin("children_named", n.childrenNamedBuiltin), nil
 	case "bytes":

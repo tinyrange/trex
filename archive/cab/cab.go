@@ -9,6 +9,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tinyrange/trex/compression/lzx"
 	mszipcompression "github.com/tinyrange/trex/compression/mszip"
@@ -22,31 +23,48 @@ import (
 func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	cache := true
-	if err := starlark.UnpackArgs("cab", args, kwargs, "file", &value, "cache?", &cache); err != nil {
+	checkpointBytes := 0
+	if err := starlark.UnpackArgs("cab", args, kwargs, "file", &value, "cache?", &cache, "lzx_checkpoint_bytes?", &checkpointBytes); err != nil {
 		return nil, err
 	}
 	file, ok := value.(starfile.File)
 	if !ok {
 		return nil, fmt.Errorf("cab: got %s, want file", value.Type())
 	}
-	return Open(file, cache)
+	if checkpointBytes != 0 && (!cache || checkpointBytes < 2<<20 || checkpointBytes > 64<<20) {
+		return nil, fmt.Errorf("cab: lzx_checkpoint_bytes requires cache=true and 2..64 MiB")
+	}
+	archive, err := Open(file, cache)
+	if err != nil {
+		return nil, err
+	}
+	archive.lzxCheckpointBytes = checkpointBytes
+	return archive, nil
 }
 
 type Archive struct {
-	file        storage.Reader
-	files       []fileRecord
-	fileIndex   map[string]int
-	exactIndex  map[string]int
-	folders     []folder
-	dataReserve int
-	flags       uint16
-	setID       uint16
-	cabinet     uint16
-	previous    string
-	next        string
-	cache       bool
-	cacheStore  *bytecache.Cache
-	cacheSource uint64
+	file               storage.Reader
+	files              []fileRecord
+	fileIndex          map[string]int
+	exactIndex         map[string]int
+	folders            []folder
+	dataReserve        int
+	flags              uint16
+	setID              uint16
+	cabinet            uint16
+	previous           string
+	next               string
+	cache              bool
+	compactCache       atomic.Bool
+	cacheStore         *bytecache.Cache
+	cacheSource        uint64
+	rawOnce            sync.Once
+	rawFolders         []rawFolderIndex
+	mszipOnce          sync.Once
+	mszipFolders       []mszipFolderIndex
+	lzxCheckpointBytes int
+	lzxOnce            sync.Once
+	lzxFolders         []indexedLZXFolder
 }
 
 type folder struct {
@@ -434,6 +452,11 @@ type Entry struct {
 func (f *Entry) Bytes() ([]byte, error) { return f.data() }
 
 func (f *Entry) data() ([]byte, error) {
+	if f.raw() || f.indexedMSZIP() || f.indexedLZX() || f.packedFolder() {
+		data := make([]byte, f.Size())
+		_, err := io.ReadFull(io.NewSectionReader(f, 0, f.Size()), data)
+		return data, err
+	}
 	if f.archive.cache {
 		return f.archive.fileData(f.file)
 	}
@@ -456,6 +479,18 @@ func (f *Entry) ReadAt(p []byte, off int64) (int, error) {
 	if off >= f.Size() {
 		return 0, io.EOF
 	}
+	if f.raw() {
+		return f.readRawAt(p, off)
+	}
+	if f.indexedMSZIP() {
+		return f.readMSZIPAt(p, off)
+	}
+	if f.indexedLZX() {
+		return f.readIndexedLZXAt(p, off)
+	}
+	if f.packedFolder() {
+		return f.readPackedAt(p, off)
+	}
 	data, err := f.data()
 	if err != nil {
 		return 0, fmt.Errorf("cab entry %q: %w", f.file.name, err)
@@ -467,6 +502,9 @@ func (f *Entry) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 func (f *Entry) WriteTo(w io.Writer) (int64, error) {
+	if f.raw() || f.indexedMSZIP() || f.indexedLZX() || f.packedFolder() {
+		return io.Copy(w, io.NewSectionReader(f, 0, f.Size()))
+	}
 	data, err := f.data()
 	if err != nil {
 		return 0, fmt.Errorf("cab entry %q: %w", f.file.name, err)
@@ -558,10 +596,17 @@ func (c *Archive) readFolderData(folder folder) ([]byte, error) {
 }
 
 func (c *Archive) readLZXFolderBlocks(folder folder) ([]byte, error) {
-	windowBits := int(folder.compression >> 8)
-	decoderInput, totalOutput, err := c.readFolderPayload(folder)
+	decoderInput, totalOutput, err := c.readLZXFolderPayload(folder)
 	if err != nil {
 		return nil, err
+	}
+	return lzx.Decompress(decoderInput, int(folder.compression>>8), totalOutput)
+}
+
+func (c *Archive) readLZXFolderPayload(folder folder) ([]byte, int, error) {
+	decoderInput, totalOutput, err := c.readFolderPayload(folder)
+	if err != nil {
+		return nil, 0, err
 	}
 	if totalOutput == 0 {
 		for _, file := range c.files {
@@ -570,42 +615,18 @@ func (c *Archive) readLZXFolderBlocks(folder folder) ([]byte, error) {
 			}
 		}
 	}
-	return lzx.Decompress(decoderInput, windowBits, totalOutput)
+	return decoderInput, totalOutput, nil
 }
 
-// readFolderPayload joins an LZX bitstream directly while reading CFDATA.
-// Keeping one payload avoids allocating one byte slice per 32 KiB data block
-// and then copying the entire compressed folder into a second slice.
+// readFolderPayload retains the existing full-buffer API for construction.
 func (c *Archive) readFolderPayload(folder folder) ([]byte, int, error) {
-	capacity := int(folder.blocks) * (32 << 10)
-	if capacity < 0 || int64(capacity) > c.file.Size() {
-		capacity = int(min(c.file.Size(), int64(^uint(0)>>1)))
+	source, totalOutput, err := c.folderPayloadReader(folder)
+	if err != nil {
+		return nil, 0, err
 	}
-	payload := make([]byte, 0, capacity)
-	totalOutput := 0
-	offset := int64(folder.dataOffset)
-	var header [8]byte
-	reserved := make([]byte, c.dataReserve)
-	for index := 0; index < int(folder.blocks); index++ {
-		if _, err := c.file.ReadAt(header[:], offset); err != nil {
-			return nil, 0, err
-		}
-		offset += int64(len(header))
-		if len(reserved) != 0 {
-			if _, err := c.file.ReadAt(reserved, offset); err != nil {
-				return nil, 0, err
-			}
-			offset += int64(len(reserved))
-		}
-		compressedSize := int(binary.LittleEndian.Uint16(header[4:6]))
-		uncompressedSize := int(binary.LittleEndian.Uint16(header[6:8]))
-		start := len(payload)
-		payload = append(payload, make([]byte, compressedSize)...)
-		if _, err := c.file.ReadAt(payload[start:], offset); err != nil {
-			return nil, 0, err
-		}
-		offset += int64(compressedSize)
-		totalOutput += uncompressedSize
+	payload := make([]byte, int(source.Size()))
+	if _, err := io.ReadFull(io.NewSectionReader(source, 0, source.Size()), payload); err != nil {
+		return nil, 0, err
 	}
 	return payload, totalOutput, nil
 }
@@ -658,7 +679,21 @@ func decodeCABBlocks(blocks []dataBlock, mszip bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out bytes.Buffer
+	// Folder size is already available from the block descriptors. Allocate it
+	// once: geometric Buffer growth both copies the folder repeatedly and pins
+	// spare capacity for as long as a cached folder remains reachable.
+	total := 0
+	for _, block := range blocks {
+		size := block.uncompressed
+		if !mszip {
+			size = len(block.compressed)
+		}
+		if size < 0 || size > int(^uint(0)>>1)-total {
+			return nil, fmt.Errorf("cab: folder output size overflow")
+		}
+		total += size
+	}
+	out := bytes.NewBuffer(make([]byte, 0, total))
 	if !mszip {
 		for _, block := range blocks {
 			out.Write(block.compressed)

@@ -4,11 +4,12 @@ WCP 9703 ShouldManifestBeSettingsManifestLinked (11be48) tests configuration
 or RegistryKey.overridable count, not the presence of migration rules. The
 original encoded manifest is hardlinked; existing older versions are retained.
 """
+load("@stdlib//windows/servicing:runtime.star", "servicing_runtime_manifest_root")
 _NS='urn:schemas-microsoft-com:asm.v3'
 _DIRECTORY='/Windows/WinSxS/SettingsManifests'
 
-def _needed(document):
-    tree=binary.xml(document,discard_whitespace=True).root
+def _needed(document, change=None):
+    tree=servicing_runtime_manifest_root(change, "after") if change!=None else binary.xml(document,discard_whitespace=True).root
     for node in tree.children:
         if node.namespace!=_NS: continue
         if node.name=='configuration': return True
@@ -31,14 +32,14 @@ def plan_update_settings_manifests(root,runtime,payloads):
             identity=str(component.identity).lower()
             if identity in sources: fail('ambiguous settings manifest identity')
             sources[identity]=dict(path=path,stem=component.stem,sha256=component.manifest_sha256,plan=plan,index=files[path.lower()])
-    names=root.path_names(lower=True)
+    names=root.path_index(lower=True)
     parent=names.get(_DIRECTORY.lower())
     if parent==None: fail('settings manifest directory is missing')
     result=[]
     destinations={}
     for transition in runtime['transitions']:
         document=transition['after']
-        if document==None or not _needed(document): continue
+        if document==None or not _needed(document, transition): continue
         source=sources.get(str(transition['component_identities']['after']).lower())
         if source==None: fail('settings manifest has no admitted staged identity')
         if digest(document,algorithm='sha256')!=source['sha256']: fail('settings declaration differs from admitted manifest')

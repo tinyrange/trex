@@ -37,16 +37,17 @@ func DecompressDCS(data []byte, maximumSize uint64) ([]byte, error) {
 	if offset != uint64(len(data)) || expanded != total {
 		return nil, fmt.Errorf("dcs: inconsistent container size")
 	}
-	out := make([]byte, 0, int(total))
+	out := make([]byte, int(total))
+	position := 0
 	offset = 12
 	for i := uint64(0); i < count; i++ {
 		stored := uint64(binary.LittleEndian.Uint32(data[offset:]))
 		size := int(binary.LittleEndian.Uint32(data[offset+4:]))
-		block, err := Decompress(data[offset+8:offset+4+stored], size)
-		if err != nil {
+		end := position + size
+		if err := decompressInto(data[offset+8:offset+4+stored], out[position:end:end]); err != nil {
 			return nil, fmt.Errorf("dcs: block %d: %w", i, err)
 		}
-		out = append(out, block...)
+		position = end
 		offset += stored + 4
 	}
 	return out, nil

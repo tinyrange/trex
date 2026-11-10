@@ -57,7 +57,7 @@ func (s *CumulativeStage) contentReadOrder(name string) (wim.FileReadOrder, bool
 	if s == nil || s.Graph == nil {
 		return wim.FileReadOrder{}, false
 	}
-	if payload, ok := s.expressByTarget[normalizeCIXName(name)]; ok {
+	if payload, ok := s.expressTarget(normalizeCIXName(name)); ok {
 		if s.assemblyReadOrder != nil {
 			// The decoded file basis is normally much larger than the optional
 			// nested patch basis. Prefer it without reading either one.
@@ -77,52 +77,106 @@ func (s *CumulativeStage) contentReadOrder(name string) (wim.FileReadOrder, bool
 	return wim.FileReadOrder{}, false
 }
 
-// Index only the immutable completed-stage descriptors. Selection mirrors
-// openTargetDescriptor: payloads before carries, exact length/hash, preferred
-// matching name, otherwise the first matching target. No target is opened.
-func (state *assemblyContentState) snapshotReadOrder() func(ContentDescriptor) (wim.FileReadOrder, bool) {
-	type identity struct {
-		length int64
-		hash   [32]byte
-	}
-	type candidate struct {
-		stage *CumulativeStage
-		name  string
-	}
-	byContent := make(map[identity][]candidate)
-	for i := len(state.prior) - 1; i >= 0; i-- {
-		stage := state.prior[i].stage
-		if stage == nil || stage.Graph == nil {
-			continue
-		}
-		payloadKeys := make(map[identity]bool)
-		for _, payload := range stage.Graph.Payloads {
-			key := identity{payload.Target.Length, payload.Target.SHA256}
-			payloadKeys[key] = true
-			byContent[key] = append(byContent[key], candidate{stage, payload.Target.Name})
-		}
-		for _, carry := range stage.Graph.Carries {
-			key := identity{carry.Target.Length, carry.Target.SHA256}
-			if payloadKeys[key] {
-				continue
+// Each completed stage owns one immutable exact-content index. Positive entries
+// address payloads (index+1); negative entries address carries (-index-1).
+// Payloads take precedence over all carries of the same identity. A snapshot
+// retains only the preceding stage list, not another copy of every older index.
+// This keeps long update histories linear rather than quadratic in metadata.
+type readOrderIdentity struct {
+	length int64
+	hash   [32]byte
+}
+
+// Keep candidates in one contiguous allocation. The hash table contains only
+// integer ranges, so singleton identities neither allocate objects nor make
+// the collector scan every hash bucket for a slice pointer.
+type contentCandidateSpan struct{ start, count int }
+type contentCandidateIndex struct {
+	spans  map[readOrderIdentity]contentCandidateSpan
+	values []int
+}
+
+func (index *contentCandidateIndex) lookup(key readOrderIdentity) []int {
+	span := index.spans[key]
+	return index.values[span.start : span.start+span.count]
+}
+func (s *CumulativeStage) contentCandidates() *contentCandidateIndex {
+	s.readOrderOnce.Do(func() {
+		index := &contentCandidateIndex{spans: make(map[readOrderIdentity]contentCandidateSpan)}
+		if s.Graph != nil {
+			payloadKeys := make(map[readOrderIdentity]bool)
+			for _, payload := range s.Graph.Payloads {
+				key := readOrderIdentity{payload.Target.Length, payload.Target.SHA256}
+				payloadKeys[key] = true
+				span := index.spans[key]
+				span.count++
+				index.spans[key] = span
 			}
-			byContent[key] = append(byContent[key], candidate{stage, carry.Target.Name})
+			for _, carry := range s.Graph.Carries {
+				key := readOrderIdentity{carry.Target.Length, carry.Target.SHA256}
+				if !payloadKeys[key] {
+					span := index.spans[key]
+					span.count++
+					index.spans[key] = span
+				}
+			}
+			total := 0
+			for key, span := range index.spans {
+				index.spans[key] = contentCandidateSpan{start: total}
+				total += span.count
+			}
+			index.values = make([]int, total)
+			add := func(key readOrderIdentity, value int) {
+				span := index.spans[key]
+				index.values[span.start+span.count] = value
+				span.count++
+				index.spans[key] = span
+			}
+			for i, payload := range s.Graph.Payloads {
+				add(readOrderIdentity{payload.Target.Length, payload.Target.SHA256}, i+1)
+			}
+			for i, carry := range s.Graph.Carries {
+				key := readOrderIdentity{carry.Target.Length, carry.Target.SHA256}
+				if !payloadKeys[key] {
+					add(key, -i-1)
+				}
+			}
+		}
+		s.readOrderByContent = index
+	})
+	return s.readOrderByContent
+}
+
+// Selection mirrors openTargetDescriptor: newest stage, payloads before carries,
+// exact length/hash, preferred matching name, otherwise first matching target.
+// A selected stage with no locality hint must NOT fall through to older bytes.
+func (state *assemblyContentState) snapshotReadOrder() func(ContentDescriptor) (wim.FileReadOrder, bool) {
+	prior := append([]completedAssemblyStage(nil), state.prior...)
+	for _, completed := range prior {
+		if completed.stage != nil {
+			completed.stage.contentCandidates()
 		}
 	}
 	base, imagePath := state.base, state.imagePath
 	return func(descriptor ContentDescriptor) (wim.FileReadOrder, bool) {
-		matches := byContent[identity{descriptor.Length, descriptor.SHA256}]
-		if len(matches) != 0 {
-			selected := matches[0]
-			for _, match := range matches {
-				if match.stage != selected.stage {
-					break
-				}
-				if normalizeCIXName(match.name) == normalizeCIXName(descriptor.Name) {
-					selected = match
+		key := readOrderIdentity{descriptor.Length, descriptor.SHA256}
+		for i := len(prior) - 1; i >= 0; i-- {
+			stage := prior[i].stage
+			if stage == nil {
+				continue
+			}
+			matches := stage.contentCandidates().lookup(key)
+			if len(matches) == 0 {
+				continue
+			}
+			selected := stage.candidateName(matches[0])
+			for _, candidate := range matches {
+				name := stage.candidateName(candidate)
+				if normalizeCIXName(name) == normalizeCIXName(descriptor.Name) {
+					selected = name
 				}
 			}
-			return selected.stage.contentReadOrder(selected.name)
+			return stage.contentReadOrder(selected)
 		}
 		if base == nil || descriptor.Name == "" {
 			return wim.FileReadOrder{}, false

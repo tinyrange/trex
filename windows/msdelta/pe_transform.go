@@ -69,7 +69,7 @@ func transformPESourceTraced(data []byte, layout peLayout, rift riftTable, flags
 		unbindPE(data, layout)
 	}
 	put32(data, int(layout.timestampOffset), target.timestamp)
-	marker := make([]byte, len(data))
+	marker := newPEMarker(len(data))
 	// MARK excludes non-executable sections on AMD64 as well as x86.
 	// A .pdata entry does not make a non-executable section eligible.
 	if flags&peTransformMarkCode != 0 {
@@ -164,7 +164,7 @@ func unbindPE(data []byte, layout peLayout) {
 	}
 }
 
-func transformImports(data []byte, layout peLayout, rift riftTable, targetBase uint64, marker []byte) {
+func transformImports(data []byte, layout peLayout, rift riftTable, targetBase uint64, marker peMarker) {
 	directory := layout.directories[1]
 	base, ok := layout.rawOffset(directory.rva)
 	if !ok || directory.rva == 0 {
@@ -195,7 +195,7 @@ func transformImports(data []byte, layout peLayout, rift riftTable, targetBase u
 	}
 }
 
-func walkImportThunks(data []byte, layout peLayout, rift riftTable, rva uint32, bound, lookup bool, size int, ordinal, targetBase uint64, marker []byte) {
+func walkImportThunks(data []byte, layout peLayout, rift riftTable, rva uint32, bound, lookup bool, size int, ordinal, targetBase uint64, marker peMarker) {
 	base, ok := layout.rawOffset(rva)
 	if !ok || rva == 0 {
 		return
@@ -246,9 +246,7 @@ func walkImportThunks(data []byte, layout peLayout, rift riftTable, rva uint32, 
 			// unaligned ASCII suffixes as image addresses.
 			if name, ok := layout.rawOffset(uint32(value)); ok && name >= 0 && name+2 <= len(data) {
 				if length := bytes.IndexByte(data[name+2:], 0); length >= 0 {
-					for i := name; i < name+2+length+1; i++ {
-						marker[i] |= 3
-					}
+					marker.update(name, name+2+length+1, 3, 0)
 				}
 			}
 			put32(data, offset, uint32(rift.mapForward(int64(uint32(value)))))
@@ -257,7 +255,7 @@ func walkImportThunks(data []byte, layout peLayout, rift riftTable, rva uint32, 
 	}
 }
 
-func transformExports(data []byte, layout peLayout, rift riftTable, marker []byte) {
+func transformExports(data []byte, layout peLayout, rift riftTable, marker peMarker) {
 	directory := layout.directories[0]
 	base, ok := layout.rawOffset(directory.rva)
 	if !ok || directory.rva == 0 || base+40 > len(data) {
@@ -280,7 +278,7 @@ func transformExports(data []byte, layout peLayout, rift riftTable, marker []byt
 	}
 }
 
-func transformResources(data []byte, layout peLayout, rift riftTable, marker []byte) {
+func transformResources(data []byte, layout peLayout, rift riftTable, marker peMarker) {
 	directory := layout.directories[2]
 	base, ok := layout.rawOffset(directory.rva)
 	if !ok || directory.rva == 0 {
@@ -333,7 +331,7 @@ type relocationEntry struct {
 	extra uint16
 }
 
-func transformRelocations(data []byte, layout peLayout, rift riftTable, targetBase uint64, marker []byte) {
+func transformRelocations(data []byte, layout peLayout, rift riftTable, targetBase uint64, marker peMarker) {
 	directory := layout.directories[5]
 	base, ok := layout.rawOffset(directory.rva)
 	if !ok || directory.rva == 0 || base == 0 {
@@ -424,7 +422,7 @@ func transformRelocations(data []byte, layout peLayout, rift riftTable, targetBa
 // MARK's bit1 only prevents instruction/branch ownership; bit2 excludes a
 // four-byte candidate from this scan. This is MSDelta normalization, not PE
 // relocation-loader semantics.
-func transformUnlistedPointersX86(data []byte, layout peLayout, rift riftTable, targetBase uint32, marker []byte) {
+func transformUnlistedPointersX86(data []byte, layout peLayout, rift riftTable, targetBase uint32, marker peMarker) {
 	start := int(layout.headerSize)
 	if start < 0 || len(data) < 4 {
 		return
@@ -437,11 +435,12 @@ func transformUnlistedPointersX86(data []byte, layout peLayout, rift riftTable, 
 			offset++
 			continue
 		}
-		if offset+4 > len(marker) {
+		if offset+4 > marker.size {
 			return
 		}
 		claimed := false
-		for _, mark := range marker[offset : offset+4] {
+		for i := offset; i < offset+4; i++ {
+			mark := marker.get(i)
 			claimed = claimed || mark&2 != 0
 		}
 		if !claimed {
@@ -459,19 +458,15 @@ func sortRelocations(entries []relocationEntry) {
 	})
 }
 
-func markPEBytes(marker []byte, offset, size int) {
-	if offset < 0 || size <= 0 || offset >= len(marker) {
+func markPEBytes(marker peMarker, offset, size int) {
+	if offset < 0 || size <= 0 || offset >= marker.size {
 		return
 	}
-	for index := offset; index < min(len(marker), offset+size); index++ {
-		marker[index] |= 1
-	}
+	marker.update(offset, offset+min(size, marker.size-offset), 1, 0)
 }
 
-func markNonExecutablePE(marker []byte, layout peLayout) {
-	for index := range marker {
-		marker[index] |= 1
-	}
+func markNonExecutablePE(marker peMarker, layout peLayout) {
+	marker.update(0, marker.size, 1, 0)
 	for _, section := range layout.sections {
 		if section.characteristics&0x20000000 == 0 {
 			continue
@@ -481,12 +476,10 @@ func markNonExecutablePE(marker []byte, layout peLayout) {
 		// Target ownership covers the full raw extent, even though instruction
 		// scanning is separately bounded by min(VirtualSize, SizeOfRawData).
 		length := int(section.rawSize)
-		if start < 0 || start >= len(marker) || length <= 0 {
+		if start < 0 || start >= marker.size || length <= 0 {
 			continue
 		}
-		for index := start; index < min(len(marker), start+length); index++ {
-			marker[index] &^= 1
-		}
+		marker.update(start, start+min(length, marker.size-start), 0, 1)
 	}
 }
 
@@ -497,15 +490,13 @@ func markNonExecutablePE(marker []byte, layout peLayout) {
 // section tails must not acquire backing through the unbounded delta rift.
 // Keep this compatibility rule local to MSDelta; certificate parsing always
 // uses the actual file offset.
-func markPEDirectories(marker []byte, layout peLayout) {
+func markPEDirectories(marker peMarker, layout peLayout) {
 	mark := func(offset int, size uint64) {
-		if offset < 0 || offset >= len(marker) {
+		if offset < 0 || offset >= marker.size {
 			return
 		}
-		end := offset + int(min(size, uint64(len(marker)-offset)))
-		for i := offset; i < end; i++ {
-			marker[i] |= 3
-		}
+		end := offset + int(min(size, uint64(marker.size-offset)))
+		marker.update(offset, end, 3, 0)
 	}
 	mark(0, uint64(layout.headerSize))
 	for _, directory := range layout.directories {
@@ -523,20 +514,21 @@ func markPEDirectories(marker []byte, layout peLayout) {
 				}
 			}
 		}
-		if offset == 0 && uint64(directory.rva) < uint64(len(marker)) {
+		if offset == 0 && uint64(directory.rva) < uint64(marker.size) {
 			offset = uint64(directory.rva)
 		}
-		if offset != 0 && offset < uint64(len(marker)) {
+		if offset != 0 && offset < uint64(marker.size) {
 			mark(int(offset), uint64(directory.size))
 		}
 	}
 }
 
-func markerRangeFree(marker []byte, offset, size int) bool {
-	if offset < 0 || size < 0 || offset > len(marker)-size {
+func markerRangeFree(marker peMarker, offset, size int) bool {
+	if offset < 0 || size < 0 || offset > marker.size-size {
 		return false
 	}
-	for _, value := range marker[offset : offset+size] {
+	for i := offset; i < offset+size; i++ {
+		value := marker.get(i)
 		if value&1 != 0 {
 			return false
 		}
@@ -562,7 +554,7 @@ func peBranchTargetReachable(layout peLayout, target uint32) bool {
 	return false
 }
 
-func peBranchTargetMarked(marker []byte, layout peLayout, target uint32) bool {
+func peBranchTargetMarked(marker peMarker, layout peLayout, target uint32) bool {
 	index := int64(target)
 	if target >= layout.headerSize {
 		if offset, ok := layout.rawOffset(target); ok {
@@ -571,10 +563,10 @@ func peBranchTargetMarked(marker []byte, layout peLayout, target uint32) bool {
 			return true
 		}
 	}
-	return index < 0 || index >= int64(len(marker)) || marker[index]&1 != 0
+	return index < 0 || index >= int64(marker.size) || marker.get(int(index))&1 != 0
 }
 
-func transformCallsX86(data []byte, layout peLayout, rift riftTable, marker []byte) {
+func transformCallsX86(data []byte, layout peLayout, rift riftTable, marker peMarker) {
 	for _, section := range layout.sections {
 		if section.characteristics&0x20000000 == 0 {
 			continue
@@ -600,7 +592,7 @@ func transformCallsX86(data []byte, layout peLayout, rift riftTable, marker []by
 	}
 }
 
-func transformJmpsX86(data []byte, layout peLayout, rift riftTable, marker []byte) {
+func transformJmpsX86(data []byte, layout peLayout, rift riftTable, marker peMarker) {
 	for _, section := range layout.sections {
 		if section.characteristics&0x20000000 == 0 {
 			continue
@@ -621,7 +613,7 @@ func transformJmpsX86(data []byte, layout peLayout, rift riftTable, marker []byt
 				position++
 				continue
 			}
-			if data[displacementOpcode] != 0xe9 && marker[displacementOpcode-1]&1 != 0 {
+			if data[displacementOpcode] != 0xe9 && marker.get(displacementOpcode-1)&1 != 0 {
 				shortAllowed = false
 			}
 			if displacementOpcode+5 >= end || !markerRangeFree(marker, displacementOpcode, 5) {
@@ -656,11 +648,11 @@ func transformJmpsX86(data []byte, layout peLayout, rift riftTable, marker []byt
 	}
 }
 
-func transformDisasmX64(data []byte, layout peLayout, rift riftTable, marker []byte) {
+func transformDisasmX64(data []byte, layout peLayout, rift riftTable, marker peMarker) {
 	transformDisasmX64Traced(data, layout, rift, marker, nil)
 }
 
-func transformDisasmX64Traced(data []byte, layout peLayout, rift riftTable, marker []byte, trace *peTransformTrace) {
+func transformDisasmX64Traced(data []byte, layout peLayout, rift riftTable, marker peMarker, trace *peTransformTrace) {
 	walkDisasmX64(data, layout, marker, func(offset int, rva uint32, instruction deltaX64Instruction) {
 		field := offset + instruction.field
 		old := int64(int32(get32(data, field)))
@@ -685,7 +677,7 @@ func transformDisasmX64Traced(data []byte, layout peLayout, rift riftTable, mark
 	})
 }
 
-func walkDisasmX64(data []byte, layout peLayout, marker []byte, visit func(offset int, rva uint32, instruction deltaX64Instruction)) {
+func walkDisasmX64(data []byte, layout peLayout, marker peMarker, visit func(offset int, rva uint32, instruction deltaX64Instruction)) {
 	directory := layout.directories[3]
 	pdata, ok := layout.rawOffset(directory.rva)
 	if !ok || directory.rva == 0 {
@@ -703,7 +695,7 @@ func walkDisasmX64(data []byte, layout peLayout, marker []byte, visit func(offse
 			// AMD64 runner never begins decoding on a byte claimed by an earlier
 			// transform. This one-byte resynchronization is important for broad
 			// .pdata ranges that contain embedded data.
-			if offset < len(marker) && marker[offset]&3 != 0 {
+			if offset < marker.size && marker.get(offset)&3 != 0 {
 				rva++
 				offset++
 				continue
@@ -718,8 +710,8 @@ func walkDisasmX64(data []byte, layout peLayout, marker []byte, visit func(offse
 			// decode across. Advance only to that boundary, then let the start-byte
 			// rule above consume it. Bit 0 alone (for example a relocation operand)
 			// does not truncate an instruction which began before the marked bytes.
-			for inner := 1; inner < instruction.length && offset+inner < len(marker); inner++ {
-				if marker[offset+inner]&2 != 0 {
+			for inner := 1; inner < instruction.length && offset+inner < marker.size; inner++ {
+				if marker.get(offset+inner)&2 != 0 {
 					advance = inner
 					break
 				}

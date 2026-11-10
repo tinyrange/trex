@@ -15,7 +15,7 @@ SERVICING_RECOVERY_FILETIME=0x019db1ded5d71680
 
 def plan_inherited_recovery(root,payloads):
     """Plan inherited recovery records from explicit root/payload state without treating missing evidence as a recovery marker."""
-    names=root.path_names(lower=True)
+    names=root.path_index(lower=True)
     result=[]
     seen={}
     for plan in payloads['stages'].values():
@@ -78,15 +78,19 @@ def retained_recovery_flags(root,payloads,stem,name,flags):
     proof=payloads.get('retained_recovery',{}).get(stem.lower(),{}).get(name)
     if proof==None: return flags
     file=root.find(proof['path'])
-    if file==None or digest(file,algorithm='sha256')!=proof['sha256']: fail('retained recovery record changed before CSI persistence')
+    if file==None: fail('retained recovery record changed before CSI persistence')
+    if proof.get('sha256')==None:
+        if root.get_metadata(proof['path']).write_order!=proof['order']: fail('retained recovery record changed before CSI persistence')
+    elif digest(file,algorithm='sha256')!=proof['sha256']:
+        fail('retained recovery record changed before CSI persistence')
     return flags|0x100
 
 
-def plan_generated_recovery(root,payloads,target_filetime):
+def plan_generated_recovery(root,payloads,target_filetime,audit=True):
     """Plan generated recovery records with an explicit target FILETIME; do not infer timestamps from wall-clock or reference output."""
     # No implicit clock, metadata borrowed from an oracle, or inferred time.
     if target_filetime<0 or target_filetime>=1<<64: fail('invalid recovery target timestamp')
-    names=root.path_names(lower=True)
+    names=root.path_index(lower=True)
     result=[]
     seen={}
     security_cache={}
@@ -106,12 +110,20 @@ def plan_generated_recovery(root,payloads,target_filetime):
             installed=names.get(entry.store_path.lower())
             if installed==None: fail('generated recovery installed content absent')
             if destination.lower() in names or destination.lower() in seen: fail('generated recovery destination already exists')
-            record=plan.create_recovery(i,target_filetime=target_filetime,lazy=True)
-            info=windows.delta_info(record,psf_record=True,maximum=128<<20)
-            if info.target_hash!=basis.sha256 or info.target_size!=basis.size or info.target_filetime!=target_filetime:
-                fail('generated recovery differs from admitted basis or timestamp')
-            if digest(root.find(installed),algorithm='sha256')!=info.extension_hash:
-                fail('generated recovery installed content changed')
+            if audit:
+                record=plan.create_recovery(i,target_filetime=target_filetime,lazy=True,audit=True)
+                info=windows.delta_info(record,psf_record=True,maximum=128<<20)
+                if info.target_hash!=basis.sha256 or info.target_size!=basis.size or info.target_filetime!=target_filetime:
+                    fail('generated recovery differs from admitted basis or timestamp')
+                if digest(root.find(installed),algorithm='sha256')!=info.extension_hash:
+                    fail('generated recovery installed content changed')
+                record_hash=digest(record,algorithm='sha256')
+            else:
+                # Native admission requires this exact stage's immutable,
+                # hash-checking installed reader. No caller-supplied hash is
+                # accepted as evidence for deferred reconstruction.
+                record=plan.create_recovery(i,target_filetime=target_filetime,lazy=True,audit=False,literal=True,installed=root.find(installed))
+                record_hash=None
             # Recovery uses staging security, not the installed file's final
             # runtime ACL (which activation can subsequently replace).
             parent_sd=_planned_recovery_parent_security(root,names,destination)
@@ -121,7 +133,7 @@ def plan_generated_recovery(root,payloads,target_filetime):
                 security_cache[security_key]=assign_servicing_staged_file_security(seed,request)
             seen[destination.lower()]=True
             result.append(dict(file=record,installed=installed,path=destination,stem=parts[3].lower(),key=entry.file_key,
-                record_hash=digest(record,algorithm='sha256'),installed_order=root.get_metadata(installed).write_order,
+                record_hash=record_hash,installed_order=root.get_metadata(installed).write_order,
                 security=security_cache[security_key],attributes=32))
     return result
 
@@ -136,7 +148,7 @@ def apply_generated_recovery(root,plan):
         if root.find(row['installed'])==None or root.get_metadata(row['installed']).write_order!=row['installed_order']:
             fail('generated recovery installed content changed')
         if row['path'].lower() in names or row['path'].lower() in seen: fail('generated recovery destination changed')
-        if digest(row['file'],algorithm='sha256')!=row['record_hash']: fail('generated recovery record changed')
+        if row['record_hash']!=None and digest(row['file'],algorithm='sha256')!=row['record_hash']: fail('generated recovery record changed')
         seen[row['path'].lower()]=True
     markers={}
     for row in plan:
@@ -157,7 +169,7 @@ def apply_generated_recovery(root,plan):
         root.set_security(destination,row['security'])
         root.set_file_attributes(destination,row['attributes'])
         names[destination.lower()]=destination
-        markers.setdefault(row['stem'],{})[row['key']]=dict(path=destination,sha256=row['record_hash'])
+        markers.setdefault(row['stem'],{})[row['key']]=dict(path=destination,sha256=row['record_hash'],order=root.get_metadata(destination).write_order)
     return markers
 
 

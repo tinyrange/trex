@@ -305,7 +305,24 @@ def test_resident_owner_deletion_and_unsupported_transition_are_atomic():
     raises(persist,args=[root,directory(),"/image6",closure,unsupported,dict(),catalogs],message="unsupported resident package transition")
     equal(digest(root.find(path)),before)
 
+
+def test_non_audit_preserves_publication_and_admission():
+    persist = testing.module("@stdlib//windows/servicing:package_store.star")["publish_package_metadata"]
+    for target in [0x40,0x70]:
+        root,name,closure,population,catalogs = _resolved_fixture(target=target)
+        fast = root.clone()
+        persist(root,directory(),"/image6",closure,population,dict(),catalogs)
+        report = persist(fast,directory(),"/image6",closure,population,dict(),catalogs,audit=False)
+        equal(report["readback_audit"],"not-performed")
+        equal(report["verified_manifests"],0)
+        equal(digest(root.find("/Windows/System32/config/SOFTWARE")),digest(fast.find("/Windows/System32/config/SOFTWARE")))
+    root,name,closure,population,catalogs = _resolved_fixture(target=0x20)
+    before = digest(root.find("/Windows/System32/config/SOFTWARE"))
+    raises(persist,args=[root,directory(),"/image6",closure,population,dict(),catalogs],kwargs=dict(audit=False),message="supported admitted stage/install")
+    equal(digest(root.find("/Windows/System32/config/SOFTWARE")),before)
+
 TEST_SUITE = suite("nt6_package_store", [
+    case("non_audit_publication_equivalence",test_non_audit_preserves_publication_and_admission),
     case("multiple_parent_detector_indexes", test_multiple_parent_detector_indexes_are_not_applicability_pruned),
     case("resident_owner_delete_and_atomic_failure", test_resident_owner_deletion_and_unsupported_transition_are_atomic),
     case("resident_supersession", test_resident_supersession_is_published_not_normalized_or_ignored),

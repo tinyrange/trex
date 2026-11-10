@@ -79,13 +79,13 @@ def plan_driver_catalog_hints(root, jobs, repositories, host_architecture):
             plans.append(dict(path=item['source'],hash=item['sha256'],order=meta.write_order,eas=[dict(e) for e in meta.extended_attributes],hint=hint,catalog=cat[0]['source'],catalog_hash=key))
     return plans
 
-def apply_catalog_hints(root, plans):
-    """Validate catalog bytes and file bindings for the batch, then publish hint EAs on the selected objects."""
+def apply_catalog_hints(root, plans, audit=True):
+    """Validate catalog and metadata bindings, optionally rehash payloads, then publish hint EAs. Audit mode rejects plans without payload proof."""
     destinations={}
     catalog_hashes={}
     for plan in plans:
         file=root.find(plan['path'])
-        if file==None or digest(file)!=plan['hash'] or root.get_metadata(plan['path']).write_order!=plan['order'] or root.get_metadata(plan['path']).extended_attributes!=plan['eas']:
+        if file==None or (audit and (plan['hash']==None or digest(file)!=plan['hash'])) or root.get_metadata(plan['path']).write_order!=plan['order'] or root.get_metadata(plan['path']).extended_attributes!=plan['eas']:
             fail('catalog hint member changed before publication')
         if plan['catalog'] not in catalog_hashes:
             cat=root.find(plan['catalog'])
@@ -125,16 +125,19 @@ def package_hint_paths(parsed):
     return result
 
 
-def plan_package_catalog_hints(root, packages):
+def plan_package_catalog_hints(root, packages, audit=True):
     """Verify actual catalogs and members in execution order, retaining last writer.
 
     Absent signed paths are not installed by this operation. Native tries the
     open and reports failure; we record absent paths without creating files.
-    Present files must still match their own catalog entry, including retained
-    compressed base content. No cached signing level is fabricated.
+    Audit mode verifies catalog signatures/chains and present files against
+    signed catalog members, including
+    retained compressed base content. Non-audit mode publishes declared hints
+    without eagerly reconstructing every payload. Neither mode fabricates a
+    cached signing level. Publication still checks namespace/object metadata.
     """
-    names=root.path_names(lower=True)
-    roots=_roots(root.find('/Windows/System32/config/SOFTWARE'))
+    names=root.path_index(lower=True)
+    roots=_roots(root.find('/Windows/System32/config/SOFTWARE')) if audit else []
     chains={}
     final={}
     proofs={}
@@ -149,16 +152,18 @@ def plan_package_catalog_hints(root, packages):
         path=names.get(('/Windows/servicing/Packages/'+name).lower())
         if path==None: fail('package hint catalog is missing')
         cat=windows.catalog(root.find(path))
-        signature=windows.catalog_signature(cat)
-        timestamp=signature.timestamp
-        if timestamp==None: fail('package hint catalog lacks authenticated timestamp')
-        chain=(signature.signer,tuple(signature.certificates),timestamp.signer,tuple(timestamp.certificates),timestamp.unix)
-        if chain not in chains:
-            windows.certificate_chain(timestamp.signer,roots,timestamp.certificates,timestamp.unix,'timestamping')
-            windows.certificate_chain(signature.signer,roots,signature.certificates,timestamp.unix,'code_signing')
-            chains[chain]=True
+        if audit:
+            signature=windows.catalog_signature(cat)
+            timestamp=signature.timestamp
+            if timestamp==None: fail('package hint catalog lacks authenticated timestamp')
+            chain=(signature.signer,tuple(signature.certificates),timestamp.signer,tuple(timestamp.certificates),timestamp.unix)
+            if chain not in chains:
+                windows.certificate_chain(timestamp.signer,roots,timestamp.certificates,timestamp.unix,'timestamping')
+                windows.certificate_chain(signature.signer,roots,signature.certificates,timestamp.unix,'code_signing')
+                chains[chain]=True
         cat_hash=digest(cat)
-        for member in package_hint_paths(windows.catalog_entries(cat)):
+        hint=_hint(name)
+        for member in package_hint_paths(windows.catalog_entries(cat, name_value="Hint")):
             actual=names.get(member['path'].lower())
             if actual==None:
                 missing[member['path'].lower()]=True
@@ -166,27 +171,28 @@ def plan_package_catalog_hints(root, packages):
             if actual not in proofs:
                 file=root.find(actual)
                 meta=root.get_metadata(actual)
-                proofs[actual]=dict(hash=digest(file),order=meta.write_order,eas=[dict(e) for e in meta.extended_attributes],hashes={},object=('link',meta.hard_link_id) if meta.hard_link_id else ('path',actual.lower()))
+                proofs[actual]=dict(hash=digest(file) if audit else None,order=meta.write_order,eas=[dict(e) for e in meta.extended_attributes],hashes={},object=('link',meta.hard_link_id) if meta.hard_link_id else ('path',actual.lower()))
             proof=proofs[actual]
-            algorithm='sha256' if len(member['digest'])==32 else 'sha1'
-            if algorithm not in proof['hashes']:
-                # DCS decoding owns an expanded byte buffer. Cache only its
-                # digest, not every expanded file for the whole catalog pass.
-                file=root.find(actual)
-                logical=archive.dcs(file) if file.size>=4 and file.bytes(0,4)==b'DCS\x01' else file
-                proof['hashes'][algorithm]=windows.catalog_hash(logical,algorithm=algorithm)
-                logical=None
-            if proof['hashes'][algorithm]!=member['digest']:
-                mismatch_count+=1
-                if len(mismatches)<16:
-                    mismatches.append(actual+'; catalog='+name+'; '+algorithm+' expected='+binary.hex(member['digest'])+' actual='+binary.hex(proof['hashes'][algorithm]))
-                continue
-            final[proof['object']]=dict(path=actual,hash=proof['hash'],order=proof['order'],eas=proof['eas'],hint=_hint(name),catalog=path,catalog_hash=cat_hash)
+            if audit:
+                algorithm='sha256' if len(member['digest'])==32 else 'sha1'
+                if algorithm not in proof['hashes']:
+                    # DCS decoding owns an expanded byte buffer. Cache only its
+                    # digest, not every expanded file for the whole catalog pass.
+                    file=root.find(actual)
+                    logical=archive.dcs(file) if file.size>=4 and file.bytes(0,4)==b'DCS\x01' else file
+                    proof['hashes'][algorithm]=windows.catalog_hash(logical,algorithm=algorithm)
+                    logical=None
+                if proof['hashes'][algorithm]!=member['digest']:
+                    mismatch_count+=1
+                    if len(mismatches)<16:
+                        mismatches.append(actual+'; catalog='+name+'; '+algorithm+' expected='+binary.hex(member['digest'])+' actual='+binary.hex(proof['hashes'][algorithm]))
+                    continue
+            final[proof['object']]=dict(path=actual,hash=proof['hash'],order=proof['order'],eas=proof['eas'],hint=hint,catalog=path,catalog_hash=cat_hash)
     # Complete the read-only verification pass to diagnose independent legacy
     # layouts together. Never return a partial publication plan after a failure.
     if mismatch_count:
         fail('package Hint member hash mismatches ('+str(mismatch_count)+', first 16): '+str(mismatches))
-    return dict(plans=list(final.values()),catalogs=len(seen),present_paths=len(proofs),absent_paths=len(missing))
+    return dict(plans=list(final.values()),catalogs=len(seen),present_paths=len(proofs),absent_paths=len(missing),payload_audit="completed" if audit else "not-performed", signature_audit="completed" if audit else "not-performed")
 
 
 def catalog_hint_name(ea):
@@ -208,7 +214,7 @@ def audit_catalog_hints(root, paths=None):
     logical bytes. Duplicate catalog leaves must contain identical bytes.
     No reference-image catalogs or filesystem objects participate.
     """
-    names = root.path_names(lower=True)
+    names = root.path_index(lower=True)
     catalogs = {}
     for lower, path in names.items():
         if lower.startswith('/windows/system32/catroot/') and lower.endswith('.cat'):

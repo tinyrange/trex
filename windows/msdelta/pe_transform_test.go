@@ -17,7 +17,7 @@ func TestAMD64TransformWrapsRelativeTargetsBeforeRiftLookup(t *testing.T) {
 		{source: 0x1000, target: 0x3000},
 		{source: 0xc0000000, target: 0x80000000},
 	}}
-	transformDisasmX64(data, layout, rift, make([]byte, len(data)))
+	transformDisasmX64(data, layout, rift, newPEMarker(len(data)))
 	if got := get32(data, 0x21); got != 0x8d4c2aef {
 		t.Fatalf("high wrapped RVA used wrong segment: %#x", got)
 	}
@@ -32,15 +32,15 @@ func TestImportNamesAreExcludedFromUnlistedPointerScan(t *testing.T) {
 	put32(data, 0x20, 0x1020)
 	put16(data, 0x40, 8)
 	copy(data[0x42:], "VerLanguageNameA\x00")
-	marker := make([]byte, len(data))
+	marker := newPEMarker(len(data))
 	rift := riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1000, target: 0x1100}}}
 	walkImportThunks(data, layout, rift, 0x1000, false, true, 4, 1<<31, layout.imageBase, marker)
 	for i := 0x40; i <= 0x52; i++ {
-		if marker[i] != 3 {
-			t.Fatalf("import name byte %#x has marker %d", i, marker[i])
+		if marker.get(i) != 3 {
+			t.Fatalf("import name byte %#x has marker %d", i, marker.get(i))
 		}
 	}
-	if marker[0x53] != 0 {
+	if marker.get(0x53) != 0 {
 		t.Fatal("import name claimed alignment padding")
 	}
 	// The unaligned suffix "meA\\0" looks like VA 0x41656d. Keep
@@ -109,11 +109,11 @@ func TestDirectoryMarkingIgnoresVirtualPaddingFileCoordinates(t *testing.T) {
 		},
 		directories: [16]peDirectory{4: {rva: 0x400, size: 0x80}},
 	}
-	marker := make([]byte, 0x480)
+	marker := newPEMarker(0x480)
 	markPEDirectories(marker, layout)
 	// Security's numeric address falls in virtual Pad1. Giving Pad1 a false
 	// raw origin at zero would claim the executable bytes at 0x200 instead.
-	for _, b := range marker[0x200:0x400] {
+	for _, b := range marker.values()[0x200:0x400] {
 		if b != 0 {
 			t.Fatal("virtual-only padding redirected a directory mark into code")
 		}
@@ -143,9 +143,9 @@ func TestDirectoryMarkingUsesDeltaSecurityCoordinates(t *testing.T) {
 	if get32(data, 0x401) != 0x1b || get32(data, 0x501) != 0x3b {
 		t.Fatalf("marked/control operands = %#x/%#x", get32(data, 0x401), get32(data, 0x501))
 	}
-	marker := make([]byte, len(data))
+	marker := newPEMarker(len(data))
 	markPEDirectories(marker, layout)
-	if marker[0x400] != 3 || marker[0x47f] != 3 || marker[0x480] != 0 || marker[0xa00] != 0 {
+	if marker.get(0x400) != 3 || marker.get(0x47f) != 3 || marker.get(0x480) != 0 || marker.get(0xa00) != 0 {
 		t.Fatal("directory marking did not preserve exact delta-coordinate extent")
 	}
 }
@@ -181,12 +181,12 @@ func TestHIGHLOWRelocationUses32BitAddressDomain(t *testing.T) {
 		// The final segment differs deliberately: a sign-extended address
 		// would wrap below the first breakpoint and select that wrong segment.
 		rift := riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1020, target: 0x1030}, {source: 0x2000, target: 0x2100}}}
-		marker := make([]byte, len(data))
+		marker := newPEMarker(len(data))
 		transformRelocations(data, layout, rift, 0x190000000, marker)
 		if got := get32(data, 0x20); got != 0x90001030 {
 			t.Fatalf("base %#x: HIGHLOW = %#x", imageBase, got)
 		}
-		for _, mark := range marker[0x20:0x24] {
+		for _, mark := range marker.values()[0x20:0x24] {
 			if mark&1 == 0 {
 				t.Fatal("HIGHLOW did not claim its operand")
 			}
@@ -204,7 +204,7 @@ func TestWalkImportThunksMapsZeroTimestampImagePointers(t *testing.T) {
 	put64(data, 0x28, 0x1200)
 	put64(data, 0x30, uint64(1)<<63|7)
 	rift := riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1000, target: 0x1200}}}
-	marker := make([]byte, len(data))
+	marker := newPEMarker(len(data))
 	walkImportThunks(data, layout, rift, 0x1000, false, false, 8, uint64(1)<<63, 0x180000000, marker)
 	if got := get64(data, 0x20); got != layout.imageBase+0x1100 {
 		t.Fatalf("import pass changed VA before relocation: %#x", got)
@@ -258,7 +258,7 @@ func TestX86BranchTargetsDoNotAliasHeaderAlignmentGap(t *testing.T) {
 			next := uint32(position + width - 0x200 + 0x1000)
 			old := target - next
 			put32(data, position+width-4, old)
-			marker := make([]byte, len(data))
+			marker := newPEMarker(len(data))
 			markNonExecutablePE(marker, layout)
 			rift := riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1800, target: 0x1900}, {source: 0x2600, target: 0x2800}}}
 			if conditional {
@@ -289,9 +289,9 @@ func TestX86BranchTargetMarkerIncludesExecutableRawPadding(t *testing.T) {
 		old := target - 0x1005
 		put32(data, 0x21, old)
 		put32(data, 0xb1, 0xffffffa0)
-		marker := make([]byte, len(data))
+		marker := newPEMarker(len(data))
 		markNonExecutablePE(marker, layout)
-		if marker[0xa0] != 0 || marker[0x11f] != 0 || marker[0x120] != 1 {
+		if marker.get(0xa0) != 0 || marker.get(0x11f) != 0 || marker.get(0x120) != 1 {
 			t.Fatal("executable ownership does not match exact raw extent")
 		}
 		rift := riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1070, target: 0x1080}, {source: 0x10f0, target: 0x1110}, {source: 0x1100, target: 0x1100}}}
@@ -316,7 +316,7 @@ func TestTransformCallsX86MapsExecutableTarget(t *testing.T) {
 	layout := testX86TransformLayout()
 	data[0x20] = 0xe8
 	put32(data, 0x21, 0x5b) // next RVA 0x1005, target RVA 0x1060
-	marker := make([]byte, len(data))
+	marker := newPEMarker(len(data))
 	markNonExecutablePE(marker, layout)
 	transformCallsX86(data, layout, riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1060, target: 0x1070}}}, marker)
 	if got := get32(data, 0x21); got != 0x6b {
@@ -324,7 +324,7 @@ func TestTransformCallsX86MapsExecutableTarget(t *testing.T) {
 	}
 
 	put32(data, 0x21, 0x5b)
-	marker[0x80] = 1 // file offset of target RVA 0x1060
+	marker.set(0x80, 1) // file offset of target RVA 0x1060
 	transformCallsX86(data, layout, riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1060, target: 0x1070}}}, marker)
 	if got := get32(data, 0x21); got != 0x5b {
 		t.Fatalf("CALL with claimed target changed to %#x", got)
@@ -357,7 +357,7 @@ func TestTransformJmpsX86RequiresByteAfterSectionBoundaryOperand(t *testing.T) {
 				}
 				old := uint32(0x1000) - uint32(0x1000+position-0x20+width)
 				put32(data, position+width-4, old)
-				marker := make([]byte, len(data))
+				marker := newPEMarker(len(data))
 				markNonExecutablePE(marker, layout)
 				rift := riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1000, target: 0x1010}, {source: 0x1080, target: 0x1080}}}
 				transformJmpsX86(data, layout, rift, marker)
@@ -378,7 +378,7 @@ func TestTransformJmpsX86CollapsesMappedNearJump(t *testing.T) {
 	layout := testX86TransformLayout()
 	data[0x20] = 0xe9
 	put32(data, 0x21, 0x8b) // next RVA 0x1005, target RVA 0x1090
-	marker := make([]byte, len(data))
+	marker := newPEMarker(len(data))
 	markNonExecutablePE(marker, layout)
 	transformJmpsX86(data, layout, riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1090, target: 0x1060}}}, marker)
 	if data[0x20] != 0xeb || data[0x21] != 0x5b {
@@ -398,7 +398,7 @@ func TestWalkImportThunksClassifiesLookupFromFirstEntry(t *testing.T) {
 	ordinal := uint64(1) << 63
 	put64(data, 0x20, ordinal|23)
 	put64(data, 0x28, 0x1100)
-	marker := make([]byte, len(data))
+	marker := newPEMarker(len(data))
 	rift := riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x1000, target: 0xfe0}}}
 	walkImportThunks(
 		data, layout,
@@ -411,7 +411,7 @@ func TestWalkImportThunksClassifiesLookupFromFirstEntry(t *testing.T) {
 		t.Fatalf("named thunk after ordinal = %#x, want unchanged %#x", got, 0x1100)
 	}
 
-	marker = make([]byte, len(data))
+	marker = newPEMarker(len(data))
 	walkImportThunks(data, layout, rift, 0x1000, false, false, 8, ordinal, 0, marker)
 	if got := get64(data, 0x28); got != 0x10e0 {
 		t.Fatalf("IAT named thunk after ordinal = %#x, want mapped %#x", got, 0x10e0)
@@ -421,7 +421,7 @@ func TestWalkImportThunksClassifiesLookupFromFirstEntry(t *testing.T) {
 	put64(data, 0x20, 0x1100)
 	put64(data, 0x28, ordinal|7)
 	put64(data, 0x30, 0x1200)
-	walkImportThunks(data, layout, rift, 0x1000, false, true, 8, ordinal, 0, make([]byte, len(data)))
+	walkImportThunks(data, layout, rift, 0x1000, false, true, 8, ordinal, 0, newPEMarker(len(data)))
 	if got := get64(data, 0x20); got != 0x10e0 {
 		t.Fatalf("name-led lookup first thunk = %#x, want mapped %#x", got, 0x10e0)
 	}
@@ -492,15 +492,15 @@ func TestTransformDisasmX64HonorsSharedByteMarkers(t *testing.T) {
 
 	t.Run("unmarked instruction is remapped", func(t *testing.T) {
 		data, layout := makeImage()
-		transformDisasmX64(data, layout, rift, make([]byte, len(data)))
+		transformDisasmX64(data, layout, rift, newPEMarker(len(data)))
 		if got := get32(data, 0x41); got != 0x2b {
 			t.Fatalf("mapped displacement = %#x, want %#x", got, 0x2b)
 		}
 	})
 	t.Run("claimed start is skipped", func(t *testing.T) {
 		data, layout := makeImage()
-		marker := make([]byte, len(data))
-		marker[0x40] = 1
+		marker := newPEMarker(len(data))
+		marker.set(0x40, 1)
 		transformDisasmX64(data, layout, rift, marker)
 		if got := get32(data, 0x41); got != 0x1b {
 			t.Fatalf("claimed instruction displacement = %#x, want unchanged %#x", got, 0x1b)
@@ -508,8 +508,8 @@ func TestTransformDisasmX64HonorsSharedByteMarkers(t *testing.T) {
 	})
 	t.Run("interior boundary truncates advancement", func(t *testing.T) {
 		data, layout := makeImage()
-		marker := make([]byte, len(data))
-		marker[0x42] = 2
+		marker := newPEMarker(len(data))
+		marker.set(0x42, 2)
 		transformDisasmX64(data, layout, rift, marker)
 		if got := get32(data, 0x41); got != 0x1b {
 			t.Fatalf("boundary-crossing displacement = %#x, want unchanged %#x", got, 0x1b)
@@ -537,7 +537,7 @@ func TestDisasmX64DoesNotUseRawExtentAsGlobalRVACutoff(t *testing.T) {
 		put32(data, off+1, 0x1b)
 	}
 	rift := riftTable{entries: []riftEntry{{source: 0, target: 0}, {source: 0x820, target: 0x830}, {source: 0x1000, target: 0x1000}, {source: 0x1820, target: 0x1830}}}
-	transformDisasmX64(data, layout, rift, make([]byte, len(data)))
+	transformDisasmX64(data, layout, rift, newPEMarker(len(data)))
 	if get32(data, 0x401) != 0x2b {
 		t.Fatal("in-domain discardable function was not normalized")
 	}

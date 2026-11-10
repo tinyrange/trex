@@ -20,6 +20,9 @@ func servicingMetadataBuiltin(stages []*uup.CumulativeStage, metadata []uup.Upda
 		err   error
 	}
 	cache := make([]cached, len(stages))
+	var contentOnce sync.Once
+	var contentCache *stageContentCache
+	var contentError error
 	return starlark.NewBuiltin("servicing_metadata", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var feature string
 		if err := starlark.UnpackArgs("servicing_metadata", args, kwargs, "feature_id", &feature); err != nil {
@@ -40,6 +43,10 @@ func servicingMetadataBuiltin(stages []*uup.CumulativeStage, metadata []uup.Upda
 		if selected < 0 {
 			return nil, fmt.Errorf("servicing_metadata: unknown installed-OS feature %q", feature)
 		}
+		contentOnce.Do(func() { contentCache, contentError = newStageContentCache(64 << 20) })
+		if contentError != nil {
+			return nil, contentError
+		}
 		c := &cache[selected]
 		c.once.Do(func() {
 			index, err := uup.NewPackageMetadataIndex(stages[selected])
@@ -52,14 +59,14 @@ func servicingMetadataBuiltin(stages []*uup.CumulativeStage, metadata []uup.Upda
 				c.err = err
 				return
 			}
-			c.value = packageMetadataRecord(index, components, stages[selected])
+			c.value = packageMetadataRecord(index, components, stages[selected], contentCache)
 			c.value.Freeze()
 		})
 		return c.value, c.err
 	})
 }
 
-func packageMetadataRecord(index *uup.PackageMetadataIndex, components *uup.ComponentMetadataIndex, stage *uup.CumulativeStage) starlark.Value {
+func packageMetadataRecord(index *uup.PackageMetadataIndex, components *uup.ComponentMetadataIndex, stage *uup.CumulativeStage, contentCache *stageContentCache) starlark.Value {
 	packages := []starlark.Value{}
 	roots := []starlark.Value{}
 	for _, entry := range index.Entries() {
@@ -146,7 +153,7 @@ func packageMetadataRecord(index *uup.PackageMetadataIndex, components *uup.Comp
 		}
 		return starvalue.NewReader("component manifest", file), nil
 	})
-	return starvalue.NewRecord(starlark.StringDict{"packages": starlark.NewList(packages), "roots": starlark.NewList(roots), "open_package": open, "open_packages": openMany, "open_catalog": openCatalog, "open_catalogs": packageCatalogBatchBuiltin(index), "open_component": openComponent, "plan_components": exactComponentPlanBuiltin(stage, components)})
+	return starvalue.NewRecord(starlark.StringDict{"packages": starlark.NewList(packages), "roots": starlark.NewList(roots), "open_package": open, "open_packages": openMany, "open_catalog": openCatalog, "open_catalogs": packageCatalogBatchBuiltin(index), "open_component": openComponent, "plan_components": exactComponentPlanWithCacheBuiltin(stage, components, contentCache)})
 }
 
 func residentComponentMetadataBuiltins(base *wim.Archive, imagePath string) (*starlark.Builtin, *starlark.Builtin) {

@@ -5,6 +5,7 @@ assembly identity changes and removals require their own installer phases and
 are rejected. New companion files may be linked into an existing cache identity
 only when absent and backed by an exact declared staged hash. No oracle paths, hashes or registry results enter this planner.
 """
+load("@stdlib//windows/servicing:runtime.star", "servicing_runtime_manifest_root")
 load("@stdlib//windows/servicing:runtime.star", "select_servicing_file_hash")
 load("@stdlib//windows/servicing:registry_effects.star", "plan_update_registry_effects", "apply_update_registry_effects")
 
@@ -25,8 +26,9 @@ def _leaf(value):
         fail("managed declaration requires a safe path leaf")
     return value
 
-def _managed_declaration(document):
-    tree = binary.xml(document, discard_whitespace=True).root
+def _managed_declaration(document, change=None, side="after"):
+    if 'gac' not in windows.assembly_manifest(document).file_elements: return None
+    tree = servicing_runtime_manifest_root(change, side) if change!=None else binary.xml(document, discard_whitespace=True).root
     managed = []
     for node in tree.children:
         if node.namespace == _NS and node.name == "file":
@@ -91,8 +93,14 @@ def _managed_declaration(document):
         files[name.lower()] = dict(name=name, hash=select_servicing_file_hash(item)["digest"])
     return dict(path=path, files=files, copy=copy == "true", assembly_file=_leaf(file["name"]), notification=identity["name"]+","+version+","+culture+","+token+","+{"64":"amd64","32":"x86","MSIL":"msil"}[architecture], architecture=architecture)
 
-def plan_update_gac(root, runtime, component_stems):
-    """Plan qualified Fusion cache refreshes from runtime transitions and exact component stems; retain source/destination guards."""
+def plan_update_gac(root, runtime, component_stems, audit=True):
+    """Plan Fusion cache refreshes with namespace guards and optional payload auditing.
+
+    Non-audit mode does not verify baseline or source bytes. The caller must
+    supply admitted sources; publication binds their captured write epochs.
+    fileCopy=false requires pre-published content or the exact staged file
+    object; shared hardlink identity avoids decoding the same object twice.
+    """
     # CSI identity comparison is case-insensitive, including versionScope.
     # Keep the exact admitted stem; never derive a store path from an identity.
     stems = {}
@@ -101,12 +109,12 @@ def plan_update_gac(root, runtime, component_stems):
         if key in stems and stems[key].lower() != stem.lower():
             fail("conflicting managed staged source identity")
         stems[key] = stem
-    names = root.path_names(lower=True)
+    names = root.path_index(lower=True)
     plans = []
     destinations = {}
     for transition in runtime["transitions"]:
-        before = _managed_declaration(transition["before"]) if transition["before"] != None else None
-        after = _managed_declaration(transition["after"]) if transition["after"] != None else None
+        before = _managed_declaration(transition["before"], transition, "before") if transition["before"] != None else None
+        after = _managed_declaration(transition["after"], transition, "after") if transition["after"] != None else None
         if before == None and after == None:
             continue
         if before == None or after == None or before["path"].lower() != after["path"].lower():
@@ -134,27 +142,35 @@ def plan_update_gac(root, runtime, component_stems):
             if destination.lower() in destinations:
                 fail("conflicting managed destination")
             destinations[destination.lower()] = True
-            current = None if added else digest(root.find(destination), algorithm="sha256")
-            if not added and current not in [before["files"][key]["hash"], item["hash"]]:
+            # Non-audit publication binds namespace epochs, not eager payload
+            # reconstruction. fileCopy=false needs the exact staged object
+            # or content proof: no replacement is published for that declaration.
+            source_link = root.get_metadata(source).hard_link_id
+            shared = not added and source_link != 0 and source_link == root.get_metadata(destination).hard_link_id
+            verify = audit or (not after["copy"] and not shared)
+            current = digest(root.find(destination), algorithm="sha256") if verify and not added else None
+            if verify and not added and current not in [before["files"][key]["hash"], item["hash"]]:
                 fail("managed cache content differs from declared baseline")
-            if digest(root.find(source), algorithm="sha256") != item["hash"]:
+            if verify and digest(root.find(source), algorithm="sha256") != item["hash"]:
                 fail("managed source hash mismatch")
             security = root.get_security(source)
             if security == None:
                 fail("managed source has no security descriptor")
             windows.security_descriptor_parts(security)
-            if not after["copy"] and (added or current != item["hash"]):
+            if not after["copy"] and (added or (not shared and current != item["hash"])):
                 fail("GAC fileCopy=false requires pre-published cache files")
-            plans.append(dict(copy=after["copy"], parent=parent, parent_order=root.get_metadata(parent).write_order, path=destination, source=source, before=current, after=item["hash"], security=security, source_order=root.get_metadata(source).write_order, destination_order=None if added else root.get_metadata(destination).write_order))
+            plans.append(dict(added=added, audited=verify, shared=shared, copy=after["copy"], parent=parent, parent_order=root.get_metadata(parent).write_order, path=destination, source=source, before=current, after=item["hash"], security=security, source_order=root.get_metadata(source).write_order, destination_order=None if added else root.get_metadata(destination).write_order))
     return plans
 
-def apply_update_gac(root, plans):
+def apply_update_gac(root, plans, audit=True):
     """Validate the full GAC batch before refreshing files; runtime Fusion/NGen validation is not implied."""
     # Validate the entire batch before unlinking any destination.
     for p in plans:
         source = root.find(p["source"])
         destination = root.find(p["path"])
-        added = p["before"] == None
+        added = p.get("added", p["before"] == None)
+        if audit and not p.get("audited", True):
+            fail("managed refresh audit requires audited planning")
         if root.get_metadata(p["parent"]).write_order != p["parent_order"]:
             fail("managed cache directory changed after planning")
         if source == None or (destination == None and not added):
@@ -163,12 +179,15 @@ def apply_update_gac(root, plans):
             fail("new managed companion destination appeared after planning")
         if root.get_metadata(p["source"]).write_order != p["source_order"] or (not added and root.get_metadata(p["path"]).write_order != p["destination_order"]):
             fail("managed refresh path changed after planning")
-        if root.get_security(p["source"]) != p["security"] or digest(source, algorithm="sha256") != p["after"] or (not added and digest(destination, algorithm="sha256") != p["before"]):
+        shared = p.get("shared", False)
+        if shared and (not root.get_metadata(p["source"]).hard_link_id or root.get_metadata(p["source"]).hard_link_id != root.get_metadata(p["path"]).hard_link_id):
+            fail("managed refresh shared file object changed")
+        if root.get_security(p["source"]) != p["security"] or ((audit or (not p["copy"] and not shared)) and (digest(source, algorithm="sha256") != p["after"] or (not added and digest(destination, algorithm="sha256") != p["before"]))):
             fail("managed refresh content/security changed after planning")
     for p in plans:
         if not p["copy"]:
             continue
-        if p["before"] != None:
+        if not p.get("added", p["before"] == None):
             root.remove(p["path"])
         root.hardlink(p["source"], p["path"])
         if not root.get_metadata(p["path"]).hard_link_id or root.get_metadata(p["path"]).hard_link_id != root.get_metadata(p["source"]).hard_link_id:
@@ -176,10 +195,12 @@ def apply_update_gac(root, plans):
     return dict(refreshed_files=len([p for p in plans if p["copy"]]), verified_files=len([p for p in plans if not p["copy"]]), validation="runtime Fusion/NGen validation not performed by this file-publication helper")
 
 
-def plan_update_gac_notifications(root, runtime):
+def plan_update_gac_notifications(root, runtime, audit=True):
     """Notify Fusion using the installed assembly's last-write FILETIME.
 
     This is NOT a wall clock and must agree with the file Fusion will inspect.
+    Optional audit verifies the declared payload hash; epochs and timestamps
+    are always checked before publication.
     Existing cache identities only: lifecycle changes are rejected by the same
     guarded cache planner. Reference counting is unchanged for these replacements.
     """
@@ -187,23 +208,23 @@ def plan_update_gac_notifications(root, runtime):
     key='/Microsoft/Fusion/GACChangeNotification/Default'
     source=root.find(path)
     if source==None: fail('Fusion notifications require SOFTWARE')
-    hive=windows.hive(source)
+    hive=windows.hive(source, snapshot=True)
     parent=hive.find(key)
     if parent==None: fail('Fusion notification parent is missing')
-    names=root.path_names(lower=True)
+    names=root.path_index(lower=True)
     notifications={}
     inputs=[]
     architectures={}
     for transition in runtime['transitions']:
-        before=_managed_declaration(transition['before']) if transition['before']!=None else None
-        after=_managed_declaration(transition['after']) if transition['after']!=None else None
+        before=_managed_declaration(transition['before'], transition, "before") if transition['before']!=None else None
+        after=_managed_declaration(transition['after'], transition, "after") if transition['after']!=None else None
         if before==None and after==None: continue
         if before==None or after==None or before['notification'].lower()!=after['notification'].lower():
             fail('Fusion notification requires stable managed identity')
         target=names.get((after['path']+'/'+after['assembly_file']).lower())
         if target==None: fail('Fusion notification cache file is missing')
         file=root.find(target)
-        if digest(file,algorithm='sha256')!=after['files'][after['assembly_file'].lower()]['hash']:
+        if audit and digest(file,algorithm='sha256')!=after['files'][after['assembly_file'].lower()]['hash']:
             fail('Fusion notification cache file is not refreshed')
         metadata=root.get_metadata(target)
         stamp=metadata.last_write_time

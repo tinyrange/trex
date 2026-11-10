@@ -30,7 +30,7 @@ func TestApplyLiteralPatch(t *testing.T) {
 	binary.LittleEndian.PutUint64(delta[4:], 0x01cd456789abcdef)
 	delta = append(delta, outer.bytes()...)
 
-	target, err := Apply(nil, delta)
+	target, err := testApplyBothOwnershipModes(t, nil, delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestApplyLZXPreservesFinalDebugTimestamp(t *testing.T) {
 	delta := make([]byte, coreHeaderSize)
 	copy(delta, "PA30")
 	delta = append(delta, outer.bytes()...)
-	got, err := Apply(source, delta)
+	got, err := testApplyBothOwnershipModes(t, source, delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestApplyPEPreprocessedSourceCanProduceRawTarget(t *testing.T) {
 	copy(delta, "PA30")
 	delta = append(delta, outer.bytes()...)
 
-	got, err := Apply(makeTestPE32(0x10000000, 0, 0x11223344), delta)
+	got, err := testApplyBothOwnershipModes(t, makeTestPE32(0x10000000, 0, 0x11223344), delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestApplyLZXRestoresX86E8WithoutReplacingFinalPELayout(t *testing.T) {
 	copy(delta, "PA30")
 	delta = append(delta, outer.bytes()...)
 
-	got, err := Apply(makeTestPE32(0x20000000, 0x12345678, 0x11223344), delta)
+	got, err := testApplyBothOwnershipModes(t, makeTestPE32(0x20000000, 0x12345678, 0x11223344), delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestApplyDispatchesLZMSContainer(t *testing.T) {
 	copy(delta, "PA30")
 	delta = append(delta, outer.bytes()...)
 
-	got, err := Apply(nil, delta)
+	got, err := testApplyBothOwnershipModes(t, nil, delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestApplyDispatchesLZMSBinaryDelta(t *testing.T) {
 	copy(delta, "PA30")
 	delta = append(delta, outer.bytes()...)
 
-	got, err := Apply([]byte("unused"), delta)
+	got, err := testApplyBothOwnershipModes(t, []byte("unused"), delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestApplyLZMSBinaryDeltaUsesPreparedPESourceAndFullRestore(t *testing.T) {
 	copy(delta, "PA30")
 	delta = append(delta, outer.bytes()...)
 
-	got, err := Apply(source, delta)
+	got, err := testApplyBothOwnershipModes(t, source, delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestApplyFixesPELZMSContainerTimestamp(t *testing.T) {
 	copy(delta, "PA30")
 	delta = append(delta, outer.bytes()...)
 
-	got, err := Apply(makeTestPE32(0x10000000, 0, sourceTimestamp), delta)
+	got, err := testApplyBothOwnershipModes(t, makeTestPE32(0x10000000, 0, sourceTimestamp), delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +479,7 @@ func TestApplyRejectsPreprocessing(t *testing.T) {
 	metadata.buffer([]byte{1})
 	metadata.buffer([]byte{1})
 	delta := append(append([]byte("PA30"), make([]byte, 8)...), metadata.bytes()...)
-	if _, err := Apply(nil, delta); err == nil {
+	if _, err := testApplyBothOwnershipModes(t, nil, delta); err == nil {
 		t.Fatal("Apply accepted an unsupported preprocessing stream")
 	}
 }
@@ -661,7 +661,7 @@ func TestApplyCreateDeltaRawSwap(t *testing.T) {
 	want := append([]byte(nil), source...)
 	copy(want[256:512], source[512:768])
 	copy(want[512:768], source[256:512])
-	got, err := Apply(source, delta)
+	got, err := testApplyBothOwnershipModes(t, source, delta)
 	if err != nil {
 		t.Fatal(err)
 	}

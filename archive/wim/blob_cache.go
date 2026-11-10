@@ -12,7 +12,8 @@ func (w *Archive) configureSolidBlobCache(maximum int64) {
 	}
 	largeSolid := false
 	sources := map[*Archive]bool{w: true}
-	for _, location := range w.byHash {
+	for _, indexed := range w.byHash {
+		location := w.expandIndexed(indexed)
 		if location.archive == nil {
 			continue
 		}

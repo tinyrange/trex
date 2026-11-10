@@ -70,7 +70,7 @@ func TestReadOrderFollowsExactPredecessorIdentityAndKeepsUnknowns(t *testing.T) 
 	basis := ContentDescriptor{Name: "base", Length: 4, SHA256: sha256.Sum256([]byte("base"))}
 	target := ContentDescriptor{Name: "target", Length: 4, SHA256: sha256.Sum256([]byte("next"))}
 	prior := &CumulativeStage{Graph: &CumulativeGraph{Payloads: []DeltaPayload{{Target: target, Basis: &basis}}},
-		expressByTarget: map[string]DeltaPayload{"target": {Target: target, Basis: &basis}}}
+		expressByTarget: map[string]*DeltaPayload{"target": {Target: target, Basis: &basis}}}
 	prior.assemblyReadOrder = func(d ContentDescriptor) (wim.FileReadOrder, bool) {
 		if d != basis {
 			t.Fatalf("wrong basis: %+v", d)

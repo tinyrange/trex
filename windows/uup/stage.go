@@ -42,13 +42,17 @@ type CumulativeStage struct {
 	Index                    *ContainerIndex
 	History                  *ContainerIndex
 	Graph                    *CumulativeGraph
-	canonicalByTarget        map[string]DeltaPayload
-	expressByTarget          map[string]DeltaPayload
+	canonicalByTarget        map[string]*DeltaPayload
+	expressByTarget          map[string]*DeltaPayload
 	canonicalCache           map[string][]byte
 	canonicalRetained        int64
 	canonicalMu              sync.Mutex
+	compactTargets           bool
+	packedTargets            *packedTargetCache
+	readOrderOnce            sync.Once
+	readOrderByContent       *contentCandidateIndex
 	carryIndexOnce           sync.Once
-	carryByTarget            map[string]CarryPayload
+	carryByTarget            map[string]*CarryPayload
 	metadataArchives         []stageMetadataArchive
 	assemblyResolver         func(ContentDescriptor) (storage.Reader, error)
 	baseRecovery             *reverseAssemblyResolver
@@ -68,7 +72,7 @@ type stageMetadataArchive struct {
 }
 
 // StageMetadataCache is one portable, bounded decompressed-chunk cache shared
-// by all WIM metadata payloads in a servicing sequence.
+// by all WIM and CAB metadata payloads in a servicing sequence.
 type StageMetadataCache struct {
 	store *bytecache.Cache
 	next  atomic.Uint64
@@ -252,7 +256,7 @@ func (s *CumulativeStage) openAssemblyFile(name string) (storage.Reader, error) 
 		candidates = append(candidates, path.Base(normalized))
 		var found *DeltaPayload
 		for _, candidate := range candidates {
-			if payload, exists := s.expressByTarget[normalizeCIXName(candidate)]; exists {
+			if payload, exists := s.expressTarget(normalizeCIXName(candidate)); exists {
 				copy := payload
 				if found != nil && normalizeCIXName(found.Target.Name) != normalizeCIXName(copy.Target.Name) {
 					return nil, fmt.Errorf("uup servicing: assembly target %q is ambiguous", name)
@@ -287,12 +291,12 @@ func (s *CumulativeStage) openAssemblyFile(name string) (storage.Reader, error) 
 
 func (s *CumulativeStage) materializeDeltaCompressedManifest(name string, file storage.Reader) (storage.Reader, error) {
 	key := "dcm\x00" + normalizeCIXName(name)
-	s.canonicalMu.Lock()
-	if cached := s.canonicalCache[key]; cached != nil {
-		s.canonicalMu.Unlock()
+	if cached, err := s.cachedTarget(key); cached != nil || err != nil {
+		if err != nil {
+			return nil, err
+		}
 		return &starvalue.Bytes{Name: name, Data: cached}, nil
 	}
-	s.canonicalMu.Unlock()
 	if file.Size() < 16 || file.Size() > defaultMaximumDeltaRecord {
 		return nil, fmt.Errorf("uup servicing: delta-compressed manifest %q has invalid size %d", name, file.Size())
 	}
@@ -334,6 +338,13 @@ func (s *CumulativeStage) materializeDeltaCompressedManifest(name string, file s
 func (s *CumulativeStage) retainTarget(key string, target []byte, maximumBytes int64) []byte {
 	s.canonicalMu.Lock()
 	defer s.canonicalMu.Unlock()
+	if s.compactTargets {
+		if s.packedTargets == nil {
+			s.packedTargets = newPackedTargetCache(min(maximumBytes, maximumPackedTargetCache))
+		}
+		s.packedTargets.retain(key, target)
+		return target
+	}
 	if cached := s.canonicalCache[key]; cached != nil {
 		return cached
 	}
@@ -367,6 +378,9 @@ func (s *CumulativeStage) releaseAssemblyFile(name string) {
 	s.canonicalMu.Lock()
 	for _, candidate := range keys {
 		for _, cacheKey := range []string{candidate, "dcm\x00" + candidate} {
+			if s.packedTargets != nil {
+				s.packedTargets.remove(cacheKey)
+			}
 			if data := s.canonicalCache[cacheKey]; data != nil {
 				delete(s.canonicalCache, cacheKey)
 				s.canonicalRetained -= int64(len(data))
@@ -405,7 +419,7 @@ func (s *CumulativeStage) expressPatch(payload DeltaPayload, record []byte) ([]b
 		if err != nil {
 			return nil, fmt.Errorf("uup servicing: resolve nested record basis for %q: %w", payload.Target.Name, err)
 		}
-		patch, err = msdelta.ApplyBounded(basis, record, uint64(defaultMaximumDeltaRecord))
+		patch, err = msdelta.ApplyOwnedBounded(basis, record, uint64(defaultMaximumDeltaRecord))
 		if err != nil {
 			return nil, fmt.Errorf("uup servicing: reconstruct nested record for %q: %w", payload.Target.Name, err)
 		}
@@ -432,7 +446,7 @@ func (s *CumulativeStage) InspectExpressDeltaInputs(name string) (*ExpressDeltaI
 	if s == nil {
 		return nil, fmt.Errorf("uup servicing: nil stage")
 	}
-	payload, ok := s.expressByTarget[normalizeCIXName(name)]
+	payload, ok := s.expressTarget(normalizeCIXName(name))
 	if !ok || payload.Literal {
 		return nil, fmt.Errorf("uup servicing: target %q is not an express delta", name)
 	}
@@ -462,13 +476,30 @@ func (s *CumulativeStage) InspectExpressDeltaInputs(name string) (*ExpressDeltaI
 }
 
 func (s *CumulativeStage) materializeExpress(payload DeltaPayload) ([]byte, error) {
-	key := normalizeCIXName(payload.Target.Name)
-	s.canonicalMu.Lock()
-	if cached := s.canonicalCache[key]; cached != nil {
-		s.canonicalMu.Unlock()
-		return cached, nil
+	return s.materializeExpressWithBasisOwnership(payload, func() ([]byte, error) {
+		return s.resolveExpressBasis(s.nameExpressBasis(payload.Target.Name, payload.Basis))
+	}, true)
+}
+
+// resolveBasis must return bytes verified against this payload's exact basis.
+// Recovery construction already needs those bytes; reuse them rather than
+// decoding the predecessor chain twice. The callback is never retained.
+func (s *CumulativeStage) materializeExpressWithBasis(payload DeltaPayload, resolveBasis func() ([]byte, error)) ([]byte, error) {
+	// Recovery uses its basis again to construct the reverse record.
+	return s.materializeExpressWithBasisOwnership(payload, resolveBasis, false)
+}
+
+func (s *CumulativeStage) materializeExpressWithBasisOwnership(payload DeltaPayload, resolveBasis func() ([]byte, error), owned bool) ([]byte, error) {
+	apply, applyRecord := msdelta.ApplyBounded, msdelta.ApplyPSFRecordBounded
+	if owned {
+		// resolveExpressBasis always allocates and verifies a private buffer,
+		// even when the predecessor resolver returned a shared cached file.
+		apply, applyRecord = msdelta.ApplyOwnedBounded, msdelta.ApplyPSFRecordOwnedBounded
 	}
-	s.canonicalMu.Unlock()
+	key := normalizeCIXName(payload.Target.Name)
+	if cached, err := s.cachedTarget(key); cached != nil || err != nil {
+		return cached, err
+	}
 	record, err := s.readExpressRecord(payload)
 	if err != nil {
 		return nil, err
@@ -486,11 +517,11 @@ func (s *CumulativeStage) materializeExpress(payload DeltaPayload) ([]byte, erro
 		if payload.RecordType != "PA30" || payload.RecordBasis != nil || payload.RecordTarget != nil {
 			return nil, fmt.Errorf("uup servicing: direct target %q has nested reconstruction fields", payload.Target.Name)
 		}
-		basis, err := s.resolveExpressBasis(s.nameExpressBasis(payload.Target.Name, payload.Basis))
+		basis, err := resolveBasis()
 		if err != nil {
 			return nil, err
 		}
-		target, err := msdelta.ApplyBounded(basis, record, uint64(maximumCanonicalTarget))
+		target, err := apply(basis, record, uint64(maximumCanonicalTarget))
 		if err != nil {
 			return target, fmt.Errorf("uup servicing: apply direct target %q: %w", payload.Target.Name, err)
 		}
@@ -503,11 +534,11 @@ func (s *CumulativeStage) materializeExpress(payload DeltaPayload) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	basis, err := s.resolveExpressBasis(s.nameExpressBasis(payload.Target.Name, payload.Basis))
+	basis, err := resolveBasis()
 	if err != nil {
 		return nil, fmt.Errorf("uup servicing: resolve target basis for %q: %w", payload.Target.Name, err)
 	}
-	target, err := msdelta.ApplyPSFRecordBounded(basis, patch, uint64(maximumCanonicalTarget))
+	target, err := applyRecord(basis, patch, uint64(maximumCanonicalTarget))
 	if err != nil {
 		return target, fmt.Errorf("uup servicing: apply express record to %q: %w", payload.Target.Name, err)
 	}
@@ -534,7 +565,7 @@ func (s *CumulativeStage) DiagnoseContentTarget(name string) (storage.Reader, er
 	if s == nil || s.Graph == nil {
 		return nil, fmt.Errorf("uup servicing: stage content graph is required")
 	}
-	payload, found := s.expressByTarget[normalizeCIXName(name)]
+	payload, found := s.expressTarget(normalizeCIXName(name))
 	if !found {
 		return nil, fmt.Errorf("uup servicing: diagnostic target %q is not an express payload", name)
 	}
@@ -711,7 +742,7 @@ func OpenCumulativeStagePayloadsCache(metadataNames []string, metadataReaders []
 			}
 			continue
 		}
-		metadataCAB, cabErr := cab.Open(metadataReader, true)
+		metadataCAB, cabErr := cab.OpenWithCache(metadataReader, true, cache.store, cache.next.Add(1))
 		if cabErr != nil {
 			return nil, fmt.Errorf("uup servicing: metadata %q is neither WIM nor cabinet (WIM: %v; CAB: %v)", metadataNames[index], wimErr, cabErr)
 		}
@@ -729,10 +760,23 @@ func OpenCumulativeStagePayloadsCache(metadataNames []string, metadataReaders []
 // OpenCanonicalStage opens a non-express CBS update cabinet. It has package
 // and component manifests but no PSF content graph.
 func OpenCanonicalStage(name string, reader storage.Reader) (*CumulativeStage, error) {
+	cache, err := NewStageMetadataCache(bytecache.DefaultBytes)
+	if err != nil {
+		return nil, err
+	}
+	return OpenCanonicalStageCache(name, reader, cache)
+}
+
+// OpenCanonicalStageCache shares decoded folders with the other metadata
+// archives in a servicing sequence instead of retaining one LRU per stage.
+func OpenCanonicalStageCache(name string, reader storage.Reader, cache *StageMetadataCache) (*CumulativeStage, error) {
+	if cache == nil || cache.store == nil {
+		return nil, fmt.Errorf("uup servicing: metadata cache is required")
+	}
 	if reader == nil {
 		return nil, fmt.Errorf("uup servicing: canonical cabinet is required")
 	}
-	metadata, err := cab.Open(reader, true)
+	metadata, err := cab.OpenWithCache(reader, true, cache.store, cache.next.Add(1))
 	if err != nil {
 		return nil, fmt.Errorf("uup servicing: open canonical cabinet %q: %w", name, err)
 	}
@@ -765,8 +809,9 @@ func OpenCanonicalStage(name string, reader storage.Reader) (*CumulativeStage, e
 	if graph.ContainerLength > maximumCanonicalContainer {
 		return nil, fmt.Errorf("uup servicing: canonical cabinet %q declares %d target bytes, exceeds %d-byte bound", name, graph.ContainerLength, maximumCanonicalContainer)
 	}
-	byTarget := make(map[string]DeltaPayload, len(graph.Payloads))
-	for _, payload := range graph.Payloads {
+	byTarget := make(map[string]*DeltaPayload, len(graph.Payloads))
+	for i := range graph.Payloads {
+		payload := &graph.Payloads[i]
 		byTarget[normalizeCIXName(payload.Target.Name)] = payload
 	}
 	return &CumulativeStage{
@@ -831,7 +876,7 @@ func (s *CumulativeStage) hasContentTarget(name string) bool {
 		return false
 	}
 	key := normalizeCIXName(name)
-	if _, found := s.expressByTarget[key]; found {
+	if _, found := s.expressTarget(key); found {
 		return true
 	}
 	if _, found := s.canonicalByTarget[key]; found {
@@ -848,8 +893,9 @@ func (s *CumulativeStage) carryTarget(name string) (CarryPayload, bool) {
 		return CarryPayload{}, false
 	}
 	s.carryIndexOnce.Do(func() {
-		s.carryByTarget = make(map[string]CarryPayload, len(s.Graph.Carries))
-		for _, carry := range s.Graph.Carries {
+		s.carryByTarget = make(map[string]*CarryPayload, len(s.Graph.Carries))
+		for i := range s.Graph.Carries {
+			carry := &s.Graph.Carries[i]
 			key := normalizeCIXName(carry.Target.Name)
 			if _, exists := s.carryByTarget[key]; !exists {
 				s.carryByTarget[key] = carry
@@ -857,7 +903,10 @@ func (s *CumulativeStage) carryTarget(name string) (CarryPayload, bool) {
 		}
 	})
 	carry, found := s.carryByTarget[normalizeCIXName(name)]
-	return carry, found
+	if !found {
+		return CarryPayload{}, false
+	}
+	return *carry, true
 }
 
 // OpenContentTarget materializes one named logical target from a stage graph.
@@ -866,7 +915,7 @@ func (s *CumulativeStage) OpenContentTarget(name string) (storage.Reader, error)
 	if s == nil || s.Graph == nil {
 		return nil, fmt.Errorf("uup servicing: stage content graph is required")
 	}
-	if payload, found := s.expressByTarget[normalizeCIXName(name)]; found {
+	if payload, found := s.expressTarget(normalizeCIXName(name)); found {
 		data, err := s.materializeExpress(payload)
 		if err != nil {
 			return nil, err
@@ -893,30 +942,21 @@ func (s *CumulativeStage) openTargetDescriptor(descriptor ContentDescriptor) (st
 	if s == nil || s.Graph == nil {
 		return nil, false, nil
 	}
-	var found *DeltaPayload
-	for index := range s.Graph.Payloads {
-		payload := &s.Graph.Payloads[index]
-		if payload.Target.Length != descriptor.Length || payload.Target.SHA256 != descriptor.SHA256 {
-			continue
-		}
-		if found == nil || (descriptor.Name != "" && normalizeCIXName(payload.Target.Name) == normalizeCIXName(descriptor.Name)) {
-			found = payload
+	candidates := s.contentCandidates().lookup(readOrderIdentity{descriptor.Length, descriptor.SHA256})
+	if len(candidates) == 0 {
+		return nil, false, nil
+	}
+	selected := candidates[0]
+	if descriptor.Name != "" {
+		name := normalizeCIXName(descriptor.Name)
+		for _, candidate := range candidates {
+			if normalizeCIXName(s.candidateName(candidate)) == name {
+				selected = candidate
+			}
 		}
 	}
-	if found == nil {
-		var carry *CarryPayload
-		for index := range s.Graph.Carries {
-			candidate := &s.Graph.Carries[index]
-			if candidate.Target.Length != descriptor.Length || candidate.Target.SHA256 != descriptor.SHA256 {
-				continue
-			}
-			if carry == nil || (descriptor.Name != "" && normalizeCIXName(candidate.Target.Name) == normalizeCIXName(descriptor.Name)) {
-				carry = candidate
-			}
-		}
-		if carry == nil {
-			return nil, false, nil
-		}
+	if selected < 0 {
+		carry := &s.Graph.Carries[-selected-1]
 		if s.assemblyResolver == nil {
 			return nil, false, fmt.Errorf("carried target %q has no predecessor resolver", carry.Target.Name)
 		}
@@ -924,26 +964,21 @@ func (s *CumulativeStage) openTargetDescriptor(descriptor ContentDescriptor) (st
 		if err == nil {
 			return file, true, nil
 		}
-		// History can carry identical bytes under several component names,
-		// including components absent from this base edition. A missing first
-		// alias must not hide another declared, hash-exact predecessor. Every
-		// candidate still passes through the strict descriptor resolver; this
-		// does not change named-target lookup or retry failed delta payloads.
+		// Retry only declared, hash-exact aliases. Payload errors never fall through.
 		seen := map[ContentDescriptor]struct{}{carry.Source: {}}
-		for _, candidate := range s.Graph.Carries {
-			if candidate.Target.Length != descriptor.Length || candidate.Target.SHA256 != descriptor.SHA256 {
+		for _, candidate := range candidates {
+			source := s.Graph.Carries[-candidate-1].Source
+			if _, duplicate := seen[source]; duplicate {
 				continue
 			}
-			if _, duplicate := seen[candidate.Source]; duplicate {
-				continue
-			}
-			seen[candidate.Source] = struct{}{}
-			if file, nextErr := s.assemblyResolver(candidate.Source); nextErr == nil {
+			seen[source] = struct{}{}
+			if file, nextErr := s.assemblyResolver(source); nextErr == nil {
 				return file, true, nil
 			}
 		}
 		return nil, false, err
 	}
+	found := &s.Graph.Payloads[selected-1]
 	var data []byte
 	var err error
 	if s.expressByTarget != nil {
@@ -959,13 +994,10 @@ func (s *CumulativeStage) openTargetDescriptor(descriptor ContentDescriptor) (st
 
 func (s *CumulativeStage) materializeCanonical(name string, visiting map[string]struct{}) ([]byte, error) {
 	key := normalizeCIXName(name)
-	s.canonicalMu.Lock()
-	if cached := s.canonicalCache[key]; cached != nil {
-		s.canonicalMu.Unlock()
-		return cached, nil
+	if cached, err := s.cachedTarget(key); cached != nil || err != nil {
+		return cached, err
 	}
-	s.canonicalMu.Unlock()
-	payload, found := s.canonicalByTarget[key]
+	payload, found := s.canonicalTarget(key)
 	if !found || s.metadataCAB == nil {
 		return nil, fmt.Errorf("uup servicing: canonical target %q is unavailable", name)
 	}
@@ -1052,7 +1084,7 @@ func (s *CumulativeStage) openExpressGraph() error {
 			return fmt.Errorf("uup servicing: empty PSF index length %d exceeds payload size %d", index.Length, s.PSF.Size())
 		}
 		s.Graph = &CumulativeGraph{ContainerLength: index.Length}
-		s.expressByTarget = make(map[string]DeltaPayload)
+		s.expressByTarget = make(map[string]*DeltaPayload)
 		s.canonicalCache = make(map[string][]byte)
 		return nil
 	}
@@ -1097,13 +1129,15 @@ func (s *CumulativeStage) openExpressGraph() error {
 	if err != nil {
 		return err
 	}
+	graph.compactStorage()
 	// The graph is the compact executable form. Retaining both parsed CIX trees
 	// keeps every unselected filename/source node alive across all update stages.
 	s.Index, s.History, s.Graph = nil, nil, graph
-	s.expressByTarget = make(map[string]DeltaPayload, len(graph.Payloads))
-	for _, payload := range graph.Payloads {
+	s.expressByTarget = make(map[string]*DeltaPayload, len(graph.Payloads))
+	for i := range graph.Payloads {
+		payload := &graph.Payloads[i]
 		key := normalizeCIXName(payload.Target.Name)
-		if _, exists := s.expressByTarget[key]; exists {
+		if _, exists := s.expressTarget(key); exists {
 			return fmt.Errorf("uup servicing: duplicate express target %q", payload.Target.Name)
 		}
 		s.expressByTarget[key] = payload

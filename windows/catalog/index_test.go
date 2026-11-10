@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func catalogTestDER(t *testing.T, tag int, compound bool, children ...[]byte) []byte {
+func catalogTestDER(t testing.TB, tag int, compound bool, children ...[]byte) []byte {
 	t.Helper()
 	value, err := asn1.Marshal(asn1.RawValue{Tag: tag, IsCompound: compound, Bytes: bytes.Join(children, nil)})
 	if err != nil {
@@ -15,7 +15,7 @@ func catalogTestDER(t *testing.T, tag int, compound bool, children ...[]byte) []
 	}
 	return value
 }
-func catalogTestOID(t *testing.T, oid asn1.ObjectIdentifier) []byte {
+func catalogTestOID(t testing.TB, oid asn1.ObjectIdentifier) []byte {
 	t.Helper()
 	value, err := asn1.Marshal(oid)
 	if err != nil {
@@ -23,7 +23,7 @@ func catalogTestOID(t *testing.T, oid asn1.ObjectIdentifier) []byte {
 	}
 	return value
 }
-func catalogTestFile(t *testing.T, version int, wrapped bool, digests ...[]byte) []byte {
+func catalogTestFile(t testing.TB, version int, wrapped bool, digests ...[]byte) []byte {
 	t.Helper()
 	seq := func(parts ...[]byte) []byte { return catalogTestDER(t, 16, true, parts...) }
 	oct := func(data []byte) []byte { return catalogTestDER(t, 4, false, data) }

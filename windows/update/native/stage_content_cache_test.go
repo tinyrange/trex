@@ -51,10 +51,10 @@ func TestStageCompressedCacheLargeTargetSmallRandomReads(t *testing.T) {
 	if s := cache.Stats(); s.Bytes > 128<<10 || s.Bytes == 0 {
 		t.Fatalf("encoded working set: %+v", s)
 	}
-	if cache.codec.chunks != nil {
+	if cache.codec.Deduplicates() {
 		t.Fatal("unbounded dedup index")
 	}
-	if hot := cache.codec.cache.Stats().Bytes; hot > maximumRetainedReadCache {
+	if hot := cache.codec.CacheStats().Bytes; hot > maximumRetainedReadCache {
 		t.Fatal("decoded cache unbounded", hot)
 	}
 

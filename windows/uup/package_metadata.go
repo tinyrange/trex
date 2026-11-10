@@ -45,6 +45,7 @@ func NewPackageMetadataIndex(stage *CumulativeStage) (*PackageMetadataIndex, err
 
 func newPackageMetadataIndex(entries []stageMetadataEntry, open func(string) (storage.Reader, error), release func(string)) (*PackageMetadataIndex, error) {
 	result := &PackageMetadataIndex{byName: map[string]PackageMetadataEntry{}, catalogs: map[string]string{}, open: open, release: release}
+	names := graphStringStore{seen: make(map[string]string)}
 	for _, entry := range entries {
 		if !strings.EqualFold(path.Ext(entry.Name), ".cat") {
 			continue
@@ -56,7 +57,7 @@ func newPackageMetadataIndex(entries []stageMetadataEntry, open func(string) (st
 		if len(result.catalogs) >= 1<<20 {
 			return nil, fmt.Errorf("catalog metadata index exceeds bound")
 		}
-		result.catalogs[key] = entry.Path
+		result.catalogs[names.copy(key)] = names.copy(entry.Path)
 	}
 	for _, entry := range entries {
 		if !strings.EqualFold(path.Ext(entry.Name), ".mum") {
@@ -88,13 +89,20 @@ func newPackageMetadataIndex(entries []stageMetadataEntry, open func(string) (st
 			}
 			return nil, fmt.Errorf("ambiguous package metadata %q in %q and %q", name, previous.Path, entry.Path)
 		}
-		value := PackageMetadataEntry{Package: name, Path: entry.Path, Aggregate: aggregate}
-		result.byName[key] = value
+		value := PackageMetadataEntry{Package: names.copy(name), Path: names.copy(entry.Path), Aggregate: aggregate}
+		result.byName[names.copy(key)] = value
 		result.entries = append(result.entries, value)
 	}
-	slices.SortFunc(result.entries, func(a, b PackageMetadataEntry) int {
-		return strings.Compare(strings.ToLower(a.Package), strings.ToLower(b.Package))
-	})
+	// The validated lowercase keys are unique and already owned. Sort these
+	// instead of allocating folded package names for every comparison.
+	keys := make([]string, 0, len(result.byName))
+	for key := range result.byName {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for i, key := range keys {
+		result.entries[i] = result.byName[key]
+	}
 	return result, nil
 }
 

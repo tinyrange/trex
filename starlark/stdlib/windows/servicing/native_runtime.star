@@ -66,7 +66,7 @@ def prepare_network_runtime(root, system_hive):
     namespace of a booted servicing process, nor effective feature-policy state.
     """
     files = {}
-    names = root.path_names(lower=True)
+    names = root.path_index(lower=True)
     for name,(path,sha,key) in _RUNTIME_IMAGES.items():
         source=root.find(names.get(path.lower(),path))
         if source==None: fail("native network runtime input missing",path)

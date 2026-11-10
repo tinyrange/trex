@@ -53,7 +53,7 @@ def plan_update_registry_effects(root, effects, bindings, key_security = {}):
         file = root.find(binding["path"])
         if file == None or digest(file) != digest(binding["source"]):
             fail("native registry source hive changed before planning")
-        states[target] = dict(path=binding["path"], source=file, source_hash=digest(file), hive=windows.hive(file), keys={}, patches=[], deletes=[], removed={}, required={})
+        states[target] = dict(path=binding["path"], source=file, source_hash=digest(file), hive=windows.hive(file, snapshot=True), keys={}, patches=[], deletes=[], removed={}, required={})
     for record in effects["key_deletions"]:
         target, parts = _route(record, bindings)
         if not parts:
@@ -107,8 +107,13 @@ def plan_update_registry_effects(root, effects, bindings, key_security = {}):
             if state["hive"].find(parts) == None or _deleted(parts, state["removed"]):
                 if "security" not in item:
                     fail("native registry key creation security is missing: " + target + ":/" + "/".join(parts))
-        file = windows.hive_from_patches(target, state["patches"], keys=list(state["keys"].values()), source=state["source"], exclude_keys=[dict(key_parts=p) for p in state["removed"].values()], exclude_values=state["deletes"])
-        after = windows.hive(file)
+        # Resolve overlapping retirements against one source epoch, then
+        # recreate explicitly authorized keys without importing unrelated data.
+        if state["removed"]:
+            file = windows.patch_hive(state["source"], state["patches"], keys=list(state["keys"].values()), exclude_keys=[dict(key_parts=p) for p in state["removed"].values()], exclude_values=state["deletes"])
+        else:
+            file = windows.patch_hive(state["source"], state["patches"], keys=list(state["keys"].values()), delete_values=state["deletes"])
+        after = windows.hive(file, snapshot=True)
         for identity, item in state["keys"].items():
             node = after.find(item["key_parts"])
             if node == None or ("security" in item and node.security != item["security"]):

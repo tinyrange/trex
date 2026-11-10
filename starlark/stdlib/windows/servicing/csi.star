@@ -174,28 +174,30 @@ def _plan_csi_component_changes(root, payloads, sources, analysis):
     return dict(source=source,patches=list(final.values()),deletes=deletes,keys=list(created_keys.values()),
         stems={exact:component['stem'] for exact,component in components.items()},catalog_files=list(catalog_files.values()),report=report)
 
-def _build_csi_component_changes(root, payloads, sources, analysis):
+def _build_csi_component_changes(root, payloads, sources, analysis, audit=True):
     # Finish planning in its own frame. Release parsed catalogs, entire source
     # key inventories and interpreter temporaries before the native hive build.
     planned = _plan_csi_component_changes(root,payloads,sources,analysis)
     deletions = [dict(key=d["key"], name=d["name"], type="REG_NONE", value=b"", delete=True) for d in planned["deletes"]]
     component_file = windows.patch_hive(planned["source"], deletions + planned["patches"], keys=planned["keys"])
-    written = windows.hive(component_file)
-    parents = {}
-    for record in planned["keys"]:
-        parent, name = record["key"].rsplit("/", 1)
-        if parent not in parents:
-            parents[parent] = {k.name.lower(): k for k in written.find(parent).children}
-        node = parents[parent].get(name.lower())
-        if node == None or windows.security_descriptor_parts(node.security) != windows.security_descriptor_parts(record["security"]):
-            fail("serialized CSI key creation security disagrees: " + record["key"])
+    if audit:
+        written = windows.hive(component_file)
+        parents = {}
+        for record in planned["keys"]:
+            parent, name = record["key"].rsplit("/", 1)
+            if parent not in parents:
+                parents[parent] = {k.name.lower(): k for k in written.find(parent).children}
+            node = parents[parent].get(name.lower())
+            if node == None or windows.security_descriptor_parts(node.security) != windows.security_descriptor_parts(record["security"]):
+                fail("serialized CSI key creation security disagrees: " + record["key"])
     return component_file,planned['stems'],planned['report'],planned['catalog_files']
 
-def apply_csi_state(root, payloads, sources, analysis):
-    """Build and read back COMPONENTS and SOFTWARE changes before publication; preserve unrelated values and return CSI effects, not package completion."""
-    # Read back both serialized hives before atomically publishing either.
+def apply_csi_state(root, payloads, sources, analysis, audit=True):
+    """Build COMPONENTS/SOFTWARE changes, optionally auditing serialized output; preserve unrelated values and return CSI effects, not package completion."""
+    # Optional debug readback verifies serialization; construction itself is
+    # identical in both modes and always preserves native source guards.
     # This frame retains no plan dictionaries while building the second hive.
-    component_file,component_stems,report,catalog_files = _build_csi_component_changes(root,payloads,sources,analysis)
+    component_file,component_stems,report,catalog_files = _build_csi_component_changes(root,payloads,sources,analysis,audit=audit)
     path = "/Windows/System32/config/COMPONENTS"
     software_path = "/Windows/System32/config/SOFTWARE"
     winner_patches = []
@@ -215,55 +217,56 @@ def apply_csi_state(root, payloads, sources, analysis):
     software_file = windows.patch_hive(root.find(software_path), deletions + winner_patches)
     # Read the emitted bytes, not just the planned dictionaries. These checks
     # distinguish successful serialization from a plausible-looking report.
-    written = windows.hive(component_file)
-    # Native find() scans sibling nk cells. Index each emitted inventory once
-    # rather than rescanning tens of thousands of components per owner edge.
-    written_deployments = {k.name.lower(): k for k in written.find("/CanonicalData/Deployments").children}
-    written_components = {k.name.lower(): k for k in written.find("/DerivedData/Components").children}
-    verified_components = {}
-    for exact, row in sources.items():
-        name = windows.csi_deployment_key(row["identity"])
-        node = written_deployments.get(name.lower())
-        if node == None:
-            fail("serialized CSI deployment is missing: " + name)
-        actual = {n.lower(): (v.type, v.raw) for n,v in node.value_records.items() if n[:2].lower() in ["p!", "s!", "i!"]}
-        expected = {v["name"].lower(): (v["type"], v["data"]) for v in row["final_sources"]}
-        if actual != expected:
-            fail("serialized CSI source values disagree with the full source plan: " + name)
-        retained = row["plans"]["install"].after
-        owned = retained.pinned != 0 or retained.installed != 0
-        for member in analysis["compositions"][exact]:
-            stem = component_stems[str(member.identity).lower()].lower()
-            if stem not in verified_components:
-                if stem not in written_components:
-                    fail("serialized CSI component is missing: " + stem)
-                verified_components[stem] = {n.lower():True for n in written_components[stem].values if n[:2].lower() == "c!"}
-            values = verified_components[stem]
-            if (("c!" + name).lower() in values) != owned:
-                fail("serialized CSI ownership disagrees with retained sources")
-    winners = windows.hive(software_file)
-    families = {k.name.lower(): k for k in winners.find("/Microsoft/Windows/CurrentVersion/SideBySide/Winners").children}
-    branches = {}
-    for plan in analysis["winner_plans"]:
-        for edit in plan.edits:
-            key = "/Microsoft/Windows/CurrentVersion/SideBySide/Winners/" + plan.family
-            if edit.branch:
-                key += "/" + edit.branch
-            family = families.get(plan.family.lower())
-            node = family
-            if edit.branch and family != None:
-                if plan.family not in branches:
-                    branches[plan.family] = {k.name.lower():k for k in family.children}
-                node = branches[plan.family].get(edit.branch.lower())
-            record = node.value_records.get(edit.name.lower() or "(default)") if node != None else None
-            if edit.delete:
-                if record != None:
-                    fail("serialized winner deletion did not take effect")
-            elif record == None or record.type != edit.type or record.raw != edit.data:
-                fail("serialized winner value disagrees with native write plan")
+    if audit:
+        written = windows.hive(component_file)
+        # Native find() scans sibling nk cells. Index each emitted inventory once
+        # rather than rescanning tens of thousands of components per owner edge.
+        written_deployments = {k.name.lower(): k for k in written.find("/CanonicalData/Deployments").children}
+        written_components = {k.name.lower(): k for k in written.find("/DerivedData/Components").children}
+        verified_components = {}
+        for exact, row in sources.items():
+            name = windows.csi_deployment_key(row["identity"])
+            node = written_deployments.get(name.lower())
+            if node == None:
+                fail("serialized CSI deployment is missing: " + name)
+            actual = {n.lower(): (v.type, v.raw) for n,v in node.value_records.items() if n[:2].lower() in ["p!", "s!", "i!"]}
+            expected = {v["name"].lower(): (v["type"], v["data"]) for v in row["final_sources"]}
+            if actual != expected:
+                fail("serialized CSI source values disagree with the full source plan: " + name)
+            retained = row["plans"]["install"].after
+            owned = retained.pinned != 0 or retained.installed != 0
+            for member in analysis["compositions"][exact]:
+                stem = component_stems[str(member.identity).lower()].lower()
+                if stem not in verified_components:
+                    if stem not in written_components:
+                        fail("serialized CSI component is missing: " + stem)
+                    verified_components[stem] = {n.lower():True for n in written_components[stem].values if n[:2].lower() == "c!"}
+                values = verified_components[stem]
+                if (("c!" + name).lower() in values) != owned:
+                    fail("serialized CSI ownership disagrees with retained sources")
+        winners = windows.hive(software_file)
+        families = {k.name.lower(): k for k in winners.find("/Microsoft/Windows/CurrentVersion/SideBySide/Winners").children}
+        branches = {}
+        for plan in analysis["winner_plans"]:
+            for edit in plan.edits:
+                key = "/Microsoft/Windows/CurrentVersion/SideBySide/Winners/" + plan.family
+                if edit.branch:
+                    key += "/" + edit.branch
+                family = families.get(plan.family.lower())
+                node = family
+                if edit.branch and family != None:
+                    if plan.family not in branches:
+                        branches[plan.family] = {k.name.lower():k for k in family.children}
+                    node = branches[plan.family].get(edit.branch.lower())
+                record = node.value_records.get(edit.name.lower() or "(default)") if node != None else None
+                if edit.delete:
+                    if record != None:
+                        fail("serialized winner deletion did not take effect")
+                elif record == None or record.type != edit.type or record.raw != edit.data:
+                    fail("serialized winner value disagrees with native write plan")
     # Validate the complete file publication batch before any path is linked.
     for item in catalog_files:
-        if hex(digest(root.find(item["source"]), algorithm="sha256")) != item["thumbprint"]:
+        if audit and hex(digest(root.find(item["source"]), algorithm="sha256")) != item["thumbprint"]:
             fail("CSI catalog source changed before publication")
         if item["create"] and root.find(item["path"]) != None:
             fail("CSI catalog destination appeared before publication")
@@ -273,8 +276,9 @@ def apply_csi_state(root, payloads, sources, analysis):
     root.write(path, component_file)
     root.write(software_path, software_file)
     report["catalog_files_created"] = len([p for p in catalog_files if p["create"]])
-    report["verified_sources"] = len(sources)
-    report["verified_winner_plans"] = len(analysis["winner_plans"])
+    report["readback_audit"] = "completed" if audit else "not-performed"
+    report["verified_sources"] = len(sources) if audit else 0
+    report["verified_winner_plans"] = len(analysis["winner_plans"]) if audit else 0
     report["policy"] = "CSI value edits from full population; no package completion, lifecycle, driver completion, filemaps, or catalog database claim"
     return report
 

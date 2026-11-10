@@ -21,7 +21,7 @@ func TestExternalResourceBacksWIMEntryBySHA1(t *testing.T) {
 	digest := sha1.Sum(data)
 	reader := &countingWIMFile{data: data}
 	archive := &Archive{
-		byHash:          make(map[string]wimResourceLocation),
+		byHash:          make(map[[20]byte]indexedResourceLocation),
 		locationsByHash: make(map[string][]wimResourceLocation),
 	}
 	if err := archive.AddExternalResources([]ExternalResource{{SHA1: digest, File: reader}}); err != nil {

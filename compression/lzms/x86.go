@@ -1,29 +1,59 @@
 package lzms
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"math/bits"
+)
+
+// Keep at most two pointer-free recency tables between calls. The block data
+// and decoded output are never retained; concurrent decoders own separate tables.
+var x86RecencyTables = make(chan *[1 << 16]int32, 2)
 
 func restoreX86Addresses(data []byte) {
+	if len(data) <= 17 {
+		return
+	}
+	var table *[1 << 16]int32
+	select {
+	case table = <-x86RecencyTables:
+	default:
+		table = new([1 << 16]int32)
+	}
+	defer func() {
+		select {
+		case x86RecencyTables <- table:
+		default:
+		}
+	}()
 	const unseen = -1 << 30
 	closestLikelyCode := unseen
-	lastTargetUsage := make([]int, 1<<16)
+	lastTargetUsage := table[:]
 	for index := range lastTargetUsage {
 		lastTargetUsage[index] = unseen
 	}
 	for position := 1; position < len(data)-16; {
-		// Most bytes (especially data/zero regions in a solid ESD chunk) are
-		// not instruction prefixes handled by this transform. Reject eight
-		// bytes at once using a conservative opcode filter. False positives
-		// take the ordinary scalar path; no candidate can be skipped.
+		// Locate the first possible opcode in eight bytes. The zero-byte
+		// test can overmark a following byte through subtraction borrow, but
+		// never skips a true candidate. Reload after processing an instruction:
+		// normalization may have rewritten bytes in the scanned word.
 		if position+8 <= len(data)-16 {
 			word := binary.LittleEndian.Uint64(data[position : position+8])
-			a := (word & 0x5858585858585858) ^ 0x4848484848484848
-			b := (word & 0xf0f0f0f0f0f0f0f0) ^ 0xf0f0f0f0f0f0f0f0
-			const ones = uint64(0x0101010101010101)
-			const highs = uint64(0x8080808080808080)
-			if ((a-ones)&^a|(b-ones)&^b)&highs == 0 {
+			if word == 0 {
 				position += 8
 				continue
 			}
+			a := (word & 0xfbfbfbfbfbfbfbfb) ^ 0x4848484848484848 // 48, 4c
+			b := (word & 0xfefefefefefefefe) ^ 0xe8e8e8e8e8e8e8e8 // e8, e9
+			c := word ^ 0xf0f0f0f0f0f0f0f0
+			d := word ^ 0xffffffffffffffff
+			const ones = uint64(0x0101010101010101)
+			const highs = uint64(0x8080808080808080)
+			candidates := ((a-ones)&^a | (b-ones)&^b | (c-ones)&^c | (d-ones)&^d) & highs
+			if candidates == 0 {
+				position += 8
+				continue
+			}
+			position += bits.TrailingZeros64(candidates) / 8
 		}
 		// E9 is scan-only: consume its operand but do not let it participate in
 		// translation or target-recency state.
@@ -51,10 +81,10 @@ func restoreX86Addresses(data []byte) {
 			binary.LittleEndian.PutUint32(data[operand:operand+4], value)
 		}
 		key := uint16(uint32(position) + uint32(uint16(value)))
-		if operandEnd-lastTargetUsage[key] <= 65535 {
+		if operandEnd-int(lastTargetUsage[key]) <= 65535 {
 			closestLikelyCode = operandEnd
 		}
-		lastTargetUsage[key] = operandEnd
+		lastTargetUsage[key] = int32(operandEnd)
 		position = operandEnd + 1
 	}
 }

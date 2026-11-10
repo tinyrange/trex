@@ -1,9 +1,11 @@
 package uup
 
 import (
-	"bytes"
+	"encoding/xml"
 	"fmt"
+	"github.com/tinyrange/trex/internal/xmltoken"
 	"io"
+	"strings"
 
 	"github.com/tinyrange/trex/storage"
 )
@@ -12,7 +14,7 @@ import (
 // must treat Manifest's result as read-only. It has no global cache and never
 // follows later changes to the source reader.
 type ParsedAssemblyFile struct {
-	data     []byte
+	data     string
 	manifest *AssemblyManifest
 	// A component index seals this binding only after full exact resolution.
 	componentIndex    *ComponentMetadataIndex
@@ -24,7 +26,7 @@ type ParsedAssemblyFile struct {
 }
 
 func (f *ParsedAssemblyFile) ReadAt(p []byte, off int64) (int, error) {
-	return bytes.NewReader(f.data).ReadAt(p, off)
+	return strings.NewReader(f.data).ReadAt(p, off)
 }
 func (f *ParsedAssemblyFile) Size() int64                 { return int64(len(f.data)) }
 func (f *ParsedAssemblyFile) Manifest() *AssemblyManifest { return f.manifest }
@@ -38,11 +40,15 @@ func parseAssemblyFile(file storage.Reader) (*ParsedAssemblyFile, error) {
 	if _, err := io.ReadFull(io.NewSectionReader(file, 0, size), data); err != nil {
 		return nil, err
 	}
-	manifest, err := ParseAssemblyManifestBytes(data)
+	// One immutable backing owns both the readable snapshot and borrowed XML
+	// token strings. Keeping data plus ParseAssemblyManifestBytes would pin two
+	// complete copies for the lifetime of every prepared manifest.
+	owned := string(data)
+	manifest, err := parseAssemblyManifest(xml.NewTokenDecoder(xmltoken.NewString(owned, false)))
 	if err != nil {
 		return nil, err
 	}
-	return &ParsedAssemblyFile{data: data, manifest: manifest}, nil
+	return &ParsedAssemblyFile{data: owned, manifest: manifest}, nil
 }
 
 // openPlannedManifest shares only an owned snapshot, never a mutable archive

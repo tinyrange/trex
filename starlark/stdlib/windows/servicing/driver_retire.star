@@ -9,7 +9,7 @@ def plan_direct_driver_retirement(root,jobs):
     """Plan removal of unretained predecessor repositories, capturing their complete namespace and file epochs."""
     retained={j.get('source',j['before']).lower():True for j in jobs if j.get('retain_source',False)}
     packages={}
-    names=root.path_names(lower=True)
+    names=root.path_index(lower=True)
     for job in jobs:
         if job.get('retain_source',False): continue
         old=job['before']
@@ -37,7 +37,7 @@ def apply_direct_driver_retirement(root,plan):
     # Check both old file epochs and the complete namespace before deleting.
     # A late extra file must not be silently swept up by recursive removal.
     actual={}
-    for lower,path in root.path_names(lower=True).items():
+    for lower,path in root.path_index(lower=True).items():
         if not lower.startswith(_PREFIX.lower()): continue
         package=lower[len(_PREFIX):].split('/',1)[0]
         if (_PREFIX+package).lower() in plan['packages']:

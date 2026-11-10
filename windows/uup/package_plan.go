@@ -133,6 +133,7 @@ func PlanAssemblyStagesObserved(base *wim.Archive, imagePath string, stages []*C
 // PlanStage; unopened future stages are neither visible nor retained.
 type AssemblyPlanner struct {
 	sealed              bool
+	sourceOnly          bool
 	state               *assemblyImageState
 	content             *assemblyContentState
 	ownershipComponents map[string]PlannedComponent
@@ -240,7 +241,7 @@ func (planner *AssemblyPlanner) BindFinalStageContent(stage *CumulativeStage) er
 	if planner == nil || planner.state == nil || planner.content == nil || stage == nil {
 		return fmt.Errorf("uup servicing: assembly planner and stage are required")
 	}
-	if planner.sealed {
+	if planner.sealed || planner.sourceOnly {
 		return fmt.Errorf("uup servicing: assembly planner is sealed")
 	}
 	stage.assemblyResolver = planner.content.snapshotResolver()
@@ -283,7 +284,7 @@ func (planner *AssemblyPlanner) planStage(stage *CumulativeStage, ownership bool
 	if planner == nil || planner.state == nil || planner.content == nil {
 		return StageAssemblyPlan{}, fmt.Errorf("uup servicing: assembly planner is required")
 	}
-	if planner.sealed {
+	if planner.sealed || planner.sourceOnly {
 		return StageAssemblyPlan{}, fmt.Errorf("uup servicing: assembly planner is sealed")
 	}
 	stage.assemblyResolver = planner.content.snapshotResolver()

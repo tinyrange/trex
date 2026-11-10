@@ -12,12 +12,12 @@ func prefetchFixture() (*Archive, *countingWIMFile, map[string]*File, []byte) {
 	a, source, resource, plain := solidBlobFixture()
 	a.blobCache = bytecache.New(2048)
 	a.images = []image{{index: 1, root: entry{path: "/image1", isDir: true}, byPath: map[string]*entry{}}}
-	a.byHash = map[string]wimResourceLocation{}
+	a.byHash = map[[20]byte]indexedResourceLocation{}
 	files := map[string]*File{}
 	for name, offset := range map[string]int64{"/image1/early": 100, "/image1/late": 40000} {
 		file := blobFile(a, resource, plain, offset, 1000, name)
 		a.images[0].byPath[wimPathKey(name)] = &file.entry
-		a.byHash[string(file.entry.hash[:])] = *file.location
+		a.addResourceLocation(string(file.entry.hash[:]), *file.location)
 		files[name] = file
 	}
 	return a, source, files, plain

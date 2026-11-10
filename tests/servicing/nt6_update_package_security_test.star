@@ -18,7 +18,7 @@ def test_manifest_creation_and_existing_metadata():
     root.set_security(old, preserved)
     fixtures = testing.module("//tests/servicing:nt6_package_store_test.star")
     unused_root, unused_name, unused_closure, population, unused_catalogs = fixtures["_resolved_fixture"]()
-    prepared = dict(files=[("existing", "replacement", "cat"), ("new", "new mum", "new cat")], summary=dict(catalogs=2))
+    prepared = dict(files=[(name, binary.concat([mum]), binary.concat([cat])) for name, mum, cat in [("existing", "replacement", "cat"), ("new", "new mum", "new cat")]], summary=dict(catalogs=2))
     catalogs["apply_package_catalogs"](root, None, None, population, prepared=prepared)
     equal(root.find(old).read(), "replacement")
     equal(root.get_security(old), preserved)

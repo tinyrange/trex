@@ -83,7 +83,17 @@ def test_generated_batch_preflight():
     raises(m['apply_generated_recovery'],args=[root,[row,row]],message='destination changed')
     equal(root.find(row['path']),None)
 
+def test_deferred_marker_rejects_same_length_replacement():
+    root,row=generated_fixture()
+    row['record_hash']=None
+    markers=m['apply_generated_recovery'](root,[row])
+    equal(m['retained_recovery_flags'](root,dict(retained_recovery=markers),'new','f!file.bin',1),0x101)
+    root.remove(row['path'])
+    root.write(row['path'],'xxxxxx')
+    raises(m['retained_recovery_flags'],args=[root,dict(retained_recovery=markers),'new','f!file.bin',1],message='changed before CSI persistence')
+
 TEST_SUITE=suite('nt6_update_recovery',[
+    case('deferred_marker_rejects_same_length_replacement',test_deferred_marker_rejects_same_length_replacement),
     case('generated_independent_file_and_marker',test_generated_independent_file_and_marker),
     case('generated_batch_preflight',test_generated_batch_preflight),
     case('link_security_and_physical_flags',test_link_security_and_physical_flags),

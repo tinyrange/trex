@@ -70,6 +70,26 @@ func decompressIntermediate(data []byte, outputSize int) ([]byte, error) {
 }
 
 func decompressIntermediateTo(data []byte, outputSize, stop int) ([]byte, error) {
+	return decompressIntermediateInto(data, outputSize, stop, nil)
+}
+
+// decompressInto is internal to framed decoding. Its destination is an exact,
+// disjoint slice of the owned frame output; neither history nor the x86
+// restoration pass may cross this block's bounds. Errors leave partial bytes
+// private to the frame decoder, which discards the whole result.
+func decompressInto(data, destination []byte) error {
+	output, err := decompressIntermediateInto(data, len(destination), len(destination), destination)
+	if err != nil {
+		return err
+	}
+	if len(output) != len(destination) {
+		return fmt.Errorf("lzms: decoded block length mismatch")
+	}
+	restoreX86Addresses(output)
+	return nil
+}
+
+func decompressIntermediateInto(data []byte, outputSize, stop int, destination []byte) ([]byte, error) {
 	if outputSize < 0 || int64(outputSize) > maximumOutputSize {
 		return nil, fmt.Errorf("lzms: invalid output size %d", outputSize)
 	}
@@ -92,7 +112,7 @@ func decompressIntermediateTo(data []byte, outputSize, stop int) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	d, err := newDecoder(data, outputSize, positionSymbols)
+	d, err := newDecoder(data, outputSize, positionSymbols, destination)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +122,7 @@ func decompressIntermediateTo(data []byte, outputSize, stop int) ([]byte, error)
 	return d.output, nil
 }
 
-func newDecoder(data []byte, outputSize, positionSymbols int) (*decoder, error) {
+func newDecoder(data []byte, outputSize, positionSymbols int, destination []byte) (*decoder, error) {
 	rangeStream, err := newRangeDecoder(data)
 	if err != nil {
 		return nil, err
@@ -164,6 +184,11 @@ func newDecoder(data []byte, outputSize, positionSymbols int) (*decoder, error) 
 	if err != nil {
 		return nil, err
 	}
+	if destination == nil {
+		destination = make([]byte, outputSize)
+	} else if len(destination) != outputSize {
+		return nil, fmt.Errorf("lzms: destination length does not match output")
+	}
 	return &decoder{
 		rangeStream: rangeStream, backwardStream: backwardStream,
 		literalMatch: literalMatch, matchType: matchType,
@@ -172,7 +197,7 @@ func newDecoder(data []byte, outputSize, positionSymbols int) (*decoder, error) 
 		literals: literals, lzOffsets: lzOffsets, deltaOffsets: deltaOffsets,
 		lengths: lengths, deltaPowers: deltaPowers,
 		recentLZ: newRecentOffsets(), recentDelta: newRecentDeltaPairs(),
-		output: make([]byte, 0, outputSize), want: outputSize,
+		output: destination[:0:outputSize], want: outputSize,
 	}, nil
 }
 

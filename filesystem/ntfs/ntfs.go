@@ -1,7 +1,6 @@
 package ntfs
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -369,11 +368,11 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 	b.mftBitmapLCN = b.allocate(fsinternal.CeilDiv(int64(len(b.mftBitmapData)), ntfsCluster))
 	if logFile == nil {
 		logSize := ntfsDefaultLogFileSize(size)
-		logData := bytes.Repeat([]byte{0xff}, int(logSize))
+		var prefix []byte
 		if !b.modern() {
-			logData = ntfsInitialLogFile(logSize)
+			prefix = ntfsInitialLogPages(logSize)
 		}
-		logFile = &starfile.Bytes{Name: "$LogFile", Data: logData}
+		logFile = starfile.NewReader("$LogFile", &ntfsInitialLogReader{size: logSize, prefix: prefix})
 	}
 	b.logFile = logFile
 	b.logFileLCN = b.allocate(fsinternal.CeilDiv(b.logFile.Size(), ntfsCluster))
@@ -425,7 +424,13 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 		return nil, fmt.Errorf("ntfs: filesystem contents require %d bytes, volume has %d", b.nextLCN*ntfsCluster, size)
 	}
 
-	mft, err := b.mftData()
+	// Final metadata owns only compressed chunks, never the construction graph.
+	// One small decoded cache serves all generated metadata in this volume.
+	metadataStore, err := starfile.NewPackedFileStore(8<<20, false)
+	if err != nil {
+		return nil, err
+	}
+	mft, err := b.packedMFT(metadataStore)
 	if err != nil {
 		return nil, err
 	}
@@ -435,8 +440,8 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 	extents := []filesystemapi.ExtentSpec{
 		{Start: 0, Size: int64(len(bootData)), Data: bootData},
 		{Start: b.size - ntfsSectorSize, Size: ntfsSectorSize, Data: bootSector},
-		{Start: b.mftLCN * ntfsCluster, Size: int64(len(mft)), Data: mft},
-		{Start: b.mftMirrLCN * ntfsCluster, Size: mirrorSize, Data: mft[:mirrorSize]},
+		{Start: b.mftLCN * ntfsCluster, Size: mft.Size(), File: mft},
+		{Start: b.mftMirrLCN * ntfsCluster, Size: mirrorSize, File: mft},
 		{Start: b.mftBitmapLCN * ntfsCluster, Size: int64(len(b.mftBitmapData)), Data: b.mftBitmapData},
 		{Start: b.logFileLCN * ntfsCluster, Size: b.logFile.Size(), File: b.logFile},
 		{Start: b.attrDefLCN * ntfsCluster, Size: int64(len(b.attrDef)), Data: b.attrDef},
@@ -477,6 +482,18 @@ func buildNTFSImageWithMetadata(dir *filesystemapi.Directory, size int64, bootCo
 			extents = append(extents, filesystemapi.ExtentSpec{Start: node.attributeListLCN * ntfsCluster, Size: int64(len(node.attributeList)), Data: node.attributeList})
 		}
 	}
+	// Inline buffers are generated metadata/data owned by this construction.
+	// Do not snapshot File-backed extents: their lazy source semantics remain.
+	for i := range extents {
+		extent := &extents[i]
+		if extent.File == nil && len(extent.Data) >= 4096 {
+			packed, err := metadataStore.Pack("NTFS generated extent", extent.Data)
+			if err != nil {
+				return nil, err
+			}
+			extent.File, extent.Data = packed, nil
+		}
+	}
 	sort.Slice(extents, func(i, j int) bool { return extents[i].Start < extents[j].Start })
 	return filesystemapi.NewGeneratedImage("ntfs.raw", size, extents), nil
 }
@@ -506,8 +523,8 @@ func ntfsDefaultLogFileSize(volumeSize int64) int64 {
 	return size
 }
 
-func ntfsInitialLogFile(size int64) []byte {
-	data := bytes.Repeat([]byte{0xff}, int(size))
+func ntfsInitialLogPages(size int64) []byte {
+	data := make([]byte, 8192)
 	const (
 		pageSize      = 4096
 		restartOffset = 0x30
@@ -1463,18 +1480,6 @@ func ntfsIndexEndEntry(hasSubnode bool, vcn uint64) []byte {
 	}
 	binary.LittleEndian.PutUint16(entry[12:14], flags)
 	return entry
-}
-
-func (b *ntfsBuild) mftData() ([]byte, error) {
-	data := make([]byte, b.mftRecords*ntfsRecordSize)
-	for _, node := range b.nodes {
-		record, err := b.mftRecord(node)
-		if err != nil {
-			return nil, err
-		}
-		copy(data[int64(node.id)*ntfsRecordSize:], record)
-	}
-	return data, nil
 }
 
 func (b *ntfsBuild) mftRecord(node *ntfsNode) ([]byte, error) {

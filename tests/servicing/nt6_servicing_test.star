@@ -207,7 +207,7 @@ def test_runtime_manifest_snapshot_binding():
     original = change["after"]
     snapshot = binary.xml(original).root
     change["documents"] = {"after": (original, snapshot)}
-    equal(policy["_runtime_manifest_root"](change, "after"), snapshot)
+    equal(policy["servicing_runtime_manifest_root"](change, "after"), snapshot)
     replacement = _runtime_files('<file name="replacement.dll"/>')["transitions"][0]["after"]
     change["after"] = replacement
     result = policy["analyze_servicing_file_paths"](fixture, "amd64")
@@ -1975,7 +1975,14 @@ def test_boot_csi_value_scoped_writes():
     apply = testing.module("@stdlib//windows/servicing:csi.star")["apply_csi_state"]
     for drop_pin in [False, True]:
         root, sources, analysis, component, deployment, winner, source_key, data = _csi_writer_fixture(drop_pin)
+        fast = root.clone()
         report = apply(root, dict(stages={}), sources, analysis)
+        fast_report = apply(fast, dict(stages={}), sources, analysis, audit=False)
+        equal(fast_report["readback_audit"], "not-performed")
+        equal(fast_report["verified_sources"], 0)
+        for hive in ["COMPONENTS", "SOFTWARE"]:
+            path = "/Windows/System32/config/" + hive
+            equal(digest(fast.find(path)), digest(root.find(path)))
         actual = windows.hive(root.find("/Windows/System32/config/COMPONENTS"))
         values = actual.find(component).values
         equal(values["CF"], 0x1234)

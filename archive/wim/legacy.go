@@ -21,9 +21,10 @@ func openLegacyWIM(file storage.Reader, header []byte, cache *bytecache.Cache, s
 		chunkSize:  int(binary.LittleEndian.Uint32(header[20:24])),
 		partNumber: 1, totalParts: 1,
 		xml: parseWIMResource(header[48:72]), boot: parseWIMResource(header[72:96]),
-		byHash: make(map[string]wimResourceLocation), locationsByHash: make(map[string][]wimResourceLocation),
+		byHash: make(map[[20]byte]indexedResourceLocation), locationsByHash: make(map[string][]wimResourceLocation),
 		legacyIDs: make(map[uint32][20]byte), cacheStore: cache, cacheSource: source,
 	}
+	defer func() { w.lookup = nil }()
 	if w.chunkSize <= 0 || w.chunkSize&(w.chunkSize-1) != 0 {
 		return nil, fmt.Errorf("wim 1.10: invalid chunk size %d", w.chunkSize)
 	}
@@ -34,6 +35,7 @@ func openLegacyWIM(file storage.Reader, header []byte, cache *bytecache.Cache, s
 	if len(table)%52 != 0 {
 		return nil, fmt.Errorf("wim 1.10: invalid lookup length %d", len(table))
 	}
+	w.lookup = make([]wimLookupEntry, 0, len(table)/52)
 	for offset := 0; offset < len(table); offset += 52 {
 		raw := table[offset : offset+52]
 		id := binary.LittleEndian.Uint32(raw[24:28])
@@ -185,7 +187,7 @@ func (w *Archive) readLegacyDir(image *image, dir entry) ([]entry, error) {
 				if _, exists := child.namedStreams[streamName]; exists {
 					return nil, fmt.Errorf("wim 1.10: duplicate stream name")
 				}
-				child.namedStreams[streamName] = w.newFile(entry{path: child.path + ":" + streamName, hash: hash, size: w.byHash[string(hash[:])].blobSize})
+				child.namedStreams[streamName] = w.newFile(entry{path: child.path + ":" + streamName, hash: hash, size: w.byHash[hash].blobSize()})
 			}
 			offset += streamLength
 		}
@@ -198,7 +200,7 @@ func (w *Archive) readLegacyDir(image *image, dir entry) ([]entry, error) {
 					return nil, fmt.Errorf("wim 1.10: missing resource ID %d for %s", id, child.path)
 				}
 				child.hash = hash
-				child.size = w.byHash[string(hash[:])].blobSize
+				child.size = w.byHash[hash].blobSize()
 			}
 		}
 		children = append(children, child)

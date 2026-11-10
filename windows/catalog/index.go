@@ -8,14 +8,22 @@ import (
 
 func catalogParts(data []byte) ([]asn1.RawValue, error) {
 	var result []asn1.RawValue
+	// Reuse the reflection destination; appended RawValues retain their own
+	// slice headers, not this temporary struct.
+	var item asn1.RawValue
 	for len(data) != 0 {
 		if len(result) >= 1000000 {
 			return nil, fmt.Errorf("too many catalog elements")
 		}
-		var item asn1.RawValue
 		rest, err := asn1.Unmarshal(data, &item)
 		if err != nil {
 			return nil, err
+		}
+		if result == nil && len(rest) != 0 {
+			// Most CTL fields and attributes are pairs. Avoid allocating and
+			// immediately growing a one-element slice, without overallocating
+			// the equally common singleton wrappers.
+			result = make([]asn1.RawValue, 0, 2)
 		}
 		result = append(result, item)
 		data = rest
@@ -94,44 +102,11 @@ func ParseIndex(data []byte) ([][]byte, error) {
 		if err != nil || len(fields) != 2 || fields[0].Class != 0 || fields[0].Tag != 4 || fields[1].Class != 0 || fields[1].Tag != 17 {
 			return nil, fmt.Errorf("invalid CTL entry")
 		}
-		digest := fields[0].Bytes
-		if !v2 {
-			attrs, err := catalogParts(fields[1].Bytes)
-			if err != nil {
-				return nil, err
-			}
-			digest = nil
-			for _, attr := range attrs {
-				parts, err := catalogSequence(attr)
-				if err != nil || len(parts) != 2 {
-					return nil, fmt.Errorf("invalid CTL attribute")
-				}
-				if !catalogOID(parts[0], "1.3.6.1.4.1.311.2.1.4") {
-					continue
-				}
-				if parts[1].Class != 0 || parts[1].Tag != 17 {
-					return nil, fmt.Errorf("invalid indirect-data values")
-				}
-				values, err := catalogParts(parts[1].Bytes)
-				if err != nil || len(values) != 1 {
-					return nil, fmt.Errorf("invalid indirect-data value")
-				}
-				indirect, err := catalogSequence(values[0])
-				if err != nil || len(indirect) != 2 {
-					return nil, fmt.Errorf("invalid indirect data")
-				}
-				info, err := catalogSequence(indirect[1])
-				if err != nil || len(info) != 2 || info[1].Class != 0 || info[1].Tag != 4 {
-					return nil, fmt.Errorf("invalid digest info")
-				}
-				digest = info[1].Bytes
-				break
-			}
+		digest, err := catalogEntryDigest(fields, v2)
+		if err != nil {
+			return nil, err
 		}
-		if len(digest) != 20 && len(digest) != 32 {
-			return nil, fmt.Errorf("unsupported CTL digest length %d", len(digest))
-		}
-		result = append(result, append([]byte(nil), digest...))
+		result = append(result, digest)
 	}
 	return result, nil
 }
@@ -188,4 +163,45 @@ func catalogEntries(ctl []asn1.RawValue) ([]asn1.RawValue, bool, error) {
 		return nil, false, err
 	}
 	return entries, v2, nil
+}
+
+func catalogEntryDigest(fields []asn1.RawValue, v2 bool) ([]byte, error) {
+	digest := fields[0].Bytes
+	if !v2 {
+		attrs, err := catalogParts(fields[1].Bytes)
+		if err != nil {
+			return nil, err
+		}
+		digest = nil
+		for _, attr := range attrs {
+			parts, err := catalogSequence(attr)
+			if err != nil || len(parts) != 2 {
+				return nil, fmt.Errorf("invalid CTL attribute")
+			}
+			if !catalogOID(parts[0], "1.3.6.1.4.1.311.2.1.4") {
+				continue
+			}
+			if parts[1].Class != 0 || parts[1].Tag != 17 {
+				return nil, fmt.Errorf("invalid indirect-data values")
+			}
+			values, err := catalogParts(parts[1].Bytes)
+			if err != nil || len(values) != 1 {
+				return nil, fmt.Errorf("invalid indirect-data value")
+			}
+			indirect, err := catalogSequence(values[0])
+			if err != nil || len(indirect) != 2 {
+				return nil, fmt.Errorf("invalid indirect data")
+			}
+			info, err := catalogSequence(indirect[1])
+			if err != nil || len(info) != 2 || info[1].Class != 0 || info[1].Tag != 4 {
+				return nil, fmt.Errorf("invalid digest info")
+			}
+			digest = info[1].Bytes
+			break
+		}
+	}
+	if len(digest) != 20 && len(digest) != 32 {
+		return nil, fmt.Errorf("unsupported CTL digest length %d", len(digest))
+	}
+	return append([]byte(nil), digest...), nil
 }

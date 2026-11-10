@@ -416,7 +416,7 @@ func hiveFromPatchesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starla
 	if err != nil {
 		return nil, err
 	}
-	return &starfile.Bytes{Name: strings.ToLower(name) + ".hiv", Data: data}, nil
+	return newHiveImage(strings.ToLower(name)+".hiv", data)
 }
 
 type hiveRawValue struct {
@@ -755,14 +755,17 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	var value starlark.Value
 	var patches *starlark.List
 	rootName := ""
-	var keys, deleteKeys, deleteValues, keyFlags *starlark.List
-	if err := starlark.UnpackArgs("patch_hive", args, kwargs, "file", &value, "patches", &patches, "root_name?", &rootName, "keys?", &keys, "delete_keys?", &deleteKeys, "delete_values?", &deleteValues, "key_flags?", &keyFlags); err != nil {
+	var keys, deleteKeys, deleteValues, keyFlags, excludeKeys, excludeValues *starlark.List
+	if err := starlark.UnpackArgs("patch_hive", args, kwargs, "file", &value, "patches", &patches, "root_name?", &rootName, "keys?", &keys, "delete_keys?", &deleteKeys, "delete_values?", &deleteValues, "key_flags?", &keyFlags, "exclude_keys?", &excludeKeys, "exclude_values?", &excludeValues); err != nil {
 		return nil, err
 	}
-	for _, edits := range []*starlark.List{patches, keys, deleteKeys, deleteValues, keyFlags} {
+	for _, edits := range []*starlark.List{patches, keys, deleteKeys, deleteValues, keyFlags, excludeKeys, excludeValues} {
 		if edits != nil && edits.Len() > 1<<20 {
 			return nil, fmt.Errorf("patch_hive: too many edits")
 		}
+	}
+	if (excludeKeys != nil || excludeValues != nil) && (deleteKeys != nil || deleteValues != nil) {
+		return nil, fmt.Errorf("patch_hive: source exclusions cannot be mixed with ordered deletes")
 	}
 	file, ok := value.(starfile.File)
 	if !ok {
@@ -786,6 +789,11 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	}
 	if rootName != "" {
 		if err := hive.renameRoot(rootName); err != nil {
+			return nil, err
+		}
+	}
+	if excludeKeys != nil || excludeValues != nil {
+		if err := hive.excludeSource(excludeKeys, excludeValues); err != nil {
 			return nil, err
 		}
 	}
@@ -892,7 +900,7 @@ func patchHiveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if err := hive.finishChildBatches(); err != nil {
 		return nil, err
 	}
-	return &starfile.Bytes{Name: "patched.hiv", Data: hive.data}, nil
+	return newHiveImage("patched.hiv", hive.data)
 }
 
 func (h *mutableHive) renameRoot(name string) error {
@@ -1689,6 +1697,9 @@ func (h *mutableHive) findSubkeyCell(keyCell uint32, name string) (uint32, error
 }
 
 func (h *mutableHive) findValueCell(keyCell uint32, name string) (uint32, error) {
+	if name == "" {
+		name = "(default)"
+	}
 	key, err := h.cellBody(keyCell)
 	if err != nil {
 		return 0, err

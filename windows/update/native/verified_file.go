@@ -39,13 +39,12 @@ func newVerifiedFileCache(maximum int64) (*verifiedFileCache, error) {
 	if maximum < 0 {
 		return nil, fmt.Errorf("negative verified file cache limit")
 	}
-	codec, err := newRetainedFileStore()
+	codec, err := starvalue.NewPackedFileStore(maximumRetainedReadCache, false)
 	if err != nil {
 		return nil, err
 	}
 	// A cross-file dedup index would pin evicted chunks. Each cached file owns
 	// its encoded chunks; only the independently bounded decoded cache is shared.
-	codec.chunks = nil
 	return &verifiedFileCache{codec: codec, maximum: maximum, entries: make(map[*verifiedFile]*list.Element)}, nil
 }
 
@@ -106,16 +105,13 @@ func (c *verifiedFileCache) get(owner *verifiedFile) (starvalue.File, error) {
 // retainLocked copies verified bytes and enforces the compressed-byte budget.
 // The caller holds c.mu and has checked the input's content identity.
 func (c *verifiedFileCache) retainLocked(owner *verifiedFile, data []byte) (starvalue.File, error) {
-	packed, err := c.codec.pack(owner.name, data)
+	packed, err := c.codec.Pack(owner.name, data)
 	if err != nil {
 		return nil, err
 	}
 	weight := packed.Size()
 	if chunks, ok := packed.(*retainedFile); ok {
-		weight = int64(len(chunks.chunks)) * 32
-		for _, chunk := range chunks.chunks {
-			weight += int64(len(chunk.data))
-		}
+		weight = chunks.RetainedBytes() - 128
 	}
 	weight += 128 // File/entry/index bookkeeping, including empty files.
 	if weight <= c.maximum {

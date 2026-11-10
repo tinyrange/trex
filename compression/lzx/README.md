@@ -38,6 +38,42 @@ with canonical long-code fallback, and bulk overlapping match copies. The whole
 output is already retained by the API, so it also supplies bounded history; E8
 translation is deferred until decoding finishes, with Go's optimized byte search
 locating candidate fixups. No second window is allocated.
+`DecompressTo` is the bounded-output CAB variant. It writes synchronously to an
+`io.Writer`, retaining raw match history across blocks and copying complete
+32-KiB frames before restoring E8 addresses. History is trimmed only at frame
+boundaries; its working set is bounded by the window and the format's 24-bit
+block size, not the folder's expanded size. The compressed input remains owned
+by the caller. A failed decode or writer can leave a prefix in the destination;
+consumers must not publish partial output. WIM decoding is unchanged.
+
+`BenchmarkLZXStreamMemory` compares full-output and streaming allocation for a
+64-MiB generated folder. `FuzzDecompressTo` compares successful output and error
+acceptance with the full decoder; targeted tests cover cross-window matches,
+E8 operands, partial frames, and short/failing writers.
+
+`DecompressReaderTo` also bounds compressed input buffering, reading from a
+stable `io.ReaderAt` with a declared compressed length. Ordinary input buffering
+is 64 KiB; an uncompressed format block may require its 24-bit size. Refills
+preserve prefetched words, including raw-byte rewinds across buffer boundaries.
+
+`NewIndexedReader` performs one complete decode, saving compressed raw-history
+checkpoints at block boundaries and SHA-256 hashes of the initial raw frames.
+Random reads resume at a nearby checkpoint, verify reconstructed frames, and
+apply the original absolute E8 transform without modifying match history.
+Checkpoint spacing must be at least the window size and can be exceeded by one
+format block. No full compressed/expanded folder is retained. The source must
+remain stable; frame hashes protect deferred content identity, not authenticity.
+Reads and scratch-cache release are synchronized. `ReleaseReadCache` preserves
+checkpoints; `RetainedBytes` reports checkpoint/history/hash storage, excluding
+source, temporary decoder buffers and allocator overhead. `ReadCacheReserve`
+provides a working-set allowance based on observed block sizes for bounded cache
+owners. Random seeks reuse decoder/input/history scratch after warm-up;
+`BenchmarkLZXIndexedRandomSeek` exercises far-apart seeks with byte validation.
+
+`FuzzLZXIndexed` compares error acceptance and random reads against the original
+full decoder. Targeted tests cover checkpoint/frame boundaries, E8 match history,
+odd raw-block padding, concurrent reads/release and changed deferred source bytes.
+
 Unconsumed prefetched words are returned before raw-byte reads, and EOF padding
 never counts as valid Huffman bits.
 

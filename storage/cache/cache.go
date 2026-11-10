@@ -5,6 +5,7 @@ package bytecache
 
 import (
 	"container/list"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -26,7 +27,8 @@ type Key struct {
 type cacheEntry struct {
 	key     Key
 	ready   chan struct{}
-	data    []byte
+	data    any
+	weight  int64
 	err     error
 	element *list.Element
 }
@@ -77,7 +79,28 @@ func NewObserved(maxBytes int64, onLoad func(uint64)) *Cache {
 	}
 }
 
+// Get loads immutable bytes. Keys must not be shared with a different value type.
 func (c *Cache) Get(key Key, load func() ([]byte, error)) ([]byte, error) {
+	value, err := c.GetValue(key, func() (any, int64, error) {
+		data, err := load()
+		return data, int64(len(data)), err
+	})
+	if value == nil {
+		return nil, err
+	}
+	data, ok := value.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("cache: key has a non-byte value")
+	}
+	return data, err
+}
+
+// GetValue caches an immutable value charged by its complete retained size.
+// Values and byte slices share the same LRU and single-flight loader policy.
+// The loader must include all memory owned by the value in its nonnegative
+// weight. In-flight working memory and caller-held values are not cache storage.
+func (c *Cache) GetValue(key Key, load func() (any, int64, error)) (any, error) {
+
 	c.mu.Lock()
 	if entry := c.entries[key]; entry != nil {
 		c.hits++
@@ -98,22 +121,25 @@ func (c *Cache) Get(key Key, load func() ([]byte, error)) ([]byte, error) {
 	c.mu.Unlock()
 
 	started := time.Now()
-	data, err := load()
+	data, weight, err := load()
+	if weight < 0 && err == nil {
+		err = fmt.Errorf("cache: negative retained value size")
+	}
 	elapsed := uint64(time.Since(started))
 
 	c.mu.Lock()
 	c.loadNanos += elapsed
 	if err == nil {
 		c.loads++
-		c.loaded += uint64(len(data))
+		c.loaded += uint64(weight)
 		if c.onLoad != nil {
-			c.onLoad(uint64(len(data)))
+			c.onLoad(uint64(weight))
 		}
 	}
-	entry.data, entry.err = data, err
-	if err == nil && int64(len(data)) <= c.maxBytes {
+	entry.data, entry.err, entry.weight = data, err, weight
+	if err == nil && weight <= c.maxBytes {
 		entry.element = c.lru.PushFront(entry)
-		c.bytes += int64(len(data))
+		c.bytes += weight
 		if c.bytes > c.peakBytes {
 			c.peakBytes = c.bytes
 		}
@@ -121,18 +147,7 @@ func (c *Cache) Get(key Key, load func() ([]byte, error)) ([]byte, error) {
 		delete(c.entries, key)
 	}
 	close(entry.ready)
-	for c.bytes > c.maxBytes {
-		oldestElement := c.lru.Back()
-		if oldestElement == nil {
-			break
-		}
-		oldest := oldestElement.Value.(*cacheEntry)
-		c.lru.Remove(oldestElement)
-		oldest.element = nil
-		delete(c.entries, oldest.key)
-		c.bytes -= int64(len(oldest.data))
-		c.evictions++
-	}
+	c.evictLocked()
 	c.mu.Unlock()
 	return data, err
 }

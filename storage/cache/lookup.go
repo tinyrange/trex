@@ -1,5 +1,7 @@
 package bytecache
 
+import "fmt"
+
 // Lookup returns a resident or in-flight immutable buffer without starting a
 // load. It allows range readers to reuse a complete resource before decoding
 // a smaller prefix. An in-flight load is joined just as it is by Get.
@@ -19,5 +21,12 @@ func (c *Cache) Lookup(key Key) ([]byte, error, bool) {
 	}
 	data, err := entry.data, entry.err
 	c.mu.Unlock()
-	return data, err, true
+	if data == nil {
+		return nil, err, true
+	}
+	buffer, ok := data.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("cache: key has a non-byte value"), true
+	}
+	return buffer, err, true
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"slices"
 	"sync"
 )
 
@@ -163,6 +165,7 @@ func (d *lzxDecoder) decodeBlock(br *lzxBitReader, out *[]byte, outSize int) err
 	if blockLen > outSize-len(*out) {
 		blockLen = outSize - len(*out)
 	}
+	*out = slices.Grow(*out, blockLen)
 	switch blockType {
 	case lzxBlockVerbatim, lzxBlockAligned:
 		if blockType == lzxBlockAligned {
@@ -508,11 +511,15 @@ func (d *lzxDecoder) undoE8(frame []byte, absoluteStart int) {
 }
 
 type lzxBitReader struct {
-	data  []byte
-	pos   int
-	bits  uint64 // MSB-first, assembled from little-endian 16-bit words
-	nbits uint
-	err   error
+	// reader is optional. The byte-slice fast path stays allocation-free.
+	reader     io.ReaderAt
+	base, size int64
+	buffer     []byte
+	data       []byte
+	pos        int
+	bits       uint64 // MSB-first, assembled from little-endian 16-bit words
+	nbits      uint
+	err        error
 }
 
 func newLZXBitReader(data []byte) *lzxBitReader {
@@ -524,7 +531,9 @@ func (r *lzxBitReader) readBits(n uint) uint32 {
 		r.fill()
 	}
 	if r.nbits < n {
-		r.err = fmt.Errorf("lzx: truncated bitstream")
+		if r.err == nil {
+			r.err = fmt.Errorf("lzx: truncated bitstream")
+		}
 		return 0
 	}
 	value := uint32(r.bits >> (64 - n))
@@ -533,7 +542,12 @@ func (r *lzxBitReader) readBits(n uint) uint32 {
 }
 
 func (r *lzxBitReader) fill() {
-	for r.nbits <= 48 && r.pos+1 < len(r.data) {
+	for r.nbits <= 48 {
+		if r.pos+1 >= len(r.data) {
+			if r.reader == nil || !r.refill(2) {
+				break
+			}
+		}
 		r.bits |= uint64(binary.LittleEndian.Uint16(r.data[r.pos:r.pos+2])) << (48 - r.nbits)
 		r.pos += 2
 		r.nbits += 16
@@ -557,7 +571,15 @@ func (r *lzxBitReader) takeBytes(n int) []byte {
 	// Return all whole prefetched words before entering the raw-byte portion.
 	r.pos -= int(r.nbits/16) * 2
 	r.bits, r.nbits = 0, 0
-	if r.pos+n > len(r.data) {
+	if r.reader != nil && (r.pos < 0 || n > len(r.data)-r.pos) {
+		if !r.refill(n) {
+			if r.err == nil {
+				r.err = fmt.Errorf("lzx: truncated byte stream")
+			}
+			return nil
+		}
+	}
+	if r.pos < 0 || n < 0 || n > len(r.data)-r.pos {
 		r.err = fmt.Errorf("lzx: truncated byte stream")
 		return nil
 	}
@@ -567,10 +589,13 @@ func (r *lzxBitReader) takeBytes(n int) []byte {
 }
 
 func (r *lzxBitReader) remaining() int {
+	if r.reader != nil {
+		return int(r.size-r.base-int64(r.pos)) + int(r.nbits/16)*2
+	}
 	return len(r.data) - r.pos + int(r.nbits/16)*2
 }
 
-func (r *lzxBitReader) bytePosition() int { return r.pos - int((r.nbits+15)/16)*2 }
+func (r *lzxBitReader) bytePosition() int { return int(r.base) + r.pos - int((r.nbits+15)/16)*2 }
 func (r *lzxBitReader) bitPosition() uint { return (16 - r.nbits%16) % 16 }
 
 type lzxHuffman struct {
@@ -690,7 +715,9 @@ func (h *lzxHuffman) decodeLong(br *lzxBitReader) (int, error) {
 		}
 	}
 	if available < 16 {
-		br.err = fmt.Errorf("lzx: truncated bitstream")
+		if br.err == nil {
+			br.err = fmt.Errorf("lzx: truncated bitstream")
+		}
 		return 0, br.err
 	}
 	return 0, fmt.Errorf("lzx: invalid huffman code")

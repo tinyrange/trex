@@ -26,7 +26,12 @@ type Reader struct {
 // New owns a string copy of data. decoded permits UTF-16/unicode declarations
 // only when the caller has already converted the actual bytes to UTF-8.
 // No input-size limit is imposed here: callers must bound the buffered input.
-func New(data []byte, decoded bool) *Reader { return &Reader{source: string(data), decoded: decoded} }
+func New(data []byte, decoded bool) *Reader { return NewString(string(data), decoded) }
+
+// NewString borrows immutable source storage. Tokens can retain substrings of
+// source. Use this when an owner already keeps the complete document snapshot;
+// byte-slice callers should use New to isolate subsequent input mutations.
+func NewString(source string, decoded bool) *Reader { return &Reader{source: source, decoded: decoded} }
 
 // Token returns a raw token, for use as xml.NewTokenDecoder's input.
 func (r *Reader) Token() (xml.Token, error) { return r.RawToken() }

@@ -98,6 +98,16 @@ func ParseAttributes(data []byte) ([]Attribute, error) {
 }
 
 func catalogNameValue(data []byte) (Attribute, error) {
+	attr, err := catalogNameValueView(data)
+	if err != nil {
+		return Attribute{}, err
+	}
+	attr.Value = append([]byte(nil), attr.Value...)
+	return attr, nil
+}
+
+// Borrow payload bytes only inside a parse. Public results clone selected data.
+func catalogNameValueView(data []byte) (Attribute, error) {
 	var attr Attribute
 	values, err := catalogParts(data)
 	if err != nil || len(values) != 1 {
@@ -121,6 +131,6 @@ func catalogNameValue(data []byte) (Attribute, error) {
 	}
 	attr.NameValue = true
 	attr.Flags = uint32(flags)
-	attr.Value = append([]byte(nil), parts[2].Bytes...)
+	attr.Value = parts[2].Bytes
 	return attr, nil
 }

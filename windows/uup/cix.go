@@ -151,9 +151,9 @@ func parseContainerIndex(decoder *xml.Decoder) (*ContainerIndex, error) {
 			for _, attribute := range start.Attr {
 				switch attribute.Name.Local {
 				case "name":
-					result.Name = attribute.Value
+					result.Name = strings.Clone(attribute.Value)
 				case "type":
-					result.Type = strings.ToUpper(attribute.Value)
+					result.Type = strings.Clone(strings.ToUpper(attribute.Value))
 				case "length":
 					result.Length, err = parseCIXInt64("container length", attribute.Value, true)
 				case "version":
@@ -173,7 +173,7 @@ func parseContainerIndex(decoder *xml.Decoder) (*ContainerIndex, error) {
 				return nil, fmt.Errorf("uup CIX: location count exceeds %d", defaultCIXMaximumLocations)
 			}
 			var raw rawCIXLocation
-			if err := decoder.DecodeElement(&raw, &start); err != nil {
+			if err := decodeCIXLocation(decoder, start, &raw); err != nil {
 				return nil, fmt.Errorf("uup CIX: location: %w", err)
 			}
 			location, err := convertCIXLocation(raw)
@@ -189,7 +189,7 @@ func parseContainerIndex(decoder *xml.Decoder) (*ContainerIndex, error) {
 				return nil, fmt.Errorf("uup CIX: file count exceeds %d", defaultCIXMaximumFiles)
 			}
 			var raw rawCIXFile
-			if err := decoder.DecodeElement(&raw, &start); err != nil {
+			if err := decodeCIXFile(decoder, start, &raw); err != nil {
 				return nil, fmt.Errorf("uup CIX: file: %w", err)
 			}
 			file, err := convertCIXFile(raw)
@@ -224,7 +224,7 @@ func convertCIXLocation(raw rawCIXLocation) (CIXLocation, error) {
 	if err != nil {
 		return CIXLocation{}, fmt.Errorf("uup CIX: invalid location flags %q", raw.Flags)
 	}
-	return CIXLocation{ID: id, Path: raw.Path, Flags: flags}, nil
+	return CIXLocation{ID: id, Path: strings.Clone(raw.Path), Flags: flags}, nil
 }
 
 func convertCIXFile(raw rawCIXFile) (CIXFile, error) {
@@ -254,7 +254,7 @@ func convertCIXFile(raw rawCIXFile) (CIXFile, error) {
 	if len(raw.Delta.Sources) == 0 || len(raw.Delta.Sources) > defaultCIXMaximumSourcesPerFile || len(raw.Delta.Bases) > defaultCIXMaximumSourcesPerFile {
 		return CIXFile{}, fmt.Errorf("uup CIX: file %d has invalid delta cardinality", id)
 	}
-	file := CIXFile{ID: id, Name: raw.Name, Length: length, Time: timestamp, Attributes: attributes, Hash: hash}
+	file := CIXFile{ID: id, Name: strings.Clone(raw.Name), Length: length, Time: timestamp, Attributes: attributes, Hash: hash}
 	for _, rawSource := range raw.Delta.Sources {
 		source, err := convertCIXSource(id, rawSource)
 		if err != nil {
@@ -288,7 +288,7 @@ func convertCIXFile(raw rawCIXFile) (CIXFile, error) {
 }
 
 func convertCIXSource(fileID int64, raw rawCIXSource) (CIXSource, error) {
-	typ := strings.ToUpper(raw.Type)
+	typ := strings.Clone(strings.ToUpper(raw.Type))
 	if typ == "" || len(raw.Name) > defaultCIXMaximumNameBytes {
 		return CIXSource{}, fmt.Errorf("uup CIX: file %d has invalid source", fileID)
 	}
@@ -310,7 +310,7 @@ func convertCIXSource(fileID int64, raw rawCIXSource) (CIXSource, error) {
 	if raw.Offset == "" && raw.Name == "" {
 		return CIXSource{}, fmt.Errorf("uup CIX: file %d source has neither name nor range", fileID)
 	}
-	return CIXSource{Type: typ, Name: raw.Name, Offset: offset, Length: length, Hash: hash}, nil
+	return CIXSource{Type: typ, Name: strings.Clone(raw.Name), Offset: offset, Length: length, Hash: hash}, nil
 }
 
 func parseCIXHash(raw rawCIXHash) ([32]byte, error) {

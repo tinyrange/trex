@@ -3,6 +3,7 @@ package native
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -116,5 +117,33 @@ func TestCatalogRequestCancellationAndFailedResultDoNotRetry(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("closed execution: %v", err)
+	}
+}
+
+func TestCompletedCatalogRequestNotPinnedByExecution(t *testing.T) {
+	resources := lifecycle.New()
+	defer resources.Close()
+	collected := make(chan struct{})
+	func() {
+		request, err := newCatalogRequest(resources, windowsupdate.ScanOptions{}, windowsupdate.ClientProtocol{}, func(context.Context) (*windowsupdate.Catalog, error) { return &windowsupdate.Catalog{}, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime.SetFinalizer(request, func(*catalogRequest) { close(collected) })
+		if _, err := request.result(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	deadline := time.After(5 * time.Second)
+	for {
+		runtime.GC()
+		select {
+		case <-collected:
+			runtime.KeepAlive(resources)
+			return
+		case <-deadline:
+			t.Fatal("completed request retained by live execution")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
