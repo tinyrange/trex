@@ -21,7 +21,7 @@ import (
 type Options struct {
 	MaxSteps uint64
 	Print    io.Writer
-	// NoPublish denies snapshot/fork/publication, including through derived views.
+	// NoPublish denies snapshot/fork/revision/publication, including through derived views.
 	NoPublish bool
 }
 
@@ -73,7 +73,7 @@ func (*Value) Freeze()               {}
 func (*Value) Truth() starlark.Bool  { return starlark.True }
 func (*Value) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: workspace") }
 func (*Value) AttrNames() []string {
-	return []string{"open_file", "view", "chmod", "delete", "fork", "glob", "list_dir", "mkdir", "publish", "read_file", "readlink", "readonly", "rename", "replace", "search", "snapshot", "stat", "symlink", "write_file"}
+	return []string{"affected_targets", "glob_page", "diff", "revision", "open_file", "view", "chmod", "delete", "fork", "glob", "list_dir", "mkdir", "publish", "read_file", "readlink", "readonly", "rename", "replace", "search", "snapshot", "stat", "symlink", "write_file"}
 }
 func (v *Value) Attr(name string) (starlark.Value, error) {
 	for _, n := range v.AttrNames() {
@@ -99,7 +99,7 @@ func list(ss []string) *starlark.List {
 	return starlark.NewList(vs)
 }
 func (v *Value) call(name string, a starlark.Tuple, k []starlark.Tuple) (starlark.Value, error) {
-	if v.noPublish && (name == "publish" || name == "fork" || name == "snapshot") {
+	if v.noPublish && (name == "publish" || name == "fork" || name == "snapshot" || name == "revision") {
 		return nil, fmt.Errorf("workspace.%s is controlled by the session host", name)
 	}
 
@@ -107,6 +107,8 @@ func (v *Value) call(name string, a starlark.Tuple, k []starlark.Tuple) (starlar
 	var p, q, s string
 	var err error
 	switch name {
+	case "affected_targets", "glob_page", "diff", "revision":
+		return v.query(name, a, k)
 	case "open_file":
 		if err = unpack("path", &p); err == nil {
 			f, e := v.w.OpenReader(p)
@@ -174,7 +176,7 @@ func (v *Value) call(name string, a starlark.Tuple, k []starlark.Tuple) (starlar
 		if err = unpack(arg, &p); err == nil {
 			var out []string
 			if name == "glob" {
-				out, err = v.w.Glob(p)
+				out, err = v.w.GlobContext(v.ctx, p)
 			} else {
 				out, err = v.w.ListDir(p)
 			}
