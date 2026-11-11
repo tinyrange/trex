@@ -7598,7 +7598,7 @@ Defaults to local-only replay of cached raw catalog responses for the exact call
 
 ### `windows.update_media`
 
-`windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, servicing_only=False, while_preparing=None, installed_stage_limit=0, base=None, image="", bootsect=None, additional_cabinets={}, additional_msus={}, additional_stage_order=[], cache="") -> update_media`
+`windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, servicing_only=False, while_preparing=None, installed_stage_limit=0, base=None, image="", bootsect=None, additional_cabinets={}, additional_msus={}, additional_stage_order=[], cache="", wim_cache_bytes=2147483648, verified_cache_bytes=6442450944, servicing_cache_bytes=-1) -> update_media`
 
 Prepares an explicitly selected catalog offer as referenced UUP media, not a complete disk image. catalog must come from update_catalog, and offer must be an original offer from that same catalog. architecture, edition, language, metadata_name (exact aggregated metadata payload name) and target_compdb (composition database name/source) are required caller choices. There is no rescan, fallback offer, ranking or client/preview filter. Dependency closure and signed-location renewal retain the original catalog, request profile, selected revision, declared hashes and sizes. Inspection modes expose metadata or plans without full image construction; servicing uses mandatory reconstructed target hashes. TinyRangeX recipes apply those effects and construct the filesystem, registry and bootable disk.
 

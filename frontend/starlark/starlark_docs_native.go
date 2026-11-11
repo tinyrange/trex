@@ -724,7 +724,7 @@ var nativeStarlarkAdditionalSignatures = map[string]string{
 	"windows.state_repository_dictionary_read": "windows.state_repository_dictionary_read(source) -> dict",
 	"windows.state_repository_hash":            "windows.state_repository_hash(values) -> string",
 	"windows.update_catalog":                   "windows.update_catalog(device_attributes, caller_attributes, products, locales, user_agent, assume_non_leaf_installed, background=False, network=False) -> windows_update_catalog or windows_update_catalog_request",
-	"windows.update_media":                     "windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, servicing_only=False, while_preparing=None, installed_stage_limit=0, base=None, image=\"\", bootsect=None, additional_cabinets={}, additional_msus={}, additional_stage_order=[], cache=\"\") -> update_media",
+	"windows.update_media":                     "windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, servicing_only=False, while_preparing=None, installed_stage_limit=0, base=None, image=\"\", bootsect=None, additional_cabinets={}, additional_msus={}, additional_stage_order=[], cache=\"\", wim_cache_bytes=2147483648, verified_cache_bytes=6442450944, servicing_cache_bytes=-1) -> update_media",
 	"windows.wow64_registry_key":               "windows.wow64_registry_key(key) -> string",
 }
 

@@ -100,11 +100,17 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	stateOnly := false
 	servicingOnly := false
 	installedStageLimit := 0
+	wimCacheBytes := maximumWIMChunkCache
+	verifiedCacheBytes := int64(maximumVerifiedFileCache)
+	servicingCacheOverride := int64(-1)
 	if err := starlark.UnpackArgs("update_media", args, kwargs,
 		"catalog", &catalogArg, "offer", &offerArg,
 		"architecture", &architecture, "edition", &edition, "language", &language,
 		"metadata_name", &metadataName, "target_compdb", &targetCompDB,
 		"cache?", &cacheDirectory,
+		"wim_cache_bytes?", &wimCacheBytes,
+		"verified_cache_bytes?", &verifiedCacheBytes,
+		"servicing_cache_bytes?", &servicingCacheOverride,
 		"index_only?", &indexOnly,
 		"plan_only?", &planOnly,
 		"metadata_only?", &metadataOnly,
@@ -118,6 +124,9 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		"additional_stage_order?", &additionalOrder,
 	); err != nil {
 		return nil, err
+	}
+	if wimCacheBytes < 0 || verifiedCacheBytes < 0 || servicingCacheOverride < -1 {
+		return nil, fmt.Errorf("update_media: cache budgets must be nonnegative (servicing -1 selects the default)")
 	}
 	additional, err := unpackAdditionalCabinets(additionalCabinets, servicingOnly)
 	if err != nil {
@@ -185,6 +194,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		bootsect: bootsectArg, indexOnly: indexOnly, planOnly: planOnly,
 		metadataOnly: metadataOnly, stateOnly: stateOnly, servicingOnly: servicingOnly,
 		installedStageLimit: installedStageLimit, additionalCabinets: additional,
+		wimCacheBytes: wimCacheBytes, verifiedCacheBytes: verifiedCacheBytes, servicingCacheOverride: servicingCacheOverride,
 	}
 	return runMediaPreparation(thread, callback, func(progress func(string)) (starlark.Value, error) {
 		return prepareSelectedMedia(resources, catalog, offer, install, options, progress)
@@ -192,6 +202,7 @@ func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 }
 
 type mediaPreparationOptions struct {
+	wimCacheBytes, verifiedCacheBytes, servicingCacheOverride              int64
 	cacheDirectory                                                         string
 	additionalCabinets                                                     []additionalCabinet
 	architecture, edition, language, metadataName, targetCompDB, imagePath string
@@ -203,6 +214,7 @@ type mediaPreparationOptions struct {
 // Only native immutable inputs cross the worker boundary. This function must
 // not evaluate caller Starlark values or use the caller interpreter thread.
 func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue, offer windowsupdate.Offer, install *wim.Archive, options mediaPreparationOptions, observe func(string)) (starlark.Value, error) {
+	wimCacheBytes, verifiedCacheBytes, servicingCacheOverride := options.wimCacheBytes, options.verifiedCacheBytes, options.servicingCacheOverride
 	architecture, edition, language := options.architecture, options.edition, options.language
 	metadataName, targetCompDB, imagePath := options.metadataName, options.targetCompDB, options.imagePath
 	bootsectArg := options.bootsect
@@ -466,7 +478,7 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 			referenceReaders = append(referenceReaders, file)
 		}
 		progress(fmt.Sprintf("update_media: opening base WIM with %d references after %s", len(referenceReaders), time.Since(mediaStarted).Round(time.Millisecond)))
-		install, err = wim.OpenWithReferencesCache(metadataFile, referenceReaders, maximumWIMChunkCache)
+		install, err = wim.OpenWithReferencesCache(metadataFile, referenceReaders, wimCacheBytes)
 		if err != nil {
 			return nil, fmt.Errorf("update_media: open referenced edition ESD: %w", err)
 		}
@@ -485,6 +497,9 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 	servicingCacheBytes := maximumServicingWIMCache
 	if servicingOnly {
 		servicingCacheBytes = constructionServicingWIMCache
+	}
+	if servicingCacheOverride >= 0 {
+		servicingCacheBytes = servicingCacheOverride
 	}
 	servicingCache, err := uup.NewStageMetadataCache(servicingCacheBytes)
 	if err != nil {
@@ -811,7 +826,7 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 		if err := starlark.UnpackArgs("servicing_effects", args, kwargs, "include_files?", &includeFiles); err != nil {
 			return nil, err
 		}
-		verifiedCache, err := newVerifiedFileCache(maximumVerifiedFileCache)
+		verifiedCache, err := newVerifiedFileCache(verifiedCacheBytes)
 		if err != nil {
 			return nil, fmt.Errorf("servicing_effects: retained files: %w", err)
 		}
