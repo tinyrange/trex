@@ -55,7 +55,7 @@ func TestUUPPayloadCacheRetainsSourceAcrossRuns(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		reader, err := openPayload(resources, pool, file, file.Size)
+		reader, err := openPayload(resources, httpPayloadPool{pool}, file, file.Size)
 		if err != nil {
 			t.Fatal(err)
 		}

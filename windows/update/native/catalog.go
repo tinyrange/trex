@@ -21,6 +21,7 @@ type catalogValue struct {
 	options      windowsupdate.ScanOptions
 	protocol     windowsupdate.ClientProtocol
 	allowNetwork bool
+	payloads     PayloadSource
 }
 
 func (*catalogValue) Type() string { return "windows_update_catalog" }

@@ -325,7 +325,7 @@ func (c *MirrorCache) downloadFrom(ctx context.Context, partial *os.File, rawURL
 	}
 	written, copyErr := io.Copy(io.MultiWriter(partial, hasher), io.LimitReader(response.Body, remaining+1))
 	if copyErr != nil {
-		return fmt.Errorf("%s: download after %d bytes: %w", displayURL, offset+written, copyErr)
+		return fmt.Errorf("%s: download after %d bytes (HTTP %d, requested offset %d, response offset %d, content length %d): %w", displayURL, offset+written, response.StatusCode, info.Size(), offset, response.ContentLength, copyErr)
 	}
 	actualSize := offset + written
 	if written > remaining || actualSize > request.MaximumBytes {
