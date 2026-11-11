@@ -94,6 +94,7 @@ def plan_update_file_commits(root, prepared, source_paths, directories, while_ve
     sources = {}
     source_checks = {}
     source_versions = {}
+    pending_names = {}
     for path in select_servicing_file_commit_paths(hierarchy, 0):
         item = hierarchy[path]
         after = item["after"]
@@ -103,9 +104,39 @@ def plan_update_file_commits(root, prepared, source_paths, directories, while_ve
         plan = dict(path=actual, key=path, phase=1 if item["directory_flags"] & 0x10 else 2, attributes=None, security=None)
         if item["operation"] == 2:
             before = item["before"]
-            if before["state"] != 0 or before.get("process_flags") != 0x40 or item["file_flags"] != 1:
+            shape = (before["state"], before.get("process_flags"), item["file_flags"])
+            if after["state"] != 0 or shape not in [(0, 0x40, 1), (0, 0x48, 1), (7, 0x50, 5)]:
                 fail("unsupported removed runtime file: " + actual)
-            plan.update(operation="remove", exists=current != None)
+            writable = before["process_flags"] == 0x48
+            if bool(item["directory_flags"] & 0x40) != writable:
+                fail("inconsistent removed runtime writable flag: " + actual)
+            plan.update(operation="pending_delete" if writable else "remove", exists=current != None)
+            if writable:
+                # WCP CommitFileChanges calls MoveFileToPendingDeletes(false):
+                # move the actual object, including modified bytes, without a
+                # hash comparison or immediate deletion. Never convert this
+                # into an ordinary unlink or retain it at its retired path.
+                plan["write_order"] = root.get_metadata(actual).write_order if current != None else None
+                if current != None:
+                    pending = "/Windows/WinSxS/Temp/PendingDeletes"
+                    entries = testing.attempt(root.list_dir, args=[pending])
+                    if not entries.ok or root.get_security(pending) == None:
+                        fail("pending-delete directory/security is missing")
+                    occupied = {name.rsplit("/", 1)[1].lower(): True for name in entries.value}
+                    leaf = actual.rsplit("/", 1)[1]
+                    # Native uses 128 bits of uniqueness + '.' + file name.
+                    # Use stable, collision-checked uniqueness for image builds;
+                    # the random native value is not a servicing identity.
+                    target = None
+                    for attempt in range(1024):
+                        name = binary.hex(digest(actual.lower() + ":" + str(plan["write_order"]) + ":" + str(attempt)))[:32] + "." + leaf
+                        if name.lower() not in occupied and name.lower() not in pending_names:
+                            target = pending + "/" + name
+                            pending_names[name.lower()] = True
+                            break
+                    if target == None:
+                        fail("pending-delete name space exhausted")
+                    plan.update(pending=target, pending_security=root.get_security(pending))
             plans.append(plan)
             continue
         if after["state"] not in [1, 2, 7]:
@@ -144,7 +175,7 @@ def plan_update_file_commits(root, prepared, source_paths, directories, while_ve
             plan["operation"] = "hardlink"
         else:
             action = select_servicing_writable_file_action(item, prepared["sources"], current)
-            plan.update(operation="copy" if action == "replace" else "preserve", before=digest(current, algorithm="sha256"))
+            plan.update(operation="copy" if action == "replace" else "preserve", before=digest(current, algorithm="sha256") if current != None else None)
             if action == "replace":
                 definition = after["descriptor"]
                 if definition == None:
@@ -222,7 +253,7 @@ def apply_update_file_commits(root, planned, phase):
     # Check payload stability and mutable projections before unlinking anything.
     sources = {}
     for plan in selected:
-        if plan["operation"] not in ["remove", "preserve"]:
+        if plan["operation"] not in ["remove", "pending_delete", "preserve"]:
             path = plan["source"]
             if path in sources and sources[path] != plan["source_hash"]:
                 fail("conflicting runtime source digests: " + path)
@@ -239,8 +270,18 @@ def apply_update_file_commits(root, planned, phase):
             if actual != sources[path]:
                 fail("runtime source changed after planning: " + path)
     for plan in selected:
-        if plan["operation"] in ["copy", "preserve"] and digest(root.find(plan["path"]), algorithm="sha256") != plan["before"]:
+        if plan["operation"] in ["copy", "preserve"] and (digest(root.find(plan["path"]), algorithm="sha256") if root.find(plan["path"]) != None else None) != plan["before"]:
             fail("writable projection changed after planning: " + plan["path"])
+    for plan in selected:
+        if plan["operation"] != "pending_delete":
+            continue
+        current = root.find(plan["path"])
+        if (current != None) != plan["exists"] or (current != None and root.get_metadata(plan["path"]).write_order != plan["write_order"]):
+            fail("pending-delete source changed after planning: " + plan["path"])
+        if current != None:
+            pending = plan["pending"].rsplit("/", 1)[0]
+            if root.get_security(pending) != plan["pending_security"] or plan["pending"].rsplit("/", 1)[1].lower() in [n.rsplit("/", 1)[1].lower() for n in root.list_dir(pending)]:
+                fail("pending-delete destination changed after planning")
     counts = dict(hardlinks=0, copies=0, preserved_writable=0, removed=0, already_absent=0)
     for plan in selected:
         path = plan["path"]
@@ -249,6 +290,15 @@ def apply_update_file_commits(root, planned, phase):
             counts["preserved_writable"] += 1
             continue
         existing = root.find(path)
+        if operation == "pending_delete":
+            if existing != None:
+                # Link before unlink preserves bytes, security, timestamps, EAs
+                # and other aliases. The temporary object remains for Windows
+                # cleanup; no CBS/POQ completion is inferred here.
+                root.hardlink(path, plan["pending"])
+                root.remove(path)
+            counts["removed" if existing != None else "already_absent"] += 1
+            continue
         if existing != None:
             root.remove(path)
         if operation == "remove":

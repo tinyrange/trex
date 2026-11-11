@@ -1647,14 +1647,24 @@ def prepare_servicing_projected_files(resolved, security, hashes, policy):
 
 
 def select_servicing_writable_file_action(item, sources, current):
-    """Select copy versus preservation for the observed paired writable shape.
+    """Select copy versus preservation for supported paired/new writable shapes.
 
     This reads the current projected file, not its possibly DCS-encoded WinSxS
     counterpart. It neither applies effects nor verifies the replacement source,
-    security authorization, FileMaps or transaction ordering. Missing projections,
-    different flags/states and non-identity hashes require separate native policy.
+    security authorization, FileMaps or transaction ordering. Missing paired
+    projections, existing new destinations, different flags/states and
+    non-identity hashes require separate native policy.
     """
     before, after = item["before"], item["after"]
+    if item["operation"] == 1:
+        # Observed Server 26100 new writable projection. Native state 1 uses
+        # the SIL copy action, not the immutable hardlink action. Existing
+        # destinations need separate collision policy and remain rejected.
+        if not item["own_changed"] or before["state"] != 0 or before.get("source_key") != None or after["state"] != 1 or after.get("process_flags") != 0x48 or item["security_flags"] != 0xc0 or item["directory_flags"] != 0xa2 or item["file_flags"] != 0:
+            fail("unsupported added writable file transition")
+        if current != None:
+            fail("added writable projection already exists")
+        return "replace"
     if item["operation"] != 3 or not item["own_changed"] or before["state"] != 0 or after["state"] != 1 or item["security_flags"] != 0x88 or item["directory_flags"] != 0xe8 or item["file_flags"] != 1:
         fail("unsupported writable file transition")
     if current == None:
