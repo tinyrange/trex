@@ -7223,6 +7223,12 @@ fits inside the input; it does not validate the body or prove that the writer
 completed. Other dump signatures are rejected. No guest execution or host
 debugger is used. This is distinct from the MDMP user-mode minidump reader.
 
+### `windows.kernel_triage_dump`
+
+`windows.kernel_triage_dump(file) -> record`
+
+Reads completed AMD64 PAGE/DU64 type-4 kernel triage dumps without a host debugger. Returns header, context (1232 AMD64 CONTEXT bytes), pc/sp/fp, stack (borrowed file), stack_address, modules (name/base/size/checksum/timestamp), and regions (virtual address plus borrowed file). Regions preserve captured ranges independently, including overlaps; this does not synthesize absent RAM or walk page tables. The triage directory and TRGD completion marker must fit the declared triage extent, itself bounded to 64 MiB and contained in RequiredDumpSpace and the input. Bounds counts before reading tables: at most 4096 drivers, 65536 memory blocks, 1 MiB stack and 32767 UTF-16 code units per name. Secondary streams after the triage extent are not interpreted. No symbol download, automatic stack unwinding or driver attribution is implied; stack words alone are not frames. Borrowed files require the input lifetime. Other dump types and malformed/incomplete ranges fail.
+
 ### `windows.map_file_security_rights`
 
 `windows.map_file_security_rights(source) -> bytes`
