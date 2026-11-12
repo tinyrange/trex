@@ -414,6 +414,12 @@ history. Inspection returns detached records and does not consume the history.
 polls while Run and PCI I/O/bus mastering were enabled; it is host scheduling
 evidence, not proof of a guest timeout or a USB transaction latency. These
 observations do not change frame progression, interrupts, or HID queue limits.
+Single-vCPU USB machines use the same device-owner coordinator as SMP machines:
+USB polling and completed storage I/O do not wait for a native CPU exit. The
+native CPU slice remains bounded at 50 ms; device progress does not require
+shortening it and interfering with host split-lock handling. Pause, inspection,
+and shutdown still join the CPU worker first; one-vCPU execution breakpoints
+retain their skip/resume semantics.
 Inactive transfer descriptors with IOC set still generate a frame-end interrupt,
 as required by the UHCI TD format. This does not execute a transaction or advance
 a queue-head's inactive software tail; acknowledging USBINT permits the next
