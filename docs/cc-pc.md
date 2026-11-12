@@ -405,6 +405,16 @@ pointer, so frontends can release relative capture and switch coordinates safely
 Native Windows 11 build 26300 has been boot-tested with 16 GiB, USB keyboard,
 absolute pointer, and wheel scrolling. This does not add SMP or an NVMe device.
 
+`cc.v1.state().usb` includes a bounded history of the last 64 I/O register
+accesses and PCI configuration writes, in access order. Values are the bytes
+read or supplied by the guest, before write masking; frame counters identify
+the controller progress at each access. `access_count` includes overwritten
+history. Inspection returns detached records and does not consume the history.
+`max_poll_gap_nanoseconds` records the largest interval between device-owner
+polls while Run and PCI I/O/bus mastering were enabled; it is host scheduling
+evidence, not proof of a guest timeout or a USB transaction latency. These
+observations do not change frame progression, interrupts, or HID queue limits.
+
 ## Native x86 NVMe
 
 Use `vmm.disk(device, bus="nvme", unit=0)` with `cc.backend(uefi=True)`.

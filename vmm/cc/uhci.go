@@ -22,6 +22,40 @@ type uhci struct {
 	irq                               func(uint32, bool) error
 	transactions, frames              uint64
 	fault                             string
+	accesses                          [64]uhciAccess
+	accessCount                       uint64
+	lastPoll                          time.Time
+	maxPollGap                        time.Duration
+}
+
+// Keep fixed-size native records on the device-owner loop. Convert to portable
+// inspection values only on request; busy register polling allocates nothing.
+type uhciAccess struct {
+	space        string
+	offset, size int
+	write        bool
+	value        uint32
+	frame        uint16
+	frames       uint64
+}
+
+func (u *uhci) recordAccess(space string, offset int, data []byte, write bool) {
+	var value uint32
+	for i, b := range data {
+		value |= uint32(b) << (8 * i)
+	}
+	u.accesses[u.accessCount%uint64(len(u.accesses))] = uhciAccess{space, offset, len(data), write, value, u.frame, u.frames}
+	u.accessCount++
+}
+
+func (u *uhci) accessHistory() []any {
+	n := min(u.accessCount, uint64(len(u.accesses)))
+	out := make([]any, 0, n)
+	for i := u.accessCount - n; i < u.accessCount; i++ {
+		a := u.accesses[i%uint64(len(u.accesses))]
+		out = append(out, map[string]any{"space": a.space, "offset": a.offset, "size": a.size, "write": a.write, "value": int64(a.value), "frame": int(a.frame), "frames": int64(a.frames)})
+	}
+	return out
 }
 
 func newUHCI(memory func(uint64, uint64) ([]byte, error), irq func(uint32, bool) error) *uhci {
@@ -44,6 +78,7 @@ func newUHCI(memory func(uint64, uint64) ([]byte, error), irq func(uint32, bool)
 	return u
 }
 func (u *uhci) writeConfig(offset int, v byte) {
+	u.recordAccess("pci", offset, []byte{v}, true)
 	switch offset {
 	case 4:
 		u.config[offset] = v & 5
@@ -82,8 +117,10 @@ func (u *uhci) io(ex hypervisor.X86Exit, now time.Time) error {
 		}
 		if !ex.Write {
 			copy(data, regs[off:])
+			u.recordAccess("io", off, data, false)
 			continue
 		}
+		u.recordAccess("io", off, data, true)
 		old := regs
 		copy(regs[off:], data)
 		touched := func(start, size int) bool { return off < start+size && off+len(data) > start }
@@ -169,6 +206,10 @@ func (u *uhci) fail(message string, process bool) error {
 	return u.updateIRQ()
 }
 func (u *uhci) poll(now time.Time) error {
+	if !u.lastPoll.IsZero() && u.command&1 != 0 && u.config[4]&5 == 5 {
+		u.maxPollGap = max(u.maxPollGap, now.Sub(u.lastPoll))
+	}
+	u.lastPoll = now
 	if u.command&1 == 0 || u.command&0xc != 0 || u.config[4]&5 != 5 {
 		u.last = now
 		return u.updateIRQ()
