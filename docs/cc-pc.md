@@ -439,6 +439,13 @@ namespace device path match the controller; no IDE function or legacy ATA ports
 are exposed for this profile. The existing snapshot/read-only disk policy is
 preserved. `cc.v1.state().nvme` reports PCI configuration and controller registers.
 
+Completion ownership is published only after read-data DMA and the completion
+body. Mapped queues release-store the aligned final CID/status word; opaque
+memory transports keep the phase invalid during the body write and publish its
+ownership byte afterward. Guest polling therefore does not depend on interrupt
+arrival to order completion data. Invalid host mapping alignment fails before
+publication instead of exposing a partially updated entry.
+
 This is a synchronous emulated block controller, not physical NVMe passthrough
 or a multiqueue throughput promise. Guest boot policy must install an NVMe driver;
 changing the VM bus alone does not make an IDE-specific image bootable.
