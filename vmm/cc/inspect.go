@@ -185,7 +185,7 @@ func (p *pc) inspectState() (starlark.Value, error) {
 		for n, d := range u.devices {
 			devices = append(devices, map[string]any{"port": n, "port_status": int(u.ports[n]), "address": int(d.address), "configuration": int(d.configuration), "controls": int64(d.controls), "reports": int64(d.reports), "pending": len(d.pending), "requests": d.trace})
 		}
-		usbState = map[string]any{"command": int(u.command), "status": int(u.status), "interrupt": int(u.interrupt), "frame": int(u.frame), "base": int64(u.base), "transactions": int64(u.transactions), "frames": int64(u.frames), "fault": u.fault, "config": fmt.Sprintf("%x", u.config[:]), "devices": devices, "access_count": int64(u.accessCount), "accesses": u.accessHistory(), "max_poll_gap_nanoseconds": int64(u.maxPollGap)}
+		usbState = map[string]any{"command": int(u.command), "status": int(u.status), "interrupt": int(u.interrupt), "frame": int(u.frame), "base": int64(u.base), "transactions": int64(u.transactions), "frames": int64(u.frames), "fault": u.fault, "config": fmt.Sprintf("%x", u.config[:]), "devices": devices, "access_count": int64(u.accessCount), "accesses": u.accessHistory(), "max_poll_gap_nanoseconds": int64(u.maxPollGap), "irq_asserted": u.irqLevel, "irq_rises": int64(u.irqRises), "irq_falls": int64(u.irqFalls), "frame_history": u.frameHistory()}
 	}
 	var network any
 	var nvmeState any

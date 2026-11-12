@@ -409,7 +409,15 @@ absolute pointer, and wheel scrolling. This does not add SMP or an NVMe device.
 accesses and PCI configuration writes, in access order. Values are the bytes
 read or supplied by the guest, before write masking; frame counters identify
 the controller progress at each access. `access_count` includes overwritten
-history. Inspection returns detached records and does not consume the history.
+history. Access rows also include the pre-write USB status, interrupt-enable
+mask, and last successfully delivered IRQ level. Inspection returns detached
+records and does not consume the history.
+`frame_history` retains the final 64 serviced frame observations, even after
+PCI disable: frame-list link, visited/active/IOC TD counts, status before/after,
+and the final TD/QH address, fetched status and token. It does not retain RAM or
+packet contents; the last descriptor need not be the one that raised USBINT.
+`irq_asserted`, `irq_rises` and `irq_falls` describe successful native IRQ-line
+updates, not guest interrupt acceptance or ISR execution.
 `max_poll_gap_nanoseconds` records the largest interval between device-owner
 polls while Run and PCI I/O/bus mastering were enabled; it is host scheduling
 evidence, not proof of a guest timeout or a USB transaction latency. These
