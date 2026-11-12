@@ -283,7 +283,13 @@ func (u *uhci) schedule(link uint32) error {
 		// An inactive queue TD is the software tail sentinel. Hardware must
 		// leave the QH element on it, not consume its link and lose the
 		// controller driver's completion boundary.
-		if binary.LittleEndian.Uint32(data[4:])&(1<<23) == 0 {
+		if status := binary.LittleEndian.Uint32(data[4:]); status&(1<<23) == 0 {
+			// UHCI TD IOC applies even when Active was already clear when
+			// fetched. Keep the software tail intact, but do not suppress
+			// its frame-end interrupt (used for controller liveness).
+			if status&(1<<24) != 0 {
+				u.status |= 1
+			}
 			if qh != 0 {
 				link = 1
 			} else {
