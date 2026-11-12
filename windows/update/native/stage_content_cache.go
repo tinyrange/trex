@@ -127,11 +127,13 @@ func (c *stageContentCache) get(r *reopenedStageReader) (file starfile.File, err
 	if chunks, ok := packed.(*retainedFile); ok {
 		weight = chunks.RetainedBytes()
 	}
+	// Decoded target size, not just compressed weight, selects the large slot:
+	// a highly compressible target can still take seconds to reconstruct.
 	// Retain one oversized target separately from the ordinary LRU. Tiny DLL
 	// reads must not evict a large target between its paging/scanning requests:
 	// rebuilding it repeatedly can starve queued guest registry reads even when
 	// every backing operation eventually succeeds. Both sets remain bounded.
-	if c.limit > 0 && weight > c.limit && weight <= maximumStageCacheEntry {
+	if c.limit > 0 && (r.size > c.limit || weight > c.limit) && weight <= maximumStageCacheEntry {
 		if c.oversized != nil {
 			c.stats.Evictions++
 		}
