@@ -239,3 +239,33 @@ func TestMalformedImagesAndLimits(t *testing.T) {
 }
 
 var _ storage.Reader = patternFile(0)
+
+func TestBuildExt2BlockMaps(t *testing.T) {
+	// 12 direct + 1024 single-indirect blocks, then into double indirect.
+	size := int64(12+1024+1500) * 4096
+	input := []unixfs.Entry{
+		{Path: "big", Mode: 0100644, Data: patternFile(size)},
+		{Path: "etc/id", Mode: 0100644, Data: bytes.NewReader([]byte("ext2\n"))},
+	}
+	r, err := Build(input, BuildOptions{Size: 64 << 20, Ext2: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := make([]byte, 1024)
+	r.ReadAt(sb, 1024)
+	if u32(sb, 96) != 0x2 || u32(sb, 100) != 0x2 {
+		t.Fatalf("features incompat %X ro_compat %X", u32(sb, 96), u32(sb, 100))
+	}
+	root := auto.Open(r, "", auto.Options{})
+	big, err := root.Resolve("big")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, off := range []int64{0, 12*4096 - 8, (12+1024)*4096 - 8, size - 31} {
+		want, got := make([]byte, 31), make([]byte, 31)
+		patternFile(size).ReadAt(want, off)
+		if _, err := big.Reader().ReadAt(got, off); err != nil || !bytes.Equal(want, got) {
+			t.Fatal(off, err)
+		}
+	}
+}

@@ -41,6 +41,7 @@ func Builtins() starlark.StringDict {
 		"http_post_json": starlark.NewBuiltin("http_post_json", httpPostJSONBuiltin),
 		"http_get":       starlark.NewBuiltin("http_get", httpGetBuiltin),
 		"mirror_file":    starlark.NewBuiltin("mirror_file", mirrorFileBuiltin),
+		"exists":         starlark.NewBuiltin("exists", existsBuiltin),
 		"open":           starlark.NewBuiltin("open", openBuiltin),
 		"stdout":         starlark.NewBuiltin("stdout", stdoutBuiltin),
 		"write":          starlark.NewBuiltin("write", writeBuiltin),
@@ -107,6 +108,23 @@ func readSubfileAt(base File, baseOffset, size int64, p []byte, off int64) (int,
 
 type fileRangeWriterTo interface {
 	WriteRangeTo(io.Writer, int64, int64) (int64, error)
+}
+
+// existsBuiltin reports whether a host file exists, so a recipe can choose
+// between an explicit saved output and constructing it again.
+func existsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs("exists", args, kwargs, "name", &name); err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return starlark.False, nil
+		}
+		return nil, err
+	}
+	return starlark.Bool(info.Mode().IsRegular()), nil
 }
 
 func openBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

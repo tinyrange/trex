@@ -1,11 +1,13 @@
 """Inspects a Debian package through nested trex archive values."""
 
 def _tar(package, section):
-    member_name = section + ".tar.xz"
-    member = package.find(member_name)
-    if member == None:
-        fail("package has no " + member_name)
-    return archive.tar(archive.xz(member))
+    xz = package.find(section + ".tar.xz")
+    if xz != None:
+        return archive.tar(archive.xz(xz))
+    gz = package.find(section + ".tar.gz")
+    if gz != None:
+        return archive.tar(archive.gzip(gz))
+    fail("package has no " + section + ".tar.xz or .tar.gz")
 
 def _print_outer(package):
     print("Debian package members:")
@@ -26,8 +28,8 @@ def _print_tar(contents):
         ))
 
 def main(args):
-    if len(args) < 1 or len(args) > 3:
-        fail("usage: debian_package.star PACKAGE.deb [control|data [PATH] | --repl]")
+    if len(args) < 1 or len(args) > 4:
+        fail("usage: debian_package.star PACKAGE.deb [control|data [PATH [--text]] | --repl]")
 
     package = archive.ar(open(args[0]))
     _print_outer(package)
@@ -61,4 +63,7 @@ def main(args):
         entry.gid,
     ))
     if entry.entry_type == "file" or entry.entry_type == "hardlink":
-        print(entry.hex(size = min(entry.size, 64)))
+        if len(args) == 4 and args[3] == "--text":
+            print(str(entry.bytes()))
+        else:
+            print(entry.hex(size = min(entry.size, 64)))
