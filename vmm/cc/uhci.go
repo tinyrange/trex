@@ -118,6 +118,13 @@ func (u *uhci) updateIRQ() error {
 	return nil
 }
 func (u *uhci) io(ex hypervisor.X86Exit, now time.Time) error {
+	// Bring the hardware clock and all due completions up to the access time.
+	// The owner ticker is only a wakeup mechanism: delayed host scheduling must
+	// not make a driver's FRNUM reads report a stopped controller. Do this before
+	// writes too, so an acknowledgment cannot precede an already-due completion.
+	if err := u.poll(now); err != nil {
+		return err
+	}
 	for n := uint32(0); n < ex.Count; n++ {
 		data := ex.Data[int(n)*int(ex.Size) : int(n+1)*int(ex.Size)]
 		off := int(uint32(ex.Port) - u.ioBase())

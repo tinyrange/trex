@@ -418,14 +418,20 @@ and the final TD/QH address, fetched status and token. It does not retain RAM or
 packet contents; the last descriptor need not be the one that raised USBINT.
 `irq_asserted`, `irq_rises` and `irq_falls` describe successful native IRQ-line
 updates, not guest interrupt acceptance or ISR execution.
-`max_poll_gap_nanoseconds` records the largest interval between device-owner
-polls while Run and PCI I/O/bus mastering were enabled; it is host scheduling
+`max_poll_gap_nanoseconds` records the largest interval between clock-service
+polls (periodic owner wakeups and register accesses) while Run and PCI I/O/bus
+mastering were enabled; it is host scheduling
 evidence, not proof of a guest timeout or a USB transaction latency. These
 observations do not change frame progression, interrupts, or HID queue limits.
 Single-vCPU USB machines use the same device-owner coordinator as SMP machines:
 USB polling and completed storage I/O do not wait for a native CPU exit. The
 native CPU slice remains bounded at 50 ms; device progress does not require
-shortening it and interfering with host split-lock handling. Pause, inspection,
+shortening it and interfering with host split-lock handling. Register accesses
+also service all frames due at the supplied hardware time before reading or
+writing the registers. A late owner wakeup cannot make FRNUM reads freeze;
+status acknowledgments are ordered after already-due completions. Repeated
+accesses at the same time do not advance frames, and a halted controller's
+frame counter remains stopped. Pause, inspection,
 and shutdown still join the CPU worker first; one-vCPU execution breakpoints
 retain their skip/resume semantics.
 Inactive transfer descriptors with IOC set still generate a frame-end interrupt,
