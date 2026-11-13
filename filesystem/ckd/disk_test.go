@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"github.com/tinyrange/trex/storage"
 	"io"
 	"strings"
 	"testing"
@@ -347,5 +348,44 @@ func TestVTOCScanBudgetIsNotBrowserEntryBudget(t *testing.T) {
 	b[off+4] = 2
 	if _, e := openTest(t, b).ReadVTOC(20); e == nil || !strings.Contains(e.Error(), "duplicate DSCB") {
 		t.Fatal(e)
+	}
+}
+
+func TestOpenPartsComposesSplitVolume(t *testing.T) {
+	img := fixture()
+	whole, err := Open(raw(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cyl := int(whole.TrackSize * whole.Heads)
+	cyls := (len(img) - 512) / cyl
+	split := cyls / 2
+	h1 := append([]byte(nil), img[:512]...)
+	h1[17] = 1
+	le.PutUint16(h1[18:], uint16(split-1))
+	h2 := append([]byte(nil), img[:512]...)
+	h2[17] = 2
+	le.PutUint16(h2[18:], 0)
+	p1 := append(h1, img[512:512+split*cyl]...)
+	p2 := append(h2, img[512+split*cyl:]...)
+	d, err := OpenParts([]storage.Reader{raw(p1), raw(p2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tr := uint32(0); tr < uint32(cyls)*whole.Heads; tr++ {
+		a, err1 := whole.Track(tr)
+		b, err2 := d.Track(tr)
+		if err1 != nil || err2 != nil || len(a) != len(b) {
+			t.Fatalf("track %d: %v %v", tr, err1, err2)
+		}
+		for i := range a {
+			if !bytes.Equal(a[i].Data, b[i].Data) || a[i].Number != b[i].Number {
+				t.Fatalf("track %d record %d differs", tr, i)
+			}
+		}
+	}
+	le.PutUint16(p1[18:], uint16(split))
+	if _, err := OpenParts([]storage.Reader{raw(p1), raw(p2)}); err == nil {
+		t.Fatal("accepted a part whose last cylinder disagrees with its size")
 	}
 }

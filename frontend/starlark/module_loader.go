@@ -211,6 +211,12 @@ func newStarlarkRuntime(script string) (*starlark.Thread, starlark.StringDict, e
 	if script != "" && script != "-" && filepath.IsAbs(script) {
 		root = filepath.Dir(script)
 	}
+	return newStarlarkRuntimeAt(root)
+}
+
+// newStarlarkRuntimeAt creates a runtime whose "//" module labels resolve in
+// the root directory.
+func newStarlarkRuntimeAt(root string) (*starlark.Thread, starlark.StringDict, error) {
 	predeclared := predeclared()
 	loader, err := newModuleLoader(root, predeclared)
 	if err != nil {

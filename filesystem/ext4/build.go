@@ -30,6 +30,10 @@ type BuildOptions struct {
 	Size  int64
 	UUID  [16]byte
 	Label string
+	// Ext2 builds a revision-1 ext2 file system: block maps instead of
+	// extents, and only the filetype and large_file features, for kernels
+	// without ext4.
+	Ext2 bool
 	// InodeCount is a minimum total inode capacity, including reserved inodes.
 	// Zero preserves automatic sizing from the input entries. The actual count
 	// is rounded up to the block-group geometry and may also grow to fit input.
@@ -222,7 +226,9 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 		}
 		put32(inode, 4, uint32(size))
 		put32(inode, 108, uint32(uint64(size)>>32))
-		put32(inode, 32, 0x80000)
+		if !options.Ext2 {
+			put32(inode, 32, 0x80000)
+		}
 		extents, err := b.allocate(uint32((uint64(size) + 4095) / 4096))
 		if err != nil {
 			return nil, fmt.Errorf("ext4: %s: %w", e.Path, err)
@@ -233,7 +239,12 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 			b.fragments = append(b.fragments, fragment{int64(x.physical) * 4096, io.NewSectionReader(data, offset, length)})
 			offset += length
 		}
-		treeBlocks, err := b.extentRoot(inode[40:100], extents)
+		var treeBlocks uint32
+		if options.Ext2 {
+			treeBlocks, err = b.blockMap(inode[40:100], extents)
+		} else {
+			treeBlocks, err = b.extentRoot(inode[40:100], extents)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -276,8 +287,13 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 	put32(sb, 76, 1)
 	put32(sb, 84, 11)
 	put16(sb, 88, 256)
-	put32(sb, 96, 0x42)
-	put32(sb, 100, 0x42)
+	if options.Ext2 {
+		put32(sb, 96, 0x2)  // filetype
+		put32(sb, 100, 0x2) // large_file
+	} else {
+		put32(sb, 96, 0x42)
+		put32(sb, 100, 0x42)
+	}
 	copy(sb[104:120], options.UUID[:])
 	copy(sb[120:136], options.Label)
 	put16(sb, 254, 32)
@@ -412,6 +428,66 @@ func (b *imageBuilder) extentRoot(root []byte, items []extent) (uint32, error) {
 	extentIndices(root, indices, depth)
 	return blocks, nil
 }
+
+// blockMap fills an ext2 i_block array: 12 direct blocks, then single,
+// double and triple indirect trees. It returns the indirect blocks used.
+func (b *imageBuilder) blockMap(root []byte, extents []extent) (uint32, error) {
+	var blocks []uint32
+	for _, x := range extents {
+		for i := uint32(0); i < x.count; i++ {
+			blocks = append(blocks, uint32(x.physical)+i)
+		}
+	}
+	for i := 0; i < 12 && i < len(blocks); i++ {
+		put32(root, i*4, blocks[i])
+	}
+	rest := blocks[min(12, len(blocks)):]
+	var meta uint32
+	var tree func(items []uint32, depth int) (uint32, error)
+	tree = func(items []uint32, depth int) (uint32, error) {
+		allocated, err := b.allocate(1)
+		if err != nil {
+			return 0, err
+		}
+		block := uint32(allocated[0].physical)
+		meta++
+		data := make([]byte, 4096)
+		per := 1
+		for i := 1; i < depth; i++ {
+			per *= 1024
+		}
+		for i := 0; i*per < len(items); i++ {
+			chunk := items[i*per : min((i+1)*per, len(items))]
+			if depth == 1 {
+				put32(data, i*4, chunk[0])
+				continue
+			}
+			child, err := tree(chunk, depth-1)
+			if err != nil {
+				return 0, err
+			}
+			put32(data, i*4, child)
+		}
+		b.addBytes(int64(block)*4096, data)
+		return block, nil
+	}
+	capacity := 1
+	for level := 1; level <= 3 && len(rest) > 0; level++ {
+		capacity *= 1024
+		take := min(capacity, len(rest))
+		block, err := tree(rest[:take], level)
+		if err != nil {
+			return 0, err
+		}
+		put32(root, (11+level)*4, block)
+		rest = rest[take:]
+	}
+	if len(rest) > 0 {
+		return 0, fmt.Errorf("file exceeds ext2 block addressing")
+	}
+	return meta, nil
+}
+
 func directoryData(n *buildNode, parent uint32) ([]byte, error) {
 	type dirent struct {
 		name string

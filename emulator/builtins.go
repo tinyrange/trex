@@ -10,6 +10,7 @@ import (
 	binaryapi "github.com/tinyrange/trex/binary"
 	"github.com/tinyrange/trex/emulator/machine"
 	"github.com/tinyrange/trex/emulator/processor"
+	"github.com/tinyrange/trex/emulator/s390"
 	"github.com/tinyrange/trex/emulator/shell"
 	"github.com/tinyrange/trex/emulator/uefi"
 	"github.com/tinyrange/trex/emulator/x86"
@@ -27,6 +28,7 @@ func Builtins() starlark.StringDict {
 	values["machine"] = starlark.NewBuiltin("machine", Builtin)
 	values["processor"] = starlark.NewBuiltin("processor", processor.Builtin)
 	values["uefi"] = starlark.NewBuiltin("uefi", uefi.Builtin)
+	values["s390"] = starlark.NewBuiltin("s390", s390.Builtin)
 	return values
 }
 
