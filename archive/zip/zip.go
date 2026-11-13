@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/tinyrange/trex/compression/deflate"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
@@ -25,7 +26,7 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 	}
 	files := make([]starlark.Value, len(reader.File))
 	for i, entry := range reader.File {
-		files[i] = &Entry{entry: entry}
+		files[i] = &Entry{entry: entry, archive: hostFile}
 	}
 	return &Archive{files: starlark.NewList(files)}, nil
 }
@@ -53,6 +54,8 @@ func (z *Archive) AttrNames() []string {
 
 type Entry struct {
 	entry         *zip.File
+	archive       io.ReaderAt // the containing ZIP, for random access
+	seekable      *deflate.Seekable
 	mu            sync.Mutex
 	reader        io.ReadCloser
 	data          []byte
@@ -66,6 +69,10 @@ type Entry struct {
 // Retain a bounded decoded window. Backward reads outside it restart the
 // compressed stream; forward reads discard skipped bytes without host files.
 const decodedWindow = 8 << 20
+
+// Members at least this large are decoded through deflate.Seekable. Their
+// ZIP checksum is checked only by Verify, which reads the whole stream.
+const seekableMinimum = 64 << 20
 
 func NewEntry(entry *zip.File) *Entry { return &Entry{entry: entry} }
 
@@ -112,6 +119,23 @@ func (f *Entry) ReadAt(p []byte, off int64) (int, error) {
 			return n, io.EOF
 		}
 		return n, err
+	}
+	// Large deflated members (whole disk volumes) are read at random: decode
+	// from recorded checkpoints instead of restarting the stream.
+	if f.entry.Method == zip.Deflate && f.archive != nil && f.Size() >= seekableMinimum {
+		if f.seekable == nil {
+			at, err := f.entry.DataOffset()
+			if err != nil {
+				f.err = err
+				return 0, err
+			}
+			raw := io.NewSectionReader(f.archive, at, int64(f.entry.CompressedSize64))
+			f.seekable = deflate.NewSeekable(raw, int64(f.entry.CompressedSize64), f.Size(), 1<<20)
+			// A member read at random (a disk volume) is indexed on a spare
+			// core so later reads deep into it need not decode what precedes.
+			f.seekable.IndexInBackground()
+		}
+		return f.seekable.ReadAt(p, off)
 	}
 	if off < f.base {
 		if f.reader != nil {
