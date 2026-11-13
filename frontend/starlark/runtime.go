@@ -345,6 +345,7 @@ func predeclared() starlark.StringDict {
 		"http_post_json": nativeIO["http_post_json"],
 		"http_get":       nativeIO["http_get"],
 		"mirror_file":    nativeIO["mirror_file"],
+		"exists":         nativeIO["exists"],
 		"open":           nativeIO["open"],
 		"repl":           starlark.NewBuiltin("repl", replBuiltin),
 		"stdout":         nativeIO["stdout"],

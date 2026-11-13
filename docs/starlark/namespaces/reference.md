@@ -4487,6 +4487,12 @@ A mutable in-memory directory tree. write adds file content, mkdir creates direc
 
 Stops evaluation with the supplied error message. Use testing.attempt when a caller needs to inspect an expected failure.
 
+### `exists`
+
+`exists(name) -> bool`
+
+Reports whether a host path names an existing regular file. Like open, this is an explicit host-path boundary; recipes use it to choose between a saved explicit output (such as a machine checkpoint) and constructing it again.
+
 ### `help`
 
 `help(value=None) -> None`
@@ -5675,6 +5681,12 @@ Wraps explicit mutable plugin state and its installation callback for emulator u
 
 Creates a portable in-process ARM64 or AMD64 instruction context independently of executable formats and OS APIs. map(address,size,data=None,access=rw) copies bounded bytes/files into owned sparse memory; read/write, get_register/set_register and plugin expose explicit experiment state. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps and PC for breakpoint, halt, budget or fault. ARM64 uses the existing baseline ARMv8-A processor without optional PAuth. No code is implicitly loaded or executed. close() releases the context.
 
+### `emulator.s390`
+
+`emulator.s390(memory=64MiB, cpus=1, mips=50, start='', idle_skip=True, architecture='esa390') -> s390_machine`
+
+Creates an in-process ESA/390 or System/370 (architecture='s370') machine with storage, CPUs, a channel subsystem, CKD DASD, 3270 and 3215 consoles, unit-record devices, AWS tapes and the hardware system console. Attach devices, then ipl() or storage_load() and run(); time is virtual. See docs/s390.md.
+
 ### `emulator.uefi`
 
 `emulator.uefi(image, memory=256MiB, memory_base=0x40000000, image_base=0, stack_size=1MiB, time_unix=0, image_path='\\EFI\\Boot\\BootAA64.efi', registers={}, observe=None, device_path=b'', event_kinds=None)`
@@ -5821,9 +5833,9 @@ Reads a clean ext2/3/4 image without mounting. Returns flat entry records with U
 
 ### `filesystem.ext4_build`
 
-`filesystem.ext4_build(entries, size, label='', uuid='', inode_count=0) -> file`
+`filesystem.ext4_build(entries, size, label='', uuid='', inode_count=0, ext2=False) -> file`
 
-Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. inode_count optionally sets minimum total inode capacity, including reserved inodes, rounded up to block-group geometry; zero sizes from input entries. Larger values reserve free inodes for later guest writes, subject to the metadata and disk-size bounds. Preserves ownership, permissions, links and devices. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes.
+Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. inode_count optionally sets minimum total inode capacity, including reserved inodes, rounded up to block-group geometry; zero sizes from input entries. Larger values reserve free inodes for later guest writes, subject to the metadata and disk-size bounds. Preserves ownership, permissions, links and devices. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes. ext2=True builds a revision-1 ext2 image instead (block maps, filetype and large_file features only) for kernels without ext4.
 
 ### `filesystem.fat`
 

@@ -147,3 +147,68 @@ func (d *Disk) Walk(ctx context.Context, visit func(uint32, []Record) error) (St
 		}
 	}
 }
+
+// OpenParts opens a CKD_P370 volume stored as several files: each holds a
+// 512-byte header (byte 17 is its sequence number, bytes 18-19 the last
+// cylinder it holds, zero in the final file) followed by consecutive
+// cylinders. The parts are composed into one image without copying.
+func OpenParts(parts []storage.Reader) (*Disk, error) {
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("ckd: no volume parts")
+	}
+	first, err := Open(parts[0])
+	if err != nil {
+		return nil, err
+	}
+	if len(parts) == 1 {
+		return first, nil
+	}
+	cylBytes := int64(first.TrackSize) * int64(first.Heads)
+	ranges := []storage.Range{{Source: parts[0], Length: parts[0].Size()}}
+	for i, p := range parts {
+		var h [512]byte
+		if _, err := io.ReadFull(io.NewSectionReader(p, 0, 512), h[:]); err != nil {
+			return nil, fmt.Errorf("ckd part %d header: %w", i+1, err)
+		}
+		if string(h[:8]) != "CKD_P370" || le.Uint32(h[8:12]) != first.Heads || le.Uint32(h[12:16]) != first.TrackSize || h[16] != first.Device {
+			return nil, fmt.Errorf("ckd part %d: geometry differs from the first part", i+1)
+		}
+		if int(h[17]) != i+1 {
+			return nil, fmt.Errorf("ckd part %d: sequence number %d", i+1, h[17])
+		}
+		if (p.Size()-512)%cylBytes != 0 {
+			return nil, fmt.Errorf("ckd part %d: incomplete cylinder", i+1)
+		}
+		if high := le.Uint16(h[18:20]); i < len(parts)-1 && int64(high) != (p.Size()-512)/cylBytes-1+cylinderBase(ranges, i, cylBytes) {
+			return nil, fmt.Errorf("ckd part %d: last cylinder %d does not match its size", i+1, high)
+		}
+		if i == 0 {
+			continue
+		}
+		ranges = append(ranges, storage.Range{Source: io.NewSectionReader(p, 512, p.Size()-512), Length: p.Size() - 512})
+	}
+	composed, err := storage.Compose(ranges...)
+	if err != nil {
+		return nil, err
+	}
+	return &Disk{Source: composed, Heads: first.Heads, TrackSize: first.TrackSize, Device: first.Device}, nil
+}
+
+// cylinderBase is the first cylinder held by part i.
+func cylinderBase(ranges []storage.Range, i int, cylBytes int64) int64 {
+	if i == 0 {
+		return 0
+	}
+	var total int64
+	for j, r := range ranges {
+		if j >= i {
+			break
+		}
+		n := r.Length
+		if j == 0 {
+			n -= 512
+		}
+		total += n / cylBytes
+	}
+	return total
+}

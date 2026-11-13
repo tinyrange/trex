@@ -73,6 +73,31 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  linux-s390:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Boot 31-bit Debian Linux on the ESA/390 emulator
+        run: |
+          mkdir -p local
+          go run ./cmd/trex scripts/smoke/linux_s390.star local/linux-s390
+          go run ./cmd/trex scripts/smoke/linux_s390_dasd.star local/linux-s390-dasd
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-s390-smoke
+          path: local/linux-s390*
+          if-no-files-found: warn
+          retention-days: 14
+
   hello-memory-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15

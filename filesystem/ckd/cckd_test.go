@@ -176,6 +176,14 @@ func TestCompressedNullTracks(t *testing.T) {
 		le.PutUint32(b[e:], 0)
 		le.PutUint16(b[e+4:], 1)
 		le.PutUint16(b[e+6:], 1)
+		// An all-ones null entry is a null track in the header's format.
+		e3 := int(le.Uint32(b[1024:])) + 8*3
+		le.PutUint32(b[e3:], 0)
+		le.PutUint16(b[e3+4:], 0xffff)
+		le.PutUint16(b[e3+6:], 0xffff)
+		if rs, err := d.Track(3); err != nil || len(rs) != 2-int(format) || rs[0].Number != 0 {
+			t.Fatalf("all-ones null entry: %+v %v", rs, err)
+		}
 		if rs, err := d.Track(4); err != nil || len(rs) != 1 || rs[0].Number != 0 {
 			t.Fatalf("per-entry null format: %+v %v", rs, err)
 		}
