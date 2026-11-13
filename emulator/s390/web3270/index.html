@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3270 Terminal</title>
+<link rel="stylesheet" href="terminal.css">
+</head>
+<body>
+<header>
+  <div class="bar">
+    <nav id="tabs" aria-label="Consoles"></nav>
+    <span id="machine" class="machine" aria-live="polite"></span>
+    <div class="actions">
+      <button id="split" aria-pressed="false" title="Show two consoles side by side">Split</button>
+      <button id="save" hidden title="Save the machine's state so it resumes from here">Save state</button>
+      <button id="snapshotsButton" hidden title="Named snapshots of the whole machine">Snapshots</button>
+      <button id="settingsButton" title="Display and keyboard settings">Settings</button>
+    </div>
+  </div>
+  <div id="keys" role="toolbar" aria-label="3270 keys">
+    <button data-key="CLEAR" title="Clear (Pause)">Clear</button>
+    <button data-key="PA1" title="PA1 (Alt+1)">PA1</button>
+    <button data-key="PA2" title="PA2 (Alt+2)">PA2</button>
+    <button data-key="PA3" title="PA3 (Alt+3)">PA3</button>
+    <button data-key="RESET" title="Reset (Escape)">Reset</button>
+    <button data-key="ERASEEOF" title="Erase EOF (End)">Erase EOF</button>
+    <button data-key="ERASEINPUT" title="Erase input">Erase Input</button>
+    <button data-key="ENTER" title="Enter">Enter</button>
+    <button id="pfToggle" aria-expanded="false" title="PF13–PF24 are Shift+F1–F12">PF keys</button>
+    <button id="transferButton" title="Upload or download a data set with IND$FILE">Transfer</button>
+  </div>
+  <div id="pf" hidden></div>
+</header>
+<main id="panes"></main>
+
+<template id="paneTemplate">
+  <section class="pane">
+    <div class="viewport">
+      <div class="screen mono" tabindex="-1" aria-label="3270 screen"></div>
+      <div class="selection" hidden></div>
+      <div class="line mono" hidden>
+        <div class="lineTools"><button type="button" class="download" title="Save the retained transcript as a text file">Download</button></div>
+        <div class="lines" tabindex="0" aria-label="Console transcript"></div>
+        <form class="lineForm" autocomplete="off">
+          <label class="prompt">&gt;</label>
+          <input class="lineInput" spellcheck="false" aria-label="Console input">
+        </form>
+      </div>
+      <div class="readerView" hidden>
+        <label class="deckLabel">Card deck (one card per line, up to 80 columns)
+          <textarea class="deck mono" spellcheck="false" rows="16" placeholder="//HELLO    JOB  CLASS=A,MSGCLASS=A&#10;//STEP1    EXEC PGM=IEFBR14&#10;//"></textarea>
+        </label>
+        <div class="readerTools">
+          <button type="button" class="submitDeck">Submit to reader</button>
+          <span class="queued" role="status"></span>
+        </div>
+      </div>
+      <div class="banner" hidden><span class="bannerText"></span> <button type="button" class="reconnect">Reconnect now</button></div>
+    </div>
+    <div class="oia mono" aria-live="polite"><span class="conn"></span><span class="lock"></span><span class="ins"></span><span class="msg"></span><span class="dev"></span><span class="pos"></span></div>
+  </section>
+</template>
+
+<dialog id="settings" aria-labelledby="settingsTitle">
+  <form method="dialog">
+    <h2 id="settingsTitle">Settings</h2>
+    <label>Font size
+      <select name="font">
+        <option value="auto">Fit to window</option>
+        <option value="12">12 px</option><option value="14">14 px</option><option value="16">16 px</option>
+        <option value="18">18 px</option><option value="20">20 px</option><option value="24">24 px</option>
+      </select>
+    </label>
+    <label>Colours
+      <select name="colors">
+        <option value="color">3270 colours</option>
+        <option value="green">Green screen</option>
+        <option value="amber">Amber screen</option>
+      </select>
+    </label>
+    <label>Cursor
+      <select name="cursor">
+        <option value="block">Block</option>
+        <option value="underline">Underline</option>
+      </select>
+    </label>
+    <label>Enter key
+      <select name="enter">
+        <option value="enter">Enter sends ENTER, Ctrl+Enter new line</option>
+        <option value="newline">Enter moves to the next line, Ctrl+Enter or Right Ctrl sends ENTER</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" name="sound"> Sound the alarm (otherwise flash)</label>
+    <fieldset id="modelSet">
+      <legend>Screen model of this terminal</legend>
+      <select name="model" aria-label="Screen model">
+        <option value="2">Model 2: 24×80</option>
+        <option value="3">Model 3: 32×80</option>
+        <option value="4">Model 4: 43×80</option>
+        <option value="5">Model 5: 27×132</option>
+      </select>
+      <p class="hint">Programs learn the size when you next log on.</p>
+    </fieldset>
+    <div class="dialogButtons"><button value="close">Done</button></div>
+  </form>
+</dialog>
+<dialog id="snapshots" aria-labelledby="snapshotsTitle">
+  <form id="snapshotForm">
+    <h2 id="snapshotsTitle">Snapshots</h2>
+    <p class="hint">A snapshot holds the whole machine: memory, every terminal and the disks. Restoring one replaces the running machine.</p>
+    <div class="snapRow">
+      <input name="snapName" aria-label="Snapshot name" placeholder="after JES2 cold start" maxlength="48" spellcheck="false" autocomplete="off">
+      <button type="submit">Take snapshot</button>
+    </div>
+    <ul id="snapshotList" class="snapList"></ul>
+    <p id="snapshotStatus" class="status" role="status"></p>
+    <div class="dialogButtons"><button type="button" id="snapshotsClose">Close</button></div>
+  </form>
+</dialog>
+<dialog id="transfer" aria-labelledby="transferTitle">
+  <form id="transferForm">
+    <h2 id="transferTitle">File transfer</h2>
+    <fieldset>
+      <legend>Direction</legend>
+      <label class="check"><input type="radio" name="direction" value="put" checked> Upload a file to the host</label>
+      <label class="check"><input type="radio" name="direction" value="get"> Download a data set from the host</label>
+    </fieldset>
+    <label>Host data set
+      <input name="dataset" required spellcheck="false" autocomplete="off" placeholder="MY.DATA or 'USER.JCL(JOB1)'">
+    </label>
+    <label class="uploadOnly">Local file
+      <input type="file" name="file">
+    </label>
+    <label>Mode
+      <select name="mode">
+        <option value="text">Text (ASCII, CRLF line ends)</option>
+        <option value="binary">Binary (no conversion)</option>
+      </select>
+    </label>
+    <label class="check uploadOnly"><input type="checkbox" name="submit"> Submit it as a job once uploaded (the file holds JCL)</label>
+    <label>Extra IND$FILE options
+      <input name="options" spellcheck="false" autocomplete="off" placeholder="RECFM(V) LRECL(255)">
+    </label>
+    <p class="hint">Put the cursor on a TSO command line (READY) first. The command is typed for you.</p>
+    <p id="transferStatus" class="status" role="status"></p>
+    <div class="dialogButtons">
+      <button type="button" id="transferClose">Close</button>
+      <button type="submit" id="transferStart">Start</button>
+    </div>
+  </form>
+</dialog>
+<textarea id="kbd" aria-label="3270 keyboard input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+<div id="toast" role="status" hidden></div>
+<script src="terminal.js"></script>
+</body>
+</html>

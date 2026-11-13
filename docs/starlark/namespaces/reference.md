@@ -4488,6 +4488,12 @@ A mutable in-memory directory tree. write adds file content, mkdir creates direc
 
 Stops evaluation with the supplied error message. Use testing.attempt when a caller needs to inspect an expected failure.
 
+### `exists`
+
+`exists(name) -> bool`
+
+Reports whether a host path names an existing regular file. Like open, this is an explicit host-path boundary; recipes use it to choose between a saved explicit output (such as a machine checkpoint) and constructing it again.
+
 ### `help`
 
 `help(value=None) -> None`
@@ -4517,6 +4523,12 @@ Performs one sequential HTTP(S) GET into an in-memory file, with normal redirect
 `http_post_json(url, body, maximum=8MiB, timeout=60, tls_roots=None, response=False, headers=None, http_version='auto') -> file or response dict`
 
 Sends a UTF-8 JSON string (or empty body) as application/json, returning a bounded in-memory file. Request body is limited to 1MiB; response maximum is 1..128MiB after transfer decompression. By default requires HTTP 200 and rejects oversized responses. response=True instead returns a frozen dictionary for any HTTP status with status, status_code, protocol, headers, trailers, content_length, transfer_encoding, uncompressed, body (file), body_truncated, read_error and complete. Header/trailer values are lists, preserving repeated fields. It reads at most maximum+1 decoded body bytes and retains a maximum-byte prefix; complete is false on truncation or read failure. Trailers may be incomplete unless complete is true. TLS responses additionally expose tls_alpn, tls_version and tls_server_name. http_version defaults to auto; 1.1 creates an isolated HTTP/1-only transport with HTTP/2 disabled and hostname/certificate verification unchanged. The returned protocol and TLS ALPN expose what was actually used. Transport/TLS failures still raise. Never follows redirects or retries; honors lifecycle cancellation and a 1..3600 second deadline. Response bodies may be gzip-decoded by HTTP; uncompressed identifies that transformation. headers optionally supplies at most 64 string-to-string fields, bounded to 64KiB. Names/control characters and case-insensitive duplicates are checked; Host, Content-Length, Transfer-Encoding, Connection, Content-Type and idempotency-key overrides are rejected. Empty User-Agent suppresses the generated header entirely rather than sending an empty value. No token acquisition or credential lookup is performed. tls_roots optionally supplies 1..16 DER/PEM CA files or bytes (up to 1MiB each); an isolated per-request root pool replaces system roots while preserving hostname, validity and chain verification. No global trust changes, implicit certificate fetching or insecure fallback. Intended for metadata; payloads should use file APIs.
+
+### `launcher`
+
+`launcher(systems) -> launcher`
+
+Describes machines a web launcher page can start and stop. systems is a list of dicts with name (lowercase letters, digits, dashes), title, description, script, args and an optional root, the directory its "//" module labels resolve in. Each script's main(args) must return machine terminals (emulator machine web_terminals); a state=PATH argument lets Stop save and Start resume the machine, and tn3270=ADDRESS is shown. Returned from main under -serve, the launcher serves the page, each running system's consoles under /s/NAME/ and their tn3270 ports; Ctrl-C saves running systems that have a state file.
 
 ### `mirror_file`
 
@@ -5676,6 +5688,12 @@ Wraps explicit mutable plugin state and its installation callback for emulator u
 
 Creates a portable in-process ARM64 or AMD64 instruction context independently of executable formats and OS APIs. map(address,size,data=None,access=rw) copies bounded bytes/files into owned sparse memory; read/write, get_register/set_register and plugin expose explicit experiment state. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps and PC for breakpoint, halt, budget or fault. ARM64 uses the existing baseline ARMv8-A processor without optional PAuth. No code is implicitly loaded or executed. close() releases the context.
 
+### `emulator.s390`
+
+`emulator.s390(memory=64MiB, cpus=1, mips=50, start='', idle_skip=True, architecture='esa390') -> s390_machine`
+
+Creates an in-process ESA/390 or System/370 (architecture='s370') machine with storage, CPUs, a channel subsystem, CKD DASD, 3270 and 3215 consoles, unit-record devices, AWS tapes and the hardware system console. Attach devices, then ipl() or storage_load() and run(); time is virtual. See docs/s390.md.
+
 ### `emulator.uefi`
 
 `emulator.uefi(image, memory=256MiB, memory_base=0x40000000, image_base=0, stack_size=1MiB, time_unix=0, image_path='\\EFI\\Boot\\BootAA64.efi', registers={}, observe=None, device_path=b'', event_kinds=None)`
@@ -5822,9 +5840,9 @@ Reads a clean ext2/3/4 image without mounting. Returns flat entry records with U
 
 ### `filesystem.ext4_build`
 
-`filesystem.ext4_build(entries, size, label='', uuid='', inode_count=0) -> file`
+`filesystem.ext4_build(entries, size, label='', uuid='', inode_count=0, ext2=False) -> file`
 
-Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. inode_count optionally sets minimum total inode capacity, including reserved inodes, rounded up to block-group geometry; zero sizes from input entries. Larger values reserve free inodes for later guest writes, subject to the metadata and disk-size bounds. Preserves ownership, permissions, links and devices. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes.
+Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. inode_count optionally sets minimum total inode capacity, including reserved inodes, rounded up to block-group geometry; zero sizes from input entries. Larger values reserve free inodes for later guest writes, subject to the metadata and disk-size bounds. Preserves ownership, permissions, links and devices. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes. ext2=True builds a revision-1 ext2 image instead (block maps, filetype and large_file features only) for kernels without ext4.
 
 ### `filesystem.fat`
 

@@ -180,11 +180,15 @@ func (c *Compressed) loadLocked(t uint32) ([]byte, error) {
 		}
 		if pos == 0 {
 			// A null level-2 entry records its own null format in both
-			// length and size.
-			if length > 1 || size != length {
+			// length and size; all-ones (seen in MVS 3.8j Turnkey
+			// volumes) is a null track in the image's default format.
+			switch {
+			case length == 0xffff && size == 0xffff:
+			case length > 1 || size != length:
 				return nil, fmt.Errorf("cckd track %d: unsupported null entry %d/%d", t, length, size)
+			default:
+				format = byte(length)
 			}
-			format = byte(length)
 		}
 	}
 	if pos == 0 {
