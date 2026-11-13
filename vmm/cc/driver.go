@@ -140,7 +140,10 @@ func (d *driver) loop() {
 	}()
 	d.emit("started", nil)
 	for {
-		if len(d.pc.cpus) > 1 {
+		// USB frame/interrupt service must not wait for the sole vCPU to
+		// exit native execution. Reuse the device-owner coordinator without
+		// shortening native slices (which can starve host split-lock handling).
+		if len(d.pc.cpus) > 1 || len(d.pc.cpus) == 1 && d.pc.uhci != nil {
 			d.loopSMP()
 		} else {
 			d.loopSingle()
@@ -239,18 +242,7 @@ func (d *driver) loopSingle() {
 		if err == nil {
 			switch ex.Reason {
 			case hypervisor.X86ExitDebug:
-				d.breakpointHit = true
-				if d.breakpointSkip > 0 {
-					d.breakpointSkip--
-					err = d.skipBreakpoint()
-					if err == nil {
-						continue
-					}
-				}
-				d.mu.Lock()
-				d.state = vmm.State{Name: "paused"}
-				d.mu.Unlock()
-				d.emit("paused", "breakpoint")
+				err = d.handleDebugExit()
 			case 0:
 				continue
 			case hypervisor.X86ExitIO:
@@ -315,6 +307,22 @@ func (d *driver) Pause(ctx context.Context) error {
 		return nil
 	})
 }
+func (d *driver) handleDebugExit() error {
+	if len(d.pc.cpus) > 1 {
+		return fmt.Errorf("execution breakpoints require one vCPU")
+	}
+	d.breakpointHit = true
+	if d.breakpointSkip > 0 {
+		d.breakpointSkip--
+		return d.skipBreakpoint()
+	}
+	d.mu.Lock()
+	d.state = vmm.State{Name: "paused"}
+	d.mu.Unlock()
+	d.emit("paused", "breakpoint")
+	return nil
+}
+
 func (d *driver) skipBreakpoint() error {
 	if d.breakpointHit {
 		r, err := d.pc.cpu.Registers()

@@ -7241,6 +7241,12 @@ fits inside the input; it does not validate the body or prove that the writer
 completed. Other dump signatures are rejected. No guest execution or host
 debugger is used. This is distinct from the MDMP user-mode minidump reader.
 
+### `windows.kernel_triage_dump`
+
+`windows.kernel_triage_dump(file) -> record`
+
+Reads completed AMD64 PAGE/DU64 type-4 kernel triage dumps without a host debugger. Returns header, context (1232 AMD64 CONTEXT bytes), pc/sp/fp, stack (borrowed file), stack_address, modules (name/base/size/checksum/timestamp), and regions (virtual address plus borrowed file). Regions preserve captured ranges independently, including overlaps; this does not synthesize absent RAM or walk page tables. The triage directory and TRGD completion marker must fit the declared triage extent, itself bounded to 64 MiB and contained in RequiredDumpSpace and the input. Bounds counts before reading tables: at most 4096 drivers, 65536 memory blocks, 1 MiB stack and 32767 UTF-16 code units per name. Secondary streams after the triage extent are not interpreted. No symbol download, automatic stack unwinding or driver attribution is implied; stack words alone are not frames. Borrowed files require the input lifetime. Other dump types and malformed/incomplete ranges fail.
+
 ### `windows.map_file_security_rights`
 
 `windows.map_file_security_rights(source) -> bytes`
@@ -7616,7 +7622,7 @@ Defaults to local-only replay of cached raw catalog responses for the exact call
 
 ### `windows.update_media`
 
-`windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, servicing_only=False, while_preparing=None, installed_stage_limit=0, base=None, image="", bootsect=None, additional_cabinets={}, additional_msus={}, additional_stage_order=[], cache="") -> update_media`
+`windows.update_media(catalog, offer, architecture, edition, language, metadata_name, target_compdb, index_only=False, plan_only=False, metadata_only=False, state_only=False, servicing_only=False, while_preparing=None, installed_stage_limit=0, base=None, image="", bootsect=None, additional_cabinets={}, additional_msus={}, additional_stage_order=[], cache="", wim_cache_bytes=2147483648, verified_cache_bytes=6442450944, servicing_cache_bytes=-1) -> update_media`
 
 Prepares an explicitly selected catalog offer as referenced UUP media, not a complete disk image. catalog must come from update_catalog, and offer must be an original offer from that same catalog. architecture, edition, language, metadata_name (exact aggregated metadata payload name) and target_compdb (composition database name/source) are required caller choices. There is no rescan, fallback offer, ranking or client/preview filter. Dependency closure and signed-location renewal retain the original catalog, request profile, selected revision, declared hashes and sizes. Inspection modes expose metadata or plans without full image construction; servicing uses mandatory reconstructed target hashes. TinyRangeX recipes apply those effects and construct the filesystem, registry and bootable disk.
 

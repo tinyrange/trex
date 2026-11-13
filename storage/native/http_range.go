@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -308,6 +309,7 @@ func (f *HTTPRangeFile) fetch(start, length int64) ([]byte, error) {
 	}
 	end := start + length - 1
 	var lastErr error
+	var prefix []byte
 	fetchContext, cancelFetch := context.WithTimeout(f.context, httpRangeFetchLimit)
 	defer cancelFetch()
 	refreshed := false
@@ -324,7 +326,8 @@ attempts:
 				lastErr = err
 				continue
 			}
-			request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+			requestStart := start + int64(len(prefix))
+			request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", requestStart, end))
 			request.Header.Set("Accept-Encoding", "identity")
 			response, err := f.client.Do(request)
 			if err != nil {
@@ -332,11 +335,20 @@ attempts:
 				lastErr = err
 				continue
 			}
-			data, err := readHTTPRange(response, start, end, f.size)
+			data, err := readHTTPRange(response, requestStart, end, f.size)
 			response.Body.Close()
 			cancelRequest()
 			if err == nil {
-				return data, nil
+				if len(prefix) == 0 {
+					return data, nil
+				}
+				return append(prefix, data...), nil
+			}
+			// Only an exact, validated Content-Range may contribute a prefix.
+			// Continue the missing suffix within the existing attempt/deadline
+			// budget; never publish or cache an incomplete chunk.
+			if len(data) > 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+				prefix = append(prefix, data...)
 			}
 			lastErr = err
 			if response.StatusCode == http.StatusForbidden && f.resolveLocations != nil && !refreshed && attempt+1 < httpRangeAttempts {
@@ -375,8 +387,8 @@ func readHTTPRange(response *http.Response, start, end, size int64) ([]byte, err
 	}
 	length := end - start + 1
 	data := make([]byte, length)
-	if _, err := io.ReadFull(response.Body, data); err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+	if n, err := io.ReadFull(response.Body, data); err != nil {
+		return data[:n], fmt.Errorf("read response: received %d of %d bytes: %w", n, length, err)
 	}
 	var extra [1]byte
 	if count, err := response.Body.Read(extra[:]); count != 0 || err != io.EOF {

@@ -405,6 +405,40 @@ pointer, so frontends can release relative capture and switch coordinates safely
 Native Windows 11 build 26300 has been boot-tested with 16 GiB, USB keyboard,
 absolute pointer, and wheel scrolling. This does not add SMP or an NVMe device.
 
+`cc.v1.state().usb` includes a bounded history of the last 64 I/O register
+accesses and PCI configuration writes, in access order. Values are the bytes
+read or supplied by the guest, before write masking; frame counters identify
+the controller progress at each access. `access_count` includes overwritten
+history. Access rows also include the pre-write USB status, interrupt-enable
+mask, and last successfully delivered IRQ level. Inspection returns detached
+records and does not consume the history.
+`frame_history` retains the final 64 serviced frame observations, even after
+PCI disable: frame-list link, visited/active/IOC TD counts, status before/after,
+and the final TD/QH address, fetched status and token. It does not retain RAM or
+packet contents; the last descriptor need not be the one that raised USBINT.
+`irq_asserted`, `irq_rises` and `irq_falls` describe successful native IRQ-line
+updates, not guest interrupt acceptance or ISR execution.
+`max_poll_gap_nanoseconds` records the largest interval between clock-service
+polls (periodic owner wakeups and register accesses) while Run and PCI I/O/bus
+mastering were enabled; it is host scheduling
+evidence, not proof of a guest timeout or a USB transaction latency. These
+observations do not change frame progression, interrupts, or HID queue limits.
+Single-vCPU USB machines use the same device-owner coordinator as SMP machines:
+USB polling and completed storage I/O do not wait for a native CPU exit. The
+native CPU slice remains bounded at 50 ms; device progress does not require
+shortening it and interfering with host split-lock handling. Register accesses
+also service all frames due at the supplied hardware time before reading or
+writing the registers. A late owner wakeup cannot make FRNUM reads freeze;
+status acknowledgments are ordered after already-due completions. Repeated
+accesses at the same time do not advance frames, and a halted controller's
+frame counter remains stopped. Pause, inspection,
+and shutdown still join the CPU worker first; one-vCPU execution breakpoints
+retain their skip/resume semantics.
+Inactive transfer descriptors with IOC set still generate a frame-end interrupt,
+as required by the UHCI TD format. This does not execute a transaction or advance
+a queue-head's inactive software tail; acknowledging USBINT permits the next
+frame's IOC to assert it again.
+
 ## Native x86 NVMe
 
 Use `vmm.disk(device, bus="nvme", unit=0)` with `cc.backend(uefi=True)`.
@@ -418,6 +452,13 @@ supported by the accelerator, with INTx/GSI16 fallback. ACPI routing and the EFI
 namespace device path match the controller; no IDE function or legacy ATA ports
 are exposed for this profile. The existing snapshot/read-only disk policy is
 preserved. `cc.v1.state().nvme` reports PCI configuration and controller registers.
+
+Completion ownership is published only after read-data DMA and the completion
+body. Mapped queues release-store the aligned final CID/status word; opaque
+memory transports keep the phase invalid during the body write and publish its
+ownership byte afterward. Guest polling therefore does not depend on interrupt
+arrival to order completion data. Invalid host mapping alignment fails before
+publication instead of exposing a partially updated entry.
 
 This is a synchronous emulated block controller, not physical NVMe passthrough
 or a multiqueue throughput promise. Guest boot policy must install an NVMe driver;

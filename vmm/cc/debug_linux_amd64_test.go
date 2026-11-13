@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func debugFixture(t *testing.T, code []byte) (*driver, inspection) {
+func debugFixture(t *testing.T, code []byte, usb bool) (*driver, inspection) {
 	t.Helper()
 	requireKVM(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -35,12 +35,20 @@ func debugFixture(t *testing.T, code []byte) (*driver, inspection) {
 		cpu.Close()
 		t.Fatal(err)
 	}
+	if usb {
+		p.cpus = []hypervisor.X86{cpu}
+		p.uhci, _, _ = usbTestController()
+	}
 	d := newDriver(ctx, p, true)
 	t.Cleanup(func() { d.Close(context.Background()) })
 	return d, inspection{driver: d, ctx: ctx}
 }
 func TestExecutionBreakpointSkipsOnlySelectedOccurrences(t *testing.T) {
-	d, i := debugFixture(t, []byte{0xff, 0x06, 0, 0x80, 0xeb, 0xfa})
+	t.Run("single", func(t *testing.T) { checkExecutionBreakpoint(t, false) })
+	t.Run("usb-coordinator", func(t *testing.T) { checkExecutionBreakpoint(t, true) })
+}
+func checkExecutionBreakpoint(t *testing.T, usb bool) {
+	d, i := debugFixture(t, []byte{0xff, 0x06, 0, 0x80, 0xeb, 0xfa}, usb)
 	if _, err := i.breakpoint(nil, nil, starlark.Tuple{starlark.MakeInt(0x7c00)}, []starlark.Tuple{{starlark.String("skip"), starlark.MakeInt(2)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +86,7 @@ func TestExecutionBreakpointSkipsOnlySelectedOccurrences(t *testing.T) {
 	}
 }
 func TestNativeStepRetainsTraceAndStopsOnGuestFailure(t *testing.T) {
-	d, i := debugFixture(t, []byte{0xb8, 0x34, 0x12, 0x0f, 0x0b})
+	d, i := debugFixture(t, []byte{0xb8, 0x34, 0x12, 0x0f, 0x0b}, false)
 	v, err := i.step(nil, nil, starlark.Tuple{starlark.MakeInt(256)}, nil)
 	if err != nil {
 		t.Fatal(err)

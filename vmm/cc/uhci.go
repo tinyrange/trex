@@ -22,6 +22,47 @@ type uhci struct {
 	irq                               func(uint32, bool) error
 	transactions, frames              uint64
 	fault                             string
+	accesses                          [64]uhciAccess
+	accessCount                       uint64
+	lastPoll                          time.Time
+	maxPollGap                        time.Duration
+	irqLevel                          bool
+	irqRises, irqFalls                uint64
+	frameTrace                        [64]uhciFrameTrace
+	frameTraceCount                   uint64
+	currentFrame                      *uhciFrameTrace
+}
+
+// Keep fixed-size native records on the device-owner loop. Convert to portable
+// inspection values only on request; busy register polling allocates nothing.
+type uhciAccess struct {
+	space             string
+	offset, size      int
+	write             bool
+	value             uint32
+	frame             uint16
+	frames            uint64
+	status, interrupt uint16
+	irq               bool
+}
+
+func (u *uhci) recordAccess(space string, offset int, data []byte, write bool) {
+	var value uint32
+	for i, b := range data {
+		value |= uint32(b) << (8 * i)
+	}
+	u.accesses[u.accessCount%uint64(len(u.accesses))] = uhciAccess{space: space, offset: offset, size: len(data), write: write, value: value, frame: u.frame, frames: u.frames, status: u.status, interrupt: u.interrupt, irq: u.irqLevel}
+	u.accessCount++
+}
+
+func (u *uhci) accessHistory() []any {
+	n := min(u.accessCount, uint64(len(u.accesses)))
+	out := make([]any, 0, n)
+	for i := u.accessCount - n; i < u.accessCount; i++ {
+		a := u.accesses[i%uint64(len(u.accesses))]
+		out = append(out, map[string]any{"space": a.space, "offset": a.offset, "size": a.size, "write": a.write, "value": int64(a.value), "frame": int(a.frame), "frames": int64(a.frames), "status": int(a.status), "interrupt": int(a.interrupt), "irq": a.irq})
+	}
+	return out
 }
 
 func newUHCI(memory func(uint64, uint64) ([]byte, error), irq func(uint32, bool) error) *uhci {
@@ -44,6 +85,7 @@ func newUHCI(memory func(uint64, uint64) ([]byte, error), irq func(uint32, bool)
 	return u
 }
 func (u *uhci) writeConfig(offset int, v byte) {
+	u.recordAccess("pci", offset, []byte{v}, true)
 	switch offset {
 	case 4:
 		u.config[offset] = v & 5
@@ -61,9 +103,28 @@ func (u *uhci) ioBase() uint32 { return binary.LittleEndian.Uint32(u.config[0x20
 func (u *uhci) updateIRQ() error {
 	enabled := u.config[4]&1 != 0 && u.config[5]&4 == 0
 	pending := (u.status&1 != 0 && u.interrupt&12 != 0) || (u.status&2 != 0 && u.interrupt&1 != 0) || (u.status&4 != 0 && u.interrupt&2 != 0) || u.status&0x18 != 0
-	return u.irq(17, enabled && pending)
+	level := enabled && pending
+	if err := u.irq(17, level); err != nil {
+		return err
+	}
+	if level != u.irqLevel {
+		if level {
+			u.irqRises++
+		} else {
+			u.irqFalls++
+		}
+		u.irqLevel = level
+	}
+	return nil
 }
 func (u *uhci) io(ex hypervisor.X86Exit, now time.Time) error {
+	// Bring the hardware clock and all due completions up to the access time.
+	// The owner ticker is only a wakeup mechanism: delayed host scheduling must
+	// not make a driver's FRNUM reads report a stopped controller. Do this before
+	// writes too, so an acknowledgment cannot precede an already-due completion.
+	if err := u.poll(now); err != nil {
+		return err
+	}
 	for n := uint32(0); n < ex.Count; n++ {
 		data := ex.Data[int(n)*int(ex.Size) : int(n+1)*int(ex.Size)]
 		off := int(uint32(ex.Port) - u.ioBase())
@@ -82,8 +143,10 @@ func (u *uhci) io(ex hypervisor.X86Exit, now time.Time) error {
 		}
 		if !ex.Write {
 			copy(data, regs[off:])
+			u.recordAccess("io", off, data, false)
 			continue
 		}
+		u.recordAccess("io", off, data, true)
 		old := regs
 		copy(regs[off:], data)
 		touched := func(start, size int) bool { return off < start+size && off+len(data) > start }
@@ -169,6 +232,10 @@ func (u *uhci) fail(message string, process bool) error {
 	return u.updateIRQ()
 }
 func (u *uhci) poll(now time.Time) error {
+	if !u.lastPoll.IsZero() && u.command&1 != 0 && u.config[4]&5 == 5 {
+		u.maxPollGap = max(u.maxPollGap, now.Sub(u.lastPoll))
+	}
+	u.lastPoll = now
 	if u.command&1 == 0 || u.command&0xc != 0 || u.config[4]&5 != 5 {
 		u.last = now
 		return u.updateIRQ()
@@ -189,7 +256,15 @@ func (u *uhci) poll(now time.Time) error {
 		if err != nil {
 			return u.fail(err.Error(), false)
 		}
-		if err := u.schedule(binary.LittleEndian.Uint32(frame)); err != nil {
+		entry := binary.LittleEndian.Uint32(frame)
+		row := &u.frameTrace[u.frameTraceCount%uint64(len(u.frameTrace))]
+		*row = uhciFrameTrace{frame: u.frame, frames: u.frames, link: entry, statusBefore: u.status, interrupt: u.interrupt}
+		u.currentFrame = row
+		err = u.schedule(entry)
+		u.currentFrame = nil
+		row.statusAfter = u.status
+		u.frameTraceCount++
+		if err != nil {
 			return u.fail(err.Error(), true)
 		}
 		u.frame = (u.frame + 1) & 0x7ff
@@ -239,10 +314,27 @@ func (u *uhci) schedule(link uint32) error {
 			return err
 		}
 		next := binary.LittleEndian.Uint32(data)
+		if row := u.currentFrame; row != nil {
+			status := binary.LittleEndian.Uint32(data[4:])
+			row.tds++
+			if status&(1<<23) != 0 {
+				row.active++
+			}
+			if status&(1<<24) != 0 {
+				row.ioc++
+			}
+			row.qh, row.td, row.tdStatus, row.token = qh, address, status, binary.LittleEndian.Uint32(data[8:])
+		}
 		// An inactive queue TD is the software tail sentinel. Hardware must
 		// leave the QH element on it, not consume its link and lose the
 		// controller driver's completion boundary.
-		if binary.LittleEndian.Uint32(data[4:])&(1<<23) == 0 {
+		if status := binary.LittleEndian.Uint32(data[4:]); status&(1<<23) == 0 {
+			// UHCI TD IOC applies even when Active was already clear when
+			// fetched. Keep the software tail intact, but do not suppress
+			// its frame-end interrupt (used for controller liveness).
+			if status&(1<<24) != 0 {
+				u.status |= 1
+			}
 			if qh != 0 {
 				link = 1
 			} else {

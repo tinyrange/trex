@@ -160,6 +160,7 @@ func Builtins() starlark.StringDict {
 		"registry_key_plan":                registryKeyPlanBuiltin,
 		"registry_path_mapper":             registryPathMapperBuiltin,
 		"kernel_dump_header":               kernelDumpHeaderBuiltin,
+		"kernel_triage_dump":               kernelTriageDumpBuiltin,
 		"state_repository_dictionary":      stateRepositoryDictionaryBuiltin,
 		"state_repository_dictionary_read": stateRepositoryDictionaryReadBuiltin,
 		"state_repository_hash":            stateRepositoryHashBuiltin,

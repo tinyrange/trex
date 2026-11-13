@@ -22,7 +22,8 @@ const maximumVerifiedFileCache = 6 << 30
 // The initial construction pass still verifies every target. Eviction discards
 // only reusable bytes, never a file's reconstruction recipe or expected hash.
 type verifiedFileCache struct {
-	mu            sync.Mutex
+	mu            sync.Mutex // LRU metadata only; never reconstruction or packing.
+	reconstruct   sync.Mutex // Preserve the one-full-target transient-memory bound.
 	codec         *retainedFileStore
 	maximum, used int64
 	entries       map[*verifiedFile]*list.Element
@@ -62,9 +63,7 @@ func newVerifiedFile(cache *verifiedFileCache, name string, verified []byte, ope
 	// verification. Admit a compressed immutable copy to the same bounded LRU
 	// used by reads instead of throwing it away and repeating that work at boot.
 	if cache.maximum != 0 {
-		cache.mu.Lock()
-		_, err := cache.retainLocked(file, verified)
-		cache.mu.Unlock()
+		_, err := cache.retain(file, verified)
 		if err != nil {
 			return nil, err
 		}
@@ -72,14 +71,27 @@ func newVerifiedFile(cache *verifiedFileCache, name string, verified []byte, ope
 	return file, nil
 }
 
-func (c *verifiedFileCache) get(owner *verifiedFile) (starvalue.File, error) {
+func (c *verifiedFileCache) lookup(owner *verifiedFile) starvalue.File {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if entry := c.entries[owner]; entry != nil {
 		c.lru.MoveToFront(entry)
-		return entry.Value.(verifiedFileEntry).file, nil
+		return entry.Value.(verifiedFileEntry).file
 	}
-	// Serialize misses to bound simultaneous full-target reconstruction peaks.
+	return nil
+}
+
+func (c *verifiedFileCache) get(owner *verifiedFile) (starvalue.File, error) {
+	if file := c.lookup(owner); file != nil {
+		return file, nil
+	}
+	// Serialize cold reconstruction peaks, not unrelated cache hits. Recheck
+	// after waiting: another reader may have admitted this same target.
+	c.reconstruct.Lock()
+	defer c.reconstruct.Unlock()
+	if file := c.lookup(owner); file != nil {
+		return file, nil
+	}
 	source, err := owner.open()
 	if err != nil {
 		return nil, err
@@ -99,12 +111,13 @@ func (c *verifiedFileCache) get(owner *verifiedFile) (starvalue.File, error) {
 	if int64(len(data)) != owner.length || sha256.Sum256(data) != owner.hash {
 		return nil, fmt.Errorf("verified file %q changed SHA-256 during reconstruction", owner.name)
 	}
-	return c.retainLocked(owner, data)
+	return c.retain(owner, data)
 }
 
-// retainLocked copies verified bytes and enforces the compressed-byte budget.
-// The caller holds c.mu and has checked the input's content identity.
-func (c *verifiedFileCache) retainLocked(owner *verifiedFile, data []byte) (starvalue.File, error) {
+// retain copies verified bytes and enforces the compressed-byte budget.
+// The caller has checked the content identity. Packing is outside the LRU lock
+// so a large cold target cannot block reads from already-admitted files.
+func (c *verifiedFileCache) retain(owner *verifiedFile, data []byte) (starvalue.File, error) {
 	packed, err := c.codec.Pack(owner.name, data)
 	if err != nil {
 		return nil, err
@@ -114,6 +127,8 @@ func (c *verifiedFileCache) retainLocked(owner *verifiedFile, data []byte) (star
 		weight = chunks.RetainedBytes() - 128
 	}
 	weight += 128 // File/entry/index bookkeeping, including empty files.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if weight <= c.maximum {
 		for c.used > c.maximum-weight {
 			old := c.lru.Back()

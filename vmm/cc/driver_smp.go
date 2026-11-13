@@ -105,6 +105,8 @@ func (d *driver) loopSMP() {
 			if stats != nil {
 				stats.Completion.add(time.Since(began), 0)
 			}
+		case hypervisor.X86ExitDebug:
+			err = d.handleDebugExit()
 		case hypervisor.X86ExitShutdown:
 			if failure == nil {
 				tripleFaultCPU = result.id

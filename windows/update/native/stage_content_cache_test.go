@@ -112,3 +112,38 @@ func TestStageCompressedCacheOversizedAdmission(t *testing.T) {
 		t.Fatal("evicted oversized target bypassed hash validation")
 	}
 }
+
+// Compressibility must not send a large, expensive-to-reconstruct target back
+// into the ordinary tiny-file LRU. Its decoded size selects the dedicated slot.
+func TestStageCompressedLargeTargetSurvivesSmallLRUChurn(t *testing.T) {
+	const limit = 128 << 10
+	cache := stageTestCache(t, limit)
+	data := bytes.Repeat([]byte("large compressed paging target"), 65536)
+	digest := sha256.Sum256(data)
+	opens := 0
+	large := &reopenedStageReader{size: int64(len(data)), expectedSHA256: &digest, compressed: cache, key: bytecache.Key{Index: 1}, open: func() (storage.Reader, error) { opens++; return &starfile.Bytes{Data: data}, nil }}
+	if _, err := large.ReadAt(make([]byte, 4096), 0); err != nil {
+		t.Fatal(err)
+	}
+	rng := rand.New(rand.NewPCG(55, 77))
+	for index := 2; index < 6; index++ {
+		smallData := make([]byte, 64<<10)
+		for i := range smallData {
+			smallData[i] = byte(rng.Uint32())
+		}
+		small := &reopenedStageReader{size: int64(len(smallData)), compressed: cache, key: bytecache.Key{Index: index}, open: func() (storage.Reader, error) { return &starfile.Bytes{Data: smallData}, nil }}
+		if _, err := small.ReadAt(make([]byte, 1), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := make([]byte, 4096)
+	if _, err := large.ReadAt(got, 1024); err != nil || !bytes.Equal(got, data[1024:1024+len(got)]) {
+		t.Fatalf("large target bytes changed: %v", err)
+	}
+	if opens != 1 {
+		t.Fatalf("compressible large paging target reconstructed %d times", opens)
+	}
+	if s := cache.Stats(); cache.used > limit || s.Bytes > limit+maximumStageCacheEntry {
+		t.Fatalf("large-slot retention exceeded established bounds: %+v", s)
+	}
+}

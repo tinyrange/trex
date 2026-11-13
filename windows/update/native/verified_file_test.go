@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tinyrange/trex/storage"
 	starvalue "github.com/tinyrange/trex/storage/star"
@@ -144,5 +145,99 @@ func TestVerifiedFileOversizedCacheEntryAndErrors(t *testing.T) {
 	got := make([]byte, len(data))
 	if _, err := file.ReadAt(got, 0); err != nil || !bytes.Equal(got, data) || cache.used != 0 || len(cache.entries) != 0 {
 		t.Fatalf("oversized entry: %v", err)
+	}
+}
+
+func TestVerifiedFileWarmReadDoesNotWaitForColdReconstruction(t *testing.T) {
+	cache, err := newVerifiedFileCache(256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldData := bytes.Repeat([]byte{'c'}, 32)
+	warmData := bytes.Repeat([]byte{'w'}, 32)
+	entered, release := make(chan struct{}), make(chan struct{})
+	cold, err := newVerifiedFile(cache, "cold", coldData, func() (storage.Reader, error) {
+		close(entered)
+		<-release
+		return &starvalue.Bytes{Data: coldData}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warm, err := newVerifiedFile(cache, "warm", warmData, func() (storage.Reader, error) { return nil, fmt.Errorf("warm file unexpectedly evicted") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache.entries[cold] != nil || cache.entries[warm] == nil {
+		t.Fatal("fixture did not evict only cold file")
+	}
+	coldDone := make(chan error, 1)
+	go func() { _, err := cold.ReadAt(make([]byte, 1), 0); coldDone <- err }()
+	<-entered
+	defer func() {
+		close(release)
+		if err := <-coldDone; err != nil {
+			t.Error(err)
+		}
+	}()
+	warmDone := make(chan error, 1)
+	go func() {
+		got := make([]byte, len(warmData))
+		_, err := warm.ReadAt(got, 0)
+		if err == nil && !bytes.Equal(got, warmData) {
+			err = fmt.Errorf("warm bytes changed")
+		}
+		warmDone <- err
+	}()
+	select {
+	case err := <-warmDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("warm read blocked behind unrelated full-file reconstruction")
+	}
+}
+
+func TestVerifiedFileColdReadersShareAdmission(t *testing.T) {
+	cache, err := newVerifiedFileCache(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("cold target"), 128)
+	var opens atomic.Int32
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	file, err := newVerifiedFile(cache, "cold shared", data, func() (storage.Reader, error) {
+		opens.Add(1)
+		once.Do(func() { close(entered) })
+		<-release
+		return &starvalue.Bytes{Data: data}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force the first runtime read to reconstruct rather than using initial
+	// admission; the configured limit is immutable during concurrent reads.
+	cache.maximum = 4096
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got := make([]byte, len(data))
+			if _, err := file.ReadAt(got, 0); err != nil || !bytes.Equal(got, data) {
+				t.Errorf("cold read: %v", err)
+			}
+		}()
+	}
+	<-entered
+	close(release)
+	wg.Wait()
+	if opens.Load() != 1 {
+		t.Fatalf("same cold target reconstructed %d times", opens.Load())
+	}
+	if cache.used > cache.maximum || len(cache.entries) != 1 {
+		t.Fatal("admission exceeded retention bound")
 	}
 }
