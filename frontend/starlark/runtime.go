@@ -348,6 +348,7 @@ func predeclared() starlark.StringDict {
 		"exists":         nativeIO["exists"],
 		"open":           nativeIO["open"],
 		"repl":           starlark.NewBuiltin("repl", replBuiltin),
+		"launcher":       starlark.NewBuiltin("launcher", launcherBuiltin),
 		"stdout":         nativeIO["stdout"],
 		"write":          nativeIO["write"],
 	}

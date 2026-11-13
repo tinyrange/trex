@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mainframe Launcher</title>
+<link rel="stylesheet" href="launcher.css">
+</head>
+<body>
+<header>
+  <h1>Systems</h1>
+  <p id="note">Start a system, then open its consoles here or connect a tn3270 client.</p>
+</header>
+<main id="systems" aria-live="polite"></main>
+<template id="card">
+  <article class="card">
+    <div class="top">
+      <div>
+        <h2 class="title"></h2>
+        <p class="desc"></p>
+      </div>
+      <span class="state"></span>
+    </div>
+    <dl class="facts">
+      <div class="tnRow"><dt>tn3270</dt><dd class="tn"></dd></div>
+      <div class="sinceRow"><dt>Running since</dt><dd class="since"></dd></div>
+      <div class="saveRow"><dt>Saved state</dt><dd class="saved"></dd></div>
+    </dl>
+    <p class="error" role="alert"></p>
+    <div class="buttons">
+      <select class="from" aria-label="Start from" hidden></select>
+      <button class="start">Start</button>
+      <a class="open" target="_blank" rel="noopener">Open consoles</a>
+      <button class="saveStop">Save and stop</button>
+      <button class="stop">Stop</button>
+    </div>
+    <details class="logBox">
+      <summary>Boot log</summary>
+      <pre class="log"></pre>
+    </details>
+  </article>
+</template>
+<script src="launcher.js"></script>
+</body>
+</html>

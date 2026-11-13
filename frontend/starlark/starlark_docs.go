@@ -186,6 +186,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"exists":                            "exists(name) -> bool",
 	"open":                              "open(name) -> file",
 	"repl":                              "repl() -> None",
+	"launcher":                          "launcher(systems) -> launcher",
 	"windows.reactos_record":            "windows.reactos_record(kind, fields) -> bytes",
 	"stdout":                            "stdout(value) -> None",
 	"write":                             "write(name, value, max_bytes=64GiB) -> None",
