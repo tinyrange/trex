@@ -4143,12 +4143,13 @@ Select a bounded ordinary single-owner registry value action.
 
 ### `select_servicing_writable_file_action`
 
-Select copy versus preservation for the observed paired writable shape.
+Select copy versus preservation for supported paired/new writable shapes.
 
     This reads the current projected file, not its possibly DCS-encoded WinSxS
     counterpart. It neither applies effects nor verifies the replacement source,
-    security authorization, FileMaps or transaction ordering. Missing projections,
-    different flags/states and non-identity hashes require separate native policy.
+    security authorization, FileMaps or transaction ordering. Missing paired
+    projections, existing new destinations, different flags/states and
+    non-identity hashes require separate native policy.
 
 ### `servicing_directory_propagation_policy`
 

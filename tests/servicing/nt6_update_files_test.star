@@ -471,7 +471,96 @@ def test_source_folder_security_matches_native_image_control():
     # rejecting all parent SACLs. Preserve the success audit with ID set.
     equal(actual["sacl"], windows.security_descriptor_parts(windows.compile_sddl("S:AI(AU;OICISAID;FA;;;WD)"))["sacl"])
 
+
+def _pending_delete_fixture():
+    root, prepared, paths, directories = _commit_fixture()
+    node = prepared["hierarchy"]["/windows/system32/obsolete.dll"]
+    node["before"]["process_flags"] = 0x48
+    node["directory_flags"] |= 0x40
+    pending = "/Windows/WinSxS/Temp/PendingDeletes"
+    root.mkdir(pending)
+    root.set_security(pending, root.get_security("/Windows"))
+    root.set_times("/Windows/System32/obsolete.dll", 201, 202, 203)
+    return root, prepared, paths, directories
+
+
+def test_writable_removal_moves_actual_object_without_hashing():
+    for modified in [False, True]:
+        root, prepared, paths, directories = _pending_delete_fixture()
+        path = "/Windows/System32/obsolete.dll"
+        if modified:
+            root.write(path, "user-modified shortcut")
+            root.set_security(path, windows.compile_sddl("O:SYG:SYD:P(A;;FA;;;SY)"))
+            root.set_times(path, 301, 302, 303)
+        root.hardlink(path, "/retained-alias")
+        before = root.get_metadata(path)
+        security = root.get_security(path)
+        plan = commit_files["plan_update_file_commits"](root, prepared, paths, directories)
+        move = [p for p in plan["plans"] if p["operation"] == "pending_delete"][0]
+        equal(root.find(move["pending"]), None)
+        commit_files["apply_update_file_commits"](root, plan, 2)
+        equal(root.find(path), None)
+        equal(root.find(move["pending"]).read(), "user-modified shortcut" if modified else "obsolete")
+        equal(root.get_security(move["pending"]), security)
+        for field in ["creation_time", "last_write_time", "last_access_time", "file_attributes", "hard_link_id"]:
+            equal(getattr(root.get_metadata(move["pending"]), field), getattr(before, field))
+        equal(root.get_metadata(move["pending"]).hard_link_id, root.get_metadata("/retained-alias").hard_link_id)
+
+
+def test_pending_delete_collision_and_staleness_are_safe():
+    root, prepared, paths, directories = _pending_delete_fixture()
+    plan = commit_files["plan_update_file_commits"](root, prepared, paths, directories)
+    move = [p for p in plan["plans"] if p["operation"] == "pending_delete"][0]
+    root.write(move["pending"], "unrelated pending object")
+    raises(commit_files["apply_update_file_commits"], args=[root,plan,2], message="destination changed")
+    equal(root.find("/Windows/System32/target.dll").read(), "old payload")
+    equal(root.find("/Windows/System32/obsolete.dll").read(), "obsolete")
+    retry = commit_files["plan_update_file_commits"](root, prepared, paths, directories)
+    next_move = [p for p in retry["plans"] if p["operation"] == "pending_delete"][0]
+    equal(next_move["pending"] != move["pending"], True)
+    root.write("/Windows/System32/obsolete.dll", "changed after planning")
+    raises(commit_files["apply_update_file_commits"], args=[root,retry,2], message="source changed")
+    equal(root.find(move["pending"]).read(), "unrelated pending object")
+    equal(root.find(next_move["pending"]), None)
+    root.remove("/Windows/System32/obsolete.dll")
+    absent = commit_files["plan_update_file_commits"](root, prepared, paths, directories)
+    result = commit_files["apply_update_file_commits"](root, absent, 2)
+    equal(result["already_absent"], 1)
+
+
+def test_added_writable_is_copy_and_rejects_existing_destination():
+    root, prepared, paths, directories = _commit_fixture()
+    path = "/Windows/System32/settings.ini"
+    node = prepared["hierarchy"][path.lower()]
+    node.update(operation=1, before=dict(state=0,source_key=None), directory_flags=0xa2, security_flags=0xc0, file_flags=0)
+    raises(commit_files["plan_update_file_commits"], args=[root,prepared,paths,directories], message="already exists")
+    root.remove(path)
+    plan = commit_files["plan_update_file_commits"](root,prepared,paths,directories)
+    root.write(path,"concurrent creation")
+    raises(commit_files["apply_update_file_commits"], args=[root,plan,2], message="writable projection changed")
+    equal(root.find("/Windows/System32/target.dll").read(), "old payload")
+    root.remove(path)
+    commit_files["apply_update_file_commits"](root,plan,2)
+    equal(root.find(path).read(),"new settings")
+    equal(root.get_metadata(path).hard_link_id,0)
+    equal(root.get_metadata(paths[("settings.ini",)]).hard_link_id,0)
+    equal(root.get_security(path)!=None,True)
+
+
+def test_removed_extra_link_retains_original_object():
+    root, prepared, paths, directories = _commit_fixture()
+    node = prepared["hierarchy"]["/windows/system32/obsolete.dll"]
+    node.update(before=dict(state=7,process_flags=0x50),file_flags=5)
+    plan = commit_files["plan_update_file_commits"](root,prepared,paths,directories)
+    commit_files["apply_update_file_commits"](root,plan,2)
+    equal(root.find("/Windows/System32/obsolete.dll"),None)
+    equal(root.find("/Windows/WinSxS/old-obsolete.dll").read(),"obsolete")
+
 TEST_SUITE = suite("nt6_update_files", [
+    case("added_writable_projection",test_added_writable_is_copy_and_rejects_existing_destination),
+    case("removed_extra_link",test_removed_extra_link_retains_original_object),
+    case("writable_pending_delete", test_writable_removal_moves_actual_object_without_hashing),
+    case("pending_delete_stale_collision_absent", test_pending_delete_collision_and_staleness_are_safe),
     case("clean_payload_owner_transfer", test_filemap_clean_payload_still_transfers_exact_owner),
     case("clean_directory_owner_transfer", test_filemap_clean_directory_still_transfers_exact_owner),
     case("source_folder_security",test_source_folder_security_matches_native_image_control),

@@ -7449,3 +7449,51 @@ EnsureComponentFullyPresent relative to previous-file prestaging is still
 material: expanding old storage before vs after sharing produces different
 objects. Resolve the callback's callers and lambda publication semantics
 before asserting the mutable/immutable final topology rule.
+
+
+### Server 26100.33822 writable projection changes
+
+The 26100.33822 Server update retires the Default-user `Windows PowerShell
+(x86).lnk` projection and adds `Windows PowerShell 5.1 (x86).lnk`. These are
+writable projections, not ordinary component-store links.
+
+In the base Server WCP 26100.32131 (PDB
+`FB69071436061AA14615D79CA4D84C161`), `CommitFileChanges` at RVA `0x146c84`
+branches on operation 2 at `0x147797` and the old-writable bit at node+0x94.
+A bounded execution of those actual bytes distinguishes the immutable branch
+from `0x147819`, the writable branch. That branch calls
+`MoveFileToPendingDeletes` (`0x2648a4`) with its immediate-delete argument false.
+The helper opens `Temp/PendingDeletes` below the servicing store, constructs
+128-bit uniqueness + `.` + the filename (backslashes replaced with underscores),
+and moves the actual object. The false argument skips immediate deletion at
+`0x264c69`. There is no old-content hash comparison on this removal path.
+
+The image adapter therefore preserves the object under
+`/Windows/WinSxS/Temp/PendingDeletes` before unlinking the retired projection.
+It retains modified bytes, security, timestamps, EAs and aliases. Its unique
+prefix is deterministic and collision-checked rather than native randomness;
+it is not a component identity. Missing secured pending directories, changed
+source generations and destination collisions fail before file effects.
+Existing pending objects are never overwritten, and Windows cleanup remains
+pending rather than being represented as completed CBS work.
+
+New-only state-1/process-0x48 projections use native copy semantics, not the
+state-2 immutable hardlink path (`0x147ae8` onward). The supported new-only
+shape is operation 1, security 0xc0, directory 0xa2 and file flags 0. Only absent
+destinations are admitted; an existing destination still requires separate
+native collision policy. Old-only extra links (state 7/process 0x50/file flags
+5) take the ordinary non-writable unlink branch and retain other aliases.
+Regression coverage lives in `nt6_update_files_test.star`.
+
+The exact 33822 HTTP/FVE/SecureBoot/timezone DLLs were reconstructed directly
+from their SSU CIX/PA30 originals with target-hash validation. Their SHA-256 and
+PDB identities are recorded in `installer.star`, alongside—not replacing—the
+older admitted versions. Bounded native ABI executions returned: HTTP 631
+instructions with one URL ACL effect, FVE 154 with no offline writes,
+SecureBoot 202 with `AvailableUpdates=0x402`, timezone 67 with no writes, and
+timezone-resource 71120 against the already-current base resources with no
+writes. Unknown installer versions are not automatically admitted.
+
+Fresh offline whole-image acceptance of the captured Server 26100.33822 input
+set passed, as did replay of the immutable 26100.33674 snapshot with the same
+builder. These integration checks are distinct from the bounded native probes.

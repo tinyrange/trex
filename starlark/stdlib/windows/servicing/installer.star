@@ -33,6 +33,10 @@ _PROFILES = {
 # Exact native ABI executions qualify each source independently.
 _QUALIFIED_SOURCES = {
     "fve": [
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..gstack-boot-onecore_31bf3856ad364e35_10.0.26100.33822_none_a1c8028d18301c17/fveupdateai.dll",
+            "fe71654f0eab199c3188ad9d97d7e85030d7073b92bcb37e4b663a2747706a60",
+            "491AC4F7A0FA783E19016C6BCB0DC0BE1",
+        ),
         ("/Windows/WinSxS/amd64_microsoft-windows-s..gstack-boot-onecore_31bf3856ad364e35_10.0.26100.9703_none_f1685e26209a4f4c/fveupdateai.dll",
             "397f7b87707990f2c34cf76bfde3debb674f8fabb3b16375380ddab609bfc012",
             "6078D4184146ECF04107D2EDE2EF118F1",
@@ -43,6 +47,10 @@ _QUALIFIED_SOURCES = {
         ),
     ],
     "secureboot": [
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..gstack-boot-onecore_31bf3856ad364e35_10.0.26100.33822_none_a1c8028d18301c17/securebootai.dll",
+            "816da061ae0af11bb2946d2a48d956869474d95e9e8a1538965afd762597fa92",
+            "C572F90162E2DCA8AEF053B2EFD1501A1",
+        ),
         ("/Windows/WinSxS/amd64_microsoft-windows-s..gstack-boot-onecore_31bf3856ad364e35_10.0.26100.9703_none_f1685e26209a4f4c/securebootai.dll",
             "d53e98ff790852c2db27a4cdaafa1996a808e9e43f921f9bf487f23c93d3e5e1",
             "C3294AD35CE6D6E6EBC6439C065A5FFB1",
@@ -53,6 +61,10 @@ _QUALIFIED_SOURCES = {
         ),
     ],
     "http": [
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.33822_none_37bd4f4f4d1b7ea0/httpai.dll",
+            "372f6d082574ebebcd5024cbc0f402968552378bbb94e37d3b079b9c6a3eb9dd",
+            "F65268D3CD5F2C3BBF8A6A9559F43CCA1",
+        ),
         ("/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.9703_none_875daae85585b1d5/httpai.dll",
             "cf6e64fe29b3726acd814dd56e1de9416d3ed97d6da119f99c44e5da339dfaa8",
             "2312C802846EF509E0355F875B1414A71",
@@ -63,6 +75,10 @@ _QUALIFIED_SOURCES = {
         ),
     ],
     "timezone": [
+        ("/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.33822_none_37bd4f4f4d1b7ea0/timezoneai.dll",
+            "7edf0fd8e5ced46593b049609b0e9d964be4b511994a44fead55785b46c36718",
+            "439F18F04A1EFC9E8C4FFF44720C3DFA1",
+        ),
         ("/Windows/WinSxS/amd64_microsoft-windows-s..-installers-onecore_31bf3856ad364e35_10.0.26100.9703_none_875daae85585b1d5/timezoneai.dll",
             "12228f33047d2bf84e6ceb1431020419d31d91fa4d1bdebce899348aadad83a8",
             "F8ECBFA28DCD5DBE0D5ED7A282B221291",

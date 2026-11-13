@@ -3,7 +3,6 @@
 package native
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha1"
 	"crypto/tls"
@@ -12,7 +11,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -104,6 +102,8 @@ func (s *httpClientSession) Close() error {
 type Transport struct {
 	Client          *http.Client
 	MaximumResponse int64
+	// Observe reports bounded lookup diagnostics, never SOAP bodies or signed URLs.
+	Observe func(string)
 }
 
 func (t Transport) Do(ctx context.Context, request windowsupdate.Request) (windowsupdate.Response, error) {
@@ -125,26 +125,15 @@ func (t Transport) Do(ctx context.Context, request windowsupdate.Request) (windo
 	if maximum <= 0 {
 		return windowsupdate.Response{}, fmt.Errorf("windows update HTTP maximum response must be positive")
 	}
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(request.Body))
-	if err != nil {
-		return windowsupdate.Response{}, fmt.Errorf("create request: %w", err)
+	// Only this explicitly read-only operation is replayed. Cookie/sync calls
+	// and arbitrary SOAP actions retain their existing one-request semantics.
+	if request.Endpoint == windowsupdate.ClientSecured && request.Action == locationLookupAction {
+		return t.lookup(ctx, client, endpoint, request, maximum, locationRetryPolicy{
+			attempts: 3, attemptLimit: time.Minute, totalLimit: 4 * time.Minute, backoff: time.Second,
+		})
 	}
-	httpRequest.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
-	httpRequest.Header.Set("User-Agent", request.UserAgent)
-	httpRequest.Header.Set("Accept-Encoding", "identity")
-	response, err := client.Do(httpRequest)
-	if err != nil {
-		return windowsupdate.Response{}, err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
-	if err != nil {
-		return windowsupdate.Response{}, fmt.Errorf("read response: %w", err)
-	}
-	if int64(len(body)) > maximum {
-		return windowsupdate.Response{}, fmt.Errorf("response exceeds %d-byte limit", maximum)
-	}
-	return windowsupdate.Response{StatusCode: response.StatusCode, Body: body}, nil
+	response, _, err := sendSOAP(ctx, client, endpoint, request, maximum)
+	return response, err
 }
 
 func microsoftUpdateHTTPClient() (*http.Client, error) {

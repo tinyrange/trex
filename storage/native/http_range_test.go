@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.starlark.net/starlark"
 )
@@ -320,8 +321,8 @@ func TestHTTPRangeDeferredLocationsConcurrentAndRefresh(t *testing.T) {
 	}))
 	defer server.Close()
 	pool, err := NewRefreshingHTTPRangePool(8, 16, server.Client(), func(ctx context.Context, name string, size int64, previous []string) ([]string, error) {
-		if _, ok := ctx.Deadline(); !ok {
-			t.Error("unbounded resolution")
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) < time.Minute {
+			t.Error("resolution must have its own budget, including after HTTP 403")
 		}
 		if resolutions.Add(1) == 1 {
 			return []string{server.URL + "/expired"}, nil

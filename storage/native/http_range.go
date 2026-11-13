@@ -25,15 +25,16 @@ const (
 	httpRangeAttempts     = 3
 	httpRangeAttemptLimit = 8 * time.Second
 	httpRangeFetchLimit   = 25 * time.Second
-	httpRangeResolveLimit = 60 * time.Second
+	httpRangeResolveLimit = 4 * time.Minute
 )
 
 var nextHTTPRangeSource atomic.Uint64
 
 // HTTPRangeLocationResolver renews locations for the same immutable file.
 // It must preserve the declared content identity and size. It is called on a
-// cache miss when OpenSHA256 has no initial URLs (bounded to 60 seconds), or
-// after a forbidden response within the existing fetch deadline.
+// cache miss when OpenSHA256 has no initial URLs, or once after a forbidden
+// response. Each resolution has its own four-minute budget, separate from the
+// chunk-transfer deadline, and still obeys the owning file context.
 type HTTPRangeLocationResolver func(context.Context, string, int64, []string) ([]string, error)
 
 // HTTPRangeFile is a read-only random-access HTTP file backed by a bounded
@@ -340,9 +341,17 @@ attempts:
 			lastErr = err
 			if response.StatusCode == http.StatusForbidden && f.resolveLocations != nil && !refreshed && attempt+1 < httpRangeAttempts {
 				refreshed = true
-				if err := f.refreshLocations(fetchContext, version); err != nil {
+				// Expired signed URLs need the same SOAP budget as initial
+				// discovery, not the remainder of an eight-second chunk read.
+				cancelFetch()
+				resolveContext, cancelResolve := context.WithTimeout(f.context, httpRangeResolveLimit)
+				err := f.refreshLocations(resolveContext, version)
+				cancelResolve()
+				if err != nil {
 					return nil, fmt.Errorf("refresh HTTP locations for %q: %w", f.name, err)
 				}
+				fetchContext, cancelFetch = context.WithTimeout(f.context, httpRangeFetchLimit)
+				defer cancelFetch() // at most one renewal per fetch
 				continue attempts
 			}
 		}

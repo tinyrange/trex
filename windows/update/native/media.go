@@ -230,32 +230,42 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 	// Declared digests and sizes are sufficient for cached source ranges.
 	// Obtain expiring locations only if a reader actually needs network bytes.
 	files := declaredPayloadFiles(closure)
-	cacheRoot, err := mediaCacheDirectory(options.cacheDirectory)
-	if err != nil {
-		return nil, err
-	}
-	diskCache, err := storagenative.NewHTTPRangeDiskCache(cacheRoot)
-	if err != nil {
-		return nil, fmt.Errorf("update_media: initialize persistent UUP cache: %w", err)
-	}
-	var rangePool *storagenative.HTTPRangePool
-	if !catalog.allowNetwork {
-		rangePool, err = storagenative.NewOfflineHTTPRangePool(0, maximumHTTPRangeCache, diskCache)
+	var rangePool payloadPool
+	if catalog.payloads != nil {
+		rangePool = archivedPayloadPool{catalog.payloads}
 	} else {
-		// Lazy location renewal needs only the selected closure and profile.
-		// Do not retain the complete catalog or its Starlark projection for
-		// the lifetime of every source-backed file in the running guest.
-		protocol, scanOptions := catalog.protocol, catalog.options
-		rangePool, err = storagenative.NewPersistentHTTPRangePool(0, maximumHTTPRangeCache, httpClient,
-			payloadLocationResolver(files, func(ctx context.Context) ([]windowsupdate.File, error) {
-				started := time.Now()
-				resolved, err := protocol.ResolveFilesForOffers(ctx, scanOptions, closure)
-				progress(fmt.Sprintf("update_media: payload location lookup took %s", time.Since(started).Round(time.Millisecond)))
-				return resolved, err
-			}), diskCache)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("update_media: initialize bounded HTTP reader: %w", err)
+		cacheRoot, err := mediaCacheDirectory(options.cacheDirectory)
+		if err != nil {
+			return nil, err
+		}
+		diskCache, err := storagenative.NewHTTPRangeDiskCache(cacheRoot)
+		if err != nil {
+			return nil, fmt.Errorf("update_media: initialize persistent UUP cache: %w", err)
+		}
+		var httpPool *storagenative.HTTPRangePool
+		if !catalog.allowNetwork {
+			httpPool, err = storagenative.NewOfflineHTTPRangePool(0, maximumHTTPRangeCache, diskCache)
+		} else {
+			// Lazy location renewal needs only the selected closure and profile.
+			// Do not retain the complete catalog or its Starlark projection for
+			// the lifetime of every source-backed file in the running guest.
+			protocol, scanOptions := catalog.protocol, catalog.options
+			if transport, ok := protocol.Transport.(Transport); ok {
+				transport.Observe = observe
+				protocol.Transport = transport
+			}
+			httpPool, err = storagenative.NewPersistentHTTPRangePool(0, maximumHTTPRangeCache, httpClient,
+				payloadLocationResolver(files, func(ctx context.Context) ([]windowsupdate.File, error) {
+					started := time.Now()
+					resolved, err := protocol.ResolveFilesForOffers(ctx, scanOptions, closure)
+					progress(fmt.Sprintf("update_media: payload location lookup took %s", time.Since(started).Round(time.Millisecond)))
+					return resolved, err
+				}), diskCache)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("update_media: initialize bounded HTTP reader: %w", err)
+		}
+		rangePool = httpPayloadPool{httpPool}
 	}
 	aggregated, err := findOfferFile(files, func(name string) bool {
 		return strings.EqualFold(name, metadataName)
@@ -1146,7 +1156,7 @@ func (c *indexedUpdateContainer) open(name string) (storage.Reader, error) {
 	return nil, fmt.Errorf("update container has no archive")
 }
 
-func indexUpdatePayloadSources(resources *lifecycle.Resources, rangePool *storagenative.HTTPRangePool, files []windowsupdate.File) ([]uup.UpdatePayloadSource, map[string]*indexedUpdateContainer, error) {
+func indexUpdatePayloadSources(resources *lifecycle.Resources, rangePool payloadPool, files []windowsupdate.File) ([]uup.UpdatePayloadSource, map[string]*indexedUpdateContainer, error) {
 	sources := make([]uup.UpdatePayloadSource, 0, len(files))
 	containers := make(map[string]*indexedUpdateContainer)
 	for _, file := range files {
@@ -1204,7 +1214,7 @@ func indexUpdatePayloadSources(resources *lifecycle.Resources, rangePool *storag
 	return sources, containers, nil
 }
 
-func openUpdatePayload(resources *lifecycle.Resources, rangePool *storagenative.HTTPRangePool, containers map[string]*indexedUpdateContainer, payload uup.UpdatePayload, maximum int64) (storage.Reader, error) {
+func openUpdatePayload(resources *lifecycle.Resources, rangePool payloadPool, containers map[string]*indexedUpdateContainer, payload uup.UpdatePayload, maximum int64) (storage.Reader, error) {
 	if payload.Source.Size < 0 || payload.Source.Size > maximum {
 		return nil, fmt.Errorf("payload %q size %d exceeds %d-byte bound", payload.Source.Name, payload.Source.Size, maximum)
 	}
@@ -1225,7 +1235,7 @@ func openUpdatePayload(resources *lifecycle.Resources, rangePool *storagenative.
 	return member, nil
 }
 
-func openInstalledUpdateStages(resources *lifecycle.Resources, rangePool *storagenative.HTTPRangePool, containers map[string]*indexedUpdateContainer, cache *uup.StageMetadataCache, plans []uup.UpdateStagePlan, observe func(uup.UpdateStagePlan, string)) ([]*uup.CumulativeStage, []uup.UpdateStagePlan, error) {
+func openInstalledUpdateStages(resources *lifecycle.Resources, rangePool payloadPool, containers map[string]*indexedUpdateContainer, cache *uup.StageMetadataCache, plans []uup.UpdateStagePlan, observe func(uup.UpdateStagePlan, string)) ([]*uup.CumulativeStage, []uup.UpdateStagePlan, error) {
 	var stages []*uup.CumulativeStage
 	var selected []uup.UpdateStagePlan
 	for _, plan := range plans {
@@ -1307,7 +1317,7 @@ func updatePayloadNames(payloads []uup.UpdatePayload) []string {
 	return result
 }
 
-func addCanonicalCabinetResources(resources *lifecycle.Resources, rangePool *storagenative.HTTPRangePool, cabinets []windowsupdate.File, install *wim.Archive) error {
+func addCanonicalCabinetResources(resources *lifecycle.Resources, rangePool payloadPool, cabinets []windowsupdate.File, install *wim.Archive) error {
 	missing, err := install.MissingResourceHashes()
 	if err != nil {
 		return fmt.Errorf("enumerate missing WIM resources: %w", err)
@@ -1542,26 +1552,18 @@ func findOfferFile(files []windowsupdate.File, match func(string) bool) (windows
 	return *selected, nil
 }
 
-func openPayload(resources *lifecycle.Resources, rangePool *storagenative.HTTPRangePool, file windowsupdate.File, maximum int64) (*storagenative.HTTPRangeFile, error) {
+func openPayload(resources *lifecycle.Resources, rangePool payloadPool, file windowsupdate.File, maximum int64) (starvalue.File, error) {
 	if file.DigestSHA256 == "" || file.Size <= 0 {
 		return nil, fmt.Errorf("payload %q lacks a SHA-256 digest or positive size", file.Name)
 	}
 	if file.Size > maximum {
 		return nil, fmt.Errorf("payload %q size %d exceeds %d-byte bound", file.Name, file.Size, maximum)
 	}
-	var urls []string
-	if file.DownloadURL != "" {
-		urls = []string{file.DownloadURL}
-	}
-	result, err := rangePool.OpenSHA256(resources.Context(), file.Name, urls, file.Size, file.DigestSHA256)
+	reader, err := rangePool.open(resources, file)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := resources.Add(result); err != nil {
-		_ = result.Close()
-		return nil, fmt.Errorf("register payload: %w", err)
-	}
-	return result, nil
+	return starvalue.NewReader(file.Name, reader), nil
 }
 
 const (
