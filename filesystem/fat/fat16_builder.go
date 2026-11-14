@@ -132,6 +132,8 @@ type fat16Build struct {
 	chs               *vmm.CHSGeometry
 	fat               []uint16
 	dirs              map[*fat32Node][]byte
+	eaMetadata        map[string]filesystemapi.Metadata
+	eaHandles         map[*fat32Node]uint16
 }
 
 func buildFAT16Image(dir *filesystemapi.Directory, size int64, bootCode []byte, hiddenLBA int64, volumeLabel [11]byte) (starfile.File, error) {
@@ -170,6 +172,7 @@ func buildFATImageWithOptionsAndGeometryAndBPB(dir *filesystemapi.Directory, siz
 	if err := imported.importDirectory(dir); err != nil {
 		return nil, err
 	}
+	b.eaMetadata = dir.Snapshot().Metadata
 	b.nodes = imported.nodes
 	b.root = imported.root
 	if err := b.applyFileOrder(fileOrder); err != nil {
@@ -284,6 +287,9 @@ func (b *fat16Build) layout() error {
 	}
 
 	clusterSize := b.sectorsPerCluster * fat32SectorSize
+	if err := b.buildOS2EAs(clusterSize); err != nil {
+		return err
+	}
 	for _, node := range b.nodes {
 		if node == b.root {
 			continue
@@ -474,7 +480,9 @@ func (b *fat16Build) directoryData(node *fat32Node) ([]byte, error) {
 		if child.dir {
 			attr |= fatAttrDir
 		}
-		entries = append(entries, fat32DirEntry(child.name, child.cluster, uint32(child.size), attr, child.short)...)
+		entry := fat32DirEntry(child.name, child.cluster, uint32(child.size), attr, child.short)
+		binary.LittleEndian.PutUint16(entry[20:22], b.eaHandles[child])
+		entries = append(entries, entry...)
 	}
 	if node == b.root {
 		maximum := int(fat16RootEntries * 32)

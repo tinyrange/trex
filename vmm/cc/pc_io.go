@@ -69,6 +69,11 @@ func (p *pc) runWithHandler(ctx context.Context, handle func(hypervisor.X86Exit)
 }
 
 func (p *pc) handleIO(ex hypervisor.X86Exit) error {
+	if p.sound != nil {
+		if handled, err := p.sound.io(ex, p.now()); handled {
+			return err
+		}
+	}
 	if ex.Port == legacyDisplayPort {
 		return p.legacyDisplayIO(ex)
 	}
@@ -261,6 +266,11 @@ func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
 		}
 	}
 	now := p.now()
+	if p.sound != nil {
+		if err := p.sound.poll(now); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
 	if err := p.serial.poll(now); err != nil {
 		return time.Time{}, nil, nil, err
 	}
@@ -329,6 +339,15 @@ func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
 		deadline = next
 		deliver = func() error { return p.cpu.SetIRQ(4, true) }
 		commit = func() { p.serial.timeout, p.serial.irq = true, true }
+	}
+	if p.sound != nil {
+		if next := p.sound.deadline(); !next.IsZero() && (deadline.IsZero() || next.Before(deadline)) {
+			deadline = next
+			// Wake native execution only. The platform owner transfers DMA and
+			// asserts IRQ on the next poll, before the guest can reuse buffers.
+			deliver = p.cpu.Cancel
+			commit = func() {}
+		}
 	}
 	return deadline, deliver, commit, nil
 }

@@ -1,4 +1,4 @@
-// Package floppy decodes DiskDupe, HD-Copy and The Duplicator disk images.
+// Package floppy decodes DiskDupe, HD-Copy, The Duplicator and IBM SaveDskF images.
 // Decoding is bounded by floppy geometry; source data is never extracted.
 package floppy
 
@@ -311,7 +311,7 @@ func (f *File) Hash() (uint32, error)                 { return 0, fmt.Errorf("un
 func (f *File) Attr(n string) (starlark.Value, error) { return starfile.Attr(f, n), nil }
 func (f *File) AttrNames() []string                   { return starfile.AttrNames() }
 
-var openers = map[string]func(storage.Reader) (*File, error){"diskdupe": OpenDiskDupe, "hdcopy": OpenHDCopy, "duplicator": OpenDuplicator}
+var openers = map[string]func(storage.Reader) (*File, error){"diskdupe": OpenDiskDupe, "hdcopy": OpenHDCopy, "duplicator": OpenDuplicator, "savedskf": OpenSaveDskF}
 
 func Builtin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
@@ -337,6 +337,8 @@ func init() {
 				match = bytes.HasPrefix(p, []byte(ddiMagic))
 			case "duplicator":
 				match = bytes.HasPrefix(p, []byte(duplicatorMagic))
+			case "savedskf":
+				match = len(p) >= 2 && p[0] == 0xaa && p[1] >= 0x58 && p[1] <= 0x5a
 			case "hdcopy":
 				match = hdCandidate(p)
 			}
@@ -356,6 +358,10 @@ func init() {
 				}
 			}
 			attrs := map[string]any{"cylinders": f.cylinders, "heads": f.heads, "sectors_per_track": f.sectors, "sector_size": 512, "logical_bytes": f.Size(), "omitted_units": missing, "filled_units": filled, "unit_bytes": f.unit}
+			if name == "savedskf" {
+				attrs["checksums_verified"] = true
+				attrs["recorded_sectors"] = len(f.extents) - missing
+			}
 			if name == "duplicator" {
 				attrs["checksums_verified"] = false
 			}

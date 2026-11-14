@@ -12,8 +12,9 @@ import (
 )
 
 type ps2byte struct {
-	value byte
-	mouse bool
+	value    byte
+	mouse    bool
+	injected bool
 }
 
 func (d *driver) AbsolutePointer(ctx context.Context) (bool, error) {
@@ -28,7 +29,9 @@ func (d *driver) AbsolutePointer(ctx context.Context) (bool, error) {
 type keyboard struct {
 	a20                                          func(bool) error
 	queue                                        []ps2byte
+	heldKeys                                     []byte // Scan bytes waiting for the inhibited keyboard clock.
 	command, output, pending, parameter, scanSet byte
+	status                                       byte
 	enabled                                      bool
 	mouseEnabled, mouseRemote, mouseScaling      bool
 	mouseParameter, mouseRate, mouseResolution   byte
@@ -37,17 +40,23 @@ type keyboard struct {
 }
 
 func newKeyboard(irq func(uint32, bool) error) *keyboard {
-	return &keyboard{command: 0x45, output: 3, enabled: true, scanSet: 2, irq: irq}
+	return &keyboard{command: 0x45, status: 0x14, output: 3, enabled: true, scanSet: 2, irq: irq}
 }
 func (k *keyboard) updateIRQ() error {
+	if k.command&0x10 == 0 && len(k.heldKeys) != 0 {
+		for _, v := range k.heldKeys {
+			k.queue = append(k.queue, ps2byte{value: v})
+		}
+		k.heldKeys = nil
+	}
 	var key, mouse bool
 	if len(k.queue) != 0 {
 		if k.queue[0].mouse {
 			mouse = k.command&2 != 0
 		} else {
-			// A disabled keyboard interface may still return controller
-			// responses to polling, but must not raise keyboard interrupts.
-			key = k.command&0x11 == 1
+			// Clock inhibition blocks keyboard traffic, not the explicit
+			// controller output-buffer injection used to test IRQ1.
+			key = k.command&1 != 0 && (k.command&0x10 == 0 || k.queue[0].injected)
 		}
 	}
 	if err := k.irq(1, key); err != nil {
@@ -56,11 +65,14 @@ func (k *keyboard) updateIRQ() error {
 	return k.irq(12, mouse)
 }
 func (k *keyboard) enqueue(mouse bool, values ...byte) error {
-	if len(k.queue)+len(values) > 1024 {
+	return k.enqueueOutput(mouse, false, values...)
+}
+func (k *keyboard) enqueueOutput(mouse, injected bool, values ...byte) error {
+	if len(k.queue)+len(k.heldKeys)+len(values) > 1024 {
 		return fmt.Errorf("PS/2 output queue is full")
 	}
 	for _, v := range values {
-		k.queue = append(k.queue, ps2byte{v, mouse})
+		k.queue = append(k.queue, ps2byte{value: v, mouse: mouse, injected: injected})
 	}
 	return k.updateIRQ()
 }
@@ -71,7 +83,7 @@ func (k *keyboard) io(ex hypervisor.X86Exit) error {
 	for i := range ex.Data {
 		if !ex.Write {
 			if ex.Port == 0x64 {
-				ex.Data[i] = 4
+				ex.Data[i] = k.status
 				if len(k.queue) != 0 {
 					ex.Data[i] |= 1
 					if k.queue[0].mouse {
@@ -100,12 +112,13 @@ func (k *keyboard) io(ex hypervisor.X86Exit) error {
 		}
 		v := ex.Data[i]
 		if ex.Port == 0x64 {
+			k.status |= 8 // Last host write was a controller command.
 			switch v {
 			case 0x20:
 				if err := k.enqueue(false, k.command); err != nil {
 					return err
 				}
-			case 0x60, 0xd1, 0xd4:
+			case 0x60, 0xd1, 0xd2, 0xd3, 0xd4:
 				k.pending = v
 			case 0xaa:
 				if err := k.enqueue(false, 0x55); err != nil {
@@ -140,6 +153,7 @@ func (k *keyboard) io(ex hypervisor.X86Exit) error {
 			}
 			continue
 		}
+		k.status &^= 8
 		switch k.pending {
 		case 0x60:
 			k.command = v
@@ -156,6 +170,15 @@ func (k *keyboard) io(ex hypervisor.X86Exit) error {
 			}
 			k.output = v
 			k.pending = 0
+			continue
+		case 0xd2, 0xd3:
+			// Controller output-buffer injection is not a keyboard command:
+			// return the supplied byte unchanged, without an ACK or translation.
+			mouse := k.pending == 0xd3
+			k.pending = 0
+			if err := k.enqueueOutput(mouse, true, v); err != nil {
+				return err
+			}
 			continue
 		case 0xd4:
 			k.pending = 0
@@ -240,7 +263,7 @@ func (k *keyboard) key(name string, down bool) error {
 	if !ok {
 		return &vmm.Error{Code: vmm.ErrorInvalid, Message: "unknown keyboard key " + name}
 	}
-	if !k.enabled || k.command&0x10 != 0 {
+	if !k.enabled {
 		return &vmm.Error{Code: vmm.ErrorState, Message: "guest keyboard is disabled"}
 	}
 	if k.command&0x40 == 0 && k.scanSet != 1 {
@@ -255,6 +278,16 @@ func (k *keyboard) key(name string, down bool) error {
 		value |= 0x80
 	}
 	data = append(data, value)
+	// The controller may inhibit the clock while servicing an interrupt.
+	// Keep physical key transitions on the keyboard side until re-enabled;
+	// they must not obstruct controller replies or explicit D2 injection.
+	if k.command&0x10 != 0 {
+		if len(k.queue)+len(k.heldKeys)+len(data) > 1024 {
+			return fmt.Errorf("PS/2 output queue is full")
+		}
+		k.heldKeys = append(k.heldKeys, data...)
+		return nil
+	}
 	return k.enqueue(false, data...)
 }
 func (d *driver) Input(ctx context.Context, input vmm.Input) error {

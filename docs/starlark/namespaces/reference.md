@@ -4920,6 +4920,12 @@ Reads the classic 22-byte/112-byte StuffIt archive generation, including self-ex
 
 Decodes the legacy Microsoft SZDD single-file compression format and returns a file. maximum bounds decoded output rather than the compressed input alone.
 
+### `archive.szdd_info`
+
+`archive.szdd_info(file, name, maximum=512MiB) -> record(file, name, decoded_size, compressed_size)`
+
+Decodes SZDD and restores a compressed member basename using the mode-A header replacement character. The original basename is required because SZDD stores only its last character. A zero replacement character or legacy SZ header retains the supplied name; paths and unsafe replacement characters are rejected.
+
 ### `archive.tar`
 
 `archive.tar(directory, compress='') -> bytes; archive.tar(file, maximum_entries=1M) -> tar`
@@ -4972,7 +4978,7 @@ Decodes an XZ stream into a file, rejecting decoder dictionaries above max_dicti
 
 `archive.zip(file) -> zip`
 
-Parses a ZIP archive and exposes member files through files or entries. Members expose name/path, entry_type, compressed_size and compression_method. Complete reads validate decoded size and CRC; entry.verify() forces complete validation, including empty entries. Each member retains a bounded 8 MiB decoded window; backward reads outside it restart decompression. No host extraction occurs.
+Parses a ZIP archive (Stored, Deflate, Shrink and Implode) and exposes member files through files or entries. Members expose name/path, entry_type, compressed_size and compression_method. Complete reads validate decoded size and CRC; entry.verify() forces complete validation, including empty entries. Each member retains a bounded 8 MiB decoded window; backward reads outside it restart decompression. No host extraction occurs.
 
 ### `archive.zstd`
 
@@ -5456,7 +5462,7 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 ### `cc.backend`
 
-`cc.backend(acpi=False, pci_ide=False, pci_display=False, hpet=False, uefi=False, usb=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
+`cc.backend(acpi=False, pci_ide=False, pci_display=False, hpet=False, uefi=False, usb=False, sb16=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
 
 Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. Native UEFI PCs accept cpus=1..4 as one package without SMT; other PC profiles remain single-CPU. All-core pause/stop/capture barriers precede inspection and teardown. cc.v1.cpus() returns per-core register summaries; state/read_virtual use CPU0, and breakpoint/step require one CPU. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 16 GiB with uefi=True. usb=True on x86_64 enables a UHCI keyboard and absolute pointer with wheel; PS/2 keyboard fallback remains until USB enumeration. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_display=True exposes the 1234:cc02 TRF1 PCI framebuffer at bus 0 device 2, with an 8 MiB BAR at 0xe0000000; it requires a compatible guest display driver. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
@@ -5657,6 +5663,12 @@ Decodes machine-code bytes into instruction records at a supplied base address. 
 `debug.gdb(channel, memory_limit=64MiB, stop_queue=256, timeout=15)`
 
 Connects a GDB remote-protocol session over an existing byte channel. The returned session controls the target and reads structured stops, registers and memory without launching a host debugger.
+
+### `debug.mapsym`
+
+`debug.mapsym(data) -> list`
+
+Reads IBM/Microsoft MAPSYM .SYM bytes or a file into unrelocated symbol records (module, segment_name, segment, name, offset). Segment is the file load address, not a runtime selector; absolute symbols use zero. Supports 16/32-bit symbol offsets and version 4/5/6 trailers. Input is limited to 1 MiB and output to one million symbols; line tables are not decoded.
 
 ### `debug.select`
 
@@ -5990,6 +6002,12 @@ Validates a stored binder program object (IEWPLMH versions 2-5), such as a CMS m
 
 Views a single-track 2352-byte or 2448-byte raw CD as logical 2048-byte sectors. Supports ISO9660 and High Sierra in Mode 1 and Mode 2 Form 1, preserving the source without conversion or mounting.
 
+### `filesystem.savedskf`
+
+`filesystem.savedskf(file) -> file`
+
+Decodes IBM SaveDskF AA58/AA59 and compressed AA5A floppy images. Validates recorded sector count and checksum. Unrecorded tail sectors remain unreadable. Returns a read-only logical disk for filesystem.fat; auto also recognizes the wrapper.
+
 ### `filesystem.sgi`
 
 `filesystem.sgi(file) -> record`
@@ -6127,6 +6145,30 @@ Parses bounded JSON input into Starlark dictionaries, lists and scalar values. I
 `json.encode(value, indent=None) -> string`
 
 Serializes a supported Starlark value as JSON text. Values that have no JSON representation fail rather than being stringified implicitly.
+
+### `os2.extended_attributes`
+
+`os2.extended_attributes(value) -> list`
+
+Decodes a bounded packed OS/2 FEA list, including its cbList header, from bytes or a file into name/flags/value dictionaries accepted by directory.set_extended_attributes. Preserves opaque value bytes and required-EA flags; rejects truncated records, duplicate or invalid names and lists exceeding 65535 bytes. Does not install or reinterpret EAs.
+
+### `os2.linear_executable`
+
+`os2.linear_executable(source, maximum=64MiB) -> record(objects, resources)`
+
+Reads little-endian OS/2 LX object images and resources, including raw, zero, iterated and EXEPACK2 pages. All tables, references and expanded sizes are bounded. Returned object files are unrelocated: imports, fixups and module initialization are deliberately not applied.
+
+### `os2.profile`
+
+`os2.profile(entries) -> file`
+
+Constructs a native OS/2 PM binary profile from an ordered list of (application, key, bytes) tuples. Values are opaque; callers include a terminating NUL for strings. Application/key names are case-sensitive, nonempty and NUL-free; duplicate keys replace values while retaining order. Names including NUL and values are limited to 65535 bytes; output to 64 MiB. Returns an in-memory file. Does not run MAKEINI, create Workplace Shell objects, apply EAs or install an OS.
+
+### `os2.stream_profile`
+
+`os2.stream_profile(source, maximum=64MiB) -> file`
+
+Constructs the binary SPI.INI profile from bounded original SSMRES LX resources, including handler classes and protocol arrays. Does not load or execute handlers.
 
 ### `path.base`
 

@@ -29,6 +29,8 @@ type Backend struct {
 	PCIDisplay bool
 	// USB enables the UHCI keyboard and absolute pointer.
 	USB bool
+	// SB16 opts into ISA DSP 4.05 PCM with DMA1/5 and bounded capture.
+	SB16 bool
 	// PIOOnly disables the PCI IDE disk's DMA capability.
 	PIOOnly bool
 	// IDEModel selects synthetic (default) or the native ich7-pata profile.
@@ -76,6 +78,9 @@ func (b *Backend) Capabilities() []string {
 }
 func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if m.Architecture == "arm64" {
+		if b.SB16 {
+			return []vmm.ValidationIssue{{Code: "cc.unsupported", Field: "sb16", Message: "ISA sound requires x86", Backend: b.ID()}}
+		}
 		if b.CPUFactory != nil {
 			return []vmm.ValidationIssue{{Code: "cc.unsupported", Field: "architecture", Message: "alternate x86 CPU engines require x86_64", Backend: b.ID()}}
 		}
@@ -116,6 +121,9 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		if err := m.DarwinBoot.Validate(); err != nil {
 			add("boot", err.Error())
 		}
+	}
+	if b.SB16 && m.CPUs > 1 {
+		add("sb16", "ISA audio currently requires a single CPU")
 	}
 	if b.USB && m.Architecture != "x86_64" {
 		add("usb", "cc USB input requires x86_64")
@@ -310,6 +318,9 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 		return nil, err
 	}
 	platform.cpus = cpus
+	if b.SB16 {
+		platform.sound = newSB16(platform.ram, cpu.SetIRQ)
+	}
 	platform.framebuffer = ram[m.Memory : uint64(m.Memory)+ramfb.Size]
 	if disk.Bus == "nvme" {
 		platform.nvme = newPCINVMe(platform)

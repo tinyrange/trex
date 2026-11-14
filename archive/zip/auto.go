@@ -27,7 +27,7 @@ func init() {
 		}
 		entries := make([]auto.Entry, 0, len(z.File))
 		for _, file := range z.File {
-			e := auto.Entry{Name: file.Name, Kind: "file", Reader: NewEntry(file), Attributes: map[string]any{"compressed_size": file.CompressedSize64, "crc32": file.CRC32, "modified": file.Modified, "mode": file.Mode().String()}}
+			e := auto.Entry{Name: file.Name, Kind: "file", Reader: NewEntry(file), Attributes: map[string]any{"compression_method": file.Method, "compressed_size": file.CompressedSize64, "crc32": file.CRC32, "modified": file.Modified, "mode": file.Mode().String()}}
 			if file.FileInfo().IsDir() {
 				e.Kind = "directory"
 				e.Reader = nil

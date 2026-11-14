@@ -360,3 +360,92 @@ declarations in Go's `src/internal/xcoff/xcoff.go` and LLVM's
 inspection. No third-party XCOFF parser code is incorporated or invoked.
 The native APIs preserve raw names, unknown auxiliary records and non-restored
 BSS; saved addresses are never automatically equated with execution addresses.
+
+## IBM SaveDskF and legacy ZIP methods
+
+The native Go SaveDskF reader's header layout and checksum were cross-checked
+against Deark `modules/fat.c` at `f7c9af05e43fa754be32d0e4601c30e377fcbc72`. Its IBM LZW dictionary behavior
+was informed by the anonymous public-domain `dskdcmps` explanation preserved
+in Deark `foreign/dskdcmps.h` and `foreign/readme-dskdcmps.txt`. Jason Summers'
+2021 modifications in that file explicitly permit public-domain treatment;
+that option is used here. No Deark runtime or external conversion is used.
+The Go reader adds strict size/geometry checks and preserves missing sectors
+rather than copying the reference converter's zero-padding policy.
+
+ZIP Shrink and Implode follow PKWARE's APPNOTE compression-method descriptions.
+Algorithm cross-checks used Apache Commons Compress `BinaryTree.java`,
+`ExplodingInputStream.java`, and `UnshrinkingInputStream.java` at
+`22cd988a71ac7dff82694933ff4feccf520bec31` (Apache-2.0), and Info-ZIP's `unshrink.c`
+in `madler/unzip` at `0b82c20ac7375b522215b567174f370be89a4b12` (Info-ZIP).
+The Go streaming readers and synthetic tests are independently written, not
+translated or linked third-party decoders. Apache's canonical-code ordering
+and tests were used to cross-check the format. No Info-ZIP implementation is
+copied. The Apache License 2.0 is retained in the repository's `LICENSE`.
+
+Reference repositories: `jsummers/deark`, `apache/commons-compress`, and
+`madler/unzip` on GitHub. Apache's `SHRUNK.ZIP`,
+`imploding-4Kdict-2trees.zip`, `imploding-8Kdict-3trees.zip`, and
+`lorem-ipsum-implode.zip` were validated in memory only. Proprietary IBM media
+was also validated locally but is not redistributed. No new Go dependency
+is introduced.
+
+## IBM OS/2 PACK2 and PM profiles
+
+The FT19 decoder and bootstrap tables in `archive/os2pack` are adapted from
+Dimitriy Ryazantcev and Jason Summers' MIT-licensed Deark implementation:
+`src/fmtutil-ftcomp.c`, `foreign/ftcompdata.h`, and `modules/os2pack.c` at
+https://github.com/jsummers/deark. The complete notice is retained in
+`archive/os2pack/LICENSE.deark`. Original IBM payloads are not redistributed.
+
+The independently written `os2.Profile` serializer uses binary-layout facts
+from XWorkplace's `include/helpers/xprf.h` INIFILE_* declarations; no GPL
+implementation was copied, linked or invoked. VGA INT 10h/1Bh layout facts were
+checked against SeaBIOS `src/std/vga.h` and `vgasrc/vgabios.c`; the firmware
+implementation and tests here are independent, with no SeaBIOS code copied.
+
+## IBM/Microsoft MAPSYM debug symbols
+
+The native `debug.mapsym` reader follows paragraph pointers and record layouts
+from Open Watcom's `bld/watcom/h/mapsym.h`. That header was consulted only for
+format facts; no implementation was copied. Tests construct synthetic symbol
+files. Original IBM kernel symbols were used for local integration inspection,
+not bundled in the repository.
+
+## OS/2 FAT extended attributes
+
+- Primary format declarations: Microsoft Windows-driver-samples,
+  `filesys/fastfat/fat.h`, `EA_FILE_HEADER`, `EA_SET_HEADER`, `PACKED_EA`.
+- Primary address/handle rules: the same repository's `filesys/fastfat/easup.c`.
+- Independent implementation: `filesystem/fat/os2_ea.go`; it serializes the
+  documented layout and does not copy driver implementation code.
+- `os2/ea.go` bounds and decodes packed OS/2 FEA lists into portable directory
+  metadata. Opaque value bytes, including typed values, remain uninterpreted.
+
+
+## OS/2 LX, streaming and multimedia policy
+
+- LX object/page/resource tables follow IBM format declarations. EXEPACK2 bit
+  fields were checked against Ryan C. Gordon's `icculus/2ine/lx_loader.c`, which
+  identifies LXlite 1.38u as the algorithm source. The bounded Go reader and
+  regression fixtures are independently implemented; no runtime loader is used.
+- SPI resource and profile layouts were checked against original IBM SSMRES,
+  SSMINI and SSM bytes, and `bitwiseworks/os2tk45/h/ssm.h` declarations.
+- MMIO/MCI construction uses original IBM CONTROL.SCR, MASTERH9.RT,
+  FOURMEG.SCR, SMVINI.SCR, VAPM.SCR and CARDINFO resources. The SDK headers
+  `mmioos2.h`, `mcios2.h` and `meerror.h` supply field/error definitions.
+  OS2World's `DEV-SAMPLES-DRV-Audio_PDD-/readme.txt` supplied an independent
+  primary MMPM2.INI connection example. No installer DLL is executed.
+- `archive.szdd_info` preserves the SZDD header's original final filename
+  character when expanding underscore-named Windows 3.1 files. The metadata
+  parser is independently written and shares the existing native decoder.
+
+## ISA PCM device
+
+8237 addressing/count and Sound Blaster DSP/mixer command facts were checked
+against primary emulator implementations `qemu/qemu/hw/audio/sb16.c` and
+`dosbox-staging/dosbox-staging/src/hardware/audio/soundblaster.cpp`, plus
+`Baron-von-Riedesel/VSBHDA/src/SB.H` command definitions (including 45h/47h
+SB16 auto-init continuation). The new Go device, tests, capture conversion and
+clock integration are independently written; no implementation code or new
+third-party dependency is copied, linked, invoked, or redistributed.
+Original IBM/Microsoft media is used only for local integration, not bundled.

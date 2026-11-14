@@ -18,6 +18,7 @@ const biosPort = 0xf1
 // Interrupt entries execute small real-mode ROM routines; native execution
 // retains all mode switches and executes the original boot sector and loader.
 type pc struct {
+	sound           *sb16
 	nvme            *pciNVMe
 	performance     *pcPerformance
 	biosDiskCalls   []any
@@ -123,6 +124,12 @@ func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Ti
 	for i := 0x20; i < 256; i++ {
 		ram[0xf1000+i*4] = 0xcf
 	}
+	// These BDA queries must execute in the ROM. A V86 monitor may emulate
+	// private I/O ports instead of forwarding our host-service trap.
+	binary.LittleEndian.PutUint16(ram[0x11*4:], 0x2620)
+	copy(ram[0xf2620:], []byte{0x1e, 0xb8, 0x40, 0, 0x8e, 0xd8, 0xa1, 0x10, 0, 0x1f, 0xcf})
+	binary.LittleEndian.PutUint16(ram[0x12*4:], 0x2600)
+	copy(ram[0xf2600:], []byte{0x1e, 0xb8, 0x40, 0, 0x8e, 0xd8, 0xa1, 0x13, 0, 0x1f, 0xcf})
 	// No NetBIOS provider is installed. Windows tests this vector for
 	// zero before invoking INT 5Ch.
 	clear(ram[0x5c*4 : 0x5c*4+4])
