@@ -48,9 +48,7 @@ func TestBIOSKeyboardBlockingReadNative(t *testing.T) {
 		t.Fatal("keyboard read has no interruptible sleep")
 	}
 	debug := cpu.(interface{ SetBreakpoint(uint64) error })
-	if err = debug.SetBreakpoint(uint64(0xf2700 + sleep + 1)); err != nil {
-		t.Fatal(err)
-	}
+	sleepPC := uint64(0xf2700 + sleep + 1)
 	defer debug.SetBreakpoint(0)
 	marker := byte(0)
 	injected := false
@@ -69,6 +67,12 @@ func TestBIOSKeyboardBlockingReadNative(t *testing.T) {
 			if head, tail := p.keyboardBounds(); head != tail {
 				t.Fatal("read did not sleep empty")
 			}
+			// Observe each empty read exactly once. An interrupt may return
+			// to HLT and clear RF before IRQ1 is serviced, so leaving an
+			// execution breakpoint armed here races unrelated timer IRQs.
+			if err = debug.SetBreakpoint(0); err != nil {
+				t.Fatal(err)
+			}
 			key := "a"
 			if marker == 2 {
 				key = "b"
@@ -79,14 +83,6 @@ func TestBIOSKeyboardBlockingReadNative(t *testing.T) {
 			if err = p.keyboard.key(key, false); err != nil {
 				t.Fatal(err)
 			}
-			r, err := cpu.Registers()
-			if err != nil {
-				t.Fatal(err)
-			}
-			r.Rflags |= 1 << 16 // suppress this execution breakpoint once
-			if err = cpu.SetRegisters(r); err != nil {
-				t.Fatal(err)
-			}
 			injected = true
 			continue
 		}
@@ -94,6 +90,12 @@ func TestBIOSKeyboardBlockingReadNative(t *testing.T) {
 			t.Fatalf("unexpected exit %+v", ex)
 		}
 		if ex.Port == 0xf2 {
+			if next := ex.Data[0]; next != marker+1 {
+				t.Fatalf("marker sequence %d -> %d", marker, next)
+			}
+			if marker != 0 && !injected {
+				t.Fatal("blocking read completed before empty-ring observation and IRQ1 input")
+			}
 			marker = ex.Data[0]
 			injected = false
 			if marker == 3 {
@@ -103,6 +105,9 @@ func TestBIOSKeyboardBlockingReadNative(t *testing.T) {
 				t.Fatal("invalid marker")
 			}
 			if err := cpu.CompleteIO(); err != nil {
+				t.Fatal(err)
+			}
+			if err = debug.SetBreakpoint(sleepPC); err != nil {
 				t.Fatal(err)
 			}
 			continue
