@@ -24,6 +24,7 @@ import (
 	_ "github.com/tinyrange/trex/archive/lha"
 	_ "github.com/tinyrange/trex/archive/lzfse"
 	_ "github.com/tinyrange/trex/archive/macresource"
+	_ "github.com/tinyrange/trex/archive/os2pack"
 	_ "github.com/tinyrange/trex/archive/pbzx"
 	_ "github.com/tinyrange/trex/archive/rar"
 	_ "github.com/tinyrange/trex/archive/sevenzip"

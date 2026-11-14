@@ -12,8 +12,8 @@ const videoRequestPort = 0xf4
 const videoDataPort = 0xf5
 
 type videoPacket struct {
-	args          [6]uint16
-	result        [7]uint16
+	args          [7]uint16
+	result        [8]uint16
 	written, read int
 }
 
@@ -29,6 +29,11 @@ func (p *pc) installVideoFirmware() {
 	copy(p.ram[0xf8000:], rasterBIOSFontHeight(8))
 	binary.LittleEndian.PutUint32(p.ram[0x1f*4:], 0xf0008400)
 	binary.LittleEndian.PutUint32(p.ram[0x43*4:], 0xf0006000)
+	// VGA static functionality table (INT 10h/1Bh). Reserved bytes stay zero.
+	clear(p.ram[0xf5200:0xf5210])
+	binary.LittleEndian.PutUint32(p.ram[0xf5200:], 1<<3|1<<6|1<<0x10|1<<0x12)
+	p.ram[0xf5207], p.ram[0xf5208], p.ram[0xf5209] = 7, 2, 8
+
 	// Palette blocks must be read by the guest ROM, not through host CPU
 	// registers: the Windows x64 video-ROM interpreter uses the same entry.
 	copy(p.ram[0xf5000:], []byte{0x3d, 0x02, 0x10, 0x0f, 0x84, 0xf9, 0x00})
@@ -42,16 +47,18 @@ func (p *pc) installVideoFirmware() {
 		0x5e, 0x5a, 0x59, 0x5b, 0x58, 0xcf,
 	})
 	copy(p.ram[0xf5007:], []byte{
-		0x55, 0x89, 0xe5, 0x50, 0x53, 0x51, 0x52, 0x06, // save BP,AX,BX,CX,DX,ES
+		0x55, 0x89, 0xe5, 0x50, 0x53, 0x51, 0x52, 0x06, 0x57, // save BP,AX,BX,CX,DX,ES,DI
 		0xba, 0xf4, 0, 0x31, 0xc0, 0xee, 0x42, // reset packet, select data port
 		0x8b, 0x46, 0xfe, 0xef, 0x8b, 0x46, 0xfc, 0xef,
 		0x8b, 0x46, 0xfa, 0xef, 0x8b, 0x46, 0xf8, 0xef,
 		0x8b, 0x46, 0, 0xef, 0x8b, 0x46, 0xf6, 0xef, // original BP, ES
+		0x8b, 0x46, 0xf4, 0xef, // original DI
 		0xed, 0x89, 0x46, 0xfe, 0xed, 0x89, 0x46, 0xfc,
 		0xed, 0x89, 0x46, 0xfa, 0xed, 0x89, 0x46, 0xf8,
 		0xed, 0x89, 0x46, 0, 0xed, 0x89, 0x46, 0xf6, // returned BP,ES
+		0xed, 0x89, 0x46, 0xf4, // returned DI
 		0xed, 0x83, 0x66, 6, 0xfe, 0x09, 0x46, 6, // return CF in interrupt frame
-		0x07, 0x5a, 0x59, 0x5b, 0x58, 0x5d, 0xcf,
+		0x5f, 0x07, 0x5a, 0x59, 0x5b, 0x58, 0x5d, 0xcf,
 	})
 }
 
@@ -76,16 +83,16 @@ func (p *pc) videoIO(ex hypervisor.X86Exit) error {
 			packet.args[packet.written] = binary.LittleEndian.Uint16(data)
 			packet.written++
 			if packet.written == len(packet.args) {
-				r := x86state.Registers{Rax: uint64(packet.args[0]), Rbx: uint64(packet.args[1]), Rcx: uint64(packet.args[2]), Rdx: uint64(packet.args[3]), Rbp: uint64(packet.args[4])}
+				r := x86state.Registers{Rax: uint64(packet.args[0]), Rbx: uint64(packet.args[1]), Rcx: uint64(packet.args[2]), Rdx: uint64(packet.args[3]), Rbp: uint64(packet.args[4]), Rdi: uint64(packet.args[6])}
 				p.lastService = fmt.Sprintf("INT 10 AX=%04x", packet.args[0])
 				es := packet.args[5]
 				carry, err := p.videoBIOS(&r, &es)
 				if err != nil {
 					return err
 				}
-				packet.result = [7]uint16{uint16(r.Rax), uint16(r.Rbx), uint16(r.Rcx), uint16(r.Rdx), uint16(r.Rbp), es, 0}
+				packet.result = [8]uint16{uint16(r.Rax), uint16(r.Rbx), uint16(r.Rcx), uint16(r.Rdx), uint16(r.Rbp), es, uint16(r.Rdi), 0}
 				if carry {
-					packet.result[6] = 1
+					packet.result[7] = 1
 				}
 			}
 		} else {
@@ -282,6 +289,37 @@ func (p *pc) videoBIOS(r *x86state.Registers, segments ...*uint16) (bool, error)
 		} else {
 			unsupported()
 		}
+	case 0x1b:
+		if al != 0 || uint16(r.Rbx) != 0 {
+			unsupported()
+			break
+		}
+		// VGA functionality/state: a 64-byte caller-owned buffer at ES:DI.
+		// The ROM table reports only modes implemented by this adapter.
+		var info [64]byte
+		binary.LittleEndian.PutUint32(info[:], 0xf0005200)
+		copy(info[4:34], p.ram[0x449:0x467])
+		copy(info[34:37], p.ram[0x484:0x487])
+		info[37] = 8 // active VGA color display
+		binary.LittleEndian.PutUint16(info[39:], 16)
+		info[41], info[42], info[49] = 8, 2, 3 // pages, 400 lines, 256 KiB
+		if p.mode == 0x12 {
+			info[41], info[42] = 1, 3
+		}
+		if p.mode == 0x10 {
+			info[41], info[42] = 2, 1
+		}
+		if p.mode == 6 {
+			info[39], info[41], info[42] = 2, 1, 0
+		}
+		s, err := p.biosAccessSystem()
+		if err != nil {
+			return false, err
+		}
+		if err := p.biosCopy(uint64(*es)*16+uint64(uint16(r.Rdi)), info[:], true, s); err != nil {
+			return false, err
+		}
+		r.Rax = r.Rax&^255 | 0x1b
 	case 0x1a:
 		setLow(&r.Rax, 0x1a)
 		setLow(&r.Rbx, 8)

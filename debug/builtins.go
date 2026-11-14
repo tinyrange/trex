@@ -18,6 +18,7 @@ type debugSelectable interface {
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
 		"disassemble": starlark.NewBuiltin("disassemble", DisassembleBuiltin),
+		"mapsym":      starlark.NewBuiltin("mapsym", MapSymbolsBuiltin),
 		"gdb":         starlark.NewBuiltin("gdb", GDBBuiltin),
 		"select":      starlark.NewBuiltin("select", SelectBuiltin),
 	}

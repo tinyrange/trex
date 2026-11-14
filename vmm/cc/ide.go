@@ -35,6 +35,7 @@ type ide struct {
 	failures                 []ideFailure
 	dmaError                 string
 	sleeping                 bool
+	multiple                 byte // 0 disabled, 1 sector per DRQ block (IDENTIFY word 47).
 }
 
 func newIDE(disk vmm.Disk, g vmm.CHSGeometry, irq func(uint32, bool) error) *ide {
@@ -51,6 +52,7 @@ func (d *ide) reset() {
 	d.dmaPending = false
 	d.dmaMode = 0xff
 	d.sleeping = false
+	d.multiple = 0
 }
 func (d *ide) signal(level bool) error {
 	d.pending = level
@@ -135,6 +137,7 @@ func (d *ide) command(command byte) error {
 		word(3, uint16(d.geometry.Heads))
 		word(6, uint16(d.geometry.Sectors))
 		word(47, 0x8001)
+		word(59, 0x100|uint16(d.multiple))
 		word(49, 0x200)
 		if d.dmaEnabled {
 			word(49, 0x300)
@@ -172,7 +175,17 @@ func (d *ide) command(command byte) error {
 		d.remaining = 1
 		d.task[7] = 0x58
 		return d.signal(true)
-	case command == 0x20 || command == 0x21 || command == 0x30 || command == 0x31 || command == 0x40 || command == 0x41 || command >= 0xc8 && command <= 0xcb:
+	case command == 0xc6:
+		// Only the advertised one-sector block size is supported. Zero
+		// disables READ/WRITE MULTIPLE without disabling ordinary PIO.
+		if d.task[2] > 1 {
+			return d.fail(4)
+		}
+		d.multiple = d.task[2]
+	case command == 0x20 || command == 0x21 || command == 0x30 || command == 0x31 || command == 0x40 || command == 0x41 || command == 0xc4 || command == 0xc5 || command >= 0xc8 && command <= 0xcb:
+		if (command == 0xc4 || command == 0xc5) && d.multiple == 0 {
+			return d.fail(4)
+		}
 		if command >= 0xc8 && !d.dmaEnabled {
 			return d.fail(4)
 		}
@@ -193,7 +206,7 @@ func (d *ide) command(command byte) error {
 			d.task[7] = 0x50
 			return d.signal(true)
 		}
-		d.write = command == 0x30 || command == 0x31 || command == 0xca || command == 0xcb
+		d.write = command == 0x30 || command == 0x31 || command == 0xc5 || command == 0xca || command == 0xcb
 		if d.write {
 			if d.disk.ReadOnly {
 				return d.fail(4)

@@ -96,6 +96,7 @@ import (
 	"github.com/tinyrange/trex/installer/nsis"
 	"github.com/tinyrange/trex/installer/omaha"
 	imagestar "github.com/tinyrange/trex/media/image/star"
+	os2api "github.com/tinyrange/trex/os2"
 	"github.com/tinyrange/trex/renvostar"
 	starcrypto "github.com/tinyrange/trex/script/crypto"
 	starjson "github.com/tinyrange/trex/script/json"
@@ -149,6 +150,7 @@ func predeclared() starlark.StringDict {
 				"installshield":    starlark.NewBuiltin("installshield", installshield.Builtin),
 				"kwaj":             starlark.NewBuiltin("kwaj", kwaj.Builtin),
 				"kwaj_info":        starlark.NewBuiltin("kwaj_info", kwaj.InfoBuiltin),
+				"szdd_info":        starlark.NewBuiltin("szdd_info", szdd.InfoBuiltin),
 				"sevenzip":         starlark.NewBuiltin("sevenzip", sevenzip.Builtin),
 				"sfp":              starlark.NewBuiltin("sfp", sfp.Builtin),
 				"szdd":             starlark.NewBuiltin("szdd", szdd.Builtin),
@@ -268,6 +270,7 @@ func predeclared() starlark.StringDict {
 				"mds":                  starlark.NewBuiltin("mds", filesystemmds.Builtin),
 				"diskdupe":             starlark.NewBuiltin("diskdupe", filesystemfloppy.Builtin),
 				"hdcopy":               starlark.NewBuiltin("hdcopy", filesystemfloppy.Builtin),
+				"savedskf":             starlark.NewBuiltin("savedskf", filesystemfloppy.Builtin),
 				"duplicator":           starlark.NewBuiltin("duplicator", filesystemfloppy.Builtin),
 				"iso9660":              starlark.NewBuiltin("iso9660", filesystemiso9660.ISO9660Builtin),
 				"mbr":                  starlark.NewBuiltin("mbr", filesystemmbr.MBRBuiltin),
@@ -330,6 +333,7 @@ func predeclared() starlark.StringDict {
 			attrs: renvostar.Builtins(),
 		},
 		"testing": testingNamespace(),
+		"os2":     namespace{name: "os2", attrs: starlark.StringDict{"profile": starlark.NewBuiltin("profile", os2api.ProfileBuiltin), "extended_attributes": starlark.NewBuiltin("extended_attributes", os2api.ExtendedAttributesBuiltin), "linear_executable": starlark.NewBuiltin("linear_executable", os2api.LinearExecutableBuiltin), "stream_profile": starlark.NewBuiltin("stream_profile", os2api.StreamProfileBuiltin)}},
 		"windows": namespace{
 			name:  "windows",
 			attrs: windowsBuiltins,

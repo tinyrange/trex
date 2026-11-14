@@ -310,8 +310,8 @@ func fatLongNamePart(raw []byte) string {
 }
 
 func fatShortName(raw []byte) string {
-	name := strings.TrimSpace(string(raw[:8]))
-	ext := strings.TrimSpace(string(raw[8:11]))
+	name := strings.TrimRight(string(raw[:8]), " ")
+	ext := strings.TrimRight(string(raw[8:11]), " ")
 	if raw[0] == 0x05 {
 		name = string([]byte{0xe5}) + name[1:]
 	}

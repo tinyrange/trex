@@ -8,6 +8,7 @@ No host conversion, extraction, mounting, or temporary disk image is involved.
 | DiskDupe DDI | `OpenDiskDupe` | `filesystem.diskdupe(file)` |
 | HD-Copy, standard and extended | `OpenHDCopy` | `filesystem.hdcopy(file)` |
 | The Duplicator, version 1 | `OpenDuplicator` | `filesystem.duplicator(file)` |
+| IBM SaveDskF / LoadDskF (AA58, AA59, AA5A) | `OpenSaveDskF` | `filesystem.savedskf(file)` |
 
 The returned read-only file can be passed to `filesystem.fat`. Automatic
 browsing recognizes the wrappers and transparently enters supported contained
@@ -42,3 +43,24 @@ Raw FAT images with trimmed unused tails need no wrapper: the existing FAT
 reader can browse and read allocated content when all required bytes exist.
 This does not reconstruct the original free-space bytes. A damaged image
 without a valid header/map is not repaired by guessing from embedded sectors.
+
+## IBM SaveDskF
+
+AA58 and AA59 carry uncompressed sectors; AA5A uses IBM's fixed 12-bit,
+MSB-first LZW variant with LRU leaf recycling. Images are bounded by their
+validated geometry (up to 84 cylinders, two heads, 40 sectors per track,
+512 bytes per sector). All recorded sectors are decoded in memory and the
+32-bit sum of little-endian 16-bit words is checked before exposing the disk.
+Malformed headers, undefined codes, truncated streams, output-size mismatches,
+and checksum failures are errors. A zero header-size field means 512 bytes.
+
+The logical disk retains its full geometry, but sectors beyond the recorded
+prefix return `ErrMissingTrack`; free-space contents are not synthesized.
+`ContiguousPrefixSize` prevents automatic probing from reading missing sectors.
+Metadata reports `recorded_sectors` and `checksums_verified: true`.
+The raw wrapper remains accessible through the original auto node.
+
+Validation against the P/390 pending-media collection opened all 22 intact
+images (including one duplicate), checked their checksums and read their FAT
+members. The image with a zeroed 40-byte header is deliberately not repaired
+or guessed. The regression tests contain synthetic data, not IBM media.

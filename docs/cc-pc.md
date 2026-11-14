@@ -497,3 +497,30 @@ Specification references: Linux KVM API sections `KVM_GET_SUPPORTED_HV_CPUID`
 and `KVM_CAP_HYPERV_SYNIC`; Hyper-V TLFS feature/MSR definitions; QEMU's
 `docs/system/i386/hyperv.rst` describes the clock/timer dependencies. No QEMU
 process is involved in this implementation.
+
+
+## Opt-in ISA PCM audio
+
+`cc.backend(sb16=True)` adds a native ISA Sound Blaster PCM device at 220h,
+DSP version 4.05, IRQ5, DMA1 and DMA5. It is disabled by default and currently
+requires a single x86 CPU. This is an in-process device, not a host sound-server
+or QEMU audio fallback. The AT 8237 controllers implement byte/word addressing,
+page wrapping, count-minus-one, masks, direction, terminal count and auto-init.
+The DSP implements 8/16-bit PCM, signed/unsigned mono/stereo, sample rates,
+single/auto DMA, pause/continue/exit, mixer levels and independent IRQ ACKs.
+Timer callbacks wake the CPU only; DMA capture and IRQ state are serialized by
+the platform owner before guest execution resumes.
+
+`vm.extension("cc.v1").audio_capture()` returns an owned WAV file and
+`sample_rate`, `channels`, `frames`, `total_frames`, `truncated`, and `fault`.
+The sink converts guest PCM into 44100-Hz signed 16-bit stereo, applies master
+and voice levels, and retains at most 16 MiB of PCM. Overflow is explicit,
+not silent; total frames continue counting. `state()["audio"]` exposes a
+bounded DSP command tail, DMA registers and transfer/IRQ state. The sink is
+portable and does not require a host audio device. It does not play sound on
+the host automatically; the WAV is an independently usable playback artifact.
+
+FM synthesis, MIDI UART, ADC/recording and Creative ADPCM are not implemented.
+Do not configure those optional guest devices or interpret successful PCM
+playback as proof of them. Original IBM Warp 3 SB16/MCI output is checked by
+waveform correlation against the supplied WAV, not merely a success return.

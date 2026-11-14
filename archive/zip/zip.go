@@ -278,7 +278,7 @@ func (f *Entry) cacheUntil(end int64) error {
 		return nil
 	}
 	if f.reader == nil {
-		reader, err := f.entry.Open()
+		reader, err := f.open()
 		if err != nil {
 			f.err = err
 			return err

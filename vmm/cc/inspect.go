@@ -25,6 +25,7 @@ func (d *driver) Extension(ctx context.Context, name string) (starlark.Value, er
 	}
 	i := inspection{driver: d, ctx: ctx}
 	return starvalue.NewRecord(starlark.StringDict{
+		"audio_capture": starlark.NewBuiltin("cc.audio_capture", i.audioCapture),
 		"breakpoint":    starlark.NewBuiltin("cc.breakpoint", i.breakpoint),
 		"step":          starlark.NewBuiltin("cc.step", i.step),
 		"read_physical": starlark.NewBuiltin("cc.read_physical", i.readPhysical),
@@ -270,6 +271,7 @@ func (p *pc) inspectState() (starlark.Value, error) {
 	}
 	return starvalue.Starlark(map[string]any{
 		"bios_counts": biosCounts,
+		"audio":       p.sound.state(),
 		"text":        string(text), "instruction_bytes": fmt.Sprintf("%x", pcBytes), "bios_ticks": int64(binary.LittleEndian.Uint32(p.ram[0x46c:])),
 		"code_mapping": mapping, "unsupported_bios": biosGaps,
 		"virtio_input": map[string]any{"status": int(p.input.status), "reports": int64(p.input.reports), "queue_ready": p.input.queues[0].ready, "used": int(p.input.queues[0].written), "descriptor": int64(p.input.queues[0].desc), "available": int64(p.input.queues[0].avail), "pending": len(p.input.pending)},
