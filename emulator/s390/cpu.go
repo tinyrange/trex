@@ -460,6 +460,10 @@ func (c *CPU) takeSVC(code byte) {
 		c.setLowByte(0x89, byte(ilc))
 		c.setLowHalf(0x8a, uint16(code))
 	}
+	if want, ok := c.M.BreakSVC[uint16(code)]; ok && c.GR[1]&want[0] == want[1] {
+		c.hitBreak = true
+		c.M.svcHit = fmt.Sprintf("svc %d at %08X R1 %08X", code, c.ia, c.GR[1])
+	}
 	c.M.Interrupts["svc"]++
 	if c.M.Interrupts["svc"] <= 64 {
 		c.M.event("svc", c, fmt.Sprintf("code %d at %08X", code, c.ia))

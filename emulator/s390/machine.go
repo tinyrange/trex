@@ -2,6 +2,7 @@ package s390
 
 import (
 	"fmt"
+	"math/bits"
 	"time"
 )
 
@@ -54,7 +55,12 @@ type Machine struct {
 	// interruption with one of these codes is taken; the general
 	// registers still hold their values at the interruption.
 	BreakProgram map[uint16]bool
-	programHit   string
+	// BreakSVC stops Run (kind "svc") after an SVC interruption
+	// whose number is a key and whose general register 1 matches the
+	// value's mask and bits (for SVC 13, the ABEND completion code).
+	BreakSVC   map[uint16][2]uint32
+	programHit string
+	svcHit     string
 
 	// EventLimit bounds retained events.
 	EventLimit int
@@ -89,6 +95,10 @@ type Machine struct {
 	watchAddr        uint32
 	// Profile, when non-nil, counts executed instructions per 256-byte block.
 	Profile map[uint32]uint64
+	// Coverage, when non-nil, has a bit set for each 64-byte block of
+	// instruction addresses executed outside interpretive execution (see
+	// EnableCoverage).
+	Coverage []uint64
 	// Interrupts counts interruptions taken by class.
 	Interrupts map[string]uint64
 	// History, when non-nil, holds the most recent instructions executed.
@@ -377,6 +387,11 @@ func (m *Machine) Run(budget uint64) StopReason {
 					m.programHit = ""
 					return StopReason{Kind: "program", Detail: d}
 				}
+				if m.svcHit != "" {
+					d := m.svcHit
+					m.svcHit = ""
+					return StopReason{Kind: "svc", Detail: d}
+				}
 				return StopReason{Kind: "breakpoint", Detail: fmt.Sprintf("cpu %d at %08X", c.Addr, c.PSW.IA)}
 			}
 		}
@@ -630,7 +645,10 @@ func (c *CPU) step() {
 	}
 	c.ilc = n
 	c.next = (ia + n) & c.amask
-	if m := c.M; m.History != nil || m.Profile != nil {
+	if m := c.M; m.History != nil || m.Profile != nil || m.Coverage != nil {
+		if m.Coverage != nil && c.sie == nil {
+			m.Coverage[ia>>12] |= 1 << (ia >> 6 & 63)
+		}
 		if m.History != nil && (!m.HistoryGuestOnly || c.sie != nil) {
 			m.record(c)
 		}
@@ -645,7 +663,17 @@ func (c *CPU) step() {
 // TranslateVirtual returns the absolute address of a virtual address of
 // CPU 0's primary address space.
 func (m *Machine) TranslateVirtual(addr uint32) (uint32, error) {
-	b, err := m.ReadVirtual(addr, 0)
+	return m.translateSpace(addr, nil)
+}
+
+// TranslateALET returns the absolute address of a virtual address in the
+// address space an ALET designates (through CPU 0's access lists).
+func (m *Machine) TranslateALET(addr, alet uint32) (uint32, error) {
+	return m.translateSpace(addr, &alet)
+}
+
+func (m *Machine) translateSpace(addr uint32, alet *uint32) (uint32, error) {
+	b, err := m.readSpace(addr, 0, alet)
 	_ = b
 	if err != nil {
 		return 0, err
@@ -663,8 +691,12 @@ func (m *Machine) TranslateVirtual(addr uint32) (uint32, error) {
 			}
 		}()
 		real := addr & c.amask
-		if c.PSW.DAT {
-			real, _ = c.translate(real, c.CR[1], accFetch)
+		std := c.CR[1]
+		if alet != nil {
+			std = c.alet(*alet, accFetch)
+		}
+		if c.PSW.DAT || alet != nil {
+			real, _ = c.translate(real, std, accFetch)
 		}
 		abs = c.realToAbs(real)
 		return nil
@@ -675,6 +707,17 @@ func (m *Machine) TranslateVirtual(addr uint32) (uint32, error) {
 // ReadVirtual reads n bytes at a virtual address of CPU 0's primary
 // address space (real addresses when DAT is off), for observation.
 func (m *Machine) ReadVirtual(addr uint32, n int) (out []byte, err error) {
+	return m.readSpace(addr, n, nil)
+}
+
+// ReadALET reads virtual storage of the address space an ALET designates,
+// translated through CPU 0's current access lists (as an operand in
+// access-register mode would be).
+func (m *Machine) ReadALET(addr uint32, n int, alet uint32) ([]byte, error) {
+	return m.readSpace(addr, n, &alet)
+}
+
+func (m *Machine) readSpace(addr uint32, n int, alet *uint32) (out []byte, err error) {
 	if n < 0 || n > 1<<20 {
 		return nil, fmt.Errorf("read: length must be 0..1M")
 	}
@@ -688,11 +731,15 @@ func (m *Machine) ReadVirtual(addr uint32, n int) (out []byte, err error) {
 			panic(r)
 		}
 	}()
+	std := c.CR[1]
+	if alet != nil {
+		std = c.alet(*alet, accFetch)
+	}
 	for i := 0; i < n; i++ {
 		v := (addr + uint32(i)) & c.amask
 		real := v
-		if c.PSW.DAT {
-			real, _ = c.translate(v, c.CR[1], accFetch)
+		if c.PSW.DAT || alet != nil {
+			real, _ = c.translate(v, std, accFetch)
 		}
 		a := c.realToAbs(real)
 		if !m.S.valid(a, 1) {
@@ -701,4 +748,36 @@ func (m *Machine) ReadVirtual(addr uint32, n int) (out []byte, err error) {
 		out = append(out, m.S.Mem[a])
 	}
 	return out, nil
+}
+
+// EnableCoverage starts (or, with on false, stops and discards) recording
+// which 64-byte blocks of instruction addresses execute. Addresses are as
+// the CPU fetched them: virtual with DAT on, real otherwise, and not
+// distinguished by address space, so blocks of the common area name one
+// location while private-area blocks merge every address space's.
+func (m *Machine) EnableCoverage(on bool) {
+	if !on {
+		m.Coverage = nil
+	} else if m.Coverage == nil {
+		m.Coverage = make([]uint64, 1<<31>>12)
+	}
+}
+
+// CoverageRanges returns the executed instruction addresses as ascending
+// [first, last] byte ranges at 64-byte granularity.
+func (m *Machine) CoverageRanges() [][2]uint32 {
+	var out [][2]uint32
+	for w, word := range m.Coverage {
+		for word != 0 {
+			b := uint32(bits.TrailingZeros64(word))
+			word &^= 1 << b
+			lo := uint32(w)<<12 | b<<6
+			if n := len(out); n > 0 && out[n-1][1]+1 == lo {
+				out[n-1][1] = lo + 63
+			} else {
+				out = append(out, [2]uint32{lo, lo + 63})
+			}
+		}
+	}
+	return out
 }

@@ -137,6 +137,15 @@ func (c *CPU) ssCharacter() {
 	}
 }
 
+// sameSpace reports whether storage operands based on registers b1 (stored)
+// and b2 (fetched) are in the same address space.
+func (c *CPU) sameSpace(b1, b2 int) bool {
+	if !c.PSW.DAT {
+		return true
+	}
+	return c.stdFor(accStore, b1) == c.stdFor(accFetch, b2)
+}
+
 // overlapsForward reports whether a forward byte copy would observe its own
 // stores (destination starts inside the source, after it).
 func overlapsForward(dst, src, n uint32) bool {
@@ -236,8 +245,10 @@ func (c *CPU) mvcl(r1, r2 int) {
 	if dl == 0 {
 		return
 	}
-	// Destructive overlap check.
-	if sl > 0 && d > s && d < s+min(sl, dl) && !(d == s) {
+	// Destructive overlap: the destination starts inside the source in the
+	// same address space (operands in different spaces, as in the
+	// access-register mode, cannot overlap).
+	if sl > 0 && d > s && d < s+min(sl, dl) && c.sameSpace(r1, r2) {
 		c.PSW.CC = 3
 		return
 	}

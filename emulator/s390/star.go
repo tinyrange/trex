@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/png"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -69,7 +70,7 @@ func (v *machineValue) Truth() starlark.Bool  { return starlark.True }
 func (v *machineValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: s390 machine") }
 
 var machineMethods = []string{"dasd", "console", "ipl", "storage_load", "command", "messages", "unit_record", "cards", "output", "tape", "dasd_track", "subchannel", "translate", "run", "psw", "registers", "screen", "type", "key", "cursor",
-	"read", "unknown", "program_counts", "dasd_errors", "screens", "time", "break_at", "break_program", "clear_breaks", "events", "instructions", "restart", "trace_io", "event_limit", "history", "watch", "disassemble", "find", "scp_config", "profile", "interrupts", "screenshot", "web_terminals", "checkpoint", "restore", "disk_changes", "transfer", "transfer_result", "ctc", "ctc_send", "ctc_packets"}
+	"read", "unknown", "program_counts", "dasd_errors", "screens", "time", "break_at", "break_program", "break_svc", "clear_breaks", "events", "instructions", "restart", "trace_io", "event_limit", "history", "watch", "disassemble", "find", "scp_config", "profile", "interrupts", "screenshot", "web_terminals", "checkpoint", "restore", "disk_changes", "dasd_usage", "coverage", "transfer", "transfer_result", "ctc", "ctc_send", "ctc_packets"}
 
 func (v *machineValue) AttrNames() []string { return machineMethods }
 
@@ -392,6 +393,50 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 				"records": starlark.MakeInt(x.Records), "data": starlark.Bytes(x.Download.String()),
 			}), nil
 		}), nil
+	case "dasd_usage":
+		// dasd_usage(reset=False) -> {device: {"read": [(first, last)], "written": [...], "records": [(track, [record numbers])]}}
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			reset := false
+			if err := starlark.UnpackArgs(name, args, kwargs, "reset?", &reset); err != nil {
+				return nil, err
+			}
+			ranges := func(rs []TrackRange) *starlark.List {
+				out := make([]starlark.Value, len(rs))
+				for i, r := range rs {
+					out[i] = starlark.Tuple{starlark.MakeUint64(uint64(r.First)), starlark.MakeUint64(uint64(r.Last))}
+				}
+				return starlark.NewList(out)
+			}
+			d := starlark.NewDict(16)
+			for _, x := range v.m.CSS.subs {
+				if dasd, ok := x.dev.(*DASD3390); ok {
+					read, written := dasd.TrackUsage()
+					recs := dasd.RecordUsage()
+					if reset {
+						dasd.ResetTrackUsage()
+					}
+					tracks := make([]uint32, 0, len(recs))
+					for t := range recs {
+						tracks = append(tracks, t)
+					}
+					slices.Sort(tracks)
+					records := make([]starlark.Value, len(tracks))
+					for i, t := range tracks {
+						nums := make([]starlark.Value, len(recs[t]))
+						for j, n := range recs[t] {
+							nums[j] = starlark.MakeInt(int(n))
+						}
+						records[i] = starlark.Tuple{starlark.MakeUint64(uint64(t)), starlark.NewList(nums)}
+					}
+					e := starlark.NewDict(3)
+					e.SetKey(starlark.String("read"), ranges(read))
+					e.SetKey(starlark.String("written"), ranges(written))
+					e.SetKey(starlark.String("records"), starlark.NewList(records))
+					d.SetKey(starlark.MakeInt(int(x.devno)), e)
+				}
+			}
+			return d, nil
+		}), nil
 	case "disk_changes":
 		// disk_changes() -> {device: written tracks}
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -520,8 +565,16 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			var addr, n int
 			virtual := false
-			if err := starlark.UnpackArgs(name, args, kwargs, "address", &addr, "length", &n, "virtual?", &virtual); err != nil {
+			alet := -1
+			if err := starlark.UnpackArgs(name, args, kwargs, "address", &addr, "length", &n, "virtual?", &virtual, "alet?", &alet); err != nil {
 				return nil, err
+			}
+			if alet >= 0 {
+				b, err := v.m.ReadALET(uint32(addr), n, uint32(alet))
+				if err != nil {
+					return nil, err
+				}
+				return starlark.Bytes(b), nil
 			}
 			if virtual {
 				b, err := v.m.ReadVirtual(uint32(addr), n)
@@ -538,10 +591,14 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 	case "translate":
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			var addr int
-			if err := starlark.UnpackArgs(name, args, kwargs, "address", &addr); err != nil {
+			alet := -1
+			if err := starlark.UnpackArgs(name, args, kwargs, "address", &addr, "alet?", &alet); err != nil {
 				return nil, err
 			}
 			a, err := v.m.TranslateVirtual(uint32(addr))
+			if alet >= 0 {
+				a, err = v.m.TranslateALET(uint32(addr), uint32(alet))
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -601,6 +658,7 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			v.m.Breakpoints = nil
 			v.m.BreakProgram = nil
+			v.m.BreakSVC = nil
 			return starlark.None, nil
 		}), nil
 	case "scp_config":
@@ -615,6 +673,24 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 			copy(v.m.SCPConfig[:], cfg)
 			copy(v.m.SCPCPUFacilities[:], cpu)
 			return starlark.None, nil
+		}), nil
+	case "coverage":
+		// coverage(on=None) -> [(first, last)] executed instruction address ranges
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			on := starlark.Value(starlark.None)
+			if err := starlark.UnpackArgs(name, args, kwargs, "on?", &on); err != nil {
+				return nil, err
+			}
+			if b, ok := on.(starlark.Bool); ok {
+				v.m.EnableCoverage(bool(b))
+				return starlark.None, nil
+			}
+			rs := v.m.CoverageRanges()
+			out := make([]starlark.Value, len(rs))
+			for i, r := range rs {
+				out[i] = starlark.Tuple{starlark.MakeUint64(uint64(r[0])), starlark.MakeUint64(uint64(r[1]))}
+			}
+			return starlark.NewList(out), nil
 		}), nil
 	case "profile":
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -767,6 +843,20 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 				out[i] = starlark.String(fmt.Sprintf("%08X %-12X %-28s cc%d", e.IA, e.Op[:ilen(e.Op[0])], text, e.CC))
 			}
 			return starlark.NewList(out), nil
+		}), nil
+	case "break_svc":
+		// break_svc(number, mask=0, value=0): stop after SVC number when
+		// GR1 & mask == value.
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var number, mask, value int
+			if err := starlark.UnpackArgs(name, args, kwargs, "number", &number, "mask?", &mask, "value?", &value); err != nil {
+				return nil, err
+			}
+			if v.m.BreakSVC == nil {
+				v.m.BreakSVC = map[uint16][2]uint32{}
+			}
+			v.m.BreakSVC[uint16(number)] = [2]uint32{uint32(mask), uint32(value)}
+			return starlark.None, nil
 		}), nil
 	case "break_program":
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -924,10 +1014,13 @@ func (v *machineValue) addDASD(args starlark.Tuple, kwargs []starlark.Tuple) (st
 
 func (v *machineValue) addConsole(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var devno int
-	rows, cols, model := 24, 80, 0
+	rows, cols, model, history := 24, 80, 0, 256
 	typ := "3270"
-	if err := starlark.UnpackArgs("console", args, kwargs, "device", &devno, "rows?", &rows, "cols?", &cols, "type?", &typ, "model?", &model); err != nil {
+	if err := starlark.UnpackArgs("console", args, kwargs, "device", &devno, "rows?", &rows, "cols?", &cols, "type?", &typ, "model?", &model, "history?", &history); err != nil {
 		return nil, err
+	}
+	if history < 1 {
+		return nil, fmt.Errorf("console: history must be positive")
 	}
 	if typ == "3215" {
 		lc := NewConsole3215()
@@ -941,6 +1034,7 @@ func (v *machineValue) addConsole(args starlark.Tuple, kwargs []starlark.Tuple) 
 		return nil, fmt.Errorf("console: type must be 3270 or 3215")
 	}
 	t := NewConsole3270(rows, cols)
+	t.LogLimit = history
 	if model != 0 {
 		if err := t.SetModel(model); err != nil {
 			return nil, err

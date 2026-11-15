@@ -1,6 +1,8 @@
 package s390
 
 import (
+	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -968,5 +970,108 @@ func TestDASDLocateDomainStopsAtExtentEnd(t *testing.T) {
 	}
 	if sense, _, _ := d.Exec(0x04, make([]byte, 32), false); sense[1]&senseFileProtect == 0 || sense[27]&0x80 == 0 {
 		t.Fatalf("sense %X", sense[:4])
+	}
+}
+
+// Track usage records the tracks channel programs read and write, in
+// ascending ranges; ReadTrack from outside the channel is not counted.
+func TestDASDTrackUsage(t *testing.T) {
+	d := NewDASD3390(volume(), 3)
+	read := func(cyl, head uint16) {
+		d.StartChain()
+		d.Exec(0x63, extent(0, 0, 2, 14), true)
+		d.Exec(0x47, locate(0x06, 1, cyl, head, 1), true)
+		if _, _, st := d.Exec(0x86, nil, false); st&usUnitCheck != 0 {
+			t.Fatalf("read %d/%d: unit check", cyl, head)
+		}
+	}
+	read(1, 3)
+	read(1, 4)
+	read(2, 0)
+	d.StartChain()
+	d.Exec(0x63, extent(0, 0, 2, 14), true)
+	d.Exec(0x47, locate(0x01, 1, 0, 2, 1), true)
+	if _, _, st := d.Exec(0x85, []byte{1, 2, 3}, false); st&usUnitCheck != 0 {
+		t.Fatal("write: unit check")
+	}
+	d.ReadTrack(40)
+	r, w := d.TrackUsage()
+	if fmt.Sprint(r) != "[{2 2} {18 19} {30 30}]" || fmt.Sprint(w) != "[{2 2}]" {
+		t.Fatalf("read %v written %v", r, w)
+	}
+	if recs := d.RecordUsage(); fmt.Sprint(recs) != "map[18:[1] 19:[1] 30:[1]]" {
+		t.Fatalf("records read %v", recs)
+	}
+	d.ResetTrackUsage()
+	if len(d.RecordUsage()) != 0 {
+		t.Fatal("records survive a reset")
+	}
+	if r, w := d.TrackUsage(); r != nil || w != nil {
+		t.Fatalf("after reset: %v %v", r, w)
+	}
+}
+
+// Coverage records the 64-byte blocks whose instructions executed.
+func TestExecutionCoverage(t *testing.T) {
+	m, _ := newTest(t, []byte{0x47, 0xf0, 0x01, 0x00}) // B X'100'
+	setupStop(m)
+	copy(m.S.Mem[0x100:], stop())
+	m.EnableCoverage(true)
+	if r := m.Run(1000); r.Kind != "disabled-wait" {
+		t.Fatalf("run: %v", r)
+	}
+	if got := fmt.Sprint(m.CoverageRanges()); got != "[[256 319] [4096 4159]]" {
+		t.Fatalf("coverage %s", got)
+	}
+	m.EnableCoverage(false)
+	if m.CoverageRanges() != nil {
+		t.Fatal("coverage kept after disabling")
+	}
+}
+
+// break_svc stops after an SVC whose GR1 matches.
+func TestBreakSVC(t *testing.T) {
+	m, _ := newTest(t, []byte{
+		0x41, 0x10, 0x00, 0x11, // LA 1,X'11'
+		0x0a, 0x0d, // SVC 13
+		0x41, 0x10, 0x00, 0x77, // LA 1,X'77'
+		0x0a, 0x0d, // SVC 13
+	})
+	be.PutUint64(m.S.Mem[pswSVCNew:], 0x00080000_80001006) // continue after the SVC
+	m.BreakSVC = map[uint16][2]uint32{13: {0xff, 0x77}}
+	r := m.Run(1000)
+	if r.Kind != "svc" || !strings.Contains(r.Detail, "svc 13") || m.CPUs[0].GR[1] != 0x77 {
+		t.Fatalf("stop %+v GR1 %X", r, m.CPUs[0].GR[1])
+	}
+}
+
+// MVCL operands in different address spaces never overlap destructively,
+// even when their logical ranges do (access-register mode); in one space
+// the overlap gives condition code 3 and moves nothing.
+func TestMVCLAcrossSpacesDoesNotOverlap(t *testing.T) {
+	run := func(sourceALET uint32) (*Machine, *CPU) {
+		m, c := newTest(t, append([]byte{0x0e, 0x4e}, stop()...)) // MVCL 4,14
+		dat(m, c)
+		// The secondary space maps page n to frame 0x40+n.
+		be.PutUint32(m.S.Mem[0x12000:], 0x00013000|0x0f)
+		for i := 0; i < 256; i++ {
+			be.PutUint32(m.S.Mem[0x13000+4*i:], uint32(0x40+i)<<12)
+		}
+		setupStop(m)
+		copy(m.S.Mem[0x42000:], bytes.Repeat([]byte{0xab}, 0x145))
+		c.loadPSW(0x04084000_80001000) // AR mode
+		c.GR[4], c.GR[5] = 0x2080, 0x145
+		c.GR[14], c.GR[15] = 0x2000, 0x145
+		c.AR[4], c.AR[14] = 0, sourceALET
+		runTo(t, m)
+		return m, c
+	}
+	m, c := run(1) // source in the secondary space
+	if !bytes.Equal(m.S.Mem[0x2080:0x2080+0x145], bytes.Repeat([]byte{0xab}, 0x145)) || c.GR[5] != 0 || c.GR[4] != 0x21c5 {
+		t.Fatalf("cross-space MVCL: R4 %X R5 %X, moved % X", c.GR[4], c.GR[5], m.S.Mem[0x2080:0x2088])
+	}
+	m, c = run(0) // both primary: destructive overlap
+	if c.GR[5] != 0x145 || m.S.Mem[0x2080] != 0 {
+		t.Fatalf("same-space overlap moved data: R5 %X", c.GR[5])
 	}
 }

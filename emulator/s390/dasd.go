@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/bits"
 
 	"github.com/tinyrange/trex/filesystem/ckd"
 	"github.com/tinyrange/trex/storage"
@@ -57,6 +58,11 @@ type DASD3390 struct {
 	prevCmd  byte
 	Stats    DASDStats
 	lastErr  error
+
+	// Tracks channel programs have read and written, one bit each.
+	usedRead, usedWritten []uint64
+	// Records whose data channel programs have read, per track.
+	usedRecords map[uint32]*[4]uint64
 }
 
 type DASDStats struct {
@@ -106,10 +112,87 @@ func (d *DASD3390) Overlay() map[uint32][]ckd.Record { return d.overlay }
 // Cylinders returns the device's cylinder count.
 func (d *DASD3390) Cylinders() uint32 { return d.cylinders }
 
-// ReadTrack returns the current content of a track (overlay first).
-func (d *DASD3390) ReadTrack(t uint32) ([]ckd.Record, error) { return d.track(t) }
+// ReadTrack returns the current content of a track (overlay first). It is
+// not counted in TrackUsage.
+func (d *DASD3390) ReadTrack(t uint32) ([]ckd.Record, error) { return d.fetch(t) }
 
+// TrackRange is an inclusive range of track numbers (cylinder*heads+head).
+type TrackRange struct{ First, Last uint32 }
+
+// TrackUsage reports the tracks channel programs have read (including
+// those searched or passed over) and written since the device was created
+// or ResetTrackUsage was called, as ascending ranges.
+func (d *DASD3390) TrackUsage() (read, written []TrackRange) {
+	return trackRanges(d.usedRead), trackRanges(d.usedWritten)
+}
+
+// ResetTrackUsage forgets the tracks and records used so far.
+func (d *DASD3390) ResetTrackUsage() { d.usedRead, d.usedWritten, d.usedRecords = nil, nil, nil }
+
+// RecordUsage reports, for each track with records whose data a channel
+// program has read (READ DATA, READ KEY AND DATA, READ COUNT KEY AND DATA,
+// READ TRACK), those records' numbers in ascending order. Records found only
+// by searching or reading counts are not included.
+func (d *DASD3390) RecordUsage() map[uint32][]byte {
+	out := make(map[uint32][]byte, len(d.usedRecords))
+	for t, m := range d.usedRecords {
+		var recs []byte
+		for i, word := range m {
+			for word != 0 {
+				b := bits.TrailingZeros64(word)
+				word &^= 1 << b
+				recs = append(recs, byte(i*64+b))
+			}
+		}
+		out[t] = recs
+	}
+	return out
+}
+
+func (d *DASD3390) markRecord(t uint32, n byte) {
+	if d.usedRecords == nil {
+		d.usedRecords = map[uint32]*[4]uint64{}
+	}
+	m := d.usedRecords[t]
+	if m == nil {
+		m = new([4]uint64)
+		d.usedRecords[t] = m
+	}
+	m[n>>6] |= 1 << (n & 63)
+}
+
+func markTrack(bits *[]uint64, t uint32) {
+	w := int(t >> 6)
+	if w >= len(*bits) {
+		*bits = append(*bits, make([]uint64, w+1-len(*bits))...)
+	}
+	(*bits)[w] |= 1 << (t & 63)
+}
+
+func trackRanges(used []uint64) []TrackRange {
+	var out []TrackRange
+	for w, word := range used {
+		for word != 0 {
+			b := uint32(bits.TrailingZeros64(word))
+			t := uint32(w)<<6 | b
+			word &^= 1 << b
+			if n := len(out); n > 0 && out[n-1].Last+1 == t {
+				out[n-1].Last = t
+			} else {
+				out = append(out, TrackRange{t, t})
+			}
+		}
+	}
+	return out
+}
+
+// track returns a track for a channel program and records the use.
 func (d *DASD3390) track(t uint32) ([]ckd.Record, error) {
+	markTrack(&d.usedRead, t)
+	return d.fetch(t)
+}
+
+func (d *DASD3390) fetch(t uint32) ([]ckd.Record, error) {
 	if r, ok := d.overlay[t]; ok {
 		return r, nil
 	}
@@ -176,10 +259,11 @@ func (l *trackEntry) push(e *trackEntry) {
 
 // writable returns a private copy of a track for modification.
 func (d *DASD3390) writable(t uint32) ([]ckd.Record, error) {
+	markTrack(&d.usedWritten, t)
 	if r, ok := d.overlay[t]; ok {
 		return r, nil
 	}
-	r, err := d.track(t)
+	r, err := d.fetch(t)
 	if err != nil {
 		return nil, err
 	}
@@ -721,6 +805,7 @@ func (d *DASD3390) readData(mt, key, count bool) ([]byte, int, byte) {
 		buf = append(buf, x.Key...)
 	}
 	buf = append(buf, x.Data...)
+	d.markRecord(d.curTrack(), x.Number)
 	d.afterData = true
 	d.Stats.Reads++
 	if d.locate {
@@ -777,6 +862,7 @@ func (d *DASD3390) readTrack() ([]byte, int, byte) {
 		buf = append(buf, countField(x)...)
 		buf = append(buf, x.Key...)
 		buf = append(buf, x.Data...)
+		d.markRecord(d.curTrack(), x.Number)
 	}
 	d.rec = len(r) - 1
 	d.afterData = true
