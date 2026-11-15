@@ -1,7 +1,8 @@
 # Native CKD and z/OS readers
 
-Portable, read-only Go support for uncompressed `CKD_P370` and compressed
-`CKD_C370` base images through `storage.Reader`. Compose with ISO9660 and gzip readers without mounting,
+Portable Go support for uncompressed `CKD_P370` and compressed
+`CKD_C370` base images through `storage.Reader`, read-only except for the
+volume trimming and compressed image writing described below. Compose with ISO9660 and gzip readers without mounting,
 extracting, launching host parsers, or booting a guest. Source-specific media
 selection, corpus assertions and audit reports belong in the private recipe
 repository; this package contains format readers and synthetic fixtures only.
@@ -47,6 +48,69 @@ for reading and are not validated.
 `filesystem.ckd_scan(file, max_errors=N)` parses every track and returns
 per-track failures instead of stopping, for distinguishing isolated media damage
 from systematic decoding faults.
+
+## Editing and writing compressed volumes
+
+`NewEdit(disk)` edits a volume without moving anything; `Trim(disk, names)`
+is an edit that only removes data sets.
+
+- `Remove(names)`: the data sets' format-1 DSCBs and the format-3 DSCBs
+  their chains name become format-0 DSCBs; the format-4 DSCB counts them
+  free (DS4DSREC), stops naming the VTOC index (DS4IVTOC, X'08') and marks
+  the format-5 free-space DSCBs not valid (DS4DOSBT, X'80'), so the
+  operating system recomputes free space from the remaining extents on its
+  next allocation. Catalog entries are not changed.
+- `Blank(names)`: records keep their counts and keys with zero data, for
+  data sets the system rewrites before reading (page and spool data sets
+  on a cold start).
+- `KeepMembers(name, members)`: a traditional PDS's directory keeps only
+  those members and aliases of them.
+- `Compact(names)`: in traditional PDSs, records outside the directory and
+  every member's extent (directory TTR to end-of-file record) get zero
+  data: space left by members replaced or deleted without compressing the
+  library, and by `KeepMembers`.
+- `AddMembers(name, members)`: fixed-record members are written on the
+  free tracks after DS1LSTAR (two blocks per track), the directory is
+  rebuilt with them (replacing members of the same names, keeping every
+  other entry's indicator byte and user data) and DS1LSTAR names the last
+  record.
+
+Tracks outside the remaining data sets, the VTOC and track 0 are null.
+`Compress(set, header, heads, trackSize)` writes any such track set as a
+`CKD_C370` image in memory: held tracks are zlib-compressed (in parallel;
+the source is read in track order), null tracks have null level-2 entries
+in format 0, and groups without a held track have no level-2 table; the
+result reads as a file and opens with `OpenCompressed`. In Starlark,
+`filesystem.ckd_volume(parts).trim(remove, blank=, compact=, members=,
+keep_members=)` applies the edits and returns the image.
+
+## CKDZ
+
+`WriteCKDZ(set, header, heads)` writes trex's compact volume format, for
+volumes built rather than exchanged: tracks as record lists without padding
+(count fields naming the physical track and all-zero keys or data are
+flags), identical encoded tracks stored once, and tracks packed into chunks
+of about 1 MiB compressed with deflate at the highest level. `Open`
+recognises it (`OpenCKDZ`) and presents the equivalent `CKD_P370` image.
+It is typically 13-24% smaller than per-track `CKD_C370` on trimmed
+operating-system volumes. Layout: see `ckdz.go`.
+
+## ICF catalog entries
+
+`Edit.Uncatalog(catalog, names)` deletes the entries for data sets from a
+BCS whose data component is on the volume: records keyed by the names,
+sphere records whose component cells name one, and alias and connector
+records referring to one. Affected control intervals are rewritten in
+place (remaining records packed, RDFs as VSAM writes them, CIDF free
+space); the index is not changed. Spanned records are refused.
+
+## HFS live pages
+
+`Dataset.HFSLivePages` walks an HFS and reports the pages the reader uses
+(control, map and attribute pages and every object's allocation): evidence
+for space decisions, not a free-space map, since pages the reader does not
+interpret are not counted. HFS data sets whose attribute pages carry cell
+flags the reader does not accept (observed X'FF' and X'DC') fail to open.
 
 ## CMS EDF minidisks
 

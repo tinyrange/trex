@@ -15,6 +15,9 @@ type Member struct {
 	Record   byte
 	Alias    bool
 	UserData []byte
+	// Info is the entry's indicator byte: the alias bit, the number of
+	// TTRs in the user data (bits 1-2) and the user data halfword count.
+	Info byte
 }
 
 // Members returns a traditional PDS directory. PDSE/HFS are intentionally not
@@ -84,7 +87,7 @@ func DirectoryBlock(b []byte) ([]Member, bool, error) {
 		if p+length > used {
 			return nil, false, fmt.Errorf("directory user data outside block")
 		}
-		m := Member{Name: Identifier(b[p : p+8]), Track: uint32(be.Uint16(b[p+8 : p+10])), Record: b[p+10], Alias: b[p+11]&128 != 0, UserData: bytes.Clone(b[p+12 : p+length])}
+		m := Member{Name: Identifier(b[p : p+8]), Track: uint32(be.Uint16(b[p+8 : p+10])), Record: b[p+10], Alias: b[p+11]&128 != 0, UserData: bytes.Clone(b[p+12 : p+length]), Info: b[p+11]}
 		out = append(out, m)
 		p += length
 	}
