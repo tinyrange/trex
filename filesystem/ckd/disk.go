@@ -51,6 +51,13 @@ func Open(source storage.Reader) (*Disk, error) {
 		}
 		return Open(c)
 	}
+	if IsCKDZ(h[:]) {
+		c, err := OpenCKDZ(source)
+		if err != nil {
+			return nil, err
+		}
+		return Open(c)
+	}
 	if string(h[:8]) != "CKD_P370" {
 		return nil, fmt.Errorf("ckd: unsupported signature %q", h[:8])
 	}

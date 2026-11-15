@@ -247,6 +247,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"filesystem.object_deck":            "filesystem.object_deck(file, max_cards=10000000, max_bytes=256MiB) -> record",
 	"filesystem.program_object":         "filesystem.program_object(file) -> file",
 	"filesystem.cp_directory":           "filesystem.cp_directory(file, root=0, max_users=100000) -> record",
+	"filesystem.ckd_volume":             "filesystem.ckd_volume(parts) -> ckd_volume",
 	"filesystem.ckd_vvr":                "filesystem.ckd_vvr(data) -> record",
 	"filesystem.ckd_catalog_record":     "filesystem.ckd_catalog_record(data) -> record",
 	"filesystem.ckd_vsam_records":       "filesystem.ckd_vsam_records(data, organization, ci_bytes, used_bytes, cis_per_ca, key_offset=0, key_length=0, index=None, index_ci_bytes=4096, index_used_bytes=0, index_root_rba=0, max_records=100000, max_record_bytes=16777216, max_intervals=1000000, max_bytes=67108864) -> list",

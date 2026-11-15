@@ -242,6 +242,7 @@ func predeclared() starlark.StringDict {
 				"ods2":                 starlark.NewBuiltin("ods2", filesystemods2.Builtin),
 				"ultrix_label":         starlark.NewBuiltin("ultrix_label", filesystemultrix.Builtin),
 				"ckd_scan":             starlark.NewBuiltin("ckd_scan", filesystemckd.ScanBuiltin),
+				"ckd_volume":           starlark.NewBuiltin("ckd_volume", filesystemckd.VolumeBuiltin),
 				"cms":                  starlark.NewBuiltin("cms", filesystemckd.CMSBuiltin),
 				"cms_library":          starlark.NewBuiltin("cms_library", filesystemckd.CMSLibraryBuiltin),
 				"cms_unpack":           starlark.NewBuiltin("cms_unpack", filesystemckd.CMSUnpackBuiltin),

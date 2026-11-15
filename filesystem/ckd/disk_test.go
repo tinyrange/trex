@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"github.com/tinyrange/trex/storage"
 	"io"
 	"strings"
@@ -12,6 +13,8 @@ import (
 
 	nativegzip "github.com/tinyrange/trex/archive/gzip"
 	"github.com/tinyrange/trex/auto"
+	starfile "github.com/tinyrange/trex/storage/star"
+	"go.starlark.net/starlark"
 )
 
 const testTrackSize = 2048
@@ -383,6 +386,17 @@ func TestOpenPartsComposesSplitVolume(t *testing.T) {
 				t.Fatalf("track %d record %d differs", tr, i)
 			}
 		}
+	}
+	// ckd_volume composes the same parts for auto().
+	v, err := VolumeBuiltin(nil, nil, starlark.Tuple{starlark.NewList([]starlark.Value{&starfile.Bytes{Data: p1}, &starfile.Bytes{Data: p2}})}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := v.(*VolumeValue).Attr("tracks"); n.String() != fmt.Sprint(cyls*int(whole.Heads)) {
+		t.Fatalf("ckd_volume tracks %v, want %d", n, cyls*int(whole.Heads))
+	}
+	if entries, err := v.(*VolumeValue).Disk.View(10).Entries(); err != nil || len(entries) == 0 || entries[0].Name != "datasets" {
+		t.Fatalf("ckd_volume view: %v %v", entries, err)
 	}
 	le.PutUint16(p1[18:], uint16(split))
 	if _, err := OpenParts([]storage.Reader{raw(p1), raw(p2)}); err == nil {
