@@ -208,6 +208,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"block.temporary_overlay":           "block.temporary_overlay(base, directory) -> disposable sparse block device",
 	"archive.ar":                        "archive.ar(file, maximum_entries=1M, maximum_metadata=64MiB) -> ar",
 	"archive.aws":                       "archive.aws(file, maximum_records=1M) -> record",
+	"archive.simh":                      "archive.simh(file, maximum_objects=1M, strict=True) -> record",
 	"archive.rms_variable":              "archive.rms_variable(file, attributes, maximum_records=1M) -> record",
 	"archive.vmsbackup_blocks":          "archive.vmsbackup_blocks(file, maximum_blocks=1M, maximum_records=1M, maximum_block_size=16MiB) -> record",
 	"archive.vmsbackup":                 "archive.vmsbackup(file, maximum_blocks=1M, maximum_records=1M, maximum_block_size=16MiB, maximum_files=1M, maximum_attributes=256) -> record",

@@ -4908,6 +4908,12 @@ Parses a 7-Zip archive into member file views with bounded entry count, metadata
 
 Parses an SFP installer archive and exposes member paths, timestamps, stored sizes and payload file views. It does not install the contents.
 
+### `archive.simh`
+
+`archive.simh(file, maximum_objects=1M, strict=True) -> record`
+
+Reads SIMH tape records and metadata in place, validating padded lengths and trailers. Records expose data, offset, class, marker, tape_mark, bad and framing_error. strict=False retains positionable records with mismatched trailers and reports their framing_error; truncation still fails. Preserves private objects and erase gaps; stops at logical end of medium.
+
 ### `archive.stuffit`
 
 `archive.stuffit(file, maximum_entries=1M, maximum_decoded_bytes=256MiB) -> record`
@@ -5704,7 +5710,7 @@ Creates a portable in-process ARM64 or AMD64 instruction context independently o
 
 `emulator.s390(memory=64MiB, cpus=1, mips=50, start='', idle_skip=True, architecture='esa390') -> s390_machine`
 
-Creates an in-process ESA/390 or System/370 (architecture='s370') machine with storage, CPUs, a channel subsystem, CKD DASD, 3270 and 3215 consoles, unit-record devices, AWS tapes and the hardware system console. Attach devices, then ipl() or storage_load() and run(); time is virtual. See docs/s390.md.
+Creates an in-process ESA/390 or System/370 (architecture='s370') machine with storage, CPUs, a channel subsystem, CKD DASD, 3270 and 3215 consoles, unit-record devices, AWS/SIMH tapes and the hardware system console. Attach devices, then ipl() or storage_load() and run(); time is virtual. See docs/s390.md.
 
 ### `emulator.uefi`
 

@@ -77,24 +77,26 @@ func (c *CPU) overflow() {
 	}
 }
 
-func (c *CPU) add(a, b uint32) uint32 {
+func (c *CPU) add(r1 int, b uint32) {
+	a := c.GR[r1]
 	r := a + b
+	c.GR[r1] = r // Overflow is a completing interruption.
 	if int32((a^r)&(b^r)) < 0 {
 		c.overflow()
-		return r
+		return
 	}
 	c.PSW.CC = ccSigned(int32(r))
-	return r
 }
 
-func (c *CPU) sub(a, b uint32) uint32 {
+func (c *CPU) sub(r1 int, b uint32) {
+	a := c.GR[r1]
 	r := a - b
+	c.GR[r1] = r // Overflow is a completing interruption.
 	if int32((a^b)&(a^r)) < 0 {
 		c.overflow()
-		return r
+		return
 	}
 	c.PSW.CC = ccSigned(int32(r))
-	return r
 }
 
 func (c *CPU) addLogical(a, b uint32) uint32 {
@@ -324,10 +326,10 @@ func (c *CPU) execute() {
 		c.PSW.CC = ccCompare(int64(int32(c.GR[r1])), int64(int32(c.GR[r2])))
 	case 0x1a:
 		r1, r2 := int(op[1]>>4), int(op[1]&0xf)
-		c.GR[r1] = c.add(c.GR[r1], c.GR[r2])
+		c.add(r1, c.GR[r2])
 	case 0x1b:
 		r1, r2 := int(op[1]>>4), int(op[1]&0xf)
-		c.GR[r1] = c.sub(c.GR[r1], c.GR[r2])
+		c.sub(r1, c.GR[r2])
 	case 0x1c: // MR
 		r1, r2 := int(op[1]>>4), int(op[1]&0xf)
 		c.even(r1)
@@ -381,10 +383,10 @@ func (c *CPU) execute() {
 		c.PSW.CC = ccCompare(int64(int32(c.GR[r1])), int64(int16(c.fetchHalf(c.eaRX(op), int(op[2]>>4)))))
 	case 0x4a:
 		r1 := op[1] >> 4
-		c.GR[r1] = c.add(c.GR[r1], sext16(c.fetchHalf(c.eaRX(op), int(op[2]>>4))))
+		c.add(int(r1), sext16(c.fetchHalf(c.eaRX(op), int(op[2]>>4))))
 	case 0x4b:
 		r1 := op[1] >> 4
-		c.GR[r1] = c.sub(c.GR[r1], sext16(c.fetchHalf(c.eaRX(op), int(op[2]>>4))))
+		c.sub(int(r1), sext16(c.fetchHalf(c.eaRX(op), int(op[2]>>4))))
 	case 0x4c:
 		r1 := op[1] >> 4
 		c.GR[r1] = uint32(int32(c.GR[r1]) * int32(int16(c.fetchHalf(c.eaRX(op), int(op[2]>>4)))))
@@ -422,10 +424,10 @@ func (c *CPU) execute() {
 		c.PSW.CC = ccCompare(int64(int32(c.GR[r1])), int64(int32(c.fetchWord(c.eaRX(op), int(op[2]>>4)))))
 	case 0x5a:
 		r1 := op[1] >> 4
-		c.GR[r1] = c.add(c.GR[r1], c.fetchWord(c.eaRX(op), int(op[2]>>4)))
+		c.add(int(r1), c.fetchWord(c.eaRX(op), int(op[2]>>4)))
 	case 0x5b:
 		r1 := op[1] >> 4
-		c.GR[r1] = c.sub(c.GR[r1], c.fetchWord(c.eaRX(op), int(op[2]>>4)))
+		c.sub(int(r1), c.fetchWord(c.eaRX(op), int(op[2]>>4)))
 	case 0x5c: // M
 		r1 := int(op[1] >> 4)
 		c.even(r1)
@@ -1020,7 +1022,7 @@ func (c *CPU) execRI() {
 	case 0x8: // LHI
 		c.GR[r1] = sext16(i)
 	case 0xa: // AHI
-		c.GR[r1] = c.add(c.GR[r1], sext16(i))
+		c.add(int(r1), sext16(i))
 	case 0xc: // MHI
 		c.GR[r1] = uint32(int32(c.GR[r1]) * int32(int16(i)))
 	case 0xe: // CHI

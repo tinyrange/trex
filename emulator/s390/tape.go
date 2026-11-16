@@ -4,11 +4,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 
+	"github.com/tinyrange/trex/archive/simh"
+	"github.com/tinyrange/trex/auto/adapter"
 	"github.com/tinyrange/trex/storage"
 )
 
-// Tape3420 is a 3420 magnetic tape drive with a mounted AWS tape image. The
+// Tape3420 is a 3420 magnetic tape drive with a mounted AWS or SIMH image. The
 // image is indexed when mounted; written blocks replace the tape from the
 // current position in memory, and the image is never modified.
 type Tape3420 struct {
@@ -20,17 +23,39 @@ type Tape3420 struct {
 
 // tapeBlock is a data block or (data == nil, mark) a tape mark.
 type tapeBlock struct {
-	src        storage.Reader
-	off        int64
-	n          int
-	data       []byte // written blocks
-	mark       bool
-	fragmented []tapeFragment
+	src          storage.Reader
+	off          int64
+	n            int
+	data         []byte // written blocks
+	mark         bool
+	bad          bool // recovered SIMH record with a recorded data error
+	framingError string
+	fragmented   []tapeFragment
 }
 
 type tapeFragment struct {
 	off int64
 	n   int
+}
+
+// MountSIMH indexes a SIMH tape directly. Private metadata and erase gaps do
+// not appear as guest records; tape marks and recorded data errors are retained.
+// A positionable record with a mismatched trailer causes a data check when read;
+// mounting it does not pretend that later damaged media was accessed during IPL.
+func MountSIMH(src storage.Reader) (*Tape3420, error) {
+	records, err := simh.Index(adapter.File(src), 1000000)
+	if err != nil {
+		return nil, err
+	}
+	t := &Tape3420{}
+	for _, r := range records {
+		if r.TapeMark {
+			t.blocks = append(t.blocks, tapeBlock{mark: true})
+		} else if r.Data != nil && (r.Class == 0 || r.Class == 8) {
+			t.blocks = append(t.blocks, tapeBlock{src: r.Data, n: int(r.Data.Size()), bad: r.Bad, framingError: r.FramingError})
+		}
+	}
+	return t, nil
 }
 
 // AWS block header flags.
@@ -81,6 +106,9 @@ func MountAWS(src storage.Reader) (*Tape3420, error) {
 }
 
 func (b *tapeBlock) bytes() ([]byte, error) {
+	if b.framingError != "" {
+		return nil, fmt.Errorf("%s", b.framingError)
+	}
 	if b.data != nil || b.src == nil {
 		return b.data, nil
 	}
@@ -134,18 +162,37 @@ func (t *Tape3420) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 		return t.check(senseIntervReq, 0)
 	}
 	switch cmd {
-	case 0x02: // read forward
-		if t.pos >= len(t.blocks) {
-			return t.check(0, 0x20) // end of data: no tape-mark to stop at
+	case 0x02, 0x0c: // read forward / backward
+		var b *tapeBlock
+		if cmd == 0x0c {
+			if t.pos == 0 {
+				return t.check(0, 0)
+			}
+			t.pos--
+			b = &t.blocks[t.pos]
+		} else {
+			if t.pos >= len(t.blocks) {
+				return t.check(0, 0x20)
+			}
+			b = &t.blocks[t.pos]
+			t.pos++
 		}
-		b := &t.blocks[t.pos]
-		t.pos++
 		if b.mark {
 			return nil, 0, ok | usUnitExcept
 		}
 		p, err := b.bytes()
 		if err != nil {
 			return t.check(senseDataCheck, 0)
+		}
+		if cmd == 0x0c {
+			// Return bytes in transfer order. The channel decrements the storage
+			// address; do not reverse the immutable source or a written overlay.
+			p = slices.Clone(p)
+			slices.Reverse(p)
+		}
+		if b.bad {
+			_, _, status := t.check(senseDataCheck, 0)
+			return p, 0, status
 		}
 		return p, 0, ok
 	case 0x01: // write

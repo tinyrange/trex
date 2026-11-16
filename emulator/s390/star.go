@@ -231,14 +231,24 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			var devno int
 			var file starlark.Value
-			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "file", &file); err != nil {
+			format := "aws"
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "file", &file, "format?", &format); err != nil {
 				return nil, err
 			}
 			src, ok := file.(storage.Reader)
 			if !ok {
 				return nil, fmt.Errorf("tape: portable file required")
 			}
-			t, err := MountAWS(src)
+			var t *Tape3420
+			var err error
+			switch format {
+			case "aws":
+				t, err = MountAWS(src)
+			case "simh":
+				t, err = MountSIMH(src)
+			default:
+				return nil, fmt.Errorf("tape: format must be aws or simh")
+			}
 			if err != nil {
 				return nil, err
 			}
