@@ -8,6 +8,7 @@ import (
 	"io"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // A capture pins a persistent root without serializing or publishing it. Nodes
@@ -88,9 +89,33 @@ type reviewWalker struct {
 	ctx           context.Context
 	before, after *Repository
 	changes       []Change
+	options       DiffOptions
+	visited       int
 }
 
+type DiffOptions struct {
+	Prefix                 string
+	MaxChanges, MaxVisited int
+	MaxMatches             int
+}
+
+// DiffLimited skips paths outside Prefix. Output/work exhaustion returns an
+// error. This API is bounded, not paginated; no arbitrary radix cursor escapes.
+func DiffLimited(ctx context.Context, before, after *Workspace, opts DiffOptions) ([]Change, error) {
+	if opts.MaxChanges < 1 || opts.MaxVisited < 1 {
+		return nil, fmt.Errorf("invalid diff limits")
+	}
+	prefix, err := clean(opts.Prefix)
+	if err != nil {
+		return nil, err
+	}
+	opts.Prefix = prefix
+	return diffTreesWithOptions(ctx, before, after, opts)
+}
 func diffTrees(ctx context.Context, before, after *Workspace) ([]Change, error) {
+	return diffTreesWithOptions(ctx, before, after, DiffOptions{Prefix: "."})
+}
+func diffTreesWithOptions(ctx context.Context, before, after *Workspace, opts DiffOptions) ([]Change, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -105,7 +130,7 @@ func diffTrees(ctx context.Context, before, after *Workspace) ([]Change, error) 
 			return nil, err
 		}
 	}
-	d := reviewWalker{ctx: ctx, before: before.r, after: after.r, changes: make([]Change, 0)}
+	d := reviewWalker{ctx: ctx, before: before.r, after: after.r, changes: make([]Change, 0), options: opts}
 	if err = d.walk(".", a, b, 0); err != nil {
 		return nil, err
 	}
@@ -114,7 +139,7 @@ func diffTrees(ctx context.Context, before, after *Workspace) ([]Change, error) 
 	return d.changes, nil
 }
 func (d *reviewWalker) record(p string, a, b *node) error {
-	if p == "." {
+	if p == "." || (d.options.Prefix != "." && p != d.options.Prefix && !strings.HasPrefix(p, d.options.Prefix+"/")) {
 		return nil
 	} // Root metadata is not part of a workspace diff.
 	var err error
@@ -141,10 +166,21 @@ func (d *reviewWalker) record(p string, a, b *node) error {
 	default:
 		return nil
 	}
+	if d.options.MaxChanges > 0 && len(d.changes) == d.options.MaxChanges {
+		return ErrQueryLimit
+	}
 	d.changes = append(d.changes, c)
 	return nil
 }
 func (d *reviewWalker) walk(p string, a, b *node, depth int) error {
+	d.visited++
+	if d.options.MaxVisited > 0 && d.visited > d.options.MaxVisited {
+		return ErrQueryLimit
+	}
+	prefix := d.options.Prefix
+	if prefix != "." && p != "." && p != prefix && !strings.HasPrefix(p, prefix+"/") && !strings.HasPrefix(prefix, p+"/") {
+		return nil
+	}
 	if err := d.ctx.Err(); err != nil {
 		return err
 	}

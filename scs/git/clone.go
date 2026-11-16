@@ -14,6 +14,7 @@ import (
 	"hash"
 	"io"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
@@ -24,6 +25,9 @@ import (
 )
 
 type Options struct {
+	// Refs selects exact advertised ref names (or HEAD). Empty means all refs.
+	// History remains complete for each selected tip; no shallow/filter semantics.
+	Refs     []string
 	Name     string
 	Auth     transport.AuthMethod
 	Progress io.Writer
@@ -96,39 +100,77 @@ func ReceivePack(ctx context.Context, url string, dst io.Writer, opt Options) (D
 	safe.User = ""
 	safe.Password = ""
 	result = Download{Remote: safe.String(), Refs: map[string]string{}, Peeled: map[string]string{}, SymbolicRefs: map[string]string{}}
-	for n, h := range adv.References {
+	selected := map[string]plumbing.Hash{}
+	if len(opt.Refs) == 0 {
+		for n, h := range adv.References {
+			selected[n] = h
+		}
+	} else {
+		for _, n := range opt.Refs {
+			if n == "HEAD" && adv.Head != nil {
+				selected[n] = *adv.Head
+				continue
+			}
+			h, ok := adv.References[n]
+			if !ok || h == plumbing.ZeroHash {
+				return result, fmt.Errorf("unknown advertised ref %q", n)
+			}
+			selected[n] = h
+		}
+	}
+	for n, h := range selected {
 		result.Refs[n] = h.String()
-	}
-	for n, h := range adv.Peeled {
-		result.Peeled[n] = h.String()
-	}
-	if adv.Head != nil {
-		result.Head = adv.Head.String()
+		if peeled, ok := adv.Peeled[n]; ok {
+			result.Peeled[n] = peeled.String()
+		}
 	}
 	for _, s := range adv.Capabilities.Get(capability.SymRef) {
 		for i := range s {
 			if s[i] == ':' {
-				result.SymbolicRefs[s[:i]] = s[i+1:]
+				from, to := s[:i], s[i+1:]
+				if _, ok := selected[to]; ok {
+					result.SymbolicRefs[from] = to
+					if from == "HEAD" {
+						result.Head = selected[to].String()
+					}
+				}
 				break
 			}
+		}
+	}
+	if h, ok := selected["HEAD"]; ok {
+		result.Head = h.String()
+	}
+	if len(opt.Refs) == 0 && adv.Head != nil {
+		result.Head = adv.Head.String()
+	}
+	if result.Head == "" && len(selected) == 1 {
+		for _, h := range selected {
+			result.Head = h.String()
 		}
 	}
 	req := packp.NewUploadPackRequestFromCapabilities(adv.Capabilities)
 	req.Capabilities.Delete(capability.ThinPack)
 	seen := map[plumbing.Hash]bool{}
-	for _, h := range adv.References {
+	names := make([]string, 0, len(selected))
+	for n := range selected {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		h := selected[n]
 		if h != plumbing.ZeroHash && !seen[h] {
 			req.Wants = append(req.Wants, h)
 			seen[h] = true
 		}
 	}
-	if adv.Head != nil && *adv.Head != plumbing.ZeroHash && !seen[*adv.Head] {
+	if len(opt.Refs) == 0 && adv.Head != nil && *adv.Head != plumbing.ZeroHash && !seen[*adv.Head] {
 		req.Wants = append(req.Wants, *adv.Head)
 	}
 	if len(req.Wants) == 0 {
 		return result, errors.New("remote has no objects")
 	}
-	fmt.Fprintf(opt.Progress, "requesting full history: %d advertised refs, %d distinct tips\n", len(result.Refs), len(req.Wants))
+	fmt.Fprintf(opt.Progress, "requesting complete selected history: %d advertised refs, %d distinct tips\n", len(result.Refs), len(req.Wants))
 	response, err := session.UploadPack(ctx, req)
 	if err != nil {
 		return result, err

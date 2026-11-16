@@ -212,12 +212,15 @@ func (r *Repository) readBodyShared(id objectKey, loc location) ([]byte, error) 
 	c := r.bodyCodec()
 	if e := c.cache[id]; e != nil {
 		c.lru.MoveToFront(e)
+		r.metrics.BodyCacheHits++
 		return e.Value.(cachedBody).data, nil
 	}
 	if err := r.flush(); err != nil {
 		return nil, err
 	}
 	data := make([]byte, loc.stored)
+	r.metrics.ObjectReads++
+	r.metrics.ObjectBytesRead += uint64(loc.stored)
 	if _, err := r.f.ReadAt(data, loc.offset); err != nil {
 		return nil, err
 	}
@@ -284,6 +287,8 @@ func (r *Repository) readBodyShared(id objectKey, loc location) ([]byte, error) 
 		r.verifiedBodies = map[objectKey][32]byte{}
 	}
 	r.verifiedBodies[id] = encoded
+	r.metrics.BodyDecodes++
+	r.metrics.BodyDecodedBytes += uint64(len(out))
 	c.rememberOwned(id, out)
 	return out, nil
 }
