@@ -43,6 +43,7 @@ import (
 	"github.com/tinyrange/trex/archive/rms"
 	"github.com/tinyrange/trex/archive/sevenzip"
 	"github.com/tinyrange/trex/archive/sfp"
+	"github.com/tinyrange/trex/archive/simh"
 	"github.com/tinyrange/trex/archive/stuffit"
 	"github.com/tinyrange/trex/archive/szdd"
 	"github.com/tinyrange/trex/archive/tome"
@@ -162,6 +163,7 @@ func predeclared() starlark.StringDict {
 				"zstd":             starlark.NewBuiltin("zstd", zstd.Builtin),
 				"zip":              starlark.NewBuiltin("zip", ziparchive.Builtin),
 				"aws":              starlark.NewBuiltin("aws", aws.Builtin),
+				"simh":             starlark.NewBuiltin("simh", simh.Builtin),
 				"vmsbackup_blocks": starlark.NewBuiltin("vmsbackup_blocks", vmsbackup.BlocksBuiltin),
 				"vmsbackup":        starlark.NewBuiltin("vmsbackup", vmsbackup.FilesBuiltin),
 				"bff":              starlark.NewBuiltin("bff", bff.Builtin),

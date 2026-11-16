@@ -34,7 +34,8 @@ type Device interface {
 	// SenseID returns the SENSE ID response.
 	SenseID() []byte
 	// Exec executes one channel command. For read-type commands the device
-	// returns the data it would transfer; for write and control commands
+	// returns the data in transfer order (last byte first for read backward);
+	// for write and control commands
 	// data holds the bytes available from storage and the device returns
 	// how many it consumed in used. status holds the unit status presented
 	// at the end of the command (CE|DE is normal completion; SM requests a
@@ -641,6 +642,7 @@ func (s *ChannelSubsystem) segments(w ccw) ([]segment, bool) {
 		return nil, false
 	}
 	first := true
+	backward := w.cmd&0xf == 0xc
 	for left > 0 {
 		if !s.m.S.valid(list, 4) {
 			return nil, false
@@ -649,9 +651,17 @@ func (s *ChannelSubsystem) segments(w ccw) ([]segment, bool) {
 		list += 4
 		var n uint32
 		if first {
-			n = 0x800 - a&0x7ff
+			if backward {
+				n = (a & 0x7ff) + 1
+			} else {
+				n = 0x800 - a&0x7ff
+			}
 		} else {
-			if a&0x7ff != 0 {
+			last := uint32(0)
+			if backward {
+				last = 0x7ff
+			}
+			if a&0x7ff != last {
 				return nil, false
 			}
 			n = 0x800
@@ -839,6 +849,13 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 		var segs []segment
 		total := uint32(0)
 		for _, cw := range chain {
+			// With skip set on an input command, the data address (including
+			// an IDAW list) is not used or checked.
+			if cw.flags&ccwSkip != 0 && cmdIsRead(w.cmd) {
+				segs = append(segs, segment{n: uint32(cw.count), skip: true})
+				total += uint32(cw.count)
+				continue
+			}
 			sg, ok := s.segments(cw)
 			if !ok {
 				x.ccwaddr = cur + 8
@@ -846,7 +863,12 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 				return
 			}
 			for _, g := range sg {
-				if !mem.valid(g.addr, g.n) {
+				start := g.addr
+				backward := w.cmd&0xf == 0xc
+				if backward {
+					start -= g.n - 1
+				}
+				if backward && g.n > g.addr+1 || !mem.valid(start, g.n) {
 					x.ccwaddr = cur + 8
 					x.schStatus = scsProgramCheck
 					x.devStatus = 0
@@ -898,7 +920,20 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 				if off+n > moved {
 					n = moved - off
 				}
-				if !g.skip && !s.storeKeyed(g.addr, out[off:off+n], key) {
+				stored := true
+				if !g.skip {
+					if w.cmd&0xf == 0xc {
+						for j := uint32(0); j < n; j++ {
+							if !s.storeKeyed(g.addr-j, out[off+j:off+j+1], key) {
+								stored = false
+								break
+							}
+						}
+					} else {
+						stored = s.storeKeyed(g.addr, out[off:off+n], key)
+					}
+				}
+				if !stored {
 					x.ccwaddr = cur + 8
 					x.schStatus = scsProtection
 					x.devStatus = 0

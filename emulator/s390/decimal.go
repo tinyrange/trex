@@ -76,7 +76,11 @@ func (c *CPU) packed(a uint32, b int, l uint32) *big.Int {
 
 // storePacked stores v into an l-byte packed field; it reports overflow.
 func (c *CPU) storePacked(a uint32, b int, l uint32, v *big.Int) bool {
-	neg := v.Sign() < 0
+	return c.storePackedSign(a, b, l, v, v.Sign() < 0)
+}
+
+// storePackedSign also represents the signed zero required by MP and DP.
+func (c *CPU) storePackedSign(a uint32, b int, l uint32, v *big.Int, neg bool) bool {
 	m := new(big.Int).Abs(v)
 	digits := m.String()
 	cap := int(l*2 - 1)
@@ -86,7 +90,7 @@ func (c *CPU) storePacked(a uint32, b int, l uint32, v *big.Int) bool {
 	}
 	buf := make([]byte, l)
 	sign := byte(0xc)
-	if neg && !allZero(digits) {
+	if neg {
 		sign = 0xd
 	}
 	buf[l-1] = sign
@@ -104,15 +108,6 @@ func (c *CPU) storePacked(a uint32, b int, l uint32, v *big.Int) bool {
 		c.storeByte(a+i, b, buf[i])
 	}
 	return over
-}
-
-func allZero(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] != '0' {
-			return false
-		}
-	}
-	return true
 }
 
 func (c *CPU) decimalCC(v *big.Int, over bool) {
@@ -269,8 +264,9 @@ func (c *CPU) ssDecimal() {
 		if new(big.Int).Abs(x).Cmp(lim) >= 0 {
 			c.program(pgmData)
 		}
+		neg := packedNegative(c.fetchByte(a1+l1-1, b1)) != packedNegative(c.fetchByte(a2+l2-1, b2))
 		x.Mul(x, y)
-		c.storePacked(a1, b1, l1, x)
+		c.storePackedSign(a1, b1, l1, x, neg)
 	case 0xfd: // DP
 		if l2 > 8 || l2 >= l1 {
 			c.program(pgmSpecification)
@@ -287,13 +283,13 @@ func (c *CPU) ssDecimal() {
 		if new(big.Int).Abs(q).Cmp(lim) >= 0 {
 			c.program(pgmDecimalDivide)
 		}
-		c.storePacked(a1, b1, ql, q)
-		// remainder carries the dividend's sign
-		if r.Sign() == 0 && x.Sign() < 0 {
-			c.storePacked(a1+ql, b1, l2, r)
-			c.storeByte(a1+l1-1, b1, c.fetchByte(a1+l1-1, b1)&0xf0|0xd)
-		} else {
-			c.storePacked(a1+ql, b1, l2, r)
-		}
+		// Capture operand signs before either result overwrites storage; big.Int
+		// deliberately loses the sign of zero.
+		xn := packedNegative(c.fetchByte(a1+l1-1, b1))
+		yn := packedNegative(c.fetchByte(a2+l2-1, b2))
+		c.storePackedSign(a1, b1, ql, q, xn != yn)
+		c.storePackedSign(a1+ql, b1, l2, r, xn)
 	}
 }
+
+func packedNegative(x byte) bool { return x&0xf == 0xb || x&0xf == 0xd }
