@@ -5468,9 +5468,9 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 ### `cc.backend`
 
-`cc.backend(acpi=False, pci_ide=False, pci_display=False, hpet=False, uefi=False, usb=False, sb16=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
+`cc.backend(acpi=False, pci_ide=False, pci_display=False, hpet=False, uefi=False, usb=False, sb16=False, p390=False, p390_s370=False, p390_start='', ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False, devices=[]) -> vmm_backend`
 
-Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. Native UEFI PCs accept cpus=1..4 as one package without SMT; other PC profiles remain single-CPU. All-core pause/stop/capture barriers precede inspection and teardown. cc.v1.cpus() returns per-core register summaries; state/read_virtual use CPU0, and breakpoint/step require one CPU. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 16 GiB with uefi=True. usb=True on x86_64 enables a UHCI keyboard and absolute pointer with wheel; PS/2 keyboard fallback remains until USB enumeration. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_display=True exposes the 1234:cc02 TRF1 PCI framebuffer at bus 0 device 2, with an 8 MiB BAR at 0xe0000000; it requires a compatible guest display driver. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. devices accepts independent native PCI construction specifications, currently on single-CPU x86 BIOS PCs without direct Darwin boot; model-specific profile checks also apply. See docs/device-models.md for the portable model/backend boundary and adding new models without editing dispatch. cc.backend(devices=[cc.p390(...)]) opts into an experimental i386-only IBM P/390 PCI adapter (1014:0036, subsystem 1014:0059) with a 32-byte I/O BAR and 4 MiB memory aperture. A portable HLE monitor connects original OS/2 support to the native ESA/390 engine and 32 MiB storage; it does not execute IBM ASIC microcode. Implemented paths include bootstrap/LIC upload retention, monitor initialization/storage size/cache-key mode, distinct normal/initial/clear reset semantics, manual start/stop/all-register commit and snapshot/Store Status/channel reset/restart, exact instruction-count stepping, coherent storage windows, PCI interrupt acknowledgment, and original AWSCHAN device-manager channel handoff. Format-0/format-1 WRITE+READ chains through the supplied IBM AWSXAMP manager, asynchronous ESA I/O interruption and TSCH are verified by the fresh-image smoke, including channel service after instruction stepping with the original MANOPS stop-event consumer registered. Original AWSCKD READ IPL/READ DATA from a native-constructed CKD_P370 3390 volume and original AWS3215 WRITE/READ INQUIRY with exact EBCDIC keyboard response are verified. Normal/clear and Stop Yes sample-record IPL through original AWSCHAN/AWSXAMP are also verified: the manual completion waits for actual host start acceptance, successful terminal status and a valid loaded PSW. Manual preparation 22 is a stopped/idle synchronization barrier preserving architectural state, tested natively and through original AWSIPL. p390_s370=True selects the native classic S/370 CPU with SIO/TIO/HIO/TCH/STIDC, CSW and BC/EC interrupts over the same ESA OS/2 monitor ABI, not original ASIC dynamic-mode selection. cc.p390(s370=True, start=...) selects those CPU/clock options; start is an RFC3339 TOD epoch. Legacy p390/p390_s370/p390_start backend options remain compatibility shorthands using exactly the same attachment path. cc.v1.state()['devices'] maps attachment names to native model state; device_read(name, space, address, size) observes model-defined storage with a 64 KiB bound. P/390 exposes main and aperture spaces, without guest descriptor/key mutation. Original AWSIPL/AWSCKD/AWS3215 reaches MVS 3.8j NIP and paging initialization; this is not a completed MVS/JES2 or GUI IPL proof. Nonblank load parameters, remaining monitor operations and full channel/IPL compatibility are not implemented. Unsupported replies/commands fail explicitly. cc.v1.state()['p390'] reports actual CPU/mailbox state, request/completion/status counts and bounded/coalesced transfers; read_physical can inspect the decoded adapter aperture with the usual 64 KiB limit; p390_read(address, size) observes absolute architectural storage, read-only with a 64 KiB limit and without changing keys or OS/2 descriptors. Original-host storage reads set reference bits and writes set reference/change bits. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. Native UEFI PCs accept cpus=1..4 as one package without SMT; other PC profiles remain single-CPU. All-core pause/stop/capture barriers precede inspection and teardown. cc.v1.cpus() returns per-core register summaries; state/read_virtual use CPU0, and breakpoint/step require one CPU. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 16 GiB with uefi=True. usb=True on x86_64 enables a UHCI keyboard and absolute pointer with wheel; PS/2 keyboard fallback remains until USB enumeration. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_display=True exposes the 1234:cc02 TRF1 PCI framebuffer at bus 0 device 2, with an 8 MiB BAR at 0xe0000000; it requires a compatible guest display driver. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
 ### `cc.boot_bsd`
 
@@ -5483,6 +5483,12 @@ Directly boots an original amd64 OpenBSD, FreeBSD or NetBSD kernel in Linux/amd6
 `cc.kernel_symbol(kernel, address) -> symbol or None`
 
 Read-only nearest original executable-section ELF symbol lookup for a stopped kernel address. Returns name, address, size and offset, or None when no preceding symbol exists. A nonzero offset is a nearest-symbol observation, not an exact call-site assertion. Input is bounded to 256 MiB and symbol/string sections to 32 MiB. Does not relocate, execute or patch bytes.
+
+### `cc.p390`
+
+`cc.p390(name='p390', slot=5, s370=False, start='') -> pci_device`
+
+Describes a fresh native P/390 PCI attachment for cc.backend(devices=[...]). name identifies generic inspection; slot selects bus-0 function 0. Requires one i386 BIOS CPU. s370 selects S/370 compatibility; start is an explicit RFC3339 clock epoch. Construction is lazy per VM, not shared mutable hardware. See docs/device-models.md.
 
 ### `channel.expose_tcp`
 
@@ -5772,6 +5778,12 @@ Decodes one explicitly selected VSAM data control interval (512 to 32768 bytes, 
 
 Enumerates the bounded active IGW attribute tree of an allocated-page file through native map-chain and child-link validation. Returns exact 20-byte keys, flags and uninterpreted values. Does not carve inactive pages or decode file payloads.
 
+### `filesystem.ckd_image`
+
+`filesystem.ckd_image(cylinders, heads, track_size, device, tracks={}) -> file`
+
+Builds an immutable single-part CKD_P370 image natively with explicit cylinder/head/track-size geometry and one-byte device code. tracks maps absolute track numbers to lists of (record_number, key_bytes, data_bytes) tuples; count addresses follow the physical track. Unspecified tracks contain an eight-byte record zero and an empty record one. Home addresses, count fields, end markers and padding are serialized in Go; sparse tracks are synthesized on reads without allocating the whole volume. This does not create VOL1, VTOC or operating-system data.
+
 ### `filesystem.ckd_scan`
 
 `filesystem.ckd_scan(file, max_tracks=16777216, max_errors=0) -> record`
@@ -5782,7 +5794,7 @@ Validates every physical CKD track and exact cylinder-aligned EOF through a port
 
 `filesystem.ckd_volume(parts) -> ckd_volume`
 
-Composes a CKD_P370 volume stored as a list of part files (each a 512-byte header and consecutive cylinders) without copying. auto() browses the result as a ckd image; tracks and heads report its geometry, track(n) returns a track's records (cylinder, head, record, key, data), and trim(remove, blank=[], compact=[], members={}, keep_members={}, uncatalog={}, format='cckd') returns {image, removed, kept_tracks, tracks, stored, dead_bytes, uncataloged}: the volume as a compressed CKD_C370 image (or with format='ckdz' trex's compact CKDZ image: record lists without padding, identical tracks stored once, 1 MiB deflate chunks; stored is then all zero) without the named data sets (their format-1/format-3 DSCBs cleared and counted free, the VTOC index turned off and free space marked for recomputation, and every track outside the remaining data sets, the VTOC and track 0 null), with blank data sets' records kept with zero data, keep_members ({data set: [member names]}) removing every other member (but aliases of kept ones) from those PDSs' directories, compacted PDSs' records outside the directory and every member's extent zeroed (dead_bytes counts them), uncatalog ({catalog data component: [data set names]}) deleting those data sets' records (and sphere, alias and connector records naming them) from ICF catalogs on the volume by rewriting their control intervals (uncataloged lists them), and with members ({data set: {member: [fixed-length EBCDIC records]}}) written into fixed-record PDSs after DS1LSTAR with rebuilt directories; stored lists each track's stored bytes.
+Composes a CKD_P370 volume stored as a list of part files (each a 512-byte header and consecutive cylinders) without copying. auto() browses the result as a ckd image; image exposes the lazy canonical uncompressed CKD_P370 reader even for compressed input, device and track_size report its byte-valued device type and track size, tracks and heads report its geometry, track(n) returns a track's records (cylinder, head, record, key, data), and trim(remove, blank=[], compact=[], members={}, keep_members={}, uncatalog={}, format='cckd') returns {image, removed, kept_tracks, tracks, stored, dead_bytes, uncataloged}: the volume as a compressed CKD_C370 image (or with format='ckdz' trex's compact CKDZ image: record lists without padding, identical tracks stored once, 1 MiB deflate chunks; stored is then all zero) without the named data sets (their format-1/format-3 DSCBs cleared and counted free, the VTOC index turned off and free space marked for recomputation, and every track outside the remaining data sets, the VTOC and track 0 null), with blank data sets' records kept with zero data, keep_members ({data set: [member names]}) removing every other member (but aliases of kept ones) from those PDSs' directories, compacted PDSs' records outside the directory and every member's extent zeroed (dead_bytes counts them), uncatalog ({catalog data component: [data set names]}) deleting those data sets' records (and sphere, alias and connector records naming them) from ICF catalogs on the volume by rewriting their control intervals (uncataloged lists them), and with members ({data set: {member: [fixed-length EBCDIC records]}}) written into fixed-record PDSs after DS1LSTAR with rebuilt directories; stored lists each track's stored bytes.
 
 ### `filesystem.ckd_vsam_records`
 
@@ -5938,7 +5950,7 @@ Parses an ISO 9660 or High Sierra filesystem and exposes directory and lazy file
 
 `filesystem.mbr(file) -> parsed MBR; filesystem.mbr(size, boot_code=None, disk_signature=0, chs=None) -> builder`
 
-With a file, parses the MBR and partitions; with a disk size, creates a builder with optional boot code, signature and CHS geometry. Partition payloads remain caller-supplied.
+With a file, parses the primary table and at most 128 logical EBRs in one extended container (05/0F/85), exposing logical partitions from index 5. Checks signatures, bounds, cycles and overlapping data/table extents. With a disk size, creates a builder with optional boot code, signature and CHS geometry. partition builds one primary. partitions(primary, logical=[], extended_type=0x05) builds multiple primaries and one generated extended container: each dictionary requires filesystem and absolute start_lba, optional type (07) and bootable (False); logical dictionaries additionally require absolute ebr_lba before their data, in increasing EBR order. At most four primary slots including the generated container. On-disk logical data offsets are EBR-relative, chain links container-relative, CHS disk-absolute. Rejects overlapping payload/table/container extents and 32-bit LBA overflow. Partition payloads and their BPB hidden-sector conventions remain caller-supplied; no guest partitioner or filesystem formatter runs.
 
 ### `filesystem.mds`
 
@@ -6166,9 +6178,9 @@ Decodes a bounded packed OS/2 FEA list, including its cbList header, from bytes 
 
 ### `os2.linear_executable`
 
-`os2.linear_executable(source, maximum=64MiB) -> record(objects, resources)`
+`os2.linear_executable(source, maximum=64MiB) -> record(objects, resources, imports)`
 
-Reads little-endian OS/2 LX object images and resources, including raw, zero, iterated and EXEPACK2 pages. All tables, references and expanded sizes are bounded. Returned object files are unrelocated: imports, fixups and module initialization are deliberately not applied.
+Reads little-endian OS/2 LX object images, resources and ordered imported module names, including raw, zero, iterated and EXEPACK2 pages. Length-prefixed imported names are bounded by the import-procedure table; empty names, embedded NULs and truncated tables are rejected. All tables, references and expanded sizes are bounded. Returned object files are unrelocated: imports, fixups and module initialization are deliberately not applied.
 
 ### `os2.profile`
 
@@ -6379,6 +6391,12 @@ Calls a function with supplied positional and keyword arguments and captures suc
 `testing.module(label) -> dict`
 
 Loads a module label and returns its globals as a dictionary. Used by the portable test runner to discover tests through the normal module loader.
+
+### `tn3270.client`
+
+`tn3270.client() -> tn3270_client`
+
+Constructs a wire-only classic TN3270 presentation client with an 80x24 display. feed(data) retains fragmented Telnet/IAC/EOR negotiation and 3270 records and returns bytes the caller must transport. Supports remote and local command codes, full-screen Read Buffer replies, field-aware typing and AID keys. Rejects TN3270E and bounds records to 64 KiB and subnegotiation to 1 KiB. Owns no socket, CPU, channel or device; connecting it does not establish a mainframe boot. Screenshots are native PNG files.
 
 ### `url.path_escape`
 
@@ -8029,6 +8047,12 @@ An InstallShield cabinet view. Files, groups, components and shortcuts preserve 
 
 Methods and attributes: `components`, `entries`, `files`, `find(path)`, `groups`, `shortcuts`, `version`.
 
+### `mbr` value
+
+A native partition-table builder or parsed view. The builder keeps payload files lazy and can emit one primary partition or an explicit multi-primary/logical layout. The parser exposes primary slots 1-4 (including the extended container) and logical partitions from 5, with disk-absolute offsets; primary ebr_lba is zero. Logical chains are bounded and checked for cycles, escapes and overlaps. This is not a filesystem mount or installer; caller-supplied FAT BPBs may use generation-specific hidden-sector conventions.
+
+Methods and attributes: `disk_signature (parsed)`, `files (parsed)`, `partition(filesystem, bootable=False, type=7, start_lba=2048) (builder)`, `partitions (parsed metadata with index, type, bootable, start_lba, sectors, offset, size, file, logical, ebr_lba)`, `partitions(primary, logical=[], extended_type=0x05) (builder)`.
+
 ### `nbd_server` value
 
 An NBD export bound to a block device. serve processes protocol requests on a supplied byte channel, stats exposes activity and close ends service. It does not own an implicit host listening socket.
@@ -8112,6 +8136,12 @@ Methods and attributes: `binary`, `bytes`, `entry_type`, `gid`, `gname`, `hex`, 
 An owned native loopback listener forwarding one TCP connection to one byte channel. port is the assigned IPv4 loopback port; close interrupts and joins its workers and closes both transports. The listener is single-use and closes after acceptance. No authentication, protocol interpretation, automatic reconnect, or replay is provided.
 
 Methods and attributes: `close()`, `port`.
+
+### `tn3270_client` value
+
+Stateful wire-only TN3270 presentation. feed returns negotiation/data replies; key returns an AID record after type edits unprotected fields. The caller transports all returned bytes. screen is current text, screens is bounded screen history, screenshot is a PNG file, records counts completed incoming 3270 records, and locked observes host keyboard inhibition without sending input. feed raises on malformed input by default; raise_error=False preserves pre-error reply bytes and reports the same poisoned-client failure through the read-only error string so callers can capture evidence and clean up. No malformed record is skipped or made usable. No socket, emulator or device ownership. Read Buffer replies cover the entire display rather than a native channel read chain's cached remainder.
+
+Methods and attributes: `error`, `feed(data, raise_error=True)`, `key(text)`, `locked`, `records`, `screen()`, `screens()`, `screenshot()`, `type(text)`.
 
 ### `unix_filesystem` value
 

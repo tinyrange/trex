@@ -183,32 +183,47 @@ func (c *CPU) loadPSW(x uint64) bool {
 	return ok
 }
 
-// Reset performs a CPU reset; clear additionally zeroes registers.
+// Reset initializes the CPU for machine construction/loading. clear also
+// zeroes the general, access and floating-point banks, but not main storage.
+// Architectural CPU-reset orders use resetCPU instead: normal CPU reset must
+// retain the PSW, control registers, prefix, timers and all data-register banks.
 func (c *CPU) Reset(clear bool) {
-	c.PSW = PSW{}
-	c.setAmode()
-	c.Stopped = true
-	c.extPending = 0
-	c.emergency = 0
-	c.purgeTLB()
+	c.resetCPU(true)
 	if clear {
 		c.GR = [16]uint32{}
 		c.AR = [16]uint32{}
 		c.FPR = [16]uint64{}
-		c.FPC = 0
-		c.Prefix = 0
+	}
+}
+
+// resetCPU implements normal and initial CPU reset, independently of the
+// system-reset-clear operation which additionally clears data banks/storage.
+func (c *CPU) resetCPU(initial bool) {
+	c.Stopped, c.Check = true, false
+	c.checkReason = ""
+	c.extPending, c.emergency, c.extCallFrom = 0, 0, 0
+	c.hitBreak, c.earlySpec, c.exAddr = false, false, false
+	c.excAddr, c.excSpace, c.excMode, c.excAR = 0, 0, 0, 0
+	c.excDATProt, c.spaceOverride = false, 0
+	c.quiet = 0
+	if initial {
+		c.PSW = PSW{}
+		c.FPC, c.Prefix = 0, 0
 		c.setCPUTimer(0)
 		c.ClockComparator = 0
+		c.CR = [16]uint32{}
+		c.CR[0] = 0x000000e0
+		c.CR[14] = 0xc2000000
+		if c.M.S370 {
+			c.CR[2] = 0xffffffff // channel masks
+			c.PSW.S370, c.PSW.BC = true, true
+			c.itBase, c.itDone, c.itPending = c.M.tod, 0, false
+		}
 	}
-	c.CR = [16]uint32{}
-	c.CR[0] = 0x000000e0
-	c.CR[2] = 0x00000000
-	c.CR[14] = 0xc2000000
-	if c.M.S370 {
-		c.CR[2] = 0xffffffff // channel masks
-		c.PSW.S370, c.PSW.BC = true, true
-		c.itBase, c.itDone, c.itPending = c.M.tod, 0, false
-	}
+	c.setAmode()
+	c.next = c.PSW.IA
+	c.pswChanged = true
+	c.purgeTLB()
 }
 
 // Interruption classes in PSA offsets.

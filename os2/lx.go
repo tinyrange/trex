@@ -19,6 +19,7 @@ type LXResource struct {
 type LXImage struct {
 	Objects   []LXObject
 	Resources []LXResource
+	Imports   []string // Imported module names only; no symbols are resolved.
 }
 
 // DecodeLX validates all tables and expands bounded LX object pages without
@@ -47,6 +48,28 @@ func DecodeLX(data []byte, maximum uint64) (*LXImage, error) {
 		return bad("table bounds")
 	}
 	img := &LXImage{}
+	imports, nimports, procs := h+u32(0x70), u32(0x74), h+u32(0x78)
+	if nimports > 65535 || (nimports != 0 && (imports < h+0xac || procs < imports || !span(imports, procs-imports) || nimports > procs-imports)) {
+		return bad("import module table bounds")
+	}
+	for i := uint64(0); i < nimports; i++ {
+		if imports >= procs {
+			return bad("truncated import module name")
+		}
+		length := uint64(data[imports])
+		imports++
+		if length == 0 || length > procs-imports {
+			return bad("invalid import module name")
+		}
+		name := data[imports : imports+length]
+		for _, b := range name {
+			if b == 0 || b > 127 {
+				return bad("invalid import module encoding")
+			}
+		}
+		img.Imports = append(img.Imports, string(name))
+		imports += length
+	}
 	var total uint64
 	for i := uint64(0); i < count; i++ {
 		row := data[ot+i*24 : ot+(i+1)*24]
@@ -238,5 +261,9 @@ func LinearExecutableBuiltin(_ *starlark.Thread, fn *starlark.Builtin, args star
 		d := img.Objects[r.Object-1].Data
 		resources = append(resources, starfile.NewRecord(starlark.StringDict{"type": starlark.MakeUint(uint(r.Type)), "id": starlark.MakeUint(uint(r.ID)), "object": starlark.MakeUint(uint(r.Object)), "offset": starlark.MakeUint(uint(r.Offset)), "file": &starfile.Bytes{Data: d[r.Offset : uint64(r.Offset)+uint64(r.Size)]}}))
 	}
-	return starfile.NewRecord(starlark.StringDict{"objects": starlark.NewList(objects), "resources": starlark.NewList(resources)}), nil
+	imports := make([]starlark.Value, len(img.Imports))
+	for i, name := range img.Imports {
+		imports[i] = starlark.String(name)
+	}
+	return starfile.NewRecord(starlark.StringDict{"objects": starlark.NewList(objects), "resources": starlark.NewList(resources), "imports": starlark.NewList(imports)}), nil
 }

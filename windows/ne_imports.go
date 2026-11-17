@@ -57,6 +57,7 @@ func parseWindowsNEImports(data []byte, maximum int) ([]windowsNEImport, error) 
 		}
 		base := uint64(binary.LittleEndian.Uint16(data[entry:])) << m.alignShift
 		length := windowsNEExpandedLength(binary.LittleEndian.Uint16(data[entry+2:]))
+		allocated := max(length, windowsNEExpandedLength(binary.LittleEndian.Uint16(data[entry+6:])))
 		at := base + length
 		if base == 0 || at > uint64(len(data)) || uint64(len(data))-at < 2 {
 			return nil, fmt.Errorf("NE segment %d has truncated relocations", segment+1)
@@ -91,8 +92,8 @@ func parseWindowsNEImports(data []byte, maximum int) ([]windowsNEImport, error) 
 			default:
 				return nil, fmt.Errorf("unsupported NE relocation source type %#x", p[0])
 			}
-			if module == 0 || module > len(modules) || uint64(offset+width) > length {
-				return nil, fmt.Errorf("invalid NE import relocation")
+			if module == 0 || module > len(modules) || uint64(offset+width) > allocated {
+				return nil, fmt.Errorf("invalid NE import relocation: segment %d source %#x width %d (allocation %#x), module %d (count %d)", segment+1, offset, width, allocated, module, len(modules))
 			}
 			item := windowsNEImport{Module: modules[module-1], Segment: segment + 1, Offset: offset, Source: int(p[0]), Additive: p[1]&4 != 0}
 			target := int(binary.LittleEndian.Uint16(p[6:]))

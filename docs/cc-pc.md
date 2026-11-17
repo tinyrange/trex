@@ -1,5 +1,8 @@
 # CrumbleCracker PC backend
 
+For new hardware experiments, use the [portable native device attachment API](device-models.md)
+with `cc.backend(devices=[...])`, rather than adding model-specific exit branches.
+
 `cc.backend()` implements `vmm.Backend` in process on Linux/amd64 with KVM.
 It runs a caller-supplied boot disk through the VMM block interface, using
 BIOS by default or native Go UEFI with `cc.backend(uefi=True)`.

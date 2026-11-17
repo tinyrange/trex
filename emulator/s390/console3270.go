@@ -355,9 +355,18 @@ func (t *Console3270) write(cmd byte, data []byte) {
 // readBuffer transfers the buffer from the current buffer address (where
 // the last write left it, 0 after an erase) to its end.
 func (t *Console3270) readBuffer() []byte {
+	return t.readBufferFrom(t.bufAddr)
+}
+
+// ReadFullBuffer returns the remote display station's complete Read Buffer
+// response. Unlike a channel's chained read position, a TN3270 Read Buffer
+// always begins at presentation-space address zero. No state is changed.
+func (t *Console3270) ReadFullBuffer() []byte { return t.readBufferFrom(0) }
+
+func (t *Console3270) readBufferFrom(start int) []byte {
 	out := []byte{t.aid}
 	out = append(out, t.encodeAddr(t.cursor)...)
-	for i := t.bufAddr; i < len(t.buf); i++ {
+	for i := start; i < len(t.buf); i++ {
 		if t.fa[i] {
 			out = append(out, 0x1d, t.buf[i])
 		} else {

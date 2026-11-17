@@ -11,6 +11,7 @@ import (
 
 	blockstar "github.com/tinyrange/trex/block/star"
 	"github.com/tinyrange/trex/vmm"
+	"github.com/tinyrange/trex/vmm/device"
 	"j5.nz/cc/hypervisor"
 )
 
@@ -20,6 +21,8 @@ const pciMemoryBase = 0xc0000000
 const highRAMBase = 1 << 32
 
 type Backend struct {
+	// Devices constructs independent portable PCI models for each machine.
+	Devices []device.Spec
 	// PrivateAppleISA opts into native HVF ISA level 3 and Apple PAC services.
 	PrivateAppleISA bool
 	// RunTimeout bounds a caller-constructed ARM64 firmware run. Zero uses 30 seconds.
@@ -31,6 +34,12 @@ type Backend struct {
 	USB bool
 	// SB16 opts into ISA DSP 4.05 PCM with DMA1/5 and bounded capture.
 	SB16 bool
+	// P390 enables the experimental original-driver PCI transport.
+	P390 bool
+	// P390S370 opts into native S/370 CPU compatibility over the ESA host ABI.
+	P390S370 bool
+	// P390Start supplies an explicit initial native mainframe TOD clock.
+	P390Start time.Time
 	// PIOOnly disables the PCI IDE disk's DMA capability.
 	PIOOnly bool
 	// IDEModel selects synthetic (default) or the native ich7-pata profile.
@@ -78,6 +87,9 @@ func (b *Backend) Capabilities() []string {
 }
 func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if m.Architecture == "arm64" {
+		if len(b.deviceSpecs()) != 0 {
+			return []vmm.ValidationIssue{{Code: "cc.unsupported", Field: "devices", Message: "PCI attachments require an x86 PC", Backend: b.ID()}}
+		}
 		if b.SB16 {
 			return []vmm.ValidationIssue{{Code: "cc.unsupported", Field: "sb16", Message: "ISA sound requires x86", Backend: b.ID()}}
 		}
@@ -121,6 +133,15 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		if err := m.DarwinBoot.Validate(); err != nil {
 			add("boot", err.Error())
 		}
+	}
+	if !b.P390 && (b.P390S370 || !b.P390Start.IsZero()) {
+		add("p390", "mainframe CPU options require p390=True")
+	}
+	if len(b.deviceSpecs()) != 0 && (m.CPUs != 1 || b.UEFI || m.DarwinBoot != nil) {
+		add("devices", "experimental PCI attachments require a single-CPU BIOS PC without direct Darwin boot")
+	}
+	if err := device.Validate(b.deviceSpecs(), device.Profile{Architecture: m.Architecture, CPUs: m.CPUs, UEFI: b.UEFI}, reservedPCISlots()); err != nil {
+		add("devices", err.Error())
 	}
 	if b.SB16 && m.CPUs > 1 {
 		add("sb16", "ISA audio currently requires a single CPU")
@@ -413,6 +434,12 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 	// conservative boundaries until its separate firmware path is audited.
 	if tracked, ok := cpu.(interface{ SetRAMWriteTracking(bool) }); ok {
 		tracked.SetRAMWriteTracking(!b.UEFI && m.DarwinBoot == nil && len(m.Channels) == 0)
+	}
+	platform.devices.Reserved = platform.deviceReservations
+	platform.devices.SetIRQ = platform.setDeviceIRQ
+	if err = platform.devices.Attach(b.deviceSpecs(), device.Profile{Architecture: m.Architecture, CPUs: m.CPUs, UEFI: b.UEFI}, reservedPCISlots()); err != nil {
+		cpu.Close()
+		return nil, err
 	}
 	return platform, nil
 }

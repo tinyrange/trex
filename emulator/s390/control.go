@@ -217,22 +217,50 @@ func (c *CPU) execB2() {
 		c.privileged()
 		c.PSW.CC = 3
 	case 0x30:
+		if c.M.p390 != nil {
+			c.M.p390.controlSubchannel(c, 0xb230)
+			return
+		}
 		c.csch()
 	case 0x31:
+		if c.M.p390 != nil {
+			c.M.p390.controlSubchannel(c, 0xb231)
+			return
+		}
 		c.hsch()
 	case 0x32:
+		if c.M.p390 != nil {
+			c.M.p390.modifySubchannel(c, a, b)
+			return
+		}
 		c.msch(a, b)
 	case 0x33:
+		if c.M.p390 != nil {
+			c.M.p390.startSubchannel(c, a, b)
+			return
+		}
 		c.ssch(a, b)
 	case 0x34:
+		if c.M.p390 != nil {
+			c.M.p390.storeSubchannel(c, a, b)
+			return
+		}
 		c.stsch(a, b)
 	case 0x35:
+		if c.M.p390 != nil {
+			c.M.p390.testSubchannel(c, a, b)
+			return
+		}
 		c.tsch(a, b)
 	case 0x36:
 		c.tpi(a, b)
 	case 0x37: // SAL
 		c.privileged()
 	case 0x38:
+		if c.M.p390 != nil {
+			c.M.p390.controlSubchannel(c, 0xb238)
+			return
+		}
 		c.rsch()
 	case 0x39:
 		c.stcrw(a, b)
@@ -570,7 +598,7 @@ func (c *CPU) sigp(r1, r3 int, a uint32) {
 		t.storeStatus(t.Prefix)
 		t.Stopped = true
 	case 0x0b, 0x0c: // initial CPU reset, CPU reset
-		t.Reset(order == 0x0b)
+		t.resetCPU(order == 0x0b)
 	case 0x0d: // set prefix
 		if t.Stopped {
 			t.Prefix = c.GR[r1] & 0x7ffff000

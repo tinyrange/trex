@@ -385,7 +385,7 @@ func (c *CPU) sieHostInterrupt() bool {
 			return true
 		}
 	}
-	if h.IO && c.M.CSS.pendingInterrupt(st.hostCR[6]) != nil {
+	if h.IO && c.M.pendingIO(st.hostCR[6]) != nil {
 		return true
 	}
 	return false

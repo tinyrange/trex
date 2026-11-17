@@ -124,7 +124,7 @@ func (d *driver) closePlatform() error {
 	if d.pc.nic != nil {
 		err = errors.Join(err, d.pc.nic.port.Close())
 	}
-	return errors.Join(err, d.pc.cpu.Close())
+	return errors.Join(err, d.pc.devices.Close(), d.pc.cpu.Close())
 }
 
 func (d *driver) loop() {

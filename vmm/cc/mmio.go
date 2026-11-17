@@ -2,6 +2,7 @@ package cc
 
 import (
 	"fmt"
+	"github.com/tinyrange/trex/vmm/device"
 
 	"j5.nz/cc/hypervisor"
 )
@@ -12,6 +13,26 @@ func (p *pc) handleMMIO(ex hypervisor.X86Exit) error {
 		return fmt.Errorf("invalid MMIO range address=%#x size=%d", ex.Address, ex.Size)
 	}
 	ex.Address = p.cpuAddress(ex.Address)
+	if p.devices.Len() != 0 {
+		data := ex.Data
+		if !ex.Write {
+			data = make([]byte, int(ex.Size))
+		}
+		handled, err := p.devices.Transfer(device.Memory, ex.Address, int(ex.Size), 1, ex.Write, data, p.devicePosition)
+		if err != nil {
+			return err
+		}
+		if handled {
+			if !ex.Write {
+				var value uint64
+				for i, b := range data {
+					value |= uint64(b) << (8 * i)
+				}
+				p.cpu.CompleteMMIORead(value, uint32(ex.Size))
+			}
+			return nil
+		}
+	}
 	if p.legacyDisplay && ex.Address >= legacyDisplayAddress && ex.Address+uint64(ex.Size) <= legacyDisplayAddress+legacyDisplaySize {
 		var value uint64
 		for index := uint8(0); index < ex.Size; index++ {

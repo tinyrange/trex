@@ -8,6 +8,7 @@ import (
 
 	"github.com/tinyrange/trex/emulator/uefi"
 	"github.com/tinyrange/trex/vmm"
+	"github.com/tinyrange/trex/vmm/device"
 	"j5.nz/cc/hypervisor"
 	"j5.nz/cc/hypervisor/x86state"
 )
@@ -19,6 +20,7 @@ const biosPort = 0xf1
 // retains all mode switches and executes the original boot sector and loader.
 type pc struct {
 	sound           *sb16
+	devices         device.Bus
 	nvme            *pciNVMe
 	performance     *pcPerformance
 	biosDiskCalls   []any
