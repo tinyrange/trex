@@ -63,6 +63,7 @@ import (
 	databasesqlite "github.com/tinyrange/trex/database/sqlite"
 	debugapi "github.com/tinyrange/trex/debug"
 	emulatorapi "github.com/tinyrange/trex/emulator"
+	"github.com/tinyrange/trex/emulator/s390/tn3270"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
 	"github.com/tinyrange/trex/filesystem/androidlp"
 	filesystemapfs "github.com/tinyrange/trex/filesystem/apfs"
@@ -245,6 +246,7 @@ func predeclared() starlark.StringDict {
 				"ultrix_label":         starlark.NewBuiltin("ultrix_label", filesystemultrix.Builtin),
 				"ckd_scan":             starlark.NewBuiltin("ckd_scan", filesystemckd.ScanBuiltin),
 				"ckd_volume":           starlark.NewBuiltin("ckd_volume", filesystemckd.VolumeBuiltin),
+				"ckd_image":            starlark.NewBuiltin("ckd_image", filesystemckd.ImageBuiltin),
 				"cms":                  starlark.NewBuiltin("cms", filesystemckd.CMSBuiltin),
 				"cms_library":          starlark.NewBuiltin("cms_library", filesystemckd.CMSLibraryBuiltin),
 				"cms_unpack":           starlark.NewBuiltin("cms_unpack", filesystemckd.CMSUnpackBuiltin),
@@ -292,6 +294,7 @@ func predeclared() starlark.StringDict {
 		"runtime":  runtimeNamespace(),
 		"vmm":      namespace{name: "vmm", attrs: vmmstar.Builtins()},
 		"crypto":   namespace{name: "crypto", attrs: starcrypto.Builtins()},
+		"tn3270":   namespace{name: "tn3270", attrs: tn3270.Builtins()},
 		"debug":    namespace{name: "debug", attrs: debugapi.Builtins()},
 		"channel":  namespace{name: "channel", attrs: channelBuiltins},
 		"emulator": namespace{name: "emulator", attrs: emulatorapi.Builtins()},

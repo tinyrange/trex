@@ -299,6 +299,9 @@ func (c *CPU) channelEnabled(ch uint16) bool {
 // takeIO370 takes a pending I/O interruption: the CSW is stored and the
 // device address identifies the source.
 func (c *CPU) takeIO370() bool {
+	if c.M.p390 != nil {
+		return c.M.p390.takeIO370(c)
+	}
 	for _, x := range c.M.CSS.subs {
 		if x.pciIRQ && c.channelEnabled(x.devno>>8) {
 			// Program-controlled interruption: the channel program is
@@ -337,6 +340,10 @@ func (c *CPU) takeIO370() bool {
 // io370 executes START I/O, TEST I/O, HALT I/O and TEST CHANNEL.
 func (c *CPU) io370(op []byte, a uint32) {
 	c.privileged()
+	if c.M.p390 != nil {
+		c.M.p390.io370(c, op, uint16(a))
+		return
+	}
 	devno := uint16(a)
 	css := c.M.CSS
 	if op[0] == 0x9f { // TCH
@@ -425,6 +432,22 @@ func (c *CPU) io370(op []byte, a uint32) {
 func (c *CPU) stidc(a uint32) {
 	c.privileged()
 	ch := uint16(a) >> 8
+	if c.M.p390 != nil {
+		c.PSW.CC = 3
+		for n := 0; n < 512; n++ {
+			s := c.M.p390.catalogEntry(uint16(n))
+			if s != nil && uint16(s[6]) == ch {
+				id := uint32(0x20000000)
+				if ch == 0 {
+					id = 0x10000000
+				}
+				c.setLowWord(0xa8, id)
+				c.PSW.CC = 0
+				return
+			}
+		}
+		return
+	}
 	for _, x := range c.M.CSS.subs {
 		if x.devno>>8 == ch {
 			id := uint32(0x20000000)

@@ -556,7 +556,7 @@ func (c *CPU) tpi(a uint32, b int) {
 	if a&3 != 0 {
 		c.program(pgmSpecification)
 	}
-	x := c.M.CSS.pendingInterrupt(c.CR[6])
+	x := c.M.pendingIO(c.CR[6])
 	if x == nil {
 		c.PSW.CC = 0
 		return

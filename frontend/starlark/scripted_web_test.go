@@ -53,7 +53,7 @@ func (v *scriptedTestVM) Attr(name string) (starlark.Value, error) {
 
 // A consumer may supply a scripted HTTP fixture without coupling engine tests
 // to its private repository. TEST_CASES are ordered (method, path, status,
-// required substring, forbidden substring) tuples. Fixture execution is bounded.
+// required substring, forbidden substring[, request body]) tuples. Fixture execution is bounded.
 func TestScriptedWebApplicationFixture(t *testing.T) {
 	filename := os.Getenv("TREX_WEB_FIXTURE")
 	source := `
@@ -134,12 +134,26 @@ TEST_CASES = [("GET", "/", 201, "scripted application", "")]
 	var row starlark.Value
 	for iterator.Next(&row) {
 		tuple := row.(starlark.Tuple)
+		if len(tuple) != 5 && len(tuple) != 6 {
+			t.Fatal("fixture row must have five or six fields")
+		}
 		method, _ := starlark.AsString(tuple[0])
 		path, _ := starlark.AsString(tuple[1])
 		want, _ := tuple[2].(starlark.Int).Int64()
 		contains, _ := starlark.AsString(tuple[3])
 		excludes, _ := starlark.AsString(tuple[4])
-		request := httptest.NewRequest(method, "http://app.test"+path, nil)
+		var body string
+		if len(tuple) == 6 {
+			var ok bool
+			body, ok = starlark.AsString(tuple[5])
+			if !ok {
+				t.Fatal("fixture request body must be a string")
+			}
+		}
+		request := httptest.NewRequest(method, "http://app.test"+path, strings.NewReader(body))
+		if len(tuple) == 6 {
+			request.Header.Set("Content-Type", "application/json")
+		}
 		request.Header.Set("Authorization", "Bearer "+app.Console.Token)
 		if method != "GET" && method != "HEAD" {
 			request.Header.Set("Origin", "http://app.test")

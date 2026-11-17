@@ -28,6 +28,12 @@ func (v *VolumeValue) AutoView(o auto.Options) (auto.View, error) {
 
 func (v *VolumeValue) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "device":
+		return starlark.MakeInt(int(v.Disk.Device)), nil
+	case "track_size":
+		return starlark.MakeUint64(uint64(v.Disk.TrackSize)), nil
+	case "image":
+		return starfile.NewReader("volume.ckd", v.Disk.Source), nil
 	case "tracks":
 		return starlark.MakeUint64(uint64((v.Disk.Source.Size() - 512) / int64(v.Disk.TrackSize))), nil
 	case "heads":
@@ -238,7 +244,7 @@ func (v *VolumeValue) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (*VolumeValue) AttrNames() []string {
-	return []string{"heads", "hfs_live", "track", "tracks", "trim"}
+	return []string{"device", "heads", "hfs_live", "image", "track", "track_size", "tracks", "trim"}
 }
 
 // VolumeBuiltin is ckd_volume(parts): a volume stored as a list of CKD part

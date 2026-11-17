@@ -26,6 +26,9 @@ func (p *pc) handleMMIO(ex hypervisor.X86Exit) error {
 		}
 		return nil
 	}
+	if p.p390 != nil && p.p390.contains(ex.Address, ex.Size) {
+		return p.p390.mmio(ex, p.cpu)
+	}
 	if p.pciNIC != nil && p.pciNIC.contains(ex.Address, ex.Size) {
 		return p.pciNIC.mmio(ex, p.cpu)
 	}

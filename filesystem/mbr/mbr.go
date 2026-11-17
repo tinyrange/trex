@@ -66,6 +66,7 @@ type mbrReadPartition struct {
 	startLBA  int64
 	sectors   int64
 	partition starfile.File
+	ebrLBA    int64
 }
 
 type mbrVolume struct {
@@ -120,6 +121,9 @@ func newMBRVolume(file starfile.File) (*mbrVolume, error) {
 		fileNames = append(fileNames, starlark.String(path))
 	}
 	volume.files = starlark.NewList(fileNames)
+	if err := volume.readExtended(); err != nil {
+		return nil, err
+	}
 	return volume, nil
 }
 
@@ -148,6 +152,8 @@ func (v *mbrVolume) Attr(name string) (starlark.Value, error) {
 				"sectors":   starlark.MakeInt64(partition.sectors),
 				"size":      starlark.MakeInt64(partition.sectors * mbrSectorSize),
 				"start_lba": starlark.MakeInt64(partition.startLBA),
+				"logical":   starlark.Bool(partition.ebrLBA != 0),
+				"ebr_lba":   starlark.MakeInt64(partition.ebrLBA),
 				"type":      starlark.MakeInt(int(partition.kind)),
 			})
 		}
@@ -186,11 +192,13 @@ func (b *mbrBuilder) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "partition":
 		return starlark.NewBuiltin("partition", b.partitionBuiltin), nil
+	case "partitions":
+		return starlark.NewBuiltin("partitions", b.partitionsBuiltin), nil
 	}
 	return nil, nil
 }
 func (b *mbrBuilder) AttrNames() []string {
-	return []string{"partition"}
+	return []string{"partition", "partitions"}
 }
 
 func (b *mbrBuilder) partitionBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

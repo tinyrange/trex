@@ -74,6 +74,9 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 			return err
 		}
 	}
+	if p.p390 != nil && p.p390.config[4]&1 != 0 && uint32(ex.Port) >= p.p390.ioBase() && uint32(ex.Port) < p.p390.ioBase()+32 {
+		return p.p390.io(ex)
+	}
 	if ex.Port == legacyDisplayPort {
 		return p.legacyDisplayIO(ex)
 	}
@@ -86,7 +89,7 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 	if p.efi != nil && ex.Port == efiPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		return p.efiCall()
 	}
-	if p.acpi != nil && ex.Port >= 0xcf8 && ex.Port <= 0xcff {
+	if (p.acpi != nil || p.p390 != nil) && ex.Port >= 0xcf8 && ex.Port <= 0xcff {
 		return p.pciIO(ex)
 	}
 	if p.uhci != nil && p.uhci.config[4]&1 != 0 && uint32(ex.Port) >= p.uhci.ioBase() && uint32(ex.Port) < p.uhci.ioBase()+32 {
@@ -266,6 +269,12 @@ func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
 		}
 	}
 	now := p.now()
+	if p.p390 != nil {
+		p.p390.poll(now)
+		if err := p.p390.updateIRQ(p.cpu); err != nil {
+			return time.Time{}, nil, nil, err
+		}
+	}
 	if p.sound != nil {
 		if err := p.sound.poll(now); err != nil {
 			return time.Time{}, nil, nil, err
@@ -345,6 +354,13 @@ func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
 			deadline = next
 			// Wake native execution only. The platform owner transfers DMA and
 			// asserts IRQ on the next poll, before the guest can reuse buffers.
+			deliver = p.cpu.Cancel
+			commit = func() {}
+		}
+	}
+	if p.p390 != nil {
+		if next := p.p390.deadline(); !next.IsZero() && (deadline.IsZero() || next.Before(deadline)) {
+			deadline = next
 			deliver = p.cpu.Cancel
 			commit = func() {}
 		}

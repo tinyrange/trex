@@ -2,7 +2,7 @@
 
 Portable Go support for uncompressed `CKD_P370` and compressed
 `CKD_C370` base images through `storage.Reader`, read-only except for the
-volume trimming and compressed image writing described below. Compose with ISO9660 and gzip readers without mounting,
+native image construction, volume trimming and compressed image writing described below. Compose with ISO9660 and gzip readers without mounting,
 extracting, launching host parsers, or booting a guest. Source-specific media
 selection, corpus assertions and audit reports belong in the private recipe
 repository; this package contains format readers and synthetic fixtures only.
@@ -26,6 +26,29 @@ indexes, extended index addressing, multivolume assembly, true sparse HFS file
 placement, ISAM, encrypted/compressed datasets and format-8 DSCBs remain unsupported. zFS backing/copy-on-write objects and other
 geometries also remain unsupported. Unknown variants fail explicitly; raw
 allocation access remains independent of logical decoding.
+
+## Constructing uncompressed images
+
+`BuildImage(cylinders, heads, trackSize, device, tracks)` builds an immutable,
+single-part `CKD_P370` file through `storage.Reader`. Geometry is explicit;
+it does not allocate a whole volume in RAM or infer device capacities.
+Populated record lists are serialized once, preserving Go record count addresses,
+keys, data and empty records. Missing tracks contain R0 plus an empty R1;
+read operations synthesize their home/count addresses and zero padding.
+Inputs are copied, boundaries are validated, and reads are concurrency-safe.
+
+`filesystem.ckd_image(cylinders, heads, track_size, device, tracks={})` exposes
+this construction to Starlark. `device` is the one-byte image device code;
+`tracks` maps absolute track numbers to lists of `(number, key_bytes, data_bytes)`
+tuples. Starlark count addresses follow the selected physical track.
+It returns a portable file, composable with native filesystem builders and
+readers. It does not initialize VOL1, VTOC or operating-system data.
+
+`filesystem.ckd_volume(source).image` exposes the canonical uncompressed
+`CKD_P370` portable reader, including for compressed inputs. Reads remain lazy;
+no materialized host image is required to place it in another filesystem.
+The volume's `device`, `track_size`, `heads` and `tracks` attributes report the
+native header and geometry. Reopening `.image` preserves tracks and VTOC data.
 
 ## Compressed CKD
 

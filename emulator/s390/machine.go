@@ -38,6 +38,7 @@ type Machine struct {
 	CPUs []*CPU
 	CSS  *ChannelSubsystem
 	cfg  Config
+	p390 *P390 // optional serialized original-host channel bridge
 
 	tod             uint64 // current virtual TOD value
 	todStep         uint64 // TOD units per instruction
@@ -376,6 +377,10 @@ func (m *Machine) Run(budget uint64) StopReason {
 			if n > 0 {
 				progressed = true
 			}
+			if m.p390 != nil && m.p390.IOPending {
+				c.hitBreak = false
+				return StopReason{Kind: "host-io", Detail: fmt.Sprintf("instruction %04X", m.p390.IOInstruction)}
+			}
 			if c.hitBreak {
 				c.hitBreak = false
 				if m.watchHit {
@@ -527,7 +532,7 @@ func (c *CPU) takeInterrupt() bool {
 			return true
 		}
 	} else if c.PSW.IO {
-		if sch := c.M.CSS.pendingInterrupt(c.CR[6]); sch != nil {
+		if sch := c.M.pendingIO(c.CR[6]); sch != nil {
 			c.PSW.Wait = false
 			sid, parm := sch.interruptCode()
 			sch.irq = false

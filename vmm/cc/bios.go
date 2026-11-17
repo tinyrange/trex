@@ -19,6 +19,7 @@ const biosPort = 0xf1
 // retains all mode switches and executes the original boot sector and loader.
 type pc struct {
 	sound           *sb16
+	p390            *p390Adapter
 	nvme            *pciNVMe
 	performance     *pcPerformance
 	biosDiskCalls   []any

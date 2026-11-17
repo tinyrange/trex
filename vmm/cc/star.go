@@ -28,11 +28,14 @@ func Builtins() starlark.StringDict {
 		acpi, pciIDE, pciDisplay, hpet, uefi, usb := false, false, false, false, false, false
 		ideDMA := true
 		sb16 := false
+		p390 := false
+		p390S370 := false
+		p390Start := ""
 		privateAppleISA := false
 		ideModel := "synthetic"
 		overlayLimit := int64(256 << 20)
 		runTimeoutValue := starlark.Value(starlark.Float(30))
-		if err := starlark.UnpackArgs("cc.backend", args, kwargs, "acpi?", &acpi, "uefi?", &uefi, "usb?", &usb, "sb16?", &sb16, "hpet?", &hpet, "pci_ide?", &pciIDE, "pci_display?", &pciDisplay, "ide_model?", &ideModel, "ide_dma?", &ideDMA, "overlay_limit?", &overlayLimit, "run_timeout?", &runTimeoutValue, "private_apple_isa?", &privateAppleISA); err != nil {
+		if err := starlark.UnpackArgs("cc.backend", args, kwargs, "acpi?", &acpi, "uefi?", &uefi, "usb?", &usb, "sb16?", &sb16, "p390?", &p390, "p390_s370?", &p390S370, "p390_start?", &p390Start, "hpet?", &hpet, "pci_ide?", &pciIDE, "pci_display?", &pciDisplay, "ide_model?", &ideModel, "ide_dma?", &ideDMA, "overlay_limit?", &overlayLimit, "run_timeout?", &runTimeoutValue, "private_apple_isa?", &privateAppleISA); err != nil {
 			return nil, err
 		}
 		if overlayLimit <= 0 {
@@ -42,6 +45,17 @@ func Builtins() starlark.StringDict {
 		if !number || math.IsNaN(runTimeout) || math.IsInf(runTimeout, 0) || runTimeout <= 0 || runTimeout > 86400 {
 			return nil, fmt.Errorf("cc.backend: run_timeout must be positive and at most 24 hours")
 		}
-		return &Backend{PrivateAppleISA: privateAppleISA, RunTimeout: time.Duration(runTimeout * float64(time.Second)), UEFI: uefi, USB: usb, SB16: sb16, ACPI: acpi, HPET: hpet, PCIIDE: pciIDE, PCIDisplay: pciDisplay, IDEModel: ideModel, PIOOnly: !ideDMA, OverlayLimit: overlayLimit}, nil
+		var epoch time.Time
+		if p390Start != "" {
+			var err error
+			epoch, err = time.Parse(time.RFC3339, p390Start)
+			if err != nil {
+				return nil, fmt.Errorf("cc.backend: invalid p390_start: %w", err)
+			}
+		}
+		if !p390 && (p390S370 || p390Start != "") {
+			return nil, fmt.Errorf("cc.backend: mainframe CPU options require p390=True")
+		}
+		return &Backend{P390S370: p390S370, P390Start: epoch, PrivateAppleISA: privateAppleISA, RunTimeout: time.Duration(runTimeout * float64(time.Second)), UEFI: uefi, USB: usb, SB16: sb16, P390: p390, ACPI: acpi, HPET: hpet, PCIIDE: pciIDE, PCIDisplay: pciDisplay, IDEModel: ideModel, PIOOnly: !ideDMA, OverlayLimit: overlayLimit}, nil
 	})}
 }

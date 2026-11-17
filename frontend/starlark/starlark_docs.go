@@ -81,6 +81,8 @@ func standardLibraryDocumentation() ([]byte, error) {
 }
 
 var nativeStarlarkTypes = map[string][]string{
+	"mbr":             {"partition(filesystem, bootable=False, type=7, start_lba=2048) (builder)", "partitions(primary, logical=[], extended_type=0x05) (builder)", "partitions (parsed metadata with index, type, bootable, start_lba, sectors, offset, size, file, logical, ebr_lba)", "files (parsed)", "disk_signature (parsed)"},
+	"tn3270_client":   {"feed(data, raise_error=True)", "type(text)", "key(text)", "screen()", "screens()", "screenshot()", "records", "locked", "error"},
 	"scs.repository":  {"empty()", "checkout(name)", "checkout_git(revision='HEAD', catalog='git')", "clone(url, catalog='git', max_pack_bytes=256MiB, max_native_bytes=512GiB)", "git_refs(catalog='git')", "refs()", "checkpoint()", "file()", "close()"},
 	"workspace":       {"open_file(path)", "read_file(path, line_start=None, line_end=None, output_limit=None)", "write_file(path, content)", "replace(path, old, new)", "list_dir(path)", "stat(path)", "glob(pattern)", "search(pattern, ...)", "mkdir(path)", "rename(old, new)", "delete(path)", "chmod(path, mode)", "symlink(path, target)", "readlink(path)", "readonly()", "view()", "fork()", "snapshot()", "publish(name)"},
 	"file":            {"size", "read()", "bytes(offset=0, size=remaining)", "binary(offset=0, size=remaining)", "hex(offset=0, size=remaining)", "slice(offset=0, size=remaining)", "splice(offset, remove, value)"},
@@ -150,6 +152,7 @@ var nativeStarlarkTypes = map[string][]string{
 }
 
 var nativeStarlarkSignatures = map[string]string{
+	"tn3270.client":                       "tn3270.client() -> tn3270_client",
 	"archive.appx":                        "archive.appx(file) -> {kind, identity, full_name, family_name, entries, files, packages}",
 	"archive.crx":                         "archive.crx(file) -> record(id, version, files, entries)",
 	"binary.software_update_catalog":      "binary.software_update_catalog(source) -> list",
@@ -248,6 +251,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"filesystem.object_deck":            "filesystem.object_deck(file, max_cards=10000000, max_bytes=256MiB) -> record",
 	"filesystem.program_object":         "filesystem.program_object(file) -> file",
 	"filesystem.cp_directory":           "filesystem.cp_directory(file, root=0, max_users=100000) -> record",
+	"filesystem.ckd_image":              "filesystem.ckd_image(cylinders, heads, track_size, device, tracks={}) -> file",
 	"filesystem.ckd_volume":             "filesystem.ckd_volume(parts) -> ckd_volume",
 	"filesystem.ckd_vvr":                "filesystem.ckd_vvr(data) -> record",
 	"filesystem.ckd_catalog_record":     "filesystem.ckd_catalog_record(data) -> record",
@@ -321,7 +325,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"firmware.acpi_table":               "firmware.acpi_table(signature, body, revision=2, oem_id='TREXOS', oem_table_id='TREXACPI', oem_revision=1, creator_id='TREX', creator_revision=1)",
 	"filesystem.mbr":                    "filesystem.mbr(file) -> parsed MBR; filesystem.mbr(size, boot_code=None, disk_signature=0, chs=None) -> builder",
 	"os2.stream_profile":                "os2.stream_profile(source, maximum=64MiB) -> file",
-	"os2.linear_executable":             "os2.linear_executable(source, maximum=64MiB) -> record(objects, resources)",
+	"os2.linear_executable":             "os2.linear_executable(source, maximum=64MiB) -> record(objects, resources, imports)",
 	"os2.extended_attributes":           "os2.extended_attributes(value) -> list",
 	"os2.profile":                       "os2.profile(entries) -> file",
 	"filesystem.fat16":                  "filesystem.fat16(directory, size, boot_code=None, hidden_sectors=0, label='NO NAME', file_order=[], directory_label=True, extended_bpb=True, chs=None) -> file",
@@ -358,7 +362,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"rfe.backend":                       "rfe.backend(overlay_limit=268435456) -> vmm_backend",
 	"cc.kernel_symbol":                  "cc.kernel_symbol(kernel, address) -> symbol or None",
 	"cc.boot_bsd":                       "cc.boot_bsd(os, kernel, marker, root=None, memory_mb=1024, timeout=60, console=None, overlay_limit=64MiB) -> result",
-	"cc.backend":                        "cc.backend(acpi=False, pci_ide=False, pci_display=False, hpet=False, uefi=False, usb=False, sb16=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend",
+	"cc.backend":                        "cc.backend(acpi=False, pci_ide=False, pci_display=False, hpet=False, uefi=False, usb=False, sb16=False, p390=False, p390_s370=False, p390_start='', ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend",
 	"qemu.backend":                      "qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', display_zoom_to_fit=False, block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[])",
 	"qemu.chardev":                      "qemu.chardev(name, **properties)",
 	"qemu.device":                       "qemu.device(name, **properties)",

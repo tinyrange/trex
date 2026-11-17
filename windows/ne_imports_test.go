@@ -63,3 +63,20 @@ func TestWindowsNEImportsRejectMalformedRelocations(t *testing.T) {
 		})
 	}
 }
+
+// OS/2 AWSCHAN's last data import starts two bytes before the stored segment
+// ends, but its far pointer extends into loader-zeroed BSS. Source bounds are
+// the allocation, while the relocation table still follows the stored length.
+func TestWindowsNEImportCanSpanInitializedDataAndBSS(t *testing.T) {
+	b := neImportFixture()
+	binary.LittleEndian.PutUint16(b[134:], 264)
+	binary.LittleEndian.PutUint16(b[772:], 254)
+	imports, err := parseWindowsNEImports(b, 2)
+	if err != nil || len(imports) != 2 || imports[0].Offset != 254 {
+		t.Fatalf("BSS-spanning import: %v %v", imports, err)
+	}
+	binary.LittleEndian.PutUint16(b[772:], 262)
+	if _, err := parseWindowsNEImports(b, 2); err == nil {
+		t.Fatal("relocation beyond allocation accepted")
+	}
+}

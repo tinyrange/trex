@@ -31,6 +31,12 @@ type Backend struct {
 	USB bool
 	// SB16 opts into ISA DSP 4.05 PCM with DMA1/5 and bounded capture.
 	SB16 bool
+	// P390 enables the experimental original-driver PCI transport.
+	P390 bool
+	// P390S370 opts into native S/370 CPU compatibility over the ESA host ABI.
+	P390S370 bool
+	// P390Start supplies an explicit initial native mainframe TOD clock.
+	P390Start time.Time
 	// PIOOnly disables the PCI IDE disk's DMA capability.
 	PIOOnly bool
 	// IDEModel selects synthetic (default) or the native ich7-pata profile.
@@ -121,6 +127,12 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		if err := m.DarwinBoot.Validate(); err != nil {
 			add("boot", err.Error())
 		}
+	}
+	if !b.P390 && (b.P390S370 || !b.P390Start.IsZero()) {
+		add("p390", "mainframe CPU options require p390=True")
+	}
+	if b.P390 && (m.Architecture != "i386" || m.CPUs != 1 || b.UEFI) {
+		add("p390", "experimental P/390 PCI transport requires a single i386 BIOS CPU")
 	}
 	if b.SB16 && m.CPUs > 1 {
 		add("sb16", "ISA audio currently requires a single CPU")
@@ -318,6 +330,9 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 		return nil, err
 	}
 	platform.cpus = cpus
+	if b.P390 {
+		platform.p390 = newP390AdapterWithConfig(b.P390S370, b.P390Start)
+	}
 	if b.SB16 {
 		platform.sound = newSB16(platform.ram, cpu.SetIRQ)
 	}
