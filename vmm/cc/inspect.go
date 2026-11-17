@@ -29,6 +29,7 @@ func (d *driver) Extension(ctx context.Context, name string) (starlark.Value, er
 		"breakpoint":    starlark.NewBuiltin("cc.breakpoint", i.breakpoint),
 		"step":          starlark.NewBuiltin("cc.step", i.step),
 		"read_physical": starlark.NewBuiltin("cc.read_physical", i.readPhysical),
+		"device_read":   starlark.NewBuiltin("cc.device_read", i.readDevice),
 		"p390_read":     starlark.NewBuiltin("cc.p390_read", i.readMainframe),
 		"descriptors":   starlark.NewBuiltin("cc.descriptors", i.descriptors),
 		"disk":          starlark.NewBuiltin("cc.disk", i.disk),
@@ -82,15 +83,13 @@ func (i inspection) readPhysical(_ *starlark.Thread, _ *starlark.Builtin, args s
 	err := i.driver.call(i.ctx, func() error {
 		p := i.driver.pc
 		var memory []byte
-		if p.p390 != nil && address >= p.p390.memoryBase() && address-p.p390.memoryBase() < uint64(len(p.p390.memory)) {
-			offset := address - p.p390.memoryBase()
-			if uint64(size) > uint64(len(p.p390.memory))-offset {
-				return fmt.Errorf("physical range exceeds P/390 aperture")
-			}
-			memory = make([]byte, size)
-			if err := p.p390.service.ReadAperture(uint32(offset), memory); err != nil {
-				return err
-			}
+		memory = make([]byte, size)
+		handled, err := p.devices.ReadPhysical(address, memory)
+		if err != nil {
+			return err
+		}
+		if handled {
+			// Model supplied an observational aperture read.
 		} else if address >= ramfb.Address && address-ramfb.Address < uint64(len(p.framebuffer)) {
 			offset := address - ramfb.Address
 			if uint64(size) > uint64(len(p.framebuffer))-offset {
@@ -281,7 +280,8 @@ func (p *pc) inspectState() (starlark.Value, error) {
 	}
 	return starvalue.Starlark(map[string]any{
 		"bios_counts": biosCounts,
-		"p390":        p.p390.state(),
+		"p390":        p.devices.State("p390"),
+		"devices":     p.devices.States(),
 		"audio":       p.sound.state(),
 		"text":        string(text), "instruction_bytes": fmt.Sprintf("%x", pcBytes), "bios_ticks": int64(binary.LittleEndian.Uint32(p.ram[0x46c:])),
 		"code_mapping": mapping, "unsupported_bios": biosGaps,
@@ -352,15 +352,34 @@ func (i inspection) readMainframe(_ *starlark.Thread, _ *starlark.Builtin, args 
 	}
 	var result starlark.Value
 	err := i.driver.call(i.ctx, func() error {
-		d := i.driver.pc.p390
-		if d == nil {
-			return fmt.Errorf("p390_read requires a P/390 adapter")
+		memory := make([]byte, size)
+		if err := i.driver.pc.devices.ReadMemory("p390", "main", address, memory); err != nil {
+			return err
 		}
-		mem := d.service.Machine.S.Mem
-		if address > uint64(len(mem)) || uint64(size) > uint64(len(mem))-address {
-			return fmt.Errorf("p390_read exceeds main storage")
+		result = starlark.Bytes(string(memory))
+		return nil
+	})
+	return result, err
+}
+
+// readDevice observes model-defined memory through the same owner as execution.
+func (i inspection) readDevice(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name, space string
+	var address uint64
+	var size int
+	if err := starlark.UnpackArgs("cc.device_read", args, kwargs, "name", &name, "space", &space, "address", &address, "size", &size); err != nil {
+		return nil, err
+	}
+	if size < 0 || size > 65536 {
+		return nil, fmt.Errorf("device_read size must be 0..65536")
+	}
+	var result starlark.Value
+	err := i.driver.call(i.ctx, func() error {
+		memory := make([]byte, size)
+		if err := i.driver.pc.devices.ReadMemory(name, space, address, memory); err != nil {
+			return err
 		}
-		result = starlark.Bytes(string(mem[address : address+uint64(size)]))
+		result = starlark.Bytes(string(memory))
 		return nil
 	})
 	return result, err

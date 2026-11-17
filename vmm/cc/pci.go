@@ -107,12 +107,11 @@ func (p *pc) pciIO(ex hypervisor.X86Exit) error {
 				}
 				value = p.pciNIC.config[offset]
 			}
-			if port >= 0xcfc && port <= 0xcff && p.p390 != nil && p.pciAddress&0xffffff00 == 0x80002800 {
-				offset := int(p.pciAddress&0xfc) + port - 0xcfc
-				if ex.Write {
-					p.p390.writeConfig(offset, data[j])
+			if port >= 0xcfc && port <= 0xcff && p.pciAddress&0x80000000 != 0 {
+				offset := uint16(p.pciAddress&0xfc) + uint16(port-0xcfc)
+				if v, ok := p.devices.Config(uint16((p.pciAddress>>8)&0xffff), offset, ex.Write, data[j]); ok {
+					value = v
 				}
-				value = p.p390.config[offset]
 			}
 			if !ex.Write {
 				data[j] = value

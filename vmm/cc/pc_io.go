@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/tinyrange/trex/vmm/device"
 	"j5.nz/cc/hypervisor"
 	"time"
 )
@@ -74,8 +75,10 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 			return err
 		}
 	}
-	if p.p390 != nil && p.p390.config[4]&1 != 0 && uint32(ex.Port) >= p.p390.ioBase() && uint32(ex.Port) < p.p390.ioBase()+32 {
-		return p.p390.io(ex)
+	if p.devices.Len() != 0 {
+		if handled, err := p.devices.Transfer(device.IO, uint64(ex.Port), int(ex.Size), int(ex.Count), ex.Write, ex.Data, nil); handled || err != nil {
+			return err
+		}
 	}
 	if ex.Port == legacyDisplayPort {
 		return p.legacyDisplayIO(ex)
@@ -89,7 +92,7 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 	if p.efi != nil && ex.Port == efiPort && ex.Write && ex.Size == 1 && ex.Count == 1 {
 		return p.efiCall()
 	}
-	if (p.acpi != nil || p.p390 != nil) && ex.Port >= 0xcf8 && ex.Port <= 0xcff {
+	if (p.acpi != nil || p.devices.Len() != 0) && ex.Port >= 0xcf8 && ex.Port <= 0xcff {
 		return p.pciIO(ex)
 	}
 	if p.uhci != nil && p.uhci.config[4]&1 != 0 && uint32(ex.Port) >= p.uhci.ioBase() && uint32(ex.Port) < p.uhci.ioBase()+32 {
@@ -269,11 +272,8 @@ func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
 		}
 	}
 	now := p.now()
-	if p.p390 != nil {
-		p.p390.poll(now)
-		if err := p.p390.updateIRQ(p.cpu); err != nil {
-			return time.Time{}, nil, nil, err
-		}
+	if err := p.devices.Poll(now); err != nil {
+		return time.Time{}, nil, nil, err
 	}
 	if p.sound != nil {
 		if err := p.sound.poll(now); err != nil {
@@ -358,8 +358,8 @@ func (p *pc) pollDevices() (time.Time, func() error, func(), error) {
 			commit = func() {}
 		}
 	}
-	if p.p390 != nil {
-		if next := p.p390.deadline(); !next.IsZero() && (deadline.IsZero() || next.Before(deadline)) {
+	{
+		if next := p.devices.Deadline(); !next.IsZero() && (deadline.IsZero() || next.Before(deadline)) {
 			deadline = next
 			deliver = p.cpu.Cancel
 			commit = func() {}
