@@ -69,6 +69,9 @@ func binaryScalarCodecNamed(name string) (binaryScalarCodec, bool) {
 
 func Builtins() starlark.StringDict {
 	attrs := starlark.StringDict{
+		"ibmi_procedures":              starlark.NewBuiltin("ibmi_procedures", ibmiProceduresBuiltin),
+		"ibmi_lid_directory":           starlark.NewBuiltin("ibmi_lid_directory", ibmiLIDDirectoryBuiltin),
+		"ibmi_dasd_index":              starlark.NewBuiltin("ibmi_dasd_index", ibmiDASDIndexBuiltin),
 		"rpm_metadata":                 starlark.NewBuiltin("rpm_metadata", rpm.Builtin),
 		"irix_executable":              starlark.NewBuiltin("irix_executable", irixbinary.Builtin),
 		"apple_device_tree":            starlark.NewBuiltin("apple_device_tree", appleDeviceTreeBuiltin),

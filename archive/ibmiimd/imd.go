@@ -1,11 +1,11 @@
-// Package ibmiimd reads the observed IMD1/LIDDIR optical LIC boot container.
+// Package ibmiimd reads observed IBM i LID directories and the IMD1 optical
+// LIC boot container.
 // It preserves stored component bytes. A separate bounded reader expands the
 // observed packed profile; neither reader relocates, executes or authenticates LIC.
 package ibmiimd
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"sort"
@@ -23,7 +23,8 @@ type Entry struct {
 	Sector  uint32 `json:"sector"`
 	Sectors uint32 `json:"sectors"`
 	Flags   uint32 `json:"flags"`
-	// DeclaredAddress preserves the +16 word; its role as a load destination is not established.
+	// DeclaredAddress preserves the +16 SLS address. It is not a physical
+	// extent in the enclosing optical file or installed disk.
 	DeclaredAddress uint64         `json:"declared_address"`
 	OpaqueTail      [8]byte        `json:"opaque_tail"`
 	Offset          int64          `json:"offset"`
@@ -52,43 +53,21 @@ func Open(source storage.Reader, maximumEntries int, maximumBytes int64) (*Image
 	if !bytes.Equal(h[:4], magic) {
 		return nil, fmt.Errorf("ibmi imd: unsupported header")
 	}
-	var d [32]byte
-	if _, err := starfile.ReadFullAt(source, d[:], 4096); err != nil {
+	entries, directoryBytes, err := ReadDirectory(source, 4096, maximumEntries)
+	if err != nil {
 		return nil, err
-	}
-	be := binary.BigEndian
-	word := be.Uint32(d[:4])
-	count := int(word & 0xffffff)
-	if word&0xff000000 != 0x80000000 || !bytes.Equal(d[4:12], directoryMagic) || count < 1 || count > maximumEntries {
-		return nil, fmt.Errorf("ibmi imd: unsupported directory or entry budget")
-	}
-	directoryBytes := int64(32) + int64(count)*32 + 4
-	if directoryBytes > source.Size()-4096 {
-		return nil, fmt.Errorf("ibmi imd: directory outside image")
-	}
-	table := make([]byte, int(count)*32+4)
-	if _, err := starfile.ReadFullAt(source, table, 4128); err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(table[len(table)-4:], endMagic) {
-		return nil, fmt.Errorf("ibmi imd: missing directory end marker")
 	}
 	image := &Image{Header: io.NewSectionReader(source, 0, 4096), Directory: io.NewSectionReader(source, 4096, directoryBytes)}
-	seen := make(map[uint32]bool, count)
-	for i := 0; i < count; i++ {
-		row := table[i*32 : i*32+32]
-		e := Entry{ID: be.Uint32(row), Sector: be.Uint32(row[4:]), Sectors: be.Uint32(row[8:]), Flags: be.Uint32(row[12:]), DeclaredAddress: be.Uint64(row[16:])}
-		copy(e.OpaqueTail[:], row[24:32])
+	for _, e := range entries {
 		e.Offset = int64(e.Sector) * 512
 		e.StoredBytes = int64(e.Sectors) * 512
-		if seen[e.ID] || e.Sectors == 0 || e.Offset < 4096+directoryBytes || e.Offset > source.Size() || e.StoredBytes > source.Size()-e.Offset {
+		if e.Sectors == 0 || e.Offset < 4096+directoryBytes || e.Offset > source.Size() || e.StoredBytes > source.Size()-e.Offset {
 			return nil, fmt.Errorf("ibmi imd: duplicate, empty or invalid component %08x", e.ID)
 		}
 		if e.StoredBytes > maximumBytes-image.StoredBytes {
 			return nil, fmt.Errorf("ibmi imd: stored-byte budget")
 		}
 		image.StoredBytes += e.StoredBytes
-		seen[e.ID] = true
 		e.Data = io.NewSectionReader(source, e.Offset, e.StoredBytes)
 		image.Entries = append(image.Entries, e)
 	}

@@ -5172,6 +5172,24 @@ Encodes a 64-bit signed integer as 8 bytes in little-endian order. Returns new b
 
 Encodes a 8-bit signed integer as 1 bytes in single-byte order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
+### `binary.ibmi_dasd_index`
+
+`binary.ibmi_dasd_index(source, ranges, maximum_pages=1048576) -> record`
+
+Indexes IBM i 4096-byte data/512-byte sidecar envelopes intersecting explicit (offset,size) ranges. Checks ranges and maximum_pages before reading; reconstructs distributed SLS addresses from eight consistent sector headers, including tagged sectors. Returns address_count, scanned_pages, unmapped_pages, page_address(offset) for a physical frame, matches(address) with physical offset, data, headers, sidecar, and the 32-byte pointer_tags bitmap, and file(address,size) for uniquely backed virtual ranges. Missing or duplicate virtual pages fail; omitted ranges are not assumed empty. Nonzero sector controls must agree before displaced data words are restored. Zero-control pages retain stored data. This is a read-only page observation, not an authoritative allocation map, filesystem or authentication result.
+
+### `binary.ibmi_lid_directory`
+
+`binary.ibmi_lid_directory(source, offset=0, maximum_entries=4096) -> list[dict]`
+
+Reads a counted big-endian LIDDIR table and END marker at offset, bounded by maximum_entries (at most65536). Returns IDs, sector fields, flags, declared addresses, opaque tails and stored sizes. Rejects duplicate IDs, truncation and malformed framing. Sector numbers remain metadata and are not interpreted as physical extents; source may be an installed SLS directory or an optical file. Does not expand, relocate or execute components.
+
+### `binary.ibmi_procedures`
+
+`binary.ibmi_procedures(source, name, maximum_matches=64, maximum_bytes=67108864) -> list[record]`
+
+Finds exact IBM037 procedure names in observed IBM i kind2 descriptors: aligned record, kind word0200000000000000, 64-bit aligned entry address at+8 and NUL-terminated name at+56. Returns record_offset, entry and name. Bounded by maximum_matches(at most1024) and maximum_bytes(at most256MiB), before source allocation. Unqualified strings, partial names and malformed descriptors are not procedure matches. Does not execute, relocate or infer a load map.
+
 ### `binary.irix_executable`
 
 `binary.irix_executable(file) -> record`
