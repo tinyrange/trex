@@ -5532,11 +5532,29 @@ Returns the complete offline synchronous v1 wire specification, including the Wi
 
 Creates two connected, bounded byte channels entirely in memory, without host sockets or DNS. maximum limits each incoming queue (default 1 MiB, at most 64 MiB). read_available returns None when the peer has no data yet, bytes when data is ready, and empty bytes after the peer closes and its data is drained. write_available returns the byte count, None when capacity is insufficient, or -1 for a closed endpoint; writes are all-or-nothing. write_capacity reports the currently available byte count, or -1 when closed, without writing data. write instead raises an error when delivery is unavailable. Emulator checkpoints restore queued data and closed state when endpoints are retained in plugin state.
 
+### `channel.serve_tn5250`
+
+`channel.serve_tn5250(terminal, address='127.0.0.1:0', public=False, notes='') -> web_tn5250`
+
+Native-only web display station for a channel.tn5250 terminal: serves a browser page and a token-authenticated JSON API on a host TCP address (loopback unless public=True). The script keeps owning the terminal; call sync() from its machine loop to publish the screen and apply queued browser input, then write the returned bytes to the host connection. url includes the session token in its fragment. notes is plain text (at most 16 KiB, such as sign-on instructions) shown above the display; it reaches the page only through the authenticated API. Operators edit fields locally and send Enter, PF1-PF24, Roll Up/Down, Help, Print, Clear, System Request or Attention; input typed for a screen the host has since replaced is discarded. Plain HTTP: use it on trusted networks.
+
+### `channel.serve_tn5250_telnet`
+
+`channel.serve_tn5250_telnet(terminal, address='127.0.0.1:0', public=False) -> telnet_tn5250`
+
+Native-only TN5250 server that lets 5250 emulator programs share a channel.tn5250 terminal's session on a host TCP address (loopback unless public=True). Each client is negotiated (terminal type, binary, end of record), starts from the terminal's current screen, then receives the host's display records; its AID input and System Request/Attention keys go to the host. The terminal keeps answering the host's queries and save requests, so client replies to them are dropped. Call sync() from the machine loop after feeding host bytes and write the returned bytes to the host connection. No authentication: anyone who can connect can use the session.
+
 ### `channel.tcp_ipv4`
 
 `channel.tcp_ipv4(local, remote, local_port, remote_port, sequence=1, mtu=1024) -> packet_tcp`
 
 Creates a bounded packet-driven IPv4 TCP client using explicit IPv4 addresses, ports, initial sequence and MTU(64..65535). Caller supplies every raw IPv4 packet and monotonic now value in seconds; no host socket, DNS or clock access. Buffers are bounded to65535 bytes per direction and one outstanding segment. See help on the returned packet_tcp for packet delivery, retransmission and feature limits.
+
+### `channel.tn5250`
+
+`channel.tn5250(terminal_type='IBM-3179-2', environment={}) -> terminal5250`
+
+Creates a24x80 IBM037 TN5250 terminal with an explicit terminal type and NEW-ENVIRON string dictionary. Processes supplied Telnet/GDS bytes and emits actual negotiation, screen-save and Cancel Invite replies. Maintains display cells and input fields, hides nondisplay input, and encodes real AID/modified-field input records. No connection, guest-state mutation or host client. Unknown display commands and field control words fail; see help on terminal5250 for supported operations.
 
 ### `clock.monotonic`
 
@@ -8161,6 +8179,18 @@ An owned native loopback listener forwarding one TCP connection to one byte chan
 
 Methods and attributes: `close()`, `port`.
 
+### `telnet_tn5250` value
+
+A TN5250 server sharing one terminal5250 session (channel.serve_tn5250_telnet). address is the listening host:port; clients lists the negotiated terminal types of connected programs. sync() forwards the terminal's applied host records to clients (starting new ones from the current screen) and returns client input to send to the host. trace(after=0) returns the last 64 records that crossed the relay after a sequence number, as (seq, from_client, forwarded, record) tuples, for diagnosing a client. close disconnects clients and stops listening; runtime teardown also closes it.
+
+Methods and attributes: `address`, `clients`, `close()`, `sync()`, `trace(after=0)`.
+
+### `terminal5250` value
+
+A24x80 IBM037 TN5250 terminal over caller-supplied bytes. feed preserves split Telnet commands and GDS records and returns protocol replies; send those bytes through the real transport. Implements terminal type, binary, EOR and NEW-ENVIRON negotiation; WTD, clear, cursor/address/repeat/transparent orders, simple input fields, actual screen save/restore and RFC1205 Cancel Invite replies. Cancel Invite suppresses key output until a subsequent read command. Unknown commands or field control words fail explicitly. apply accepts one unescaped GDS record. rows hides nondisplay fields; cursor is a1-based row/column pair. fields lists(row,column,length,attribute) tuples; set_field replaces a zero-based field with IBM037 text, and key returns a real GDS AID/modified-fields input record including IAC/EOR. records counts completed GDS records; last_record retains the original bytes. set_lenient(True) makes feed skip a record it cannot apply (each record applies atomically) instead of failing, counting it in skipped with its error in skip_error, for interactive sessions. No host display, sockets or process dependencies.
+
+Methods and attributes: `apply(data)`, `cursor`, `feed(data)`, `fields`, `key(aid)`, `last_record`, `records`, `rows`, `set_field(index, value)`, `set_lenient(enabled)`, `skip_error`, `skipped`.
+
 ### `unix_filesystem` value
 
 A bounded mutable Unix namespace shared directly by shell, compiler and ELF execution. write accepts ordinary portable file values; find returns an immutable file snapshot rather than a live descriptor. Modes and Unix-second timestamps are explicit. Missing paths and invalid canonical absolute guest paths raise errors; host paths are never accessed.
@@ -8238,6 +8268,12 @@ Methods and attributes: `architecture`, `boot`, `channels`, `cpus`, `disks`, `di
 A named portable guest-network request. kind selects networking behavior; required controls whether a backend may omit unsupported networking.
 
 Methods and attributes: `kind`, `name`, `required`.
+
+### `web_tn5250` value
+
+A browser display station serving one terminal5250 (channel.serve_tn5250). url is the page address with its session token. sync(status='') publishes the terminal's screen and a status line, applies queued browser input to the terminal and returns the bytes to send to the host (empty when there is none); malformed input is reported in the status line instead of failing. wait(seconds) blocks for up to one second, returning early (True) when browser input is queued, so a machine loop can let idle guest time pass in real time. close stops serving; runtime teardown also closes it.
+
+Methods and attributes: `close()`, `sync(status='')`, `url`, `wait(seconds)`.
 
 ### `windows.address_space` value
 

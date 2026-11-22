@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5250 Terminal</title>
+<link rel="stylesheet" href="terminal.css">
+</head>
+<body>
+<main>
+  <div id="notes" hidden></div>
+  <div id="screen" tabindex="0" aria-label="5250 display" role="application"></div>
+  <div id="status" aria-live="polite">
+    <span id="state">Connecting…</span>
+    <span id="lock"></span>
+    <span id="mode"></span>
+    <span id="position"></span>
+  </div>
+  <div id="keys">
+    <div class="row" id="pf1"></div>
+    <div class="row" id="pf2"></div>
+    <div class="row">
+      <button data-key="ENTER">Enter</button>
+      <button data-key="ROLLDOWN" title="Page Up">Roll Down</button>
+      <button data-key="ROLLUP" title="Page Down">Roll Up</button>
+      <button data-key="HELP">Help</button>
+      <button data-key="PRINT">Print</button>
+      <button data-key="CLEAR">Clear</button>
+      <button data-key="SYSREQ">SysReq</button>
+      <button data-key="ATTN" title="Escape">Attn</button>
+      <button data-key="RESET" title="Right Ctrl">Reset</button>
+    </div>
+  </div>
+  <p id="hint">Type into the display. Enter sends; F1–F12 (Shift for F13–F24), Page Up/Down roll, Tab moves between fields, Insert toggles insert mode, Escape is Attention, right Ctrl resets a locked keyboard.</p>
+</main>
+<script src="terminal.js"></script>
+</body>
+</html>
