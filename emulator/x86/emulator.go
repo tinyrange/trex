@@ -16,6 +16,7 @@ import (
 	exportbatch "github.com/tinyrange/trex/emulator/internal/exports"
 	importquery "github.com/tinyrange/trex/emulator/internal/imports"
 	"github.com/tinyrange/trex/emulator/peimage"
+	starvalue "github.com/tinyrange/trex/script/value"
 	windowsapi "github.com/tinyrange/trex/windows"
 	"go.starlark.net/starlark"
 	"golang.org/x/arch/x86/x86asm"
@@ -278,21 +279,6 @@ type emulatorExecution struct {
 	frozen    bool
 }
 
-type emulatorCheckpointDict struct {
-	value *starlark.Dict
-	items []starlark.Tuple
-}
-
-type emulatorCheckpointList struct {
-	value *starlark.List
-	items []starlark.Value
-}
-
-type emulatorCheckpointSet struct {
-	value *starlark.Set
-	items []starlark.Value
-}
-
 type emulatorCheckpointExecution struct {
 	value    *emulatorExecution
 	snapshot emulatorExecution
@@ -303,18 +289,14 @@ type emulatorCheckpointExecution struct {
 // those containers, so replacing them would leave the callbacks attached to
 // state from after the checkpoint.
 type emulatorCheckpoint struct {
-	resources    []func() error
-	captureError error
-	owner        *emulatorX86
-	machine      *emulatorX86
-	dicts        []emulatorCheckpointDict
-	lists        []emulatorCheckpointList
-	sets         []emulatorCheckpointSet
-	executions   []emulatorCheckpointExecution
+	state      *starvalue.GraphCheckpoint
+	owner      *emulatorX86
+	machine    *emulatorX86
+	executions []emulatorCheckpointExecution
 }
 
 func (c *emulatorCheckpoint) String() string {
-	return fmt.Sprintf("<emulator.checkpoint mapped=%d states=%d>", c.machine.mappedBytes, len(c.dicts)+len(c.lists)+len(c.sets))
+	return fmt.Sprintf("<emulator.checkpoint mapped=%d states=%d>", c.machine.mappedBytes, c.state.Containers())
 }
 func (c *emulatorCheckpoint) Type() string          { return "emulator.checkpoint" }
 func (c *emulatorCheckpoint) Freeze()               {}
@@ -8006,129 +7988,9 @@ func starlarkRegisterValues(name string, value starlark.Value) (map[x86asm.Reg]u
 	return output, nil
 }
 
-func (c *emulatorCheckpoint) capture(value starlark.Value, seenDicts map[*starlark.Dict]bool, seenLists map[*starlark.List]bool, seenSets map[*starlark.Set]bool, seenRecords map[*starlarkRecord]bool, seenExecutions map[*emulatorExecution]bool) {
-	if value == nil {
-		return
-	}
-	switch value := value.(type) {
-	case interface{ CaptureCheckpoint() (func() error, error) }:
-		restore, err := value.CaptureCheckpoint()
-		if err != nil {
-			c.captureError = err
-		} else {
-			c.resources = append(c.resources, restore)
-		}
-	case *starlark.Dict:
-		if seenDicts[value] {
-			return
-		}
-		seenDicts[value] = true
-		items := value.Items()
-		c.dicts = append(c.dicts, emulatorCheckpointDict{value: value, items: items})
-		for _, item := range items {
-			c.capture(item[0], seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
-			c.capture(item[1], seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
-		}
-	case *starlark.List:
-		if seenLists[value] {
-			return
-		}
-		seenLists[value] = true
-		items := make([]starlark.Value, value.Len())
-		for index := range items {
-			items[index] = value.Index(index)
-		}
-		c.lists = append(c.lists, emulatorCheckpointList{value: value, items: items})
-		for _, item := range items {
-			c.capture(item, seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
-		}
-	case *starlark.Set:
-		if seenSets[value] {
-			return
-		}
-		seenSets[value] = true
-		items := make([]starlark.Value, 0, value.Len())
-		iterator := value.Iterate()
-		var item starlark.Value
-		for iterator.Next(&item) {
-			items = append(items, item)
-		}
-		iterator.Done()
-		c.sets = append(c.sets, emulatorCheckpointSet{value: value, items: items})
-		for _, item := range items {
-			c.capture(item, seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
-		}
-	case starlark.Tuple:
-		for _, item := range value {
-			c.capture(item, seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
-		}
-	case *starlarkRecord:
-		if seenRecords[value] {
-			return
-		}
-		seenRecords[value] = true
-		for _, item := range value.Values {
-			c.capture(item, seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
-		}
-	case *emulatorExecution:
-		if seenExecutions[value] {
-			return
-		}
-		seenExecutions[value] = true
-		snapshot := *value
-		snapshot.context.callFrames = append([]emulatorCallFrame(nil), value.context.callFrames...)
-		c.executions = append(c.executions, emulatorCheckpointExecution{value: value, snapshot: snapshot})
-		c.capture(value.result, seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
-	}
-}
-
 func (c *emulatorCheckpoint) restoreState(machine *emulatorX86) error {
-	for _, restore := range c.resources {
-		if err := restore(); err != nil {
-			return fmt.Errorf("restore checkpoint resource: %w", err)
-		}
-	}
-	for _, saved := range c.dicts {
-		if err := saved.value.Clear(); err != nil {
-			// Frozen values are immutable configuration reachable from a
-			// plugin's mutable state. They cannot have changed since capture,
-			// so preserving them is already an exact restore.
-			if strings.Contains(err.Error(), "frozen") {
-				continue
-			}
-			return fmt.Errorf("restore checkpoint dict: %w", err)
-		}
-		for _, item := range saved.items {
-			if err := saved.value.SetKey(item[0], item[1]); err != nil {
-				return fmt.Errorf("restore checkpoint dict item: %w", err)
-			}
-		}
-	}
-	for _, saved := range c.lists {
-		if err := saved.value.Clear(); err != nil {
-			if strings.Contains(err.Error(), "frozen") {
-				continue
-			}
-			return fmt.Errorf("restore checkpoint list: %w", err)
-		}
-		for _, item := range saved.items {
-			if err := saved.value.Append(item); err != nil {
-				return fmt.Errorf("restore checkpoint list item: %w", err)
-			}
-		}
-	}
-	for _, saved := range c.sets {
-		if err := saved.value.Clear(); err != nil {
-			if strings.Contains(err.Error(), "frozen") {
-				continue
-			}
-			return fmt.Errorf("restore checkpoint set: %w", err)
-		}
-		for _, item := range saved.items {
-			if err := saved.value.Insert(item); err != nil {
-				return fmt.Errorf("restore checkpoint set item: %w", err)
-			}
-		}
+	if err := c.state.Restore(); err != nil {
+		return err
 	}
 	for _, saved := range c.executions {
 		restored := saved.snapshot
@@ -8150,20 +8012,27 @@ func (m *emulatorX86) checkpointBuiltin(_ *starlark.Thread, _ *starlark.Builtin,
 		return nil, fmt.Errorf("checkpoint: machine must be mutable and between calls")
 	}
 	checkpoint := &emulatorCheckpoint{owner: m, machine: m.clone()}
-	seenDicts := make(map[*starlark.Dict]bool)
-	seenLists := make(map[*starlark.List]bool)
-	seenSets := make(map[*starlark.Set]bool)
-	seenRecords := make(map[*starlarkRecord]bool)
-	seenExecutions := make(map[*emulatorExecution]bool)
+	var roots []starlark.Value
 	for _, state := range m.pluginStates {
-		checkpoint.capture(state, seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
+		roots = append(roots, state)
 	}
 	for execution := range m.executions {
-		checkpoint.capture(execution, seenDicts, seenLists, seenSets, seenRecords, seenExecutions)
+		roots = append(roots, execution)
 	}
-	if checkpoint.captureError != nil {
-		return nil, fmt.Errorf("checkpoint resource: %w", checkpoint.captureError)
+	state, err := starvalue.CaptureGraph(roots, func(v starlark.Value) starlark.Value {
+		execution, ok := v.(*emulatorExecution)
+		if !ok {
+			return nil
+		}
+		snapshot := *execution
+		snapshot.context.callFrames = append([]emulatorCallFrame(nil), execution.context.callFrames...)
+		checkpoint.executions = append(checkpoint.executions, emulatorCheckpointExecution{execution, snapshot})
+		return execution.result
+	})
+	if err != nil {
+		return nil, err
 	}
+	checkpoint.state = state
 	return checkpoint, nil
 }
 

@@ -11,7 +11,7 @@ import (
 )
 
 func Builtins() starlark.StringDict {
-	return starlark.StringDict{"memory_pair": starlark.NewBuiltin("memory_pair", memoryPairBuiltin), "extension": starlark.NewBuiltin("channel.extension", extensionBuiltin), "extension_protocol": starlark.NewBuiltin("channel.extension_protocol", extensionProtocolBuiltin)}
+	return starlark.StringDict{"memory_pair": starlark.NewBuiltin("memory_pair", memoryPairBuiltin), "extension": starlark.NewBuiltin("channel.extension", extensionBuiltin), "extension_protocol": starlark.NewBuiltin("channel.extension_protocol", extensionProtocolBuiltin), "tcp_ipv4": starlark.NewBuiltin("channel.tcp_ipv4", tcpIPv4Builtin)}
 }
 
 func memoryPairBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -88,4 +88,18 @@ func (c *Value) writeAvailableBuiltin(_ *starlark.Thread, _ *starlark.Builtin, a
 		return nil, err
 	}
 	return starlark.MakeInt(n), nil
+}
+
+func (c *Value) writeCapacityBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackArgs("write_capacity", args, kwargs); err != nil {
+		return nil, err
+	}
+	available, _, err := c.WriteCapacity()
+	if errors.Is(err, io.ErrClosedPipe) {
+		return starlark.MakeInt(-1), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("write_capacity: %w", err)
+	}
+	return starlark.MakeInt(available), nil
 }

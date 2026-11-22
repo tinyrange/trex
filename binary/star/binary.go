@@ -93,6 +93,8 @@ func Builtins() starlark.StringDict {
 		"encode":               starlark.NewBuiltin("encode", binaryEncodeBuiltin),
 		"extents":              starlark.NewBuiltin("extents", binaryExtentsBuiltin),
 		"hex":                  starlark.NewBuiltin("hex", binaryHexBuiltin),
+		"slip_encode":          starlark.NewBuiltin("slip_encode", slipEncodeBuiltin),
+		"slip_decode":          starlark.NewBuiltin("slip_decode", slipDecodeBuiltin),
 		"layout":               starlark.NewBuiltin("layout", binaryLayoutBuiltin),
 		"macho":                starlark.NewBuiltin("macho", machoBuiltin),
 		"perf":                 starlark.NewBuiltin("perf", perf.Builtin),

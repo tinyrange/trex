@@ -80,6 +80,8 @@ func (c *Value) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("read_available", c.readAvailableBuiltin), nil
 	case "write_available":
 		return starlark.NewBuiltin("write_available", c.writeAvailableBuiltin), nil
+	case "write_capacity":
+		return starlark.NewBuiltin("write_capacity", c.writeCapacityBuiltin), nil
 	case "write":
 		return starlark.NewBuiltin("write", c.writeBuiltin), nil
 	case "close":
@@ -90,7 +92,7 @@ func (c *Value) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (c *Value) AttrNames() []string {
-	return []string{"close", "name", "read", "read_some", "read_available", "write", "write_available"}
+	return []string{"close", "name", "read", "read_some", "read_available", "write", "write_available", "write_capacity"}
 }
 
 func (c *Value) Read(p []byte) (int, error) {

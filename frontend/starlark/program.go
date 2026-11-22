@@ -43,6 +43,7 @@ func RunProgram(ctx context.Context, p Program) (err error) {
 	}
 	loader := newModuleLoaderFS(p.Files, environment)
 	thread := &starlark.Thread{Name: "application", Load: loader.Load}
+	thread.SetLocal(moduleLoaderKey, loader)
 	resources := installRuntimeResources(thread)
 	installInternet(thread, p.AllowInternet)
 	defer func() {

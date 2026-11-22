@@ -4530,6 +4530,12 @@ Sends a UTF-8 JSON string (or empty body) as application/json, returning a bound
 
 Describes machines a web launcher page can start and stop. systems is a list of dicts with name (lowercase letters, digits, dashes), title, description, script, args and an optional root, the directory its "//" module labels resolve in. Each script's main(args) must return machine terminals (emulator machine web_terminals); a state=PATH argument lets Stop save and Start resume the machine, and tn3270=ADDRESS is shown. Returned from main under -serve, the launcher serves the page, each running system's consoles under /s/NAME/ and their tn3270 ports; Ctrl-C saves running systems that have a state file.
 
+### `load_fresh`
+
+`load_fresh(module) -> dict`
+
+Evaluates a module label and its explicit load dependencies in an independent loader cache, returning frozen public exports. Requires an active REPL and uses the same workspace and runtime capabilities. Existing references, predeclared bindings and the ordinary load cache remain unchanged; explicitly rebind callbacks to use fresh functions. Invalidate emulator checkpoints after contributing code or initialization changes, and validate final behavior from a fresh image and VM.
+
 ### `mirror_file`
 
 `mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file`
@@ -5328,6 +5334,18 @@ Returns bytes with up to count non-overlapping occurrences of old replaced by ne
 
 Reads RPM package metadata with a version-3/4 lead and v1 headers, without executing scripts, decompressing payloads or authenticating signatures. Returns fields (named stored tags), tags and signature_tags (numeric keys with type/count/value), source_package, payload_offset and a borrowed payload file. STRING is a string; numeric values and STRING_ARRAY/I18NSTRING are lists; BIN is bytes. Missing fields are absent; localized strings are not selected. Unknown tags are retained; unknown types, duplicate tags, unsupported leads, invalid offsets/counts/alignment and unterminated strings fail. Entry/byte limits cover both headers; decoded values are also bounded against alias amplification. Maximum entries is 1M and maximum bytes is 256MiB. No digest, immutable-region or signature verification is performed; this is inspection, not package validation or an RPM database reader.
 
+### `binary.slip_decode`
+
+`binary.slip_decode(value, maximum=65536) -> (packets, remainder)`
+
+Decodes complete RFC1055 SLIP packets from at most16MiB of wire bytes. Ignores empty frames; returns packets and the unchanged partial wire packet. Prepend remainder to the next read. maximum bounds each decoded packet (1..1MiB); malformed escapes and oversized packets fail explicitly.
+
+### `binary.slip_encode`
+
+`binary.slip_encode(value, maximum=65536) -> bytes`
+
+Frames one RFC1055 SLIP packet with leading/trailing END and escaped END/ESC bytes. maximum bounds decoded packet size (1..1MiB).
+
 ### `binary.snapshot`
 
 `binary.snapshot(file, maximum=512MiB, cache_bytes=64KiB) -> file`
@@ -5430,6 +5448,12 @@ Parses a list of at most 4096 XML inputs with 1..8 native workers (default 4), p
 
 Decodes one complete RFC 1950 zlib stream from bytes or a file. Returns bytes; verifies the checksum and rejects truncation, trailing data and output beyond maximum (0..512MiB). No host extraction or intermediate files.
 
+### `block.blank`
+
+`block.blank(size, logical_block_size=512) -> block_device`
+
+Creates immutable zero-valued storage of the requested sector-aligned size without allocating its contents. Its extents are unallocated. Use block.overlay to retain writes over this portable empty-disk base.
+
 ### `block.cache`
 
 `block.cache(base, max_bytes=32MiB, chunk_size=64KiB)`
@@ -5506,7 +5530,13 @@ Returns the complete offline synchronous v1 wire specification, including the Wi
 
 `channel.memory_pair(maximum=1MiB) -> (byte_channel, byte_channel)`
 
-Creates two connected, bounded byte channels entirely in memory, without host sockets or DNS. maximum limits each incoming queue (default 1 MiB, at most 64 MiB). read_available returns None when the peer has no data yet, bytes when data is ready, and empty bytes after the peer closes and its data is drained. write_available returns the byte count, None when capacity is insufficient, or -1 for a closed endpoint; writes are all-or-nothing. write instead raises an error when delivery is unavailable. Emulator checkpoints restore queued data and closed state when endpoints are retained in plugin state.
+Creates two connected, bounded byte channels entirely in memory, without host sockets or DNS. maximum limits each incoming queue (default 1 MiB, at most 64 MiB). read_available returns None when the peer has no data yet, bytes when data is ready, and empty bytes after the peer closes and its data is drained. write_available returns the byte count, None when capacity is insufficient, or -1 for a closed endpoint; writes are all-or-nothing. write_capacity reports the currently available byte count, or -1 when closed, without writing data. write instead raises an error when delivery is unavailable. Emulator checkpoints restore queued data and closed state when endpoints are retained in plugin state.
+
+### `channel.tcp_ipv4`
+
+`channel.tcp_ipv4(local, remote, local_port, remote_port, sequence=1, mtu=1024) -> packet_tcp`
+
+Creates a bounded packet-driven IPv4 TCP client using explicit IPv4 addresses, ports, initial sequence and MTU(64..65535). Caller supplies every raw IPv4 packet and monotonic now value in seconds; no host socket, DNS or clock access. Buffers are bounded to65535 bytes per direction and one outstanding segment. See help on the returned packet_tcp for packet delivery, retransmission and feature limits.
 
 ### `clock.monotonic`
 
@@ -6319,6 +6349,18 @@ Evaluates supported Renvo make recipes against a virtual source tree and rebuild
 `rfe.backend(overlay_limit=268435456) -> vmm_backend`
 
 Creates an experimental in-process software x86 PC backend from Renvo x86.rfe. JIT-compiles hot 16-, 32- and 64-bit code using Renvo native blocks, without KVM or QEMU. Requires a supported 64-bit native-JIT host; unavailable executable memory is an error. Privileged/device/unsupported instructions use precise architectural slow paths. Shares BIOS, IDE, VGA, input and overlays with cc. MS-DOS 6.22 startup, Windows 3.11 standard/enhanced-mode Notepad, and Windows 98 SE Explorer/Notepad are verified. The graphical smokes verify keyboard input, PS/2 mouse-selected Save and changed bytes on the guest disk. Enhanced-mode paging and actual native-tier retirement are explicitly asserted. Implements basic x87, string port I/O, paging and protected/v8086 gates; parts of x87 and other legacy CPU/device features remain incomplete. overlay_limit bounds dirty snapshot memory in bytes. Inspect with vm.extension("rfe.v1").state().
+
+### `runtime.cpu_profile_start`
+
+`runtime.cpu_profile_start() -> None`
+
+Starts the process's Go CPU profiler into memory so a REPL or script can profile a chosen phase of a long run without exiting. Fails while another capture, including -cpuprofile, is running. Writes no host file.
+
+### `runtime.cpu_profile_stop`
+
+`runtime.cpu_profile_stop(limit=30) -> record`
+
+Ends the capture from cpu_profile_start and returns seconds (wall), cpu_seconds and samples, functions (the limit Go functions with the most flat time; each has function, flat and cum CPU seconds, where flat is the innermost inlined frame and cum counts each function once per sample; code without Go symbols, such as generated native code, is reported as (unsymbolized)) and data (the complete gzip pprof encoding for offline tools). limit defaults to 30 and must be 1..200.
 
 ### `runtime.heap_profile`
 
@@ -7913,7 +7955,7 @@ Methods and attributes: `capabilities`, `commit()`, `extents(offset, length)`, `
 
 An owned bidirectional byte transport. read requests a specified amount, read_some returns available bytes within its bound/timeout, write sends bytes, and close releases the endpoint. Channel operations do not imply any particular wire protocol.
 
-Methods and attributes: `close()`, `name`, `read(size, maximum=8MiB)`, `read_available(maximum=64KiB)`, `read_some(maximum=64KiB, timeout=30)`, `write(value)`, `write_available(value)`.
+Methods and attributes: `close()`, `name`, `read(size, maximum=8MiB)`, `read_available(maximum=64KiB)`, `read_some(maximum=64KiB, timeout=30)`, `write(value)`, `write_available(value)`, `write_capacity()`.
 
 ### `byte_view` value
 
@@ -8034,6 +8076,12 @@ Methods and attributes: `components`, `entries`, `files`, `find(path)`, `groups`
 An NBD export bound to a block device. serve processes protocol requests on a supplied byte channel, stats exposes activity and close ends service. It does not own an implicit host listening socket.
 
 Methods and attributes: `close()`, `export_name`, `serve(channel)`, `stats`.
+
+### `packet_tcp` value
+
+A bounded IPv4 TCP client driven by caller-supplied packets and monotonic seconds. start/input/poll return an outgoing raw IPv4 packet or None; deliver every returned packet and keep polling. write queues application bytes; read drains received bytes. One segment is outstanding, with at most65535 queued bytes in each direction. state/error/eof expose connection outcomes. No sockets, DNS, routes or clock reads. Drops invalid checksums, fragments and unrelated traffic; cumulatively acknowledges out-of-order data for retransmission. Does not negotiate window scaling, timestamps, SACK, IPv6 or simultaneous open; a zero send window waits for a peer window update. close queues an orderly FIN after output drains, or cancels an incomplete open.
+
+Methods and attributes: `close()`, `eof`, `error`, `input(packet, now=0)`, `poll(now=0)`, `read(maximum=65535)`, `start(now=0)`, `state`, `write(data)`.
 
 ### `qemu.v1` value
 
