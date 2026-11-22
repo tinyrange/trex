@@ -149,3 +149,19 @@ spelling. Prefixed instructions consume eight bytes. Unknown words and truncated
 prefixes carry an explicit error and advance by four bytes. Successful decoding
 alone does not establish that bytes are executable code. This API does not infer
 load addresses, recover control flow, apply relocation or emulate POWER state.
+
+`binary.ppc_census(source, ranges=None, byte_order="big", samples=4,
+maximum=1<<30, flow=False)` merges a whole-range opcode histogram in Go: decoded
+mnemonic counts, `mfspr`/`mtspr` SPR numbers, absolute branch targets per 64KiB page
+and undecodable words keyed by
+primary/extended opcode with a few sample words and source offsets. Pass
+`flow=True` with one range per procedure to count only words reachable from the
+range's first nonzero word through fallthrough and in-range direct branches and
+calls; this keeps literal pools and strings after unconditional transfers out of the census.
+The census does not establish that a range is code or what an unknown encoding does.
+
+`binary.locate_table(source, addresses, high=0xffffffff, top=10)` finds where a
+table image belongs: given addresses that must hold pointers (such as TOC slots
+read by code), it returns bases at which the source has an aligned doubleword
+with the given high word at many of them, ranked by hits. `word_mask=` and
+`word_value=` match four-byte words instead, such as branch-table entries.

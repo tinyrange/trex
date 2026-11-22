@@ -26,6 +26,7 @@ import (
 	_ "github.com/tinyrange/trex/archive/macresource"
 	_ "github.com/tinyrange/trex/archive/os2pack"
 	_ "github.com/tinyrange/trex/archive/pbzx"
+	_ "github.com/tinyrange/trex/archive/powerfirmware"
 	_ "github.com/tinyrange/trex/archive/rar"
 	_ "github.com/tinyrange/trex/archive/sevenzip"
 	_ "github.com/tinyrange/trex/archive/sfp"

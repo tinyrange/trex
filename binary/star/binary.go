@@ -100,6 +100,8 @@ func Builtins() starlark.StringDict {
 		"perf":                 starlark.NewBuiltin("perf", perf.Builtin),
 		"elf_symbols":          starlark.NewBuiltin("elf_symbols", elfmeta.Builtin),
 		"ppc_instructions":     starlark.NewBuiltin("ppc_instructions", powerPCInstructionsBuiltin),
+		"ppc_census":           starlark.NewBuiltin("ppc_census", powerPCCensusBuiltin),
+		"locate_table":         starlark.NewBuiltin("locate_table", locateTableBuiltin),
 		"plist":                starlark.NewBuiltin("plist", plistBuiltin),
 		"plist_encode":         starlark.NewBuiltin("plist_encode", plistEncodeBuiltin),
 		"replace":              starlark.NewBuiltin("replace", binaryReplaceBuiltin),

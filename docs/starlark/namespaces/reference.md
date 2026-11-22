@@ -5184,6 +5184,12 @@ Inspects MIPS ELF32/ELF64 and ECOFF32 files natively, returning byte order, o32/
 
 Compiles a fixed-size binary layout from a format string and optional field names. The returned value encodes records or decodes a source at a byte offset.
 
+### `binary.locate_table`
+
+`binary.locate_table(source, addresses, high=0xffffffff, top=10, word_mask=None, word_value=None) -> list[record]`
+
+Finds bases at which a source image, placed at that address, holds a big-endian doubleword whose high 32 bits equal high at many of the given addresses (for example TOC slots that code reads pointers from). Returns up to top records of base, hits and total, best first. Candidates come from three anchor addresses; positions are four-byte aligned. With word_mask/word_value, an address matches when the four-byte word there satisfies word & word_mask == word_value (for example unconditional relative branches) instead of the doubleword high-word test. Evidence of a consistent placement, not proof of identity.
+
 ### `binary.macho`
 
 `binary.macho(file, architecture="x86_64", cpu_subtype=None) -> record`
@@ -5207,6 +5213,12 @@ Decodes bounded XML 1.0 or bplist00 property lists into dict/list, bytes, string
 `binary.plist_encode(value) -> file`
 
 Encodes supported plist values as deterministic XML1.0 in an in-memory file. Preserves plist_date values from decoding. Enforces aggregate conversion/output byte, node and depth limits, including dictionary keys. Rejects None, non-finite floats, non-string keys, invalid XML characters and integers outside int64.
+
+### `binary.ppc_census`
+
+`binary.ppc_census(source, ranges=None, byte_order="big", samples=4, maximum=1073741824, flow=False) -> record`
+
+Histograms POWER instruction words over (offset, size) ranges without execution: decoded mnemonics, SPR accesses and undecodable words grouped by primary/extended opcode with bounded sample words and source offsets. ranges=None selects the whole source. With flow=True each range is one procedure entered at its first nonzero word, and only words reachable through fallthrough and in-range direct branches and calls are counted, so tables after unconditional transfers are excluded; a rejected word ends its path. Results are evidence about the selected ranges, not proof that they are code. Ranges are four-byte aligned; maximum bounds total bytes and samples is at most 64.
 
 ### `binary.ppc_instructions`
 
@@ -5747,6 +5759,12 @@ Creates an in-process machine for the input's supported architecture, using nati
 `emulator.plugin(install, name='plugin', state=None, attrs=None) -> plugin`
 
 Wraps explicit mutable plugin state and its installation callback for emulator use. Keep checkpointed callback state here rather than hiding it in closures.
+
+### `emulator.power`
+
+`emulator.power(memory=256MiB, cpus=1, mips=100, pvr=0, extensions=None) -> power_machine`
+
+Creates an in-process 64-bit big-endian Power ISA partition in guest (supervisor) state: CPUs, real memory and a host-owned hashed page table. sc 1 calls on_hcall(handler(cpu)); words the core does not implement go to on_illegal(handler(cpu, word)) before an illegal-instruction interrupt. Supports SLB/page-table translation, storage/segment/program/decrementer interrupts, break_at, watch, stop_on_interrupts, history, disassemble, checkpoint/restore and run(); time is virtual. On linux/amd64 an exact block JIT runs guest code natively (set_jit, jit_stats, state_digest); hcall_native answers fixed hypervisor calls in Go. See docs/power.md.
 
 ### `emulator.processor`
 
