@@ -1,0 +1,52 @@
+:root {
+  --bg: #000;
+  --panel: #151515;
+  --text: #d8d8d8;
+  --green: #3ee03e;
+  --white: #f2f2f2;
+  --red: #ff4d4d;
+  --turquoise: #3fd7d7;
+  --yellow: #f2e35b;
+  --pink: #f07ad8;
+  --blue: #7aa8ff;
+  --cursor: #3ee03e;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+main { max-width: 100%; padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+#screen {
+  font-family: "IBM Plex Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  font-size: clamp(9px, 1.55vw, 18px);
+  line-height: 1.25;
+  white-space: pre;
+  color: var(--green);
+  background: var(--bg);
+  padding: 8px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  outline: none;
+  cursor: text;
+  user-select: none;
+  max-width: 100%;
+  overflow-x: auto;
+}
+#screen:focus { border-color: #4a4; }
+#screen .r { height: 1.25em; }
+#screen span { display: inline-block; width: 1ch; }
+.c0 { --fg: var(--green); } .c0h { --fg: var(--white); }
+.c1, .c1h { --fg: var(--red); }
+.c2 { --fg: var(--turquoise); } .c2h { --fg: var(--yellow); }
+.c3 { --fg: var(--pink); } .c3h { --fg: var(--blue); }
+#screen span { color: var(--fg); }
+.u { text-decoration: underline; }
+#screen span.rv { background: var(--fg); color: var(--bg); }
+#screen span.cur { background: var(--cursor); color: var(--bg); }
+#screen:not(:focus) span.cur { background: transparent; outline: 1px solid var(--cursor); color: var(--fg); }
+#status { font-family: monospace; display: flex; gap: 2em; color: #9a9; min-height: 1.4em; }
+#lock { color: var(--yellow); }
+#keys { display: flex; flex-direction: column; gap: 4px; align-items: center; }
+#keys .row { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; }
+button { background: var(--panel); color: var(--text); border: 1px solid #333; border-radius: 4px; padding: 4px 8px; font: 12px system-ui, sans-serif; cursor: pointer; }
+button:hover { border-color: #4a4; }
+#hint { color: #777; font-size: 12px; max-width: 80ch; text-align: center; margin: 0; }
+#notes { white-space: pre-wrap; font: 13px/1.5 system-ui, sans-serif; color: var(--text); background: var(--panel); border: 1px solid #333; border-left: 3px solid var(--green); border-radius: 4px; padding: 10px 14px; max-width: 88ch; width: 100%; }

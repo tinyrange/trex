@@ -119,6 +119,8 @@ func predeclared() starlark.StringDict {
 	vmmstar.RegisterBackend("rfe.v1", (&rfeapi.Backend{}).Capabilities())
 	channelBuiltins := channelstar.Builtins()
 	channelBuiltins["expose_tcp"] = starlark.NewBuiltin("expose_tcp", channelnative.ExposeTCPBuiltin)
+	channelBuiltins["serve_tn5250"] = starlark.NewBuiltin("serve_tn5250", channelnative.ServeTN5250Builtin)
+	channelBuiltins["serve_tn5250_telnet"] = starlark.NewBuiltin("serve_tn5250_telnet", channelnative.ServeTN5250TelnetBuiltin)
 	if ccapi.Available() {
 		vmmstar.RegisterBackend("cc.v1", ccapi.Capabilities())
 	}
