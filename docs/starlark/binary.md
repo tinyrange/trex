@@ -133,6 +133,27 @@ Use `binary.concat` and `binary.extents` for lazy composition. Do not join large
 files by converting them to bytes or by extracting intermediate host files.
 
 
+## IBM i DASD inspection
+
+`binary.ibmi_dasd_index(source,ranges,maximum_pages=1048576)` indexes9-sector
+page envelopes intersecting explicit `(offset,size)` ranges. The returned
+record exposes `matches(address)` (physical offset and data/header/sidecar
+files), `page_address(offset)` for a physical frame and `file(address,size)`
+for uniquely backed SLS storage. Missing and
+duplicate pages fail; omitted ranges are not assumed empty. Nonzero sector
+controls must agree before displaced words are restored. Unstamped bytes
+remain unchanged. This observation does not select filesystem generations.
+
+`binary.ibmi_lid_directory(source,offset=0,maximum_entries=4096)` validates
+the counted LIDDIR framing and returns metadata dictionaries. Its sector
+fields are not interpreted as physical extents. See
+[the DASD format note](../formats/ibmi-dasd.md) for the observed generation.
+
+`binary.ibmi_procedures(source,name,maximum_matches=64,
+maximum_bytes=67108864)` finds exact IBM037 names in qualified native kind2
+procedure descriptors. It returns record offsets and entry addresses; partial
+names and unqualified strings are excluded. It does not infer a load map.
+
 ## POWER instruction inspection
 
 `binary.ppc_instructions(source, offset=0, size=256, address=0,

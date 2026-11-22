@@ -154,6 +154,9 @@ var nativeStarlarkTypes = map[string][]string{
 }
 
 var nativeStarlarkSignatures = map[string]string{
+	"binary.ibmi_procedures":              "binary.ibmi_procedures(source, name, maximum_matches=64, maximum_bytes=67108864) -> list[record]",
+	"binary.ibmi_dasd_index":              "binary.ibmi_dasd_index(source, ranges, maximum_pages=1048576) -> record",
+	"binary.ibmi_lid_directory":           "binary.ibmi_lid_directory(source, offset=0, maximum_entries=4096) -> list[dict]",
 	"archive.appx":                        "archive.appx(file) -> {kind, identity, full_name, family_name, entries, files, packages}",
 	"archive.crx":                         "archive.crx(file) -> record(id, version, files, entries)",
 	"binary.software_update_catalog":      "binary.software_update_catalog(source) -> list",
