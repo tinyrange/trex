@@ -161,6 +161,7 @@ var nativeStarlarkSignatures = map[string]string{
 
 	"emulator.shell.filesystem": "emulator.shell.filesystem(maximum=64MiB) -> unix_filesystem",
 	"emulator.s390":             "emulator.s390(memory=64MiB, cpus=1, mips=50, start='', idle_skip=True, architecture='esa390') -> s390_machine",
+	"emulator.power":            "emulator.power(memory=256MiB, cpus=1, mips=100, pvr=0, extensions=None) -> power_machine",
 	"emulator.shell.run":        "emulator.shell.run(files, source, dir='/', env={}, args=[], commands={}, executable=None, stdin=b'', name='shell', max_steps=100000, maximum_output=8MiB, timeout=120) -> shell_result",
 	"emulator.shell.date":       "emulator.shell.date(epoch) -> shell_command",
 	"emulator.shell.uname":      "emulator.shell.uname() -> shell_command",
@@ -287,6 +288,8 @@ var nativeStarlarkSignatures = map[string]string{
 	"filesystem.ext4":                   "filesystem.ext4(file, maximum_entries=100000, maximum_depth=32) -> record",
 	"filesystem.ffs_build":              "filesystem.ffs_build(entries, size=0, extra=0, layout='raw', timestamp=1700000000) -> file",
 	"filesystem.ext4_build":             "filesystem.ext4_build(entries, size, label='', uuid='', inode_count=0, ext2=False) -> file",
+	"binary.locate_table":               "binary.locate_table(source, addresses, high=0xffffffff, top=10, word_mask=None, word_value=None) -> list[record]",
+	"binary.ppc_census":                 "binary.ppc_census(source, ranges=None, byte_order=\"big\", samples=4, maximum=1073741824, flow=False) -> record",
 	"binary.ppc_instructions":           "binary.ppc_instructions(source, offset=0, size=256, address=0, byte_order=\"big\", maximum=4096) -> list[record]",
 	"binary.macho":                      "binary.macho(file, architecture=\"x86_64\", cpu_subtype=None) -> record",
 	"binary.rpm_metadata":               "binary.rpm_metadata(file, maximum_entries=65536, maximum_bytes=16MiB) -> record",
