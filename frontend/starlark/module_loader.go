@@ -17,6 +17,8 @@ import (
 // checkout and ensures module processing remains in memory.
 var standardLibrary = stdlib.StandardLibrary
 
+const moduleLoaderKey = "trex.runtime.module.loader"
+
 type moduleResult struct {
 	globals starlark.StringDict
 	err     error
@@ -50,6 +52,44 @@ func newModuleLoaderFS(workspace fs.FS, predeclared starlark.StringDict) *module
 		predeclared: predeclared,
 		modules:     make(map[string]*moduleResult),
 	}
+}
+
+// LoadFresh uses an independent cache for this module and its explicit load
+// dependencies. Existing functions and the ordinary loader cache remain valid.
+func (l *moduleLoader) LoadFresh(thread *starlark.Thread, name string) (starlark.StringDict, error) {
+	fresh := newModuleLoaderFS(l.workspace, l.predeclared)
+	previous := thread.Load
+	thread.Load = fresh.Load
+	defer func() { thread.Load = previous }()
+	return fresh.Load(thread, name)
+}
+
+func loadFreshBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs("load_fresh", args, kwargs, "module", &name); err != nil {
+		return nil, err
+	}
+	if active, _ := thread.Local(starlarkREPLActive).(bool); !active {
+		return nil, fmt.Errorf("load_fresh: requires an active REPL")
+	}
+	loader, ok := thread.Local(moduleLoaderKey).(*moduleLoader)
+	if !ok {
+		return nil, fmt.Errorf("load_fresh: no module loader is installed")
+	}
+	globals, err := loader.LoadFresh(thread, name)
+	if err != nil {
+		return nil, err
+	}
+	exports := starlark.NewDict(len(globals))
+	for name, value := range globals {
+		if !strings.HasPrefix(name, "_") {
+			if err := exports.SetKey(starlark.String(name), value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	exports.Freeze()
+	return exports, nil
 }
 
 func (l *moduleLoader) Load(thread *starlark.Thread, name string) (starlark.StringDict, error) {
@@ -223,6 +263,7 @@ func newStarlarkRuntimeAt(root string) (*starlark.Thread, starlark.StringDict, e
 		return nil, nil, err
 	}
 	thread := &starlark.Thread{Name: "main", Load: loader.Load}
+	thread.SetLocal(moduleLoaderKey, loader)
 	installRuntimeResources(thread)
 	installRuntimeClock(thread)
 	if err := installPredeclaredModules(thread, loader, predeclared); err != nil {

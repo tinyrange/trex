@@ -77,6 +77,60 @@ func TestModuleLoaderRelativeWorkspaceLoad(t *testing.T) {
 	}
 }
 
+func TestFreshModuleLoadKeepsRetainedReferencesAndRefreshesDependencies(t *testing.T) {
+	workspace := fstest.MapFS{
+		"lib/value.star": {Data: []byte("VALUE = 42\n")},
+		"app/main.star":  {Data: []byte("load(\"../lib/value.star\", \"VALUE\")\n_PRIVATE = 1\ndef get():\n    return VALUE\n")},
+	}
+	environment := predeclared()
+	loader := newModuleLoaderFS(workspace, environment)
+	thread := &starlark.Thread{Name: "test", Load: loader.Load}
+	thread.SetLocal(moduleLoaderKey, loader)
+	thread.SetLocal(starlarkREPLActive, true)
+	old, err := loader.Load(thread, "//app:main.star")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace["lib/value.star"] = &fstest.MapFile{Data: []byte("VALUE = 99\n")}
+	fresh, err := starlark.Call(thread, environment["load_fresh"], starlark.Tuple{starlark.String("//app:main.star")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exports := fresh.(*starlark.Dict)
+	get, _, _ := exports.Get(starlark.String("get"))
+	for _, test := range []struct {
+		fn   starlark.Value
+		want string
+	}{{old["get"], "42"}, {get, "99"}} {
+		value, err := starlark.Call(thread, test.fn, nil, nil)
+		if err != nil || value.String() != test.want {
+			t.Fatalf("value=%v err=%v want=%s", value, err, test.want)
+		}
+	}
+	if _, found, _ := exports.Get(starlark.String("_PRIVATE")); found {
+		t.Fatal("fresh load exported a private name")
+	}
+	if err := exports.SetKey(starlark.String("new"), starlark.None); err == nil {
+		t.Fatal("fresh exports are mutable")
+	}
+	// A failed fresh dependency must restore the original loader as well.
+	workspace["lib/value.star"] = &fstest.MapFile{Data: []byte("load(\":missing.star\", \"VALUE\")\n")}
+	if _, err := loader.LoadFresh(thread, "//app:main.star"); err == nil {
+		t.Fatal("missing fresh dependency succeeded")
+	}
+	cached, err := thread.Load(thread, "//lib:value.star")
+	if err != nil || cached["VALUE"].String() != "42" {
+		t.Fatalf("original loader was not restored: %v %v", cached, err)
+	}
+	if _, err := loader.LoadFresh(thread, "//../outside.star"); err == nil {
+		t.Fatal("fresh load escaped its workspace")
+	}
+	thread.SetLocal(starlarkREPLActive, false)
+	if _, err := starlark.Call(thread, environment["load_fresh"], starlark.Tuple{starlark.String("//app:main.star")}, nil); err == nil {
+		t.Fatal("fresh load accepted execution outside a REPL")
+	}
+}
+
 func TestModuleLoaderRejectsTraversalAndCycles(t *testing.T) {
 	workspace := fstest.MapFS{
 		"a.star": {Data: []byte("load(\":b.star\", \"B\")\nA = B\n")},

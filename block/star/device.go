@@ -62,6 +62,7 @@ type blockDeviceLease interface {
 
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
+		"blank":   starlark.NewBuiltin("blank", blockBlankBuiltin),
 		"cache":   starlark.NewBuiltin("cache", blockCacheBuiltin),
 		"device":  starlark.NewBuiltin("device", blockDeviceBuiltin),
 		"overlay": starlark.NewBuiltin("overlay", blockOverlayBuiltin),
@@ -70,6 +71,23 @@ func Builtins() starlark.StringDict {
 }
 
 type fileBlockDevice = blockpkg.FileDevice
+
+func blockBlankBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var size int64
+	sector := 512
+	if err := starlark.UnpackArgs("blank", args, kwargs, "size", &size, "logical_block_size?", &sector); err != nil {
+		return nil, err
+	}
+	if sector <= 0 || uint64(sector) > math.MaxUint32 {
+		return nil, fmt.Errorf("blank: invalid sector size")
+	}
+	d, err := blockpkg.NewZeroDevice(size, uint32(sector))
+	if err != nil {
+		return nil, err
+	}
+	return NewValue("blank", d), nil
+}
+
 type FileBlockDeviceOptions = blockpkg.FileDeviceOptions
 
 func NewFileBlockDevice(file storage.Reader, options FileBlockDeviceOptions) (BlockDevice, error) {
@@ -115,6 +133,22 @@ func blockDeviceBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 type Value struct {
 	name   string
 	device BlockDevice
+}
+
+func checkpointDevice(device BlockDevice) (validate, restore func() error, err error) {
+	if !device.Capabilities().Writable {
+		return nil, func() error { return nil }, nil
+	}
+	if c, ok := device.(interface {
+		CheckpointResource() (validate, restore func() error, err error)
+	}); ok {
+		return c.CheckpointResource()
+	}
+	return nil, nil, fmt.Errorf("block checkpoint requires a rewindable writable backing")
+}
+
+func (v *Value) CheckpointResource() (validate, restore func() error, err error) {
+	return checkpointDevice(v.device)
 }
 
 func (v *Value) Device() BlockDevice { return v.device }

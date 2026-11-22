@@ -4,6 +4,14 @@ The `binary` namespace handles bounded byte parsing and construction while
 preserving lazy `file` inputs. Choose an API based on access pattern rather than
 converting every input to `bytes`.
 
+`binary.slip_encode(value, maximum=65536)` returns RFC1055 wire bytes with
+leading/trailing END and escaped END/ESC bytes. `binary.slip_decode(value,
+maximum=65536)` returns `(packets, remainder)`, ignoring empty frames. Prepend
+the unchanged partial wire packet in `remainder` to the next channel read;
+even an escape split across reads is retained. Malformed escapes and oversized
+packets fail explicitly. Decoding accepts at most16MiB per chunk and each
+packet limit is1..1MiB.
+
 ## Scalar matrix
 
 | Family | Names | Widths | Endianness |

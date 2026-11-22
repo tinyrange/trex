@@ -76,3 +76,43 @@ func TestStarlarkNumberAcceptsIntAndFloat(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteCapacityTracksPeerConsumptionAndClosure(t *testing.T) {
+	a, b, err := channelpkg.NewMemoryPair(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := New("capacity", a)
+	method, err := value.Attr("write_capacity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(want int) {
+		t.Helper()
+		got, err := starlark.Call(&starlark.Thread{}, method, nil, nil)
+		if err != nil || got != starlark.MakeInt(want) {
+			t.Fatalf("capacity = %v, %v; want %d", got, err, want)
+		}
+	}
+	check(4)
+	if _, err := a.Write([]byte("ab")); err != nil {
+		t.Fatal(err)
+	}
+	check(2)
+	if _, err := b.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	check(3)
+	if _, err := a.Write([]byte("cde")); err != nil {
+		t.Fatal(err)
+	}
+	check(0)
+	b.Close()
+	check(-1)
+	client, target := net.Pipe()
+	defer client.Close()
+	defer target.Close()
+	if _, err := New("unsupported", client).writeCapacityBuiltin(nil, nil, nil, nil); err == nil {
+		t.Fatal("a stream without cooperative capacity must report it as unsupported")
+	}
+}

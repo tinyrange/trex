@@ -41,6 +41,72 @@ func TestFileBlockDeviceSeparatesLogicalSectorAndMinimumTransfer(t *testing.T) {
 	}
 }
 
+func TestCheckpointRejectsPublishedDiskBeforeRewindingOtherDisk(t *testing.T) {
+	base := testBlockDevice(t, 4096)
+	published, err := newOverlayBlockDevice(base, 4096, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := newOverlayBlockDevice(base, 4096, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := starvalue.CaptureGraph([]starlark.Value{NewValue("published", published), NewValue("other", other)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.WriteAt([]byte{0x93}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := published.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cp.Restore(); err == nil {
+		t.Fatal("restored through a published disk")
+	}
+	var got [1]byte
+	if _, err := other.ReadAt(got[:], 0); err != nil || got[0] != 0x93 {
+		t.Fatalf("failed restore changed independent disk: %x, %v", got, err)
+	}
+}
+
+func TestNestedDiskSnapshotsKeepParentBytes(t *testing.T) {
+	parent, err := newOverlayBlockDevice(testBlockDevice(t, 8192), 8192, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := newOverlayBlockDevice(parent, 8192, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.WriteAt([]byte{0x31}, 4096); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := child.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parent.WriteAt([]byte{0xc2}, 0); err != nil {
+		t.Fatal(err)
+	}
+	committed, err := child.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parent.WriteAt([]byte{0x84}, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		file starfile.File
+		head byte
+	}{{saved, 0}, {committed, 0xc2}} {
+		data := make([]byte, 4097)
+		if _, err := check.file.ReadAt(data, 0); err != nil || data[0] != check.head || data[4096] != 0x31 {
+			t.Fatalf("nested image bytes %02x/%02x, %v", data[0], data[4096], err)
+		}
+	}
+}
+
 func TestBlockOverlayIsolationCapacityLeaseAndCommit(t *testing.T) {
 	base := testBlockDevice(t, 3*4096)
 	overlay, err := newOverlayBlockDevice(base, 4096, 4096)

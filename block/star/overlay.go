@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -42,6 +44,7 @@ type overlayBlockDevice struct {
 	dirtyBytes int64
 	generation uint64
 	sealed     bool
+	published  starfile.File
 	leases     int
 	reads      atomic.Uint64
 	writes     atomic.Uint64
@@ -359,24 +362,120 @@ func (d *overlayBlockDevice) Commit() (starfile.File, error) {
 	if d.leases != 0 {
 		return nil, fmt.Errorf("block overlay has %d active lease(s)", d.leases)
 	}
+	if d.published != nil {
+		return d.published, nil
+	}
+	if d.base.Capabilities().Writable {
+		file, err := d.snapshotLocked()
+		if err != nil {
+			return nil, err
+		}
+		d.published = file
+	} else {
+		d.published = &blockDeviceFile{name: "block overlay", device: d}
+	}
 	d.sealed = true
-	return &blockDeviceFile{name: "block overlay", device: d}, nil
+	return d.published, nil
+}
+
+// CheckpointResource keeps the backing chunks shared until a subsequent write.
+// Restore updates this same device so already-attached SCSI endpoints rewind.
+func (d *overlayBlockDevice) CheckpointResource() (validate, restore func() error, err error) {
+	checkBase, restoreBase, err := checkpointDevice(d.base)
+	if err != nil {
+		return nil, nil, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sealed {
+		return checkBase, restoreBase, nil
+	}
+	chunks, dirtyBytes := maps.Clone(d.chunks), d.dirtyBytes
+	d.generation++
+	reads, writes := d.reads.Load(), d.writes.Load()
+	readBytes, writeBytes := d.readBytes.Load(), d.writeBytes.Load()
+	d.traceMu.Lock()
+	trace, traceNext := slices.Clone(d.trace), d.traceNext
+	d.traceMu.Unlock()
+	validate = func() error {
+		d.mu.RLock()
+		defer d.mu.RUnlock()
+		if d.sealed {
+			return fmt.Errorf("cannot rewind a published block overlay")
+		}
+		if checkBase != nil {
+			return checkBase()
+		}
+		return nil
+	}
+	return validate, func() error {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.sealed {
+			return fmt.Errorf("cannot rewind a published block overlay")
+		}
+		if err := restoreBase(); err != nil {
+			return err
+		}
+		d.chunks, d.dirtyBytes = maps.Clone(chunks), dirtyBytes
+		d.generation++
+		d.reads.Store(reads)
+		d.writes.Store(writes)
+		d.readBytes.Store(readBytes)
+		d.writeBytes.Store(writeBytes)
+		d.traceMu.Lock()
+		d.trace, d.traceNext = slices.Clone(trace), traceNext
+		d.traceMu.Unlock()
+		return nil
+	}, nil
 }
 
 func (d *overlayBlockDevice) Snapshot() (starfile.File, error) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.sealed {
-		d.mu.Unlock()
 		return nil, fmt.Errorf("block overlay is sealed")
+	}
+	file, err := d.snapshotLocked()
+	if err == nil {
+		d.snapshots.Add(1)
+	}
+	return file, err
+}
+
+func (d *overlayBlockDevice) snapshotLocked() (starfile.File, error) {
+	base := d.base
+	if base.Capabilities().Writable {
+		var file starfile.File
+		var err error
+		switch backing := base.(type) {
+		case *overlayBlockDevice:
+			backing.mu.Lock()
+			file = backing.published
+			if file == nil {
+				file, err = backing.snapshotLocked()
+			}
+			backing.mu.Unlock()
+		case blockDeviceSnapshotter:
+			file, err = backing.Snapshot()
+		default:
+			return nil, fmt.Errorf("cannot snapshot a mutable backing without snapshot support")
+		}
+		if err != nil {
+			return nil, err
+		}
+		geometry := base.Geometry()
+		base, err = newFileBlockDevice(file, geometry.LogicalBlockSize, geometry.PhysicalBlockSize, false)
+		if err != nil {
+			return nil, err
+		}
 	}
 	chunks := make(map[int64][]byte, len(d.chunks))
 	for index, chunk := range d.chunks {
 		chunks[index] = chunk.data
 	}
 	d.generation++
-	snapshot := &overlaySnapshotBlockDevice{base: d.base, chunkSize: d.chunkSize, chunks: chunks}
-	d.mu.Unlock()
-	d.snapshots.Add(1)
+	snapshot := &overlaySnapshotBlockDevice{base: base, chunkSize: d.chunkSize, chunks: chunks}
 	return &blockDeviceFile{name: "block overlay snapshot", device: snapshot}, nil
 }
 
