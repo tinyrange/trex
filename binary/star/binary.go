@@ -17,6 +17,7 @@ import (
 	"github.com/tinyrange/trex/binary/berkeleydb"
 	"github.com/tinyrange/trex/binary/elfmeta"
 	irixbinary "github.com/tinyrange/trex/binary/irix"
+	"github.com/tinyrange/trex/binary/mipscoff"
 	"github.com/tinyrange/trex/binary/perf"
 	"github.com/tinyrange/trex/binary/rpm"
 	filesystemapi "github.com/tinyrange/trex/filesystem"
@@ -74,6 +75,8 @@ func Builtins() starlark.StringDict {
 		"ibmi_dasd_index":              starlark.NewBuiltin("ibmi_dasd_index", ibmiDASDIndexBuiltin),
 		"rpm_metadata":                 starlark.NewBuiltin("rpm_metadata", rpm.Builtin),
 		"irix_executable":              starlark.NewBuiltin("irix_executable", irixbinary.Builtin),
+		"mips_coff":                    starlark.NewBuiltin("mips_coff", mipscoff.Builtin),
+		"mips_coff_message_lengths":    starlark.NewBuiltin("mips_coff_message_lengths", mipscoff.MessageLengthsBuiltin),
 		"apple_device_tree":            starlark.NewBuiltin("apple_device_tree", appleDeviceTreeBuiltin),
 		"encode_apple_device_tree":     starlark.NewBuiltin("encode_apple_device_tree", encodeAppleDeviceTreeBuiltin),
 		"arm64_disassemble":            starlark.NewBuiltin("arm64_disassemble", arm64DisassembleBuiltin),

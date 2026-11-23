@@ -11,6 +11,7 @@ import (
 	"github.com/tinyrange/trex/emulator/machine"
 	"github.com/tinyrange/trex/emulator/power"
 	"github.com/tinyrange/trex/emulator/processor"
+	"github.com/tinyrange/trex/emulator/r3000"
 	"github.com/tinyrange/trex/emulator/s390"
 	"github.com/tinyrange/trex/emulator/shell"
 	"github.com/tinyrange/trex/emulator/uefi"
@@ -31,6 +32,7 @@ func Builtins() starlark.StringDict {
 	values["uefi"] = starlark.NewBuiltin("uefi", uefi.Builtin)
 	values["s390"] = starlark.NewBuiltin("s390", s390.Builtin)
 	values["power"] = starlark.NewBuiltin("power", power.Builtin)
+	values["r3000"] = starlark.NewBuiltin("r3000", r3000.Builtin)
 	return values
 }
 

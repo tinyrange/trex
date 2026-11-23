@@ -129,6 +129,7 @@ func predeclared() starlark.StringDict {
 	}
 	windowsBuiltins := windowsapi.Builtins()
 	windowsBuiltins["kd"] = starlark.NewBuiltin("kd", kd.Builtin)
+	windowsBuiltins["kd_early"] = starlark.NewBuiltin("kd_early", kd.EarlyBuiltin)
 	return starlark.StringDict{
 		"scs":       namespace{name: "scs", attrs: scsstar.Builtins(scsnative.CreateOptimized, scsnative.Open, scsnative.GitTransport)},
 		"auto":      starlark.NewBuiltin("auto", autostar.Builtin),

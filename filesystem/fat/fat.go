@@ -507,39 +507,14 @@ func (f *fatFile) ReadAt(p []byte, off int64) (int, error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	clusterSize := f.image.bytesPerSector * f.image.sectorsPerCluster
 	want := min(int64(len(p)), f.entry.size-off)
 	n := 0
 	for int64(n) < want {
-		position := off + int64(n)
-		index := position / clusterSize
-		for int64(len(f.clusters)) <= index {
-			cluster := f.entry.cluster
-			if len(f.clusters) > 0 {
-				var err error
-				cluster, err = f.image.nextCluster(f.clusters[len(f.clusters)-1])
-				if err != nil {
-					return n, err
-				}
-				if f.image.isEndCluster(cluster) {
-					return n, io.ErrUnexpectedEOF
-				}
-			}
-			if err := f.image.validDataCluster(cluster); err != nil {
-				return n, err
-			}
-			if f.seen[cluster] {
-				return n, fmt.Errorf("fat: cyclic file cluster chain")
-			}
-			if f.seen == nil {
-				f.seen = make(map[uint32]bool)
-			}
-			f.seen[cluster] = true
-			f.clusters = append(f.clusters, cluster)
+		volumeOffset, count, err := f.volumeRange(off+int64(n), want-int64(n))
+		if err != nil {
+			return n, err
 		}
-		within := position % clusterSize
-		count := min(want-int64(n), clusterSize-within)
-		read, err := starfile.ReadFullAt(f.image.file, p[n:int64(n)+count], f.image.clusterOffset(f.clusters[index])+within)
+		read, err := starfile.ReadFullAt(f.image.file, p[n:int64(n)+count], volumeOffset)
 		n += read
 		if err != nil {
 			return n, err
@@ -549,6 +524,85 @@ func (f *fatFile) ReadAt(p []byte, off int64) (int, error) {
 		return n, io.EOF
 	}
 	return n, nil
+}
+
+// volumeRange resolves at most one cluster with f.mu held.
+func (f *fatFile) volumeRange(position, maximum int64) (int64, int64, error) {
+	clusterSize := f.image.bytesPerSector * f.image.sectorsPerCluster
+	index := position / clusterSize
+	for int64(len(f.clusters)) <= index {
+		cluster := f.entry.cluster
+		if len(f.clusters) != 0 {
+			var err error
+			cluster, err = f.image.nextCluster(f.clusters[len(f.clusters)-1])
+			if err != nil {
+				return 0, 0, err
+			}
+			if f.image.isEndCluster(cluster) {
+				return 0, 0, io.ErrUnexpectedEOF
+			}
+		}
+		if err := f.image.validDataCluster(cluster); err != nil {
+			return 0, 0, err
+		}
+		if f.seen[cluster] {
+			return 0, 0, fmt.Errorf("fat: cyclic file cluster chain")
+		}
+		if f.seen == nil {
+			f.seen = make(map[uint32]bool)
+		}
+		f.seen[cluster] = true
+		f.clusters = append(f.clusters, cluster)
+	}
+	within := position % clusterSize
+	return f.image.clusterOffset(f.clusters[index]) + within, min(maximum, clusterSize-within), nil
+}
+
+type fileVolumeRange struct{ offset, size int64 }
+
+func (f *fatFile) volumeRanges(offset, size int64) ([]fileVolumeRange, error) {
+	if offset < 0 || size < 0 || offset > f.Size() || size > f.Size()-offset {
+		return nil, fmt.Errorf("fat: file range outside %q", f.entry.path)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var ranges []fileVolumeRange
+	for size > 0 {
+		start, count, err := f.volumeRange(offset, size)
+		if err != nil {
+			return nil, err
+		}
+		if len(ranges) != 0 && ranges[len(ranges)-1].offset+ranges[len(ranges)-1].size == start {
+			ranges[len(ranges)-1].size += count
+		} else {
+			if len(ranges) == 65536 {
+				return nil, fmt.Errorf("fat: too many fragmented ranges in %q", f.entry.path)
+			}
+			ranges = append(ranges, fileVolumeRange{start, count})
+		}
+		offset += count
+		size -= count
+	}
+	return ranges, nil
+}
+
+func (f *fatFile) volumeRangesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var offset, size int64
+	if err := starlark.UnpackArgs("volume_ranges", args, kwargs, "offset", &offset, "size", &size); err != nil {
+		return nil, err
+	}
+	ranges, err := f.volumeRanges(offset, size)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]starlark.Value, 0, len(ranges))
+	for _, r := range ranges {
+		out = append(out, starfile.NewRecord(starlark.StringDict{
+			"offset": starlark.MakeInt64(r.offset),
+			"size":   starlark.MakeInt64(r.size),
+		}))
+	}
+	return starlark.NewList(out), nil
 }
 
 func (i *fatImage) validDataCluster(cluster uint32) error {
@@ -583,9 +637,12 @@ func (f *fatFile) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", f.Type())
 }
 func (f *fatFile) Attr(name string) (starlark.Value, error) {
+	if name == "volume_ranges" {
+		return starlark.NewBuiltin(name, f.volumeRangesBuiltin), nil
+	}
 	return starfile.Attr(f, name), nil
 }
-func (f *fatFile) AttrNames() []string { return starfile.AttrNames() }
+func (f *fatFile) AttrNames() []string { return append(starfile.AttrNames(), "volume_ranges") }
 
 type fatRegionFile struct {
 	image  *fatImage
