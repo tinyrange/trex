@@ -5214,6 +5214,18 @@ Finds bases at which a source image, placed at that address, holds a big-endian 
 
 Inspects a bounded little-endian Mach-O64 image (architecture x86_64 or arm64), optionally selected from a big-endian fat32/fat64 universal container. cpu_subtype optionally selects an exact uint32 subtype (including arm64e capability bits) and validates the thin header; omitted selection rejects ambiguous CPU matches. Exposes the selected cpu_subtype, initial thread entry PC (zero when absent), borrowed file, segments (name, address, size, file_offset, file_size, flags), original symbols (name, address, type, section, description), dyld exports (name, address, flags, resolver, reexport_ordinal, import_name), indirect imports (name, kind stub/pointer, address, size), and fileset_entries (name, address, file_offset) for MH_FILESET kernel collections. fileset(name) opens an embedded Mach-O through the same reader, preserving collection-relative segment and linkedit offsets. Bound filesets with stripped symbol tables may contain zero indirect-symbol placeholders; these expose no named imports. Fileset offsets refer to the containing image; entries are not independent extracted binaries. at(address, size) returns borrowed file-backed virtual bytes; zero-fill, unmapped, ambiguous and overflowing ranges fail. Header, command, string, symbol and export-trie traversal bounds and aggregate name/prefix allocations are enforced. Export trie support includes ordinary, absolute, weak, thread-local, reexport and stub/resolver terminals; it does not resolve reexport dependencies. Does not relocate, link or execute the image.
 
+### `binary.mips_coff`
+
+`binary.mips_coff(file, symbols=True) -> record`
+
+Reads fixed R3000 ROM COFF and early NT MIPS executables. Returns ROM status, preferred base, entry, bounded sections and ordinary COFF symbols. ROM entry and section addresses are linked virtual addresses. Early NT process entry and sections are relative to base.
+
+### `binary.mips_coff_message_lengths`
+
+`binary.mips_coff_message_lengths(file) -> list[record]`
+
+Validates an early NT MIPS COFF message resource and returns file-relative offset, before and after values for text-only length words that need inclusive aligned strides. Correctly framed resources yield an empty list. The file is read-only.
+
 ### `binary.perf`
 
 `binary.perf(file, maximum_records=1000000, maximum_samples=1000000, maximum_string_bytes=1MiB) -> record`
@@ -5790,6 +5802,12 @@ Creates an in-process 64-bit big-endian Power ISA partition in guest (supervisor
 
 Creates a portable in-process ARM64 or AMD64 instruction context independently of executable formats and OS APIs. map(address,size,data=None,access=rw) copies bounded bytes/files into owned sparse memory; read/write, get_register/set_register and plugin expose explicit experiment state. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps and PC for breakpoint, halt, budget or fault. ARM64 uses the existing baseline ARMv8-A processor without optional PAuth. No code is implicitly loaded or executed. close() releases the context.
 
+### `emulator.r3000`
+
+`emulator.r3000(rom, memory=64MiB, nvram=None, station_id=None, start='') -> r3000_machine`
+
+Creates an in-process little-endian R3000 Jazz workstation from portable firmware and NVRAM files. The machine advances on a 25 MHz virtual clock, with an April 1991 UTC epoch by default. Attach a block device and serve a fixed ROM COFF image over the built-in DEC MOP boot network.
+
 ### `emulator.s390`
 
 `emulator.s390(memory=64MiB, cpus=1, mips=50, start='', idle_skip=True, architecture='esa390') -> s390_machine`
@@ -5956,7 +5974,7 @@ Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte b
 
 `filesystem.fat(file) -> FAT filesystem`
 
-Parses an existing FAT volume into a filesystem view. Use fat12, fat16 or fat32 with a directory to construct a new volume.
+Parses an existing FAT volume into a filesystem view. Use fat12, fat16 or fat32 with a directory to construct a new volume. FAT member files expose volume_ranges(offset, size), which returns ordered volume-relative offset and size records for a byte range, including fragmented clusters.
 
 ### `filesystem.fat12`
 
@@ -7376,6 +7394,12 @@ Builds InternetShortcut (.url) bytes for a URL with optional icon location and i
 
 Creates a Windows kernel-debugging protocol session over an existing byte channel. The session exposes packets, events, context and memory operations, bounded by the configured protocol limits.
 
+### `windows.kd_early`
+
+`windows.kd_early(channel) -> windows.kd_early`
+
+Opens the April 1991 NT KD protocol on a ready byte channel. Poll returns decoded stops, MIPS contexts, replies, debug text and input prompts. Advance the guest between sending a request and checking its response.
+
 ### `windows.kernel_dump_header`
 
 `windows.kernel_dump_header(file) -> record`
@@ -8173,6 +8197,12 @@ A validated QEMU option descriptor with its value/properties. It is interpreted 
 
 Methods and attributes: `name`, `properties`.
 
+### `r3000_machine` value
+
+A bounded Jazz execution with physical and translated memory inspection, CPU breakpoints, registers, keyboard input and a framebuffer capture. Serial ports are portable duplex channels. The firmware boots through SONIC Ethernet and MOP, and accesses the system volume through the Jazz SCSI controller. A write watch reports the first matching CPU write to a physical range, including framebuffer writes. Physical reads of RAM, ROM and display memory have no device side effects.
+
+Methods and attributes: `attach_disk(target, device)`, `break_at(address)`, `clear_breaks()`, `clear_watch()`, `close()`, `key(key, down=True)`, `mop_status()`, `read(address, size)`, `read_effective(address, size)`, `registers()`, `run(budget, stop_on_exception=False)`, `screenshot()`, `serial(port=1)`, `serve_mop(name, file)`, `step()`, `type(text)`, `watch_write(address, size, nonzero=False)`.
+
 ### `scs.repository` value
 
 Owns portable SCS storage and immutable objects. clone imports full advertised Git history natively, retaining no host checkout or pack spool; compressed transport stays in bounded paged memory. Git checkout is lazy. Native workspace publication is distinct from Git commits and does not push. file returns an immutable standalone repository artifact only for snapshot-capable backends (memory); publish live edits first. Opening/checkpointing can repair derived state. No GC, synchronization or format-stability promise.
@@ -8328,6 +8358,12 @@ Methods and attributes: `breakin()`, `breakpoint(address, timeout=30)`, `close()
 A breakpoint installed through the Windows KD protocol. handle identifies the remote breakpoint; remove deletes it and removed reports the local handle state.
 
 Methods and attributes: `address`, `handle`, `remove(timeout=30)`, `removed`.
+
+### `windows.kd_early` value
+
+A cooperative R3000 kernel debugger for the original eight-byte KD packet header. Poll returns one event or None. Send requests while stopped and advance the machine before polling for replies. Use reply_prompt for Debug I/O prompts such as the NT Session Manager console.
+
+Methods and attributes: `breakin()`, `close()`, `context(processor=0)`, `continue(status=0x10002)`, `poll()`, `read_virtual(address, size, processor=0)`, `reply_prompt(data)`, `request(api, processor=0, arg0=0, arg1=0, arg2=0, data=b'')`, `set_context(context, pc=None, processor=0)`, `stopped`, `write_virtual(address, data, processor=0)`.
 
 ### `windows.memory_image` value
 

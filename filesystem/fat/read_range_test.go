@@ -102,3 +102,25 @@ func TestRejectBadFileChains(t *testing.T) {
 		t.Fatal("accepted truncated data")
 	}
 }
+
+func TestVolumeRangesFollowFragmentedClustersWithoutPayloadReads(t *testing.T) {
+	for _, kind := range []int{12, 16, 32} {
+		f, source := rangeFixture(kind)
+		got, err := f.volumeRanges(511, 514)
+		want := []fileVolumeRange{{511, 1}, {1536, 512}, {512, 1}}
+		if err != nil || len(got) != len(want) {
+			t.Fatalf("FAT%d: ranges %v, %v", kind, got, err)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("FAT%d: ranges %v, want %v", kind, got, want)
+			}
+		}
+		if source.read != 0 {
+			t.Fatalf("FAT%d: range mapping read %d payload bytes", kind, source.read)
+		}
+		if _, err := f.volumeRanges(1535, 2); err == nil {
+			t.Fatalf("FAT%d: range beyond EOF accepted", kind)
+		}
+	}
+}
