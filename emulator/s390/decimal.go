@@ -44,6 +44,15 @@ func (c *CPU) cvb(x uint64) uint32 {
 
 // packed reads a packed-decimal operand and returns its value.
 func (c *CPU) packed(a uint32, b int, l uint32) *big.Int {
+	v := c.readPacked(a, b, l)
+	if v == nil {
+		c.program(pgmData)
+	}
+	return v
+}
+
+// readPacked returns nil for an invalid digit or sign.
+func (c *CPU) readPacked(a uint32, b int, l uint32) *big.Int {
 	v := new(big.Int)
 	ten := big.NewInt(10)
 	var sign byte
@@ -51,7 +60,7 @@ func (c *CPU) packed(a uint32, b int, l uint32) *big.Int {
 		x := c.fetchByte(a+i, b)
 		hi, lo := x>>4, x&0xf
 		if hi > 9 {
-			c.program(pgmData)
+			return nil
 		}
 		v.Mul(v, ten)
 		v.Add(v, big.NewInt(int64(hi)))
@@ -59,14 +68,14 @@ func (c *CPU) packed(a uint32, b int, l uint32) *big.Int {
 			sign = lo
 		} else {
 			if lo > 9 {
-				c.program(pgmData)
+				return nil
 			}
 			v.Mul(v, ten)
 			v.Add(v, big.NewInt(int64(lo)))
 		}
 	}
 	if sign < 0xa {
-		c.program(pgmData)
+		return nil
 	}
 	if sign == 0xb || sign == 0xd {
 		v.Neg(v)
@@ -81,6 +90,14 @@ func (c *CPU) storePacked(a uint32, b int, l uint32, v *big.Int) bool {
 
 // storePackedSign also represents the signed zero required by MP and DP.
 func (c *CPU) storePackedSign(a uint32, b int, l uint32, v *big.Int, neg bool) bool {
+	buf, over := packedBytes(l, v, c.decimalSign(neg))
+	for i, x := range buf {
+		c.storeByte(a+uint32(i), b, x)
+	}
+	return over
+}
+
+func packedBytes(l uint32, v *big.Int, sign byte) ([]byte, bool) {
 	m := new(big.Int).Abs(v)
 	digits := m.String()
 	cap := int(l*2 - 1)
@@ -89,10 +106,6 @@ func (c *CPU) storePackedSign(a uint32, b int, l uint32, v *big.Int, neg bool) b
 		digits = digits[len(digits)-cap:]
 	}
 	buf := make([]byte, l)
-	sign := byte(0xc)
-	if neg {
-		sign = 0xd
-	}
 	buf[l-1] = sign
 	pos := len(digits) - 1
 	for i := int(l*2 - 2); i >= 0 && pos >= 0; i-- {
@@ -104,10 +117,7 @@ func (c *CPU) storePackedSign(a uint32, b int, l uint32, v *big.Int, neg bool) b
 			buf[i/2] |= d
 		}
 	}
-	for i := uint32(0); i < l; i++ {
-		c.storeByte(a+i, b, buf[i])
-	}
-	return over
+	return buf, over
 }
 
 func (c *CPU) decimalCC(v *big.Int, over bool) {
@@ -155,85 +165,64 @@ func (c *CPU) ssDecimal() {
 		over := c.storePacked(a1, b1, l1, m)
 		c.decimalCC(m, over)
 	case 0xf1: // MVO
+		// Right to left, one byte at a time: each result byte is stored
+		// immediately after the second-operand byte it needs is fetched,
+		// as the architecture defines for overlapping operands.
 		c.checkStore(a1, l1, b1)
-		src := make([]byte, l2)
-		for i := uint32(0); i < l2; i++ {
-			src[i] = c.fetchByte(a2+i, b2)
-		}
-		last := c.fetchByte(a1+l1-1, b1) & 0xf
-		// Build nibble string: source digits then the preserved sign.
-		var nib []byte
-		for _, x := range src {
-			nib = append(nib, x>>4, x&0xf)
-		}
-		nib = append(nib, last)
-		out := make([]byte, l1)
-		pos := len(nib) - 1
-		for i := int(l1*2 - 1); i >= 0; i-- {
-			var d byte
-			if pos >= 0 {
-				d = nib[pos]
-				pos--
+		carry := c.fetchByte(a1+l1-1, b1) & 0xf // the sign is kept
+		j := int(l2) - 1
+		for i := int(l1) - 1; i >= 0; i-- {
+			var x byte
+			if j >= 0 {
+				x = c.fetchByte(a2+uint32(j), b2)
+				j--
 			}
-			if i%2 == 0 {
-				out[i/2] |= d << 4
-			} else {
-				out[i/2] |= d
-			}
-		}
-		for i := uint32(0); i < l1; i++ {
-			c.storeByte(a1+i, b1, out[i])
+			c.storeByte(a1+uint32(i), b1, x<<4|carry)
+			carry = x >> 4
 		}
 	case 0xf2: // PACK
+		// Right to left; each result byte is stored after the zoned
+		// bytes that supply its digits are fetched.
 		c.checkStore(a1, l1, b1)
-		src := make([]byte, l2)
-		for i := uint32(0); i < l2; i++ {
-			src[i] = c.fetchByte(a2+i, b2)
-		}
-		out := make([]byte, l1)
-		// rightmost byte: swap nibbles
-		out[l1-1] = src[l2-1]<<4 | src[l2-1]>>4
-		si := int(l2) - 2
+		j := int(l2) - 1
+		x := c.fetchByte(a2+uint32(j), b2)
+		j--
+		c.storeByte(a1+l1-1, b1, x<<4|x>>4)
 		for i := int(l1) - 2; i >= 0; i-- {
 			var lo, hi byte
-			if si >= 0 {
-				lo = src[si] & 0xf
-				si--
+			if j >= 0 {
+				lo = c.fetchByte(a2+uint32(j), b2) & 0xf
+				j--
 			}
-			if si >= 0 {
-				hi = src[si] & 0xf
-				si--
+			if j >= 0 {
+				hi = c.fetchByte(a2+uint32(j), b2) & 0xf
+				j--
 			}
-			out[i] = hi<<4 | lo
-		}
-		for i := uint32(0); i < l1; i++ {
-			c.storeByte(a1+i, b1, out[i])
+			c.storeByte(a1+uint32(i), b1, hi<<4|lo)
 		}
 	case 0xf3: // UNPK
+		// Right to left; two zoned result bytes are stored after each
+		// packed byte is fetched, whose left digit is not refetched.
 		c.checkStore(a1, l1, b1)
-		src := make([]byte, l2)
-		for i := uint32(0); i < l2; i++ {
-			src[i] = c.fetchByte(a2+i, b2)
-		}
-		out := make([]byte, l1)
-		out[l1-1] = src[l2-1]<<4 | src[l2-1]>>4
-		var nib []byte
-		for i := 0; i < int(l2)-1; i++ {
-			nib = append(nib, src[i]>>4, src[i]&0xf)
-		}
-		nib = append(nib, src[l2-1]>>4)
-		nib = nib[:len(nib)-1]
-		pos := len(nib) - 1
+		j := int(l2) - 1
+		x := c.fetchByte(a2+uint32(j), b2)
+		j--
+		c.storeByte(a1+l1-1, b1, x<<4|x>>4)
+		var left byte
+		have := false
 		for i := int(l1) - 2; i >= 0; i-- {
-			var d byte
-			if pos >= 0 {
-				d = nib[pos]
-				pos--
+			if have {
+				c.storeByte(a1+uint32(i), b1, c.decimalZone()<<4|left)
+				have = false
+				continue
 			}
-			out[i] = 0xf0 | d
-		}
-		for i := uint32(0); i < l1; i++ {
-			c.storeByte(a1+i, b1, out[i])
+			x = 0
+			if j >= 0 {
+				x = c.fetchByte(a2+uint32(j), b2)
+				j--
+			}
+			c.storeByte(a1+uint32(i), b1, c.decimalZone()<<4|x&0xf)
+			left, have = x>>4, true
 		}
 	case 0xf8: // ZAP
 		v := c.packed(a2, b2, l2)
@@ -244,8 +233,17 @@ func (c *CPU) ssDecimal() {
 		y := c.packed(a2, b2, l2)
 		c.PSW.CC = byte(ccSigned(int32(x.Cmp(y))))
 	case 0xfa, 0xfb: // AP, SP
-		x := c.packed(a1, b1, l1)
-		y := c.packed(a2, b2, l2)
+		x := c.readPacked(a1, b1, l1)
+		var y *big.Int
+		if x != nil || c.M.Model9020 {
+			y = c.readPacked(a2, b2, l2)
+		}
+		if x == nil || y == nil {
+			if c.M.Model9020 {
+				c.addInvalid9020(a1, b1, l1, a2, b2, l2, op[0] == 0xfb)
+			}
+			c.program(pgmData)
+		}
 		if op[0] == 0xfa {
 			x.Add(x, y)
 		} else {
@@ -256,6 +254,10 @@ func (c *CPU) ssDecimal() {
 	case 0xfc: // MP
 		if l2 > 8 || l2 >= l1 {
 			c.program(pgmSpecification)
+		}
+		if c.M.Model9020 {
+			c.multiply9020(a1, b1, l1, a2, b2, l2)
+			return
 		}
 		x := c.packed(a1, b1, l1)
 		y := c.packed(a2, b2, l2)

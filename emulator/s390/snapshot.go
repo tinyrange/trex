@@ -29,25 +29,28 @@ import (
 var snapshotMagic = []byte("TREXS390\x00\x01")
 
 type machineSnap struct {
-	S370             bool
-	MemSize          int
-	KeyShift         uint
-	TOD, LastStck    uint64
-	TODProgrammable  uint16
-	ServiceSignal    bool
-	ServiceParam     uint32
-	InputWake        bool
-	LoadParm         string
-	SCPConfig        [6]byte
-	Facilities       uint32
-	SCPCPUFacilities [12]byte
-	SCLP             sclpSnap
-	CPUs             []cpuSnap
-	Subchannels      []subSnap
-	CRW              []uint32
-	CRWPend          bool
-	Devices          []devSnap
-	Mem, Keys        []byte
+	S370                  bool
+	S360, Model9020, IOCE bool
+	MemSize               int
+	KeyShift              uint
+	TOD, LastStck         uint64
+	TODProgrammable       uint16
+	ServiceSignal         bool
+	ServiceParam          uint32
+	InputWake             bool
+	LoadParm              string
+	SCPConfig             [6]byte
+	Facilities            uint32
+	SCPCPUFacilities      [12]byte
+	SCLP                  sclpSnap
+	CPUs                  []cpuSnap
+	Subchannels           []subSnap
+	CRW                   []uint32
+	CRWPend               bool
+	Devices               []devSnap
+	Mem, Keys             []byte
+	MACH                  []byte
+	IOCEATR               [3]channelATR9020
 }
 
 type sclpSnap struct {
@@ -65,28 +68,37 @@ type sclpEventSnap struct {
 }
 
 type cpuSnap struct {
-	Addr              uint16
-	GR, AR, CR        [16]uint32
-	FPR               [16]uint64
-	FPC               uint32
-	PSW               PSW
-	Prefix            uint32
-	ClockComparator   uint64
-	Amask, PgMask     uint32
-	ITBase, ITDone    uint64
-	ITPending         bool
-	Stopped, Check    bool
-	CheckReason       string
-	ExtPending        uint32
-	Emergency         uint64
-	ExtCallFrom       uint16
-	TimerValue        int64
-	TimerRef          uint64
-	Instructions      uint64
-	SIEEntries        uint64
-	DXC               byte
-	ExcAddr, ExcSpace uint32
-	SIE               *sieSnap // interpretive execution in progress
+	Addr                             uint16
+	GR, AR, CR                       [16]uint32
+	FPR                              [16]uint64
+	FPC                              uint32
+	PSW                              PSW
+	Prefix                           uint32
+	ClockComparator                  uint64
+	Amask, PgMask                    uint32
+	ITBase, ITDone                   uint64
+	ITPending                        bool
+	Stopped, Check                   bool
+	CheckReason                      string
+	ExtPending                       uint32
+	Emergency                        uint64
+	ExtCallFrom                      uint16
+	TimerValue                       int64
+	TimerRef                         uint64
+	Instructions                     uint64
+	SIEEntries                       uint64
+	DXC                              byte
+	IODelay                          int
+	ExcAddr, ExcSpace                uint32
+	DAR9020, DARMask9020, Checks9020 uint32
+	PIR9020                          byte
+	ATR9020                          uint64
+	ATRSet9020                       bool
+	PSB9020                          uint32
+	Local9020                        [4][16]uint32
+	Delay9020                        uint64
+	DiagnosticSE1                    bool
+	SIE                              *sieSnap // interpretive execution in progress
 }
 
 // sieSnap is the host state saved by START INTERPRETIVE EXECUTION; the
@@ -148,6 +160,81 @@ type subSnap struct {
 	BlockAddr                        uint32
 	BlockFmt1, PCIWait, PCIInterrupt bool
 	PCIAt                            uint64
+	Timed, DevPending                bool
+	EndCE, EndDE                     uint64
+	CCWs                             int
+	ResumeAt, FinishAt, DEAt         uint64
+	CUBusyUntil                      uint64
+	CUEndWanted                      bool
+	DEStatus                         byte
+	EndAtDE                          bool
+	Op                               *opSnap
+}
+
+// opSnap is a CCW whose data transfer is in progress (ccwOp).
+type opSnap struct {
+	Cmd                 byte
+	Chain               []ccwSnap // the last element is the CCW that ends the transfer
+	Addrs               []uint32
+	Segs                []segSnap
+	Total, Cur          uint32
+	ReadStored          uint32
+	Out                 []byte
+	TapeWrite           []byte
+	DiskWrite           *diskWrite2314
+	Used                int
+	Status              byte
+	Read, Chained, Fmt1 bool
+	Halted              bool
+	LengthOnException   bool
+	Key, Err            byte
+	ChainErr            uint32
+	Checked             bool
+}
+
+type ccwSnap struct {
+	Cmd, Flags byte
+	Count      uint16
+	Addr       uint32
+}
+
+type segSnap struct {
+	Addr, N uint32
+	Skip    bool
+}
+
+func snapOp(op *ccwOp) *opSnap {
+	if op == nil {
+		return nil
+	}
+	o := &opSnap{Cmd: op.Cmd, Addrs: op.Addrs, Total: op.Total, Cur: op.Cur, ReadStored: op.ReadStored, Out: op.Out, TapeWrite: op.TapeWrite, DiskWrite: op.DiskWrite, Used: op.Used, Halted: op.Halted,
+		Status: op.Status, Read: op.Read, Chained: op.Chained, Fmt1: op.Fmt1, Key: op.Key, Err: op.Err, ChainErr: op.ChainErr, Checked: op.Checked,
+		LengthOnException: op.LengthOnException}
+	for _, w := range append(append([]ccw(nil), op.Chain...), op.Last) {
+		o.Chain = append(o.Chain, ccwSnap{w.cmd, w.flags, w.count, w.addr})
+	}
+	for _, g := range op.Segs {
+		o.Segs = append(o.Segs, segSnap{g.addr, g.n, g.skip})
+	}
+	return o
+}
+
+func (o *opSnap) op() *ccwOp {
+	if o == nil {
+		return nil
+	}
+	op := &ccwOp{Cmd: o.Cmd, Addrs: o.Addrs, Total: o.Total, Cur: o.Cur, ReadStored: o.ReadStored, Out: o.Out, TapeWrite: o.TapeWrite, DiskWrite: o.DiskWrite, Used: o.Used, Halted: o.Halted,
+		Status: o.Status, Read: o.Read, Chained: o.Chained, Fmt1: o.Fmt1, Key: o.Key, Err: o.Err, ChainErr: o.ChainErr, Checked: o.Checked,
+		LengthOnException: o.LengthOnException}
+	for _, w := range o.Chain {
+		op.Chain = append(op.Chain, ccw{w.Cmd, w.Flags, w.Count, w.Addr})
+	}
+	op.Last = op.Chain[len(op.Chain)-1]
+	op.Chain = op.Chain[:len(op.Chain)-1]
+	for _, g := range o.Segs {
+		op.Segs = append(op.Segs, segment{g.Addr, g.N, g.Skip})
+	}
+	return op
 }
 
 type devSnap struct {
@@ -176,12 +263,13 @@ func decodeGob(data []byte, v any) error {
 // capture copies the machine's mutable state. Storage is copied, so the
 // result stays valid while the machine continues to run.
 func (m *Machine) capture() (*machineSnap, error) {
-	s := &machineSnap{S370: m.S370, MemSize: len(m.S.Mem), KeyShift: m.S.KeyShift,
+	s := &machineSnap{S370: m.S370, S360: m.S360, Model9020: m.Model9020, IOCE: m.cfg.IOCE, MemSize: len(m.S.Mem), KeyShift: m.S.KeyShift,
 		TOD: m.tod, LastStck: m.lastStck, TODProgrammable: m.todProgrammable,
 		ServiceSignal: m.serviceSignal, ServiceParam: m.serviceParam, InputWake: m.inputWake,
 		LoadParm: m.LoadParm, SCPConfig: m.SCPConfig, Facilities: m.Facilities, SCPCPUFacilities: m.SCPCPUFacilities,
 		CRW: append([]uint32(nil), m.CSS.crw...), CRWPend: m.CSS.crwPend,
-		Mem: append([]byte(nil), m.S.Mem...), Keys: append([]byte(nil), m.S.Keys...)}
+		Mem: append([]byte(nil), m.S.Mem...), Keys: append([]byte(nil), m.S.Keys...),
+		MACH: append([]byte(nil), m.CSS.mach...), IOCEATR: m.CSS.ioceATR}
 	sc := m.sclp
 	s.SCLP = sclpSnap{CPReceive: sc.cpReceive, CPSend: sc.cpSend, Lines: append([]string(nil), sc.Lines...),
 		Partial: append([]byte(nil), sc.Partial...), Dropped: sc.dropped, Version: sc.version}
@@ -198,7 +286,11 @@ func (m *Machine) capture() (*machineSnap, error) {
 			ITBase: c.itBase, ITDone: c.itDone, ITPending: c.itPending, Stopped: c.Stopped, Check: c.Check,
 			CheckReason: c.checkReason, ExtPending: c.extPending, Emergency: c.emergency, ExtCallFrom: c.extCallFrom,
 			TimerValue: c.timerValue, TimerRef: c.timerRef, Instructions: c.Instructions, SIEEntries: c.SIEEntries,
-			DXC: c.dxc, ExcAddr: c.excAddr, ExcSpace: c.excSpace})
+			DXC: c.dxc, ExcAddr: c.excAddr, ExcSpace: c.excSpace, IODelay: c.ioDelay,
+			DAR9020: c.maintenance9020.dar, DARMask9020: c.maintenance9020.darMask,
+			Checks9020: c.maintenance9020.checks, PIR9020: c.maintenance9020.pir,
+			ATR9020: c.maintenance9020.atr, ATRSet9020: c.maintenance9020.atrSet, PSB9020: c.maintenance9020.psb,
+			Local9020: c.maintenance9020.local, Delay9020: c.maintenance9020.delayUntil, DiagnosticSE1: c.maintenance9020.diagnosticSE1})
 	}
 	for _, x := range m.CSS.subs {
 		s.Subchannels = append(s.Subchannels, subSnap{Num: x.num, Devno: x.devno, Intparm: x.intparm, ISC: x.isc,
@@ -207,7 +299,9 @@ func (m *Machine) capture() (*machineSnap, error) {
 			DevStatus: x.devStatus, SchStatus: x.schStatus, Residual: x.residual, Pending: x.pending, IRQ: x.irq,
 			CCDeferred: x.ccDeferred, Sense: append([]byte(nil), x.sense...), AttnHold: x.attnHold,
 			Blocked: x.blocked, BlockAddr: x.blockAddr, BlockFmt1: x.blockFmt1, PCIWait: x.pciWait,
-			PCIInterrupt: x.pciIRQ, PCIAt: x.pciAt})
+			PCIInterrupt: x.pciIRQ, PCIAt: x.pciAt, Timed: x.timed, DevPending: x.devPending, EndCE: x.endCE, EndDE: x.endDE,
+			CCWs: x.ccws, ResumeAt: x.resumeAt, FinishAt: x.finishAt, DEAt: x.deAt, DEStatus: x.deStatus,
+			CUBusyUntil: x.cuBusyUntil, CUEndWanted: x.cuEndWanted, EndAtDE: x.endAtDE, Op: snapOp(x.op)})
 		sn, ok := x.dev.(snapshotter)
 		if !ok {
 			return nil, fmt.Errorf("s390: device %04X (%T) cannot be checkpointed", x.devno, x.dev)
@@ -266,8 +360,11 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 		return fmt.Errorf("s390: checkpoint: %w", err)
 	}
 	// Validate everything before changing anything.
-	if s.S370 != m.S370 || s.MemSize != len(m.S.Mem) || len(s.CPUs) != len(m.CPUs) {
+	if s.S370 != m.S370 || s.S360 != m.S360 || s.Model9020 != m.Model9020 || s.IOCE != m.cfg.IOCE || s.MemSize != len(m.S.Mem) || len(s.CPUs) != len(m.CPUs) {
 		return fmt.Errorf("s390: checkpoint is of a different machine (%d bytes, %d CPUs, S/370 %v)", s.MemSize, len(s.CPUs), s.S370)
+	}
+	if len(s.MACH) != 0 && len(s.MACH) != len(m.CSS.mach) {
+		return fmt.Errorf("s390: checkpoint has %d bytes of MACH storage, the machine %d", len(s.MACH), len(m.CSS.mach))
 	}
 	devs := map[uint16]devSnap{}
 	for _, d := range s.Devices {
@@ -326,6 +423,9 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 	}
 	copy(m.S.Mem, s.Mem)
 	copy(m.S.Keys, s.Keys)
+	clear(m.CSS.mach)
+	copy(m.CSS.mach, s.MACH)
+	m.CSS.ioceATR = s.IOCEATR
 	m.tod, m.lastStck, m.todProgrammable = s.TOD, s.LastStck, s.TODProgrammable
 	m.serviceSignal, m.serviceParam, m.inputWake = s.ServiceSignal, s.ServiceParam, s.InputWake
 	m.LoadParm, m.SCPConfig, m.Facilities, m.SCPCPUFacilities = s.LoadParm, s.SCPConfig, s.Facilities, s.SCPCPUFacilities
@@ -346,8 +446,11 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 		c.Stopped, c.Check, c.checkReason = cs.Stopped, cs.Check, cs.CheckReason
 		c.extPending, c.emergency, c.extCallFrom = cs.ExtPending, cs.Emergency, cs.ExtCallFrom
 		c.timerValue, c.timerRef = cs.TimerValue, cs.TimerRef
-		c.Instructions, c.SIEEntries, c.dxc = cs.Instructions, cs.SIEEntries, cs.DXC
+		c.Instructions, c.SIEEntries, c.dxc, c.ioDelay = cs.Instructions, cs.SIEEntries, cs.DXC, cs.IODelay
 		c.excAddr, c.excSpace = cs.ExcAddr, cs.ExcSpace
+		c.maintenance9020 = maintenance9020{dar: cs.DAR9020, darMask: cs.DARMask9020, checks: cs.Checks9020, pir: cs.PIR9020,
+			atr: cs.ATR9020, atrSet: cs.ATRSet9020, psb: cs.PSB9020, local: cs.Local9020,
+			delayUntil: cs.Delay9020, diagnosticSE1: cs.DiagnosticSE1}
 		c.next = c.PSW.IA
 		c.sie = nil
 		if cs.SIE != nil {
@@ -371,8 +474,13 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 		x.pending, x.irq, x.ccDeferred, x.sense, x.attnHold = ss.Pending, ss.IRQ, ss.CCDeferred, ss.Sense, ss.AttnHold
 		x.blocked, x.blockAddr, x.blockFmt1 = ss.Blocked, ss.BlockAddr, ss.BlockFmt1
 		x.pciWait, x.pciIRQ, x.pciAt = ss.PCIWait, ss.PCIInterrupt, ss.PCIAt
+		x.timed, x.devPending, x.endCE, x.endDE, x.ccws = ss.Timed, ss.DevPending, ss.EndCE, ss.EndDE, ss.CCWs
+		x.resumeAt, x.finishAt, x.deAt, x.deStatus, x.endAtDE = ss.ResumeAt, ss.FinishAt, ss.DEAt, ss.DEStatus, ss.EndAtDE
+		x.cuBusyUntil, x.cuEndWanted = ss.CUBusyUntil, ss.CUEndWanted
+		x.op = ss.Op.op()
 	}
 	m.CSS.crw, m.CSS.crwPend = s.CRW, s.CRWPend
+	m.CSS.reschedule()
 	return nil
 }
 
@@ -381,12 +489,17 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 type dasdSnap struct {
 	Fingerprint                   []byte
 	Overlay                       map[uint32][]ckd.Record
+	Home                          map[uint32][5]byte
+	Overflow                      map[uint32]map[int]bool
 	Cyl, Head                     uint32
 	Rec                           int
 	AfterData, AfterKey           bool
+	SeekIncomplete                bool
+	PlugRemoved                   bool
 	IndexPass                     int
 	Extent                        bool
 	Mask                          byte
+	MaskSet                       bool
 	ExtBeg, ExtEnd                uint32
 	Locate                        bool
 	LROp                          byte
@@ -400,6 +513,8 @@ type dasdSnap struct {
 	PGID                          [11]byte
 	Chained                       bool
 	PrevCmd                       byte
+	SearchMatch                   byte
+	SpaceLengths                  [3]byte
 	Cylinders, Heads              uint32
 	DevType                       uint16
 	OverlayTracks, OverlayRecords int
@@ -439,11 +554,12 @@ func (d *DASD3390) snapshot() ([]byte, error) {
 		}
 		overlay[t] = cp
 	}
-	return encodeGob(dasdSnap{Fingerprint: fp, Overlay: overlay, Cyl: d.cyl, Head: d.head, Rec: d.rec,
-		AfterData: d.afterData, AfterKey: d.afterKey, IndexPass: d.indexPass, Extent: d.extent, Mask: d.mask,
+	return encodeGob(dasdSnap{Fingerprint: fp, Overlay: overlay, Home: d.home, Overflow: d.overflow, Cyl: d.cyl, Head: d.head, Rec: d.rec,
+		AfterData: d.afterData, AfterKey: d.afterKey, SeekIncomplete: d.seekIncomplete, PlugRemoved: d.plugRemoved,
+		IndexPass: d.indexPass, Extent: d.extent, Mask: d.mask, MaskSet: d.maskSet,
 		ExtBeg: d.extBeg, ExtEnd: d.extEnd, Locate: d.locate, LROp: d.lrOp, LRCount: d.lrCount, LROrient: d.lrOrient,
 		LRSearch: d.lrSearch, LRSearched: d.lrSearched, LRFirst: d.lrFirst, Sense: d.sense, RSSD: d.rssd,
-		Reserved: d.reserved, PGID: d.pgid, Chained: d.chained, PrevCmd: d.prevCmd,
+		Reserved: d.reserved, PGID: d.pgid, Chained: d.chained, PrevCmd: d.prevCmd, SearchMatch: d.searchMatch, SpaceLengths: d.spaceLengths,
 		Cylinders: d.cylinders, Heads: d.heads, DevType: d.devType})
 }
 
@@ -468,6 +584,8 @@ func (d *DASD3390) restore(data []byte, disksOnly bool) error {
 		return err
 	}
 	d.overlay = s.Overlay
+	d.home = s.Home
+	d.overflow = s.Overflow
 	if d.overlay == nil {
 		d.overlay = map[uint32][]ckd.Record{}
 	}
@@ -475,9 +593,13 @@ func (d *DASD3390) restore(data []byte, disksOnly bool) error {
 		return nil
 	}
 	d.cyl, d.head, d.rec, d.afterData, d.afterKey, d.indexPass = s.Cyl, s.Head, s.Rec, s.AfterData, s.AfterKey, s.IndexPass
-	d.extent, d.mask, d.extBeg, d.extEnd = s.Extent, s.Mask, s.ExtBeg, s.ExtEnd
+	d.seekIncomplete = s.SeekIncomplete
+	d.plugRemoved = s.PlugRemoved
+	d.extent, d.mask, d.maskSet, d.extBeg, d.extEnd = s.Extent, s.Mask, s.MaskSet, s.ExtBeg, s.ExtEnd
 	d.locate, d.lrOp, d.lrCount, d.lrOrient, d.lrSearch, d.lrSearched, d.lrFirst = s.Locate, s.LROp, s.LRCount, s.LROrient, s.LRSearch, s.LRSearched, s.LRFirst
 	d.sense, d.rssd, d.reserved, d.pgid, d.chained, d.prevCmd = s.Sense, s.RSSD, s.Reserved, s.PGID, s.Chained, s.PrevCmd
+	d.searchMatch = s.SearchMatch
+	d.spaceLengths = s.SpaceLengths
 	return nil
 }
 
@@ -536,19 +658,28 @@ func (t *Console3270) restore(data []byte, _ bool) error {
 }
 
 type console3215Snap struct {
-	Lines   []string
-	Partial string
-	Input   []string
-	Sense   byte
-	Dropped int
-	Version uint64
+	Lines                          []string
+	Partial                        string
+	Input                          []string
+	Sense                          byte
+	Dropped                        int
+	Version                        uint64
+	NotReady, ReadyEnd, CancelRead bool
+	WriteLines                     int
+	WritePartial                   string
+	WriteData                      []byte
+	WriteReturn                    bool
 }
 
 func (t *Console3215) snapshotKind() string { return "3215" }
 
 func (t *Console3215) snapshot() ([]byte, error) {
-	return encodeGob(console3215Snap{Lines: t.Lines, Partial: t.Partial, Input: t.input, Sense: t.sense,
-		Dropped: t.dropped, Version: t.version})
+	return encodeGob(t.consoleState())
+}
+
+func (t *Console3215) consoleState() console3215Snap {
+	return console3215Snap{Lines: t.Lines, Partial: t.Partial, Input: t.input, Sense: t.sense,
+		Dropped: t.dropped, Version: t.version}
 }
 
 func (t *Console3215) restore(data []byte, _ bool) error {
@@ -556,24 +687,78 @@ func (t *Console3215) restore(data []byte, _ bool) error {
 	if err := decodeGob(data, &s); err != nil {
 		return err
 	}
+	t.restoreConsoleState(s)
+	return nil
+}
+
+func (t *Console3215) restoreConsoleState(s console3215Snap) {
 	t.Lines, t.Partial, t.input, t.sense, t.dropped = s.Lines, s.Partial, s.Input, s.Sense, s.Dropped
 	t.version = max(t.version, s.Version) + 1
+}
+
+func (t *Console1052) snapshot() ([]byte, error) {
+	s := t.consoleState()
+	s.NotReady, s.ReadyEnd, s.CancelRead = t.notReady, t.readyEnd, t.cancelRead
+	s.WriteLines, s.WritePartial, s.WriteData, s.WriteReturn = t.wLines, t.wPart, t.wData, t.wCR
+	return encodeGob(s)
+}
+
+func (t *Console1052) restore(data []byte, _ bool) error {
+	var s console3215Snap
+	if err := decodeGob(data, &s); err != nil {
+		return err
+	}
+	t.restoreConsoleState(s)
+	t.notReady, t.readyEnd, t.cancelRead = s.NotReady, s.ReadyEnd, s.CancelRead
+	t.wLines, t.wPart, t.wData, t.wCR = s.WriteLines, s.WritePartial, s.WriteData, s.WriteReturn
 	return nil
 }
 
 type unitRecordSnap struct {
-	Type    uint16
-	Cards   [][]byte
-	Output  []string
-	Sense   byte
-	Dropped int
-	Version uint64
+	Type         uint16
+	Cards        [][]byte
+	Output       []string
+	Sense        byte
+	Dropped      int
+	Version      uint64
+	Buffer       []byte
+	Last         byte
+	Started      bool
+	EOF          bool
+	PunchStopped bool
+	Punched      [][]byte
+	DiagColumns  [160]byte
+	DiagReady    bool
+	Printer      printerSnap
+	SwitchPaths  [2]uint16
+	Control      switch2821State
+	Port         unit2821State
+}
+
+type printerSnap struct {
+	Tape                                             []uint16
+	Line                                             int
+	SkipMoves, UCSLoaded, UCSGated, BlockCheck, Fold bool
+	UCS                                              [240]byte
+	Plane                                            [printBuffer]byte
+	ChainPos                                         int
+	PrevCmd                                          byte
 }
 
 func (u *UnitRecord) snapshotKind() string { return fmt.Sprintf("unit-%04X", u.Type) }
 
 func (u *UnitRecord) snapshot() ([]byte, error) {
-	return encodeGob(unitRecordSnap{Type: u.Type, Cards: u.cards, Output: u.Output, Sense: u.sense, Dropped: u.dropped, Version: u.version})
+	s := unitRecordSnap{Type: u.Type, Cards: u.cards, Output: u.Output, Sense: u.sense, Dropped: u.dropped, Version: u.version,
+		Buffer: u.buffer, Last: u.last, Started: u.started, EOF: u.eof, PunchStopped: u.punchStopped, Punched: u.punched,
+		DiagColumns: u.diagColumns, DiagReady: u.diagReady,
+		Printer: printerSnap{Tape: u.pr.tape, Line: u.pr.line, SkipMoves: u.pr.skipMoves, UCSLoaded: u.pr.ucsLoaded,
+			UCSGated: u.pr.ucsGated, BlockCheck: u.pr.blockCheck, Fold: u.pr.fold, UCS: u.pr.ucs, Plane: u.pr.plane,
+			ChainPos: u.chainPos, PrevCmd: u.prevCmd}}
+	if u.port != nil {
+		s.SwitchPaths = [2]uint16{u.port.paths[0].devno, u.port.paths[1].devno}
+		s.Control, s.Port = u.port.control.state, u.port.state
+	}
+	return encodeGob(s)
 }
 
 func (u *UnitRecord) restore(data []byte, _ bool) error {
@@ -581,22 +766,49 @@ func (u *UnitRecord) restore(data []byte, _ bool) error {
 	if err := decodeGob(data, &s); err != nil {
 		return err
 	}
+	var paths [2]uint16
+	if u.port != nil {
+		paths = [2]uint16{u.port.paths[0].devno, u.port.paths[1].devno}
+	}
+	if paths != s.SwitchPaths {
+		return fmt.Errorf("unit record %04X: snapshot has different 2821 interfaces", u.devno)
+	}
+	if u.port != nil {
+		u.port.control.state, u.port.state = s.Control, s.Port
+	}
 	u.cards, u.Output, u.sense, u.dropped = s.Cards, s.Output, s.Sense, s.Dropped
+	u.buffer, u.last, u.started, u.eof = s.Buffer, s.Last, s.Started, s.EOF
+	u.punchStopped, u.punched = s.PunchStopped, s.Punched
+	u.diagColumns, u.diagReady = s.DiagColumns, s.DiagReady
+	p := s.Printer
+	u.pr = printer{tape: p.Tape, line: p.Line, skipMoves: p.SkipMoves, ucsLoaded: p.UCSLoaded, ucsGated: p.UCSGated,
+		blockCheck: p.BlockCheck, fold: p.Fold, ucs: p.UCS, plane: p.Plane}
+	u.chainPos, u.prevCmd = p.ChainPos, p.PrevCmd
 	u.version = max(u.version, s.Version) + 1
 	return nil
 }
 
 type tapeSnap struct {
-	Blocks   int
-	Pos      int
-	Unloaded bool
-	Sense    [24]byte
+	Blocks        int
+	Pos           int
+	Unloaded      bool
+	Sense         [24]byte
+	PastLoadPoint bool
+	LastCommand   byte
+	SevenTrack    bool
+	SevenMode     byte
+	NoConverter   bool
+	ReelEOT       int64
+	ReelPosition  int64
+	TapeIndicate  bool
 }
 
 func (t *Tape3420) snapshotKind() string { return "3420" }
 
 func (t *Tape3420) snapshot() ([]byte, error) {
-	return encodeGob(tapeSnap{Blocks: len(t.blocks), Pos: t.pos, Unloaded: t.unloaded, Sense: t.sense})
+	return encodeGob(tapeSnap{Blocks: len(t.blocks), Pos: t.pos, Unloaded: t.unloaded, Sense: t.sense,
+		PastLoadPoint: t.pastLoadPoint, LastCommand: t.lastCommand, SevenTrack: t.sevenTrack, SevenMode: t.sevenMode,
+		NoConverter: t.noConverter, ReelEOT: t.reelEOT, ReelPosition: t.reelPosition, TapeIndicate: t.tapeIndicate})
 }
 
 func (t *Tape3420) restore(data []byte, _ bool) error {
@@ -607,7 +819,16 @@ func (t *Tape3420) restore(data []byte, _ bool) error {
 	if s.Blocks != len(t.blocks) {
 		return fmt.Errorf("tape has %d blocks, checkpoint %d (tapes written in a session are not saved)", len(t.blocks), s.Blocks)
 	}
+	if s.SevenTrack != t.sevenTrack || s.NoConverter != t.noConverter {
+		return fmt.Errorf("tape track configuration differs from checkpoint")
+	}
+	if s.ReelEOT != t.reelEOT {
+		return fmt.Errorf("tape reel configuration differs from checkpoint")
+	}
 	t.pos, t.unloaded, t.sense = s.Pos, s.Unloaded, s.Sense
+	t.pastLoadPoint, t.lastCommand = s.PastLoadPoint, s.LastCommand
+	t.sevenMode = s.SevenMode
+	t.reelPosition, t.tapeIndicate = s.ReelPosition, s.TapeIndicate
 	return nil
 }
 

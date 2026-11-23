@@ -1,7 +1,5 @@
 package s390
 
-import "fmt"
-
 // System/370 architecture mode: basic-control and extended-control PSWs,
 // System/370 dynamic address translation with 2K or 4K pages and 64K or 1M
 // segments, channel I/O through START I/O and the CSW, the interval timer,
@@ -11,7 +9,10 @@ import "fmt"
 func (p PSW) encode370() uint64 {
 	var b [8]byte
 	ctl := p.Key<<4 | b2(p.MC)<<2 | b2(p.Wait)<<1 | b2(p.Problem)
-	if p.BC {
+	if p.S360 {
+		ctl |= b2(p.ASCII) << 3
+	}
+	if p.BC || p.S360 {
 		b[0] = p.SysMask
 		b[1] = ctl
 		b[2], b[3] = byte(p.IntCode>>8), byte(p.IntCode)
@@ -73,8 +74,22 @@ func decode370(x uint64) (p PSW, ok bool) {
 	return p, ok
 }
 
+// decode360 decodes a System/360 PSW: bit 12 is the USASCII-8 mode bit.
+func decode360(x uint64) PSW {
+	p, _ := decode370(x &^ (1 << 51))
+	p.BC, p.S360 = true, true
+	p.ASCII = x&(1<<51) != 0
+	p.SysMask = byte(x >> 56)
+	p.IO = p.SysMask&0xfe != 0
+	p.Ext = p.SysMask&0x01 != 0
+	return p
+}
+
 // decodePSW decodes a PSW in the machine's architecture.
 func (c *CPU) decodePSW(x uint64) (PSW, bool) {
+	if c.M.S360 {
+		return decode360(x), true
+	}
 	if c.M.S370 {
 		return decode370(x)
 	}
@@ -231,7 +246,11 @@ func (c *CPU) ssk370(r1, r2 int) {
 		c.program(pgmSpecification)
 	}
 	abs := c.realAbs(a, accFetch)
-	*c.S.key(abs) = byte(c.GR[r1]) & 0xfe
+	mask := byte(0xfe)
+	if c.M.cfg.IOCE {
+		mask = 0xf0 // The standalone IOCE preprocessor has four-bit keys (D10450).
+	}
+	*c.S.key(abs) = byte(c.GR[r1]) & mask
 }
 
 func (c *CPU) isk370(r1, r2 int) {
@@ -244,6 +263,9 @@ func (c *CPU) isk370(r1, r2 int) {
 	mask := byte(0xfe)
 	if c.PSW.BC {
 		mask = 0xf8
+	}
+	if c.M.cfg.IOCE {
+		mask = 0xf0
 	}
 	c.GR[r1] = c.GR[r1]&^0xff | uint32(k&mask)
 }
@@ -274,16 +296,6 @@ func (c *CPU) storeCSW(x *Subchannel) {
 	c.setLowDouble(0x40, x.csw())
 }
 
-// accept370 clears status the program has received and presents an
-// attention held while it was pending.
-func (s *ChannelSubsystem) accept370(x *Subchannel) {
-	x.pending, x.irq = false, false
-	if x.attnHold {
-		x.attnHold = false
-		s.Unsolicited(x.devno, usAttention)
-	}
-}
-
 // channelEnabled reports whether I/O interruptions from a channel are
 // enabled by the PSW and, in EC mode, control register 2.
 func (c *CPU) channelEnabled(ch uint16) bool {
@@ -299,6 +311,9 @@ func (c *CPU) channelEnabled(ch uint16) bool {
 // takeIO370 takes a pending I/O interruption: the CSW is stored and the
 // device address identifies the source.
 func (c *CPU) takeIO370() bool {
+	if c.ioDelay > 0 {
+		return false
+	}
 	for _, x := range c.M.CSS.subs {
 		if x.pciIRQ && c.channelEnabled(x.devno>>8) {
 			// Program-controlled interruption: the channel program is
@@ -332,92 +347,6 @@ func (c *CPU) takeIO370() bool {
 		return true
 	}
 	return false
-}
-
-// io370 executes START I/O, TEST I/O, HALT I/O and TEST CHANNEL.
-func (c *CPU) io370(op []byte, a uint32) {
-	c.privileged()
-	devno := uint16(a)
-	css := c.M.CSS
-	if op[0] == 0x9f { // TCH
-		ch := devno >> 8
-		c.PSW.CC = 3
-		for _, x := range css.subs {
-			if x.devno>>8 == ch {
-				if c.PSW.CC == 3 {
-					c.PSW.CC = 0
-				}
-				if x.pending {
-					c.PSW.CC = 1
-				}
-			}
-		}
-		return
-	}
-	x := css.bydev[devno]
-	if x == nil {
-		c.PSW.CC = 3
-		return
-	}
-	if x.blocked {
-		switch op[0] {
-		case 0x9e: // HIO: terminate the waiting operation
-			x.blocked = false
-			x.devStatus, x.schStatus = usCE|usDE, 0
-			x.ccwaddr = x.blockAddr + 8
-			c.storeCSW(x)
-			c.PSW.CC = 1
-		default:
-			c.PSW.CC = 2 // busy
-		}
-		return
-	}
-	switch op[0] {
-	case 0x9c: // SIO, SIOF
-		if x.pending {
-			c.storeCSW(x)
-			c.setLowByte(0x44, x.devStatus|usBusy)
-			css.accept370(x)
-			c.PSW.CC = 1
-			return
-		}
-		caw := c.lowWord(0x48)
-		x.key = byte(caw >> 28)
-		x.ccwaddr, x.devStatus, x.schStatus, x.residual = 0, 0, 0, 0
-		if caw&0x0f000007 != 0 {
-			x.schStatus = scsProgramCheck
-			c.storeCSW(x)
-			c.PSW.CC = 1
-			return
-		}
-		if ce, ok := x.dev.(ChainEnd); ok {
-			ce.StartChain()
-		}
-		css.trace = css.trace[:0]
-		css.run(x, caw&0x00fffff8, false, 0, x.key)
-		c.PSW.CC = 0
-		if x.blocked {
-			return // continues when the device or program is ready
-		}
-		if ce, ok := x.dev.(ChainEnd); ok {
-			ce.EndChain()
-		}
-		if c.M.TraceIO {
-			c.M.event("io", c, fmt.Sprintf("SIO %04X caw %08X cmds %s -> dev %02X ch %02X ccw %06X resid %d", devno, caw, css.traceString(), x.devStatus, x.schStatus, x.ccwaddr, x.residual))
-		}
-		x.pending, x.irq = true, true
-		c.PSW.CC = 0
-	case 0x9d: // TIO, CLRIO
-		if x.pending {
-			c.storeCSW(x)
-			css.accept370(x)
-			c.PSW.CC = 1
-			return
-		}
-		c.PSW.CC = 0
-	case 0x9e: // HIO, HDV
-		c.PSW.CC = 0
-	}
 }
 
 // stidc is STORE CHANNEL ID: channel 0 is a byte multiplexer, others are

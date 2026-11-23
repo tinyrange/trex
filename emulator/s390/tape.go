@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"time"
 
 	"github.com/tinyrange/trex/archive/simh"
 	"github.com/tinyrange/trex/auto/adapter"
@@ -15,10 +16,48 @@ import (
 // image is indexed when mounted; written blocks replace the tape from the
 // current position in memory, and the image is never modified.
 type Tape3420 struct {
-	blocks   []tapeBlock
-	pos      int // index of the next block
-	unloaded bool
-	sense    [24]byte
+	blocks        []tapeBlock
+	pos           int // index of the next block
+	unloaded      bool
+	sense         [24]byte
+	pastLoadPoint bool  // the 2401 can move past the load point before block 0
+	lastCommand   byte  // used by the 2803 while tape motion holds the control unit
+	sevenTrack    bool  // a 2401 with a seven-track head
+	sevenMode     byte  // 2803 density, redundancy and conversion mode
+	noConverter   bool  // the optional seven-track data converter is absent
+	reelEOT       int64 // 2401 reflective marker measured in 800-bpi frames; 0 means unspecified
+	reelPosition  int64
+	tapeIndicate  bool
+
+	chanT, devT time.Duration // timing of the last command (CommandTiming)
+}
+
+// Drive timing, of the order of a 3420 Model 8: 6250 bpi at 200 in/s, and
+// start/stop plus inter-block gap time. Sense moves 24 bytes.
+const (
+	tapeByte    = 800 * time.Nanosecond
+	tapeStart   = time.Millisecond
+	tapeControl = 20 * time.Microsecond
+)
+
+// CommandTiming implements Timed. Reads and writes hold the channel until
+// the block has passed (channel end and device end together). Motion and
+// tape-mark commands present channel end in the initial status and device
+// end when the motion is complete. Mode sets, no-operation and commands
+// rejected at initiation are immediate.
+func (t *Tape3420) CommandTiming(cmd byte, n int) (time.Duration, time.Duration) {
+	return t.chanT, t.devT
+}
+
+// motion sets the timing of a motion command over n bytes of tape.
+func (t *Tape3420) motion(n int) { t.chanT, t.devT = 0, tapeStart+time.Duration(n)*tapeByte }
+
+// transfer sets the timing of a data transfer of n bytes.
+func (t *Tape3420) transfer(n int) { t.chanT, t.devT = tapeStart+time.Duration(n)*tapeByte, 0 }
+
+func (t *Tape3420) writeRecord(data []byte) {
+	t.blocks = append(t.blocks[:t.pos], tapeBlock{data: slices.Clone(data), n: len(data)})
+	t.pos++
 }
 
 // tapeBlock is a data block or (data == nil, mark) a tape mark.
@@ -27,10 +66,12 @@ type tapeBlock struct {
 	off          int64
 	n            int
 	data         []byte // written blocks
+	density      int    // recorded frames per inch on a seven-track write
 	mark         bool
 	bad          bool // recovered SIMH record with a recorded data error
 	framingError string
 	fragmented   []tapeFragment
+	reelEnd      int64 // physical position following this block and its gap
 }
 
 type tapeFragment struct {
@@ -149,7 +190,9 @@ func (t *Tape3420) status() {
 
 func (t *Tape3420) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte) {
 	ok := byte(usCE | usDE)
+	t.chanT, t.devT = 0, 0
 	if cmd == 0x04 { // sense
+		t.chanT = tapeControl
 		t.status()
 		s := t.sense
 		t.sense = [24]byte{}
@@ -177,12 +220,14 @@ func (t *Tape3420) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 			b = &t.blocks[t.pos]
 			t.pos++
 		}
+		t.transfer(b.n)
 		if b.mark {
 			return nil, 0, ok | usUnitExcept
 		}
 		p, err := b.bytes()
 		if err != nil {
-			return t.check(senseDataCheck, 0)
+			_, _, status := t.check(senseDataCheck, 0)
+			return nil, 0, status
 		}
 		if cmd == 0x0c {
 			// Return bytes in transfer order. The channel decrements the storage
@@ -196,25 +241,29 @@ func (t *Tape3420) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 		}
 		return p, 0, ok
 	case 0x01: // write
-		t.blocks = append(t.blocks[:t.pos], tapeBlock{data: append([]byte(nil), data...)})
-		t.pos++
+		t.writeRecord(data)
+		t.transfer(len(data))
 		return nil, len(data), ok
 	case 0x1f: // write tape mark
 		t.blocks = append(t.blocks[:t.pos], tapeBlock{mark: true})
 		t.pos++
+		t.motion(0)
 		return nil, 0, ok
 	case 0x07: // rewind
 		t.pos = 0
+		t.motion(0)
 		return nil, 0, ok
 	case 0x0f: // rewind and unload
 		t.pos = 0
 		t.unloaded = true
+		t.motion(0)
 		return nil, 0, ok
 	case 0x37: // forward space block
 		if t.pos >= len(t.blocks) {
 			return t.check(0, 0x20)
 		}
 		t.pos++
+		t.motion(t.blocks[t.pos-1].n)
 		if t.blocks[t.pos-1].mark {
 			return nil, 0, ok | usUnitExcept
 		}
@@ -224,27 +273,35 @@ func (t *Tape3420) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 			return t.check(0, 0)
 		}
 		t.pos--
+		t.motion(t.blocks[t.pos].n)
 		if t.blocks[t.pos].mark {
 			return nil, 0, ok | usUnitExcept
 		}
 		return nil, 0, ok
 	case 0x3f: // forward space file
+		n := 0
 		for t.pos < len(t.blocks) {
 			t.pos++
+			n += t.blocks[t.pos-1].n
 			if t.blocks[t.pos-1].mark {
+				t.motion(n)
 				return nil, 0, ok
 			}
 		}
 		return t.check(0, 0x20)
 	case 0x2f: // backspace file
+		n := 0
 		for t.pos > 0 {
 			t.pos--
+			n += t.blocks[t.pos].n
 			if t.blocks[t.pos].mark {
-				return nil, 0, ok
+				break
 			}
 		}
+		t.motion(n)
 		return nil, 0, ok
 	case 0x17: // erase gap
+		t.motion(0)
 		return nil, 0, ok
 	case 0x0b, 0x13, 0x1b, 0x23, 0x2b, 0x33, 0x3b, 0x43, 0x4b, 0x53, 0x5b, 0x63, 0x6b, 0x73, 0x7b,
 		0x93, 0x9b, 0xa3, 0xab, 0xb3, 0xbb, 0xc3, 0xcb, 0xd3, 0xdb, 0xe3, 0xeb, 0xf3, 0xfb: // mode set

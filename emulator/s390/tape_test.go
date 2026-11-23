@@ -16,6 +16,64 @@ func simhRecord(class byte, data string) []byte {
 	return binary.LittleEndian.AppendUint32(p, w)
 }
 
+func Test2401SevenTrackFrames(t *testing.T) {
+	tape := &Tape2401{Tape3420: &Tape3420{sevenTrack: true}}
+	tape.Reset()
+	data := []byte{0xde, 0xad, 0xbe}
+	tape.writeRecord(data)
+	if frames, err := tape.blocks[0].bytes(); err != nil || !bytes.Equal(frames, []byte{0x37, 0x2a, 0x76, 0x3e}) {
+		t.Fatalf("converted physical frames % X, %v", frames, err)
+	}
+	tape.Exec(0x07, nil, false)
+	if out, _, st := tape.Exec(0x02, nil, false); st != usCE|usDE || !bytes.Equal(out, data) {
+		t.Fatalf("converted read % X status %02X", out, st)
+	}
+	tape.Exec(0x07, nil, false)
+	tape.Exec(0xa3, nil, false) // 800 bpi, even redundancy, translator off
+	if _, _, st := tape.Exec(0x02, nil, false); st != usCE|usDE|usUnitCheck {
+		t.Fatalf("wrong redundancy status %02X", st)
+	}
+	if sense, _, _ := tape.Exec(0x04, nil, false); !bytes.Equal(sense, []byte{0x08, 0x50, 0x03, 0x80, 0, 0}) {
+		t.Fatalf("parity check sense % X", sense)
+	}
+	tape.Exec(0x07, nil, false)
+	tape.Exec(0xab, nil, false) // 800 bpi, even redundancy, translator on
+	text := EncodeEBCDIC(" 0A")
+	tape.writeRecord(text)
+	if frames, err := tape.blocks[0].bytes(); err != nil || !bytes.Equal(frames, []byte{0x50, 0x0a, 0x71}) {
+		t.Fatalf("translated physical frames % X, %v", frames, err)
+	}
+	tape.Exec(0x07, nil, false)
+	if out, _, st := tape.Exec(0x02, nil, false); st != usCE|usDE || !bytes.Equal(out, text) {
+		t.Fatalf("translated read % X status %02X", out, st)
+	}
+}
+
+func Test2401ReflectiveEndOfTape(t *testing.T) {
+	tape := &Tape2401{Tape3420: &Tape3420{}}
+	tape.setReelEOT(1)
+	data := bytes.Repeat([]byte{0x12}, 160)
+	if got := tape.finishWrite(data); got != 0 {
+		t.Fatalf("write before marker: %02X", got)
+	}
+	if got := tape.finishWrite(data); got != usUnitExcept {
+		t.Fatalf("write across marker: %02X", got)
+	}
+	if sense, _, _ := tape.Exec(0x04, nil, false); sense[1] != 0x44 {
+		t.Fatalf("sense after crossing marker: %X", sense)
+	}
+	tape.Exec(0x27, nil, false)
+	if sense, _, _ := tape.Exec(0x04, nil, false); sense[1] != 0x40 {
+		t.Fatalf("sense after backspacing: %X", sense)
+	}
+	if out, _, status := tape.Exec(0x02, nil, false); status != usCE|usDE || !bytes.Equal(out, data) {
+		t.Fatalf("read across marker: status %02X, %d bytes", status, len(out))
+	}
+	if sense, _, _ := tape.Exec(0x04, nil, false); sense[1] != 0x44 {
+		t.Fatalf("sense after reading past the marker: %X", sense)
+	}
+}
+
 func TestSIMHTapePositionAndErrors(t *testing.T) {
 	img := simhRecord(14, "metadata")
 	img = append(img, simhRecord(0, "ABC")...)
@@ -103,15 +161,18 @@ func TestTapeReadBackwardChannel(t *testing.T) {
 			for i, a := range tc.idaws {
 				be.PutUint32(m.S.Mem[0x3000+4*i:], a)
 			}
-			m.CSS.run(x, 0x3100, false, 0, 0)
+			runNow(m, x, 0x3100, 0)
 			if x.schStatus != tc.status {
 				t.Fatalf("status=%02x want=%02x", x.schStatus, tc.status)
 			}
 			if tc.status == 0 && (x.residual != 0 || x.devStatus != usCE|usDE || tp.pos != 0) {
 				t.Fatalf("residual=%d device=%02x position=%d", x.residual, x.devStatus, tp.pos)
 			}
-			if tc.status != 0 && tp.pos != 1 {
-				t.Fatal("invalid CCW moved the tape")
+			// An invalid data address is found when the data is transferred:
+			// the drive has accepted the command, the block passes, and the
+			// drive's ending status accompanies the program check.
+			if tc.status != 0 && (tp.pos != 0 || x.devStatus != usCE|usDE || x.residual != tc.count) {
+				t.Fatalf("checked transfer: position=%d device=%02x residual=%d", tp.pos, x.devStatus, x.residual)
 			}
 			for a, want := range tc.want {
 				if got := string(m.S.Mem[a : a+uint32(len(want))]); got != want {
@@ -132,7 +193,7 @@ func TestReadBackwardDataChainAndProtection(t *testing.T) {
 	// Discard the last three bytes; transfer the remaining seven backwards.
 	copy(m.S.Mem[0x3100:], []byte{0x0c, 0, 0, 1, ccwCD | ccwSkip | ccwIDA, 0, 0, 3,
 		0, 0, 0x33, 6, ccwSLI, 0, 0, 20})
-	m.CSS.run(x, 0x3100, false, 0, 0)
+	runNow(m, x, 0x3100, 0)
 	if got := string(m.S.Mem[0x3300:0x3307]); got != "0123456" || x.residual != 13 || x.ccwaddr != 0x3110 || x.schStatus != 0 {
 		t.Fatalf("data=%q residual=%d ccw=%x status=%x", got, x.residual, x.ccwaddr, x.schStatus)
 	}
@@ -145,11 +206,21 @@ func TestReadBackwardDataChainAndProtection(t *testing.T) {
 	copy(m.S.Mem[0x3100:], []byte{0x0c, 0, 0x38, 2, 0, 0, 0, 10})
 	*m.S.key(0x3800) = 0x10
 	*m.S.key(0x37ff) = 0x20
-	m.CSS.run(x, 0x3100, false, 0, 1)
+	runNow(m, x, 0x3100, 1)
 	if x.schStatus != scsProtection || string(m.S.Mem[0x3800:0x3803]) != "789" || m.S.Mem[0x37ff] != 0 {
 		t.Fatalf("protection=%x data=%x", x.schStatus, m.S.Mem[0x37ff:0x3803])
 	}
 	if *m.S.key(0x3800)&(keyRef|keyChg) != keyRef|keyChg || *m.S.key(0x37ff) != 0x20 {
 		t.Fatal("incorrect storage reference/change bits")
+	}
+}
+
+// runNow executes a channel program, advancing the clock through its timed
+// transfers.
+func runNow(m *Machine, x *Subchannel, addr uint32, key byte) {
+	m.CSS.run(x, addr, false, 0, key)
+	for m.CSS.next != 0 {
+		m.tod = m.CSS.next
+		m.CSS.tick370()
 	}
 }

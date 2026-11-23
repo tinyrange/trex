@@ -7,10 +7,19 @@ func (c *CPU) ssCharacter() {
 	a1 := c.eaBD(op[2], op[3])
 	a2 := c.eaBD(op[4], op[5])
 	b1, b2 := int(op[2]>>4), int(op[4]>>4)
+	// The IOCE preprocessor terminates variable-length operations at the
+	// protected byte, keeping any earlier stores (9020A section 6-47).
+	if !c.M.cfg.IOCE {
+		switch op[0] {
+		case 0xd1, 0xd2, 0xd3, 0xd4, 0xd6, 0xd7:
+			c.checkFetch(a2, l, b2)
+			c.checkStore(a1, l, b1)
+		case 0xdc:
+			c.checkStore(a1, l, b1)
+		}
+	}
 	switch op[0] {
 	case 0xd2: // MVC
-		c.checkFetch(a2, l, b2)
-		c.checkStore(a1, l, b1)
 		if d := c.span(a1, l, accStore, b1); d != nil {
 			if s := c.span(a2, l, accFetch, b2); s != nil {
 				if !overlapsForward(a1, a2, l) {
@@ -31,16 +40,12 @@ func (c *CPU) ssCharacter() {
 		if op[0] == 0xd3 {
 			mask = 0xf0
 		}
-		c.checkFetch(a2, l, b2)
-		c.checkStore(a1, l, b1)
 		for i := uint32(0); i < l; i++ {
 			x := c.fetchByte(a2+i, b2)
 			y := c.fetchByte(a1+i, b1)
 			c.storeByte(a1+i, b1, y&^mask|x&mask)
 		}
 	case 0xd4, 0xd6, 0xd7: // NC, OC, XC
-		c.checkFetch(a2, l, b2)
-		c.checkStore(a1, l, b1)
 		var nz byte
 		if op[0] == 0xd7 && a1 == a2 && b1 == b2 {
 			if d := c.span(a1, l, accStore, b1); d != nil {
@@ -100,7 +105,6 @@ func (c *CPU) ssCharacter() {
 		}
 		c.PSW.CC = 0
 	case 0xdc: // TR
-		c.checkStore(a1, l, b1)
 		for i := uint32(0); i < l; i++ {
 			x := c.fetchByte(a1+i, b1)
 			c.storeByte(a1+i, b1, c.fetchByte(a2+uint32(x), b2))
@@ -152,12 +156,28 @@ func overlapsForward(dst, src, n uint32) bool {
 	return dst > src && dst < src+n
 }
 
-// edit implements ED and EDMK.
+// edit implements ED and EDMK. Source bytes are fetched an aligned
+// doubleword at a time, ahead of the result stores; with overlapping
+// operands, whose results the architecture leaves unpredictable, an edit
+// therefore uses the source bytes as they were when fetched.
 func (c *CPU) edit(l uint32, a1 uint32, b1 int, a2 uint32, b2 int, mark bool) {
 	c.checkStore(a1, l, b1)
 	fill := c.fetchByte(a1, b1)
 	sig, nonzero := false, false
 	src := a2
+	var buf [8]byte
+	bufAt := ^uint32(0) // address of buf[0]; none fetched yet
+	next := func() byte {
+		if src&^7 != bufAt {
+			bufAt = src &^ 7
+			for a := src; a < bufAt+8; a++ {
+				buf[a-bufAt] = c.fetchByte(a&c.amask, b2)
+			}
+		}
+		x := buf[src-bufAt]
+		src = (src + 1) & c.amask
+		return x
+	}
 	var cur byte
 	right := false // the right digit of cur is the next digit
 	for i := uint32(0); i < l; i++ {
@@ -170,8 +190,7 @@ func (c *CPU) edit(l uint32, a1 uint32, b1 int, a2 uint32, b2 int, mark bool) {
 				digit = cur & 0xf
 				right = false
 			} else {
-				cur = c.fetchByte(src, b2)
-				src = (src + 1) & c.amask
+				cur = next()
 				digit = cur >> 4
 				if digit > 9 {
 					c.program(pgmData)
@@ -185,7 +204,7 @@ func (c *CPU) edit(l uint32, a1 uint32, b1 int, a2 uint32, b2 int, mark bool) {
 				nonzero = true
 			}
 			if sig || digit != 0 {
-				res = 0xf0 | digit
+				res = c.decimalZone()<<4 | digit
 				if !sig && mark {
 					c.setMark(a1 + i)
 				}

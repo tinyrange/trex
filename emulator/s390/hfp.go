@@ -120,6 +120,11 @@ func (c *CPU) hfpFinish(h hfp, sigCheck bool) (hfp, uint16) {
 	}
 	if h.exp < 0 {
 		if c.PSW.ProgMask&2 != 0 {
+			if c.M.cfg.IOCE {
+				// The 9020 preprocessor completes underflow with true
+				// zero even when it takes the interruption (D106D1).
+				return hfp{frac: new(big.Int), n: h.n}, pgmHFPUnderflow
+			}
 			h.exp += 128
 			return h, pgmHFPUnderflow
 		}

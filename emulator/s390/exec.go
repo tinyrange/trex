@@ -194,6 +194,48 @@ func (c *CPU) unknown() {
 // execute runs one decoded instruction held in c.op.
 func (c *CPU) execute() {
 	op := c.op[:]
+	if c.M.S360 && !s360Ops[op[0]] {
+		if c.M.Model9020 && !c.M.cfg.IOCE {
+			switch op[0] {
+			case 0x0b: // DLY, A27-2734-2 §8.4.5.1
+				if op[1] != 0 {
+					c.maintenance9020.delayUntil = c.M.tod + uint64(op[1])*256*todMicro
+				}
+				return
+			case 0x0c: // LI
+				c.GR[op[1]>>4] = uint32(c.Addr)
+				return
+			case 0x0d: // SATR
+				c.setATR9020(int(op[1]>>4), int(op[1]&0xf))
+				return
+			case 0x0e: // IATR
+				atr := c.atr9020()
+				c.GR[op[1]&0xf] = uint32(atr&0xff) << 24
+				c.GR[op[1]>>4] = uint32(atr >> 8)
+				return
+			case 0x84: // WRD
+				c.writeDirect9020(op[1], c.eaBD(op[2], op[3]))
+				return
+			case 0xa0: // SPSB
+				c.privileged()
+				physical := c.Prefix/bytesPer9020SE + 1
+				c.storeWord(c.eaBD(op[2], op[3]), int(op[2]>>4), c.maintenance9020.psb|physical)
+				return
+			case 0xa1: // LPSB
+				c.privileged()
+				logical := c.fetchWord(c.eaBD(op[2], op[3]), int(op[2]>>4)) & 0x00fff000
+				physical := c.translate9020(logical)
+				if !c.S.valid(physical, 4096) {
+					c.program(pgmSpecification)
+				}
+				c.maintenance9020.psb, c.Prefix = logical, physical
+				c.purgeTLB()
+				c.ipageValid = false
+				return
+			}
+		}
+		c.program(pgmOperation)
+	}
 	switch op[0] {
 	// ---- RR ----
 	case 0x01:
@@ -396,7 +438,11 @@ func (c *CPU) execute() {
 		c.branch(t)
 	case 0x4e: // CVD
 		a := c.eaRX(op)
-		c.storeDouble(a, int(op[2]>>4), cvd(int32(c.GR[op[1]>>4])))
+		v := cvd(int32(c.GR[op[1]>>4]))
+		if c.PSW.ASCII {
+			v = v&^0xf | uint64(c.decimalSign(v&0xf == 0xd))
+		}
+		c.storeDouble(a, int(op[2]>>4), v)
 	case 0x4f: // CVB
 		c.GR[op[1]>>4] = c.cvb(c.fetchDouble(c.eaRX(op), int(op[2]>>4)))
 	case 0x50:
@@ -459,7 +505,13 @@ func (c *CPU) execute() {
 		if x&0xb8 != 0 && !c.PSW.BC {
 			c.program(pgmSpecification)
 		}
+		old := c.PSW.SysMask
 		c.setSystemMask(x)
+		if c.M.Model9020 && x&^old&0xfe != 0 {
+			// The 9020 recognizes an I/O interruption that SSM enables
+			// only after the following instruction.
+			c.ioDelay = 2
+		}
 	case 0x82: // LPSW
 		c.privileged()
 		a := c.eaBD(op[2], op[3])
@@ -475,7 +527,7 @@ func (c *CPU) execute() {
 		c.pswChanged = true
 	case 0x83: // DIAGNOSE
 		c.privileged()
-		c.diagnose(int(op[1]>>4), int(op[1]&0xf), c.eaBD(op[2], op[3]))
+		c.diagnose(c.eaBD(op[2], op[3]), int(op[2]>>4))
 	case 0x84, 0x85: // BRXH, BRXLE
 		r1, r3 := int(op[1]>>4), int(op[1]&0xf)
 		i := int32(int16(be.Uint16(op[2:])))
@@ -861,6 +913,7 @@ func (c *CPU) divide(r1 int, d uint32) {
 }
 
 func (c *CPU) stm(r1, r3 int, a uint32, b int) {
+	c.checkAlignment360(a, 4)
 	n := uint32((r3-r1)&15) + 1
 	c.checkStore(a, n*4, b)
 	if p := c.span(a, n*4, accStore, b); p != nil {
@@ -879,6 +932,7 @@ func (c *CPU) stm(r1, r3 int, a uint32, b int) {
 }
 
 func (c *CPU) lm(r1, r3 int, a uint32, b int) {
+	c.checkAlignment360(a, 4)
 	n := uint32((r3-r1)&15) + 1
 	if p := c.span(a, n*4, accFetch, b); p != nil {
 		for i, r := uint32(0), r1; i < n; i, r = i+1, (r+1)&15 {
