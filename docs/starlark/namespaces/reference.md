@@ -5076,11 +5076,17 @@ Creates a sequential byte reader at the selected offset. Scalar reads and bytes(
 
 Decodes a hex, Base64 or unpadded URL-safe Base64 string into bytes. This is the inverse of binary.hex/base64, not a character-set decoder; use binary.text for text.
 
+### `binary.elf_structs`
+
+`binary.elf_structs(file, names)`
+
+Reads named DWARF structure tags from a portable ELF64 file. Returns a dictionary keyed by the requested names with each structure's size and a fields record of constant byte offsets. Missing definitions and conflicting layouts fail. The request accepts 1 to 64 names.
+
 ### `binary.elf_symbols`
 
 `binary.elf_symbols(file, maximum_symbols=1000000, maximum_string_bytes=16MiB, maximum_relocations=0)`
 
-Reads bounded ELF64 static/dynamic symbols and load segments from a portable file, in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), and segments (address, offset, file_size, memory_size, flags). A positive maximum_relocations reads allocated x86-64 ELF64 dynamic RELA entries and returns their address, type, symbol name, and signed addend in relocations. Zero leaves relocations empty. All addresses are ELF values. The caller supplies the load bias and resolves and applies relocations.
+Reads bounded ELF64 static and dynamic symbols and program headers from a portable file in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), load segments and an optional tls segment. Segment records contain address, offset, file_size, memory_size, flags and alignment. A positive maximum_relocations decodes allocated x86-64 dynamic RELA and RELR entries into records with address, type, symbol, signed addend and implicit_addend. For RELR, read the addend at the relocation address. Zero leaves relocations empty. The caller supplies the load bias and resolves and applies relocations.
 
 ### `binary.encode`
 
@@ -5792,9 +5798,9 @@ Creates an in-process 64-bit big-endian Power ISA partition in guest (supervisor
 
 ### `emulator.processor`
 
-`emulator.processor(architecture='arm64', memory=64MiB) -> processor`
+`emulator.processor(architecture='arm64', memory=64MiB, linux_brk=0) -> processor`
 
-Creates a portable in-process ARM64 or AMD64 instruction context independently of executable formats and OS APIs. map(address,size,data=None,access=rw) copies bounded bytes/files into owned sparse memory; read/write, get_register/set_register and plugin expose explicit experiment state. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps and PC for breakpoint, halt, budget or fault. ARM64 uses the existing baseline ARMv8-A processor without optional PAuth. No code is implicitly loaded or executed. close() releases the context.
+Creates a portable in-process ARM64 or AMD64 instruction context. map(address,size,data=None,access=rw) copies bounded bytes or files into owned sparse memory. read/write, get_register/set_register and plugin expose explicit state. A positive page-aligned linux_brk enables Linux/amd64 userspace syscall handling, with empty stdin and bounded stdout and stderr byte fields. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps, pc and exit_status. An exited Linux task stays stopped. ARM64 uses the baseline ARMv8-A processor. The caller supplies the initial code, memory and registers. close() releases the context.
 
 ### `emulator.s390`
 

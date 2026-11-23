@@ -51,7 +51,6 @@ type process struct {
 	cfg                      Config
 	cpu                      amd64.CPU
 	memory                   *cpu.AddressSpace
-	used                     uint64
 	nextMap, brk, initialBrk uint64
 	closed                   [3]bool
 }
@@ -61,7 +60,7 @@ const userLimit = uint64(1) << 47
 
 func align(value uint64) uint64 { return (value + pageSize - 1) &^ (pageSize - 1) }
 func (p *process) mapMemory(address, size uint64, data []byte, access cpu.Access) error {
-	if size == 0 || address >= userLimit || size > userLimit-address || size > p.cfg.MaxMemory-p.used {
+	if size == 0 || address >= userLimit || size > userLimit-address || size > p.memory.Remaining() {
 		return fmt.Errorf("linux: invalid mapping or memory budget exceeded")
 	}
 	if len(data) != 0 && uint64(len(data)) != size {
@@ -73,11 +72,10 @@ func (p *process) mapMemory(address, size uint64, data []byte, access cpu.Access
 	if err := p.memory.Map(address, data, access); err != nil {
 		return err
 	}
-	p.used += size
 	return nil
 }
 
-func Run(ctx context.Context, image storage.Reader, cfg Config) (Result, error) {
+func normalizeConfig(cfg Config) (Config, error) {
 	if cfg.MaxInstructions == 0 {
 		cfg.MaxInstructions = 10000000
 	}
@@ -85,7 +83,7 @@ func Run(ctx context.Context, image storage.Reader, cfg Config) (Result, error) 
 		cfg.MaxMemory = 128 << 20
 	}
 	if cfg.MaxMemory > 1<<30 {
-		return Result{}, fmt.Errorf("linux: memory budget exceeds 1 GiB")
+		return Config{}, fmt.Errorf("linux: memory budget exceeds 1 GiB")
 	}
 	if cfg.Stdin == nil {
 		cfg.Stdin = strings.NewReader("")
@@ -100,15 +98,31 @@ func Run(ctx context.Context, image storage.Reader, cfg Config) (Result, error) 
 		cfg.Dir = "/"
 	}
 	if !path.IsAbs(cfg.Dir) {
-		return Result{}, fmt.Errorf("linux: working directory must be absolute")
+		return Config{}, fmt.Errorf("linux: working directory must be absolute")
 	}
-	p := &process{files: make(map[uint64]*descriptor), cfg: cfg, memory: cpu.NewAddressSpace(cfg.MaxMemory), nextMap: 0x100000000}
+	return cfg, nil
+}
+
+func newProcess(cfg Config, memory *cpu.AddressSpace) (*process, error) {
+	p := &process{files: make(map[uint64]*descriptor), cfg: cfg, memory: memory, nextMap: 0x100000000}
 	p.umask = 0022
 	if cfg.Umask != nil {
 		if *cfg.Umask&^0777 != 0 {
-			return Result{}, fmt.Errorf("linux: invalid creation mask")
+			return nil, fmt.Errorf("linux: invalid creation mask")
 		}
 		p.umask = *cfg.Umask
+	}
+	return p, nil
+}
+
+func Run(ctx context.Context, image storage.Reader, cfg Config) (Result, error) {
+	cfg, err := normalizeConfig(cfg)
+	if err != nil {
+		return Result{}, err
+	}
+	p, err := newProcess(cfg, cpu.NewAddressSpace(cfg.MaxMemory))
+	if err != nil {
+		return Result{}, err
 	}
 	defer p.closeFiles()
 	if err := p.load(image); err != nil {
@@ -121,31 +135,15 @@ func Run(ctx context.Context, image storage.Reader, cfg Config) (Result, error) 
 		}
 		result.PC = p.cpu.PC()
 		result.Instructions++
-		var opcode [2]byte
-		if err := p.memory.ReadMemory(result.PC, opcode[:1], cpu.Execute); err != nil {
+		handled, exited, status, err := p.handleSyscall()
+		if err != nil {
 			return result, err
 		}
-		syscall := false
-		if opcode[0] == 0x0f {
-			if err := p.memory.ReadMemory(result.PC+1, opcode[1:], cpu.Execute); err != nil {
-				return result, err
-			}
-			syscall = opcode[1] == 0x05
+		if exited {
+			result.Status = status
+			return result, nil
 		}
-		if syscall {
-			// SYSCALL clobbers RCX/R11; the Linux return path resumes at the next PC.
-			p.cpu.SetRegister("rcx", result.PC+2)
-			flags, _ := p.cpu.Register("rflags")
-			p.cpu.SetRegister("r11", flags)
-			p.cpu.SetPC(result.PC + 2)
-			status, exited, err := p.syscall()
-			if err != nil {
-				return result, err
-			}
-			if exited {
-				result.Status = status
-				return result, nil
-			}
+		if handled {
 			continue
 		}
 		effect, err := p.cpu.Step(p.memory)
@@ -222,24 +220,39 @@ func (p *process) syscall() (int, bool, error) {
 			p.errno(22)
 			break
 		}
-		if d != 0x22 || e != ^uint64(0) || f != 0 {
+		if (d != 0x22 && d != 0x32) || e != ^uint64(0) || f != 0 {
 			return 0, false, &SyscallError{number, p.cpu.PC() - 2}
+		}
+		size := align(b)
+		access := cpu.Access(c)
+		if d == 0x32 {
+			if a&(pageSize-1) != 0 || a >= userLimit || size > userLimit-a {
+				p.errno(22)
+			} else if err := p.memory.MapFixed(a, make([]byte, int(size)), access); err != nil {
+				p.errno(12)
+			} else {
+				p.ret(a)
+			}
+			break
 		}
 		if a != 0 {
 			return 0, false, fmt.Errorf("linux: mmap address hints not implemented")
 		}
-		size := align(b)
 		address := p.nextMap
-		access := cpu.Access(c)
-		if access == 0 {
-			return 0, false, fmt.Errorf("linux: PROT_NONE mmap not implemented")
-		}
 		if err := p.mapMemory(address, size, nil, access); err != nil {
 			p.errno(12)
 			break
 		}
 		p.nextMap += size + pageSize
 		p.ret(address)
+	case 11: // munmap accepts holes in the page range.
+		if a&(pageSize-1) != 0 || a >= userLimit || b == 0 || b > userLimit-a || align(b) > userLimit-a {
+			p.errno(22)
+		} else if err := p.memory.UnmapRange(a, int(align(b))); err != nil {
+			p.errno(22)
+		} else {
+			p.ret(0)
+		}
 	case 10:
 		if a&(pageSize-1) != 0 || b == 0 || b > p.cfg.MaxMemory || c&^uint64(7) != 0 {
 			p.errno(22)

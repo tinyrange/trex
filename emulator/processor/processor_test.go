@@ -54,3 +54,28 @@ func TestProcessorRejectsPermissionsAndBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestConstructedLinuxProcessorWritesAndExits(t *testing.T) {
+	_, err := starlark.ExecFile(&starlark.Thread{}, "linux.star", `
+def test():
+    p = processor(architecture="amd64", linux_brk=0x60000000)
+    # write(1, 0x2000, 4); exit(7)
+    p.map(0x1000, 4096, data=b"\xb8\x01\x00\x00\x00\xbf\x01\x00\x00\x00\xbe\x00\x20\x00\x00\xba\x04\x00\x00\x00\x0f\x05\xbf\x07\x00\x00\x00\xb8\x3c\x00\x00\x00\x0f\x05", access="rx")
+    p.map(0x2000, 4096, data=b"test", access="r")
+    p.set_register("rip", 0x1000)
+    r = p.run(1, stop_at=[0x1000])
+    if r.reason != "breakpoint" or r.steps != 0 or r.exit_status != None or p.stdout:
+        fail(r)
+    r = p.run(8)
+    if r.reason != "exit" or r.exit_status != 7 or r.steps != 8 or p.stdout != b"test" or p.stderr:
+        fail(r)
+    r = p.run(8)
+    if r.reason != "exit" or r.exit_status != 7 or r.steps != 0 or p.stdout != b"test":
+        fail(r)
+    p.close()
+test()
+`, starlark.StringDict{"processor": starlark.NewBuiltin("processor", Builtin)})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

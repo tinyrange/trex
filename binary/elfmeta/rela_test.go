@@ -69,3 +69,38 @@ func TestAllocatedDynamicRELA(t *testing.T) {
 		})
 	}
 }
+
+func TestAllocatedDynamicRELR(t *testing.T) {
+	b := relocationFixture()
+	le := binary.LittleEndian
+	copy(b[0x161:], ".relr.dyn\x00")
+	section := b[0x340:]
+	le.PutUint32(section[4:], uint32(shtRELR))
+	le.PutUint64(section[32:], 32)
+	le.PutUint32(section[40:], 0)
+	le.PutUint64(section[56:], 8)
+	for i, entry := range []uint64{0x2000, 1 | 1<<1 | 1<<63, 1 | 1<<2, 0x3000} {
+		le.PutUint64(b[0x1c8+i*8:], entry)
+	}
+	image, err := Open(input(b), Options{MaximumRelocations: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Relocation{
+		{Address: 0x2000, Type: 8, ImplicitAddend: true},
+		{Address: 0x2008, Type: 8, ImplicitAddend: true},
+		{Address: 0x21f8, Type: 8, ImplicitAddend: true},
+		{Address: 0x2208, Type: 8, ImplicitAddend: true},
+		{Address: 0x3000, Type: 8, ImplicitAddend: true},
+	}
+	if !slices.Equal(image.Relocations, want) {
+		t.Fatalf("relocations = %+v, want %+v", image.Relocations, want)
+	}
+	if _, err := Open(input(b), Options{MaximumRelocations: 4}); err == nil {
+		t.Fatal("accepted over-limit RELR records")
+	}
+	le.PutUint64(b[0x1c8:], 3)
+	if _, err := Open(input(b), Options{MaximumRelocations: 5}); err == nil {
+		t.Fatal("accepted bitmap before the first address")
+	}
+}

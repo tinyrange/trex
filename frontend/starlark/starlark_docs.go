@@ -298,6 +298,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"binary.rpm_metadata":               "binary.rpm_metadata(file, maximum_entries=65536, maximum_bytes=16MiB) -> record",
 	"binary.berkeley_db":                "binary.berkeley_db(file, maximum_entries=1000000) -> record",
 	"binary.elf_symbols":                "binary.elf_symbols(file, maximum_symbols=1000000, maximum_string_bytes=16MiB, maximum_relocations=0)",
+	"binary.elf_structs":                "binary.elf_structs(file, names)",
 	"binary.perf":                       "binary.perf(file, maximum_records=1000000, maximum_samples=1000000, maximum_string_bytes=1MiB) -> record",
 	"binary.plist":                      "binary.plist(source) -> value",
 	"binary.plist_encode":               "binary.plist_encode(value) -> file",

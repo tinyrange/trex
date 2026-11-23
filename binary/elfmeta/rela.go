@@ -6,20 +6,22 @@ import (
 	"io"
 )
 
-// Relocation describes one allocated ELF64 dynamic RELA entry. Address is
+// Relocation describes one allocated ELF64 dynamic relocation. Address is
 // the ELF virtual address for executables and shared objects. Type is specific
-// to the ELF machine. Symbol is empty for symbol index zero.
+// to the ELF machine. Symbol is empty for symbol index zero. RELR entries use
+// the original word at Address as their addend.
 type Relocation struct {
-	Address uint64
-	Type    uint32
-	Symbol  string
-	Addend  int64
+	Address        uint64
+	Type           uint32
+	Symbol         string
+	Addend         int64
+	ImplicitAddend bool
 }
 
-func readDynamicRELA(f *elf.File, symbols []Symbol, maximum int) ([]Relocation, error) {
+func readDynamicRelocations(f *elf.File, symbols []Symbol, maximum int) ([]Relocation, error) {
 	const entrySize = 24
 	if f.Machine != elf.EM_X86_64 {
-		return nil, fmt.Errorf("elf_symbols: dynamic RELA is supported for x86-64 ELF")
+		return nil, fmt.Errorf("elf_symbols: dynamic relocations are supported for x86-64 ELF")
 	}
 	// ELF symbol index zero is the mandatory null entry. Open preserves
 	// the order of all subsequent dynamic symbols, including undefined ones.
@@ -31,7 +33,18 @@ func readDynamicRELA(f *elf.File, symbols []Symbol, maximum int) ([]Relocation, 
 	}
 	var out []Relocation
 	for _, section := range f.Sections {
-		if section.Type != elf.SHT_RELA || section.Flags&elf.SHF_ALLOC == 0 {
+		if section.Flags&elf.SHF_ALLOC == 0 {
+			continue
+		}
+		if section.Type == shtRELR {
+			var err error
+			out, err = readRELR(out, f.ByteOrder, section, maximum)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if section.Type != elf.SHT_RELA {
 			continue
 		}
 		if section.Link >= uint32(len(f.Sections)) || f.Sections[section.Link].Type != elf.SHT_DYNSYM {

@@ -87,7 +87,7 @@ func (p *process) load(image storage.Reader) error {
 		address += base
 		start := address &^ (pageSize - 1)
 		size := align(address+memsz) - start
-		if size > p.cfg.MaxMemory-p.used {
+		if size > p.memory.Remaining() {
 			return fmt.Errorf("linux: ELF exceeds memory budget")
 		}
 		data := make([]byte, int(size))

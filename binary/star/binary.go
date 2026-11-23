@@ -103,6 +103,7 @@ func Builtins() starlark.StringDict {
 		"macho":                starlark.NewBuiltin("macho", machoBuiltin),
 		"perf":                 starlark.NewBuiltin("perf", perf.Builtin),
 		"elf_symbols":          starlark.NewBuiltin("elf_symbols", elfmeta.Builtin),
+		"elf_structs":          starlark.NewBuiltin("elf_structs", elfmeta.StructsBuiltin),
 		"ppc_instructions":     starlark.NewBuiltin("ppc_instructions", powerPCInstructionsBuiltin),
 		"ppc_census":           starlark.NewBuiltin("ppc_census", powerPCCensusBuiltin),
 		"locate_table":         starlark.NewBuiltin("locate_table", locateTableBuiltin),

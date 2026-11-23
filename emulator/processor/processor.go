@@ -3,6 +3,7 @@
 package processor
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/tinyrange/trex/emulator/amd64"
 	"github.com/tinyrange/trex/emulator/arm64"
 	"github.com/tinyrange/trex/emulator/cpu"
+	"github.com/tinyrange/trex/emulator/linux"
 	"github.com/tinyrange/trex/storage"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
@@ -20,6 +22,19 @@ type value struct {
 	memory *cpu.AddressSpace
 	plugin *starlark.Dict
 	closed bool
+	task   *linux.Task
+	stdout boundedOutput
+	stderr boundedOutput
+	exit   *int
+}
+
+type boundedOutput struct{ buffer bytes.Buffer }
+
+func (o *boundedOutput) Write(data []byte) (int, error) {
+	if len(data) > (1<<20)-o.buffer.Len() {
+		return 0, fmt.Errorf("processor: Linux output exceeds 1 MiB")
+	}
+	return o.buffer.Write(data)
 }
 
 func (*value) String() string        { return "emulator.processor" }
@@ -28,7 +43,7 @@ func (*value) Freeze()               {}
 func (*value) Truth() starlark.Bool  { return starlark.True }
 func (*value) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: emulator.processor") }
 func (*value) AttrNames() []string {
-	return []string{"architecture", "plugin", "map", "read", "write", "get_register", "set_register", "run", "close"}
+	return []string{"architecture", "plugin", "stdout", "stderr", "map", "read", "write", "get_register", "set_register", "run", "close"}
 }
 func (v *value) Attr(name string) (starlark.Value, error) {
 	if name == "plugin" {
@@ -39,6 +54,12 @@ func (v *value) Attr(name string) (starlark.Value, error) {
 			return starlark.None, nil
 		}
 		return starlark.String(v.cpu.Architecture().Name), nil
+	}
+	switch name {
+	case "stdout":
+		return starlark.Bytes(v.stdout.buffer.String()), nil
+	case "stderr":
+		return starlark.Bytes(v.stderr.buffer.String()), nil
 	}
 	for _, n := range v.AttrNames()[2:] {
 		if n == name {
@@ -53,6 +74,10 @@ func (v *value) call(_ *starlark.Thread, builtin *starlark.Builtin, args starlar
 	if name == "close" {
 		if err := starlark.UnpackArgs(name, args, kwargs); err != nil {
 			return nil, err
+		}
+		if v.task != nil {
+			v.task.Close()
+			v.task = nil
 		}
 		v.cpu, v.memory, v.closed = nil, nil, true
 		return starlark.None, nil
@@ -175,11 +200,34 @@ func (v *value) call(_ *starlark.Thread, builtin *starlark.Builtin, args starlar
 			}
 		}
 		result := func(reason, detail string, steps uint64) starlark.Value {
-			return starfile.NewRecord(starlark.StringDict{"reason": starlark.String(reason), "detail": starlark.String(detail), "steps": starlark.MakeUint64(steps), "pc": starlark.MakeUint64(v.cpu.PC())})
+			var status starlark.Value = starlark.None
+			if v.exit != nil {
+				status = starlark.MakeInt(*v.exit)
+			}
+			return starfile.NewRecord(starlark.StringDict{
+				"reason": starlark.String(reason), "detail": starlark.String(detail),
+				"steps": starlark.MakeUint64(steps), "pc": starlark.MakeUint64(v.cpu.PC()), "exit_status": status,
+			})
+		}
+		if v.exit != nil {
+			return result("exit", "", 0), nil
 		}
 		for i := uint64(0); i < maximum; i++ {
 			if stops[v.cpu.PC()] {
 				return result("breakpoint", "", i), nil
+			}
+			if v.task != nil {
+				handled, exited, status, err := v.task.HandleSyscall()
+				if err != nil {
+					return result("fault", err.Error(), i), nil
+				}
+				if exited {
+					v.exit = &status
+					return result("exit", "", i+1), nil
+				}
+				if handled {
+					continue
+				}
 			}
 			effect, err := v.cpu.Step(v.memory)
 			if err != nil {
@@ -200,20 +248,32 @@ func (v *value) call(_ *starlark.Thread, builtin *starlark.Builtin, args starlar
 func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	architecture := "arm64"
 	memory := uint64(64 << 20)
-	if err := starlark.UnpackArgs("processor", args, kwargs, "architecture?", &architecture, "memory?", &memory); err != nil {
+	var linuxBreak uint64
+	if err := starlark.UnpackArgs("processor", args, kwargs, "architecture?", &architecture, "memory?", &memory, "linux_brk?", &linuxBreak); err != nil {
 		return nil, err
 	}
 	if memory == 0 || memory > 1<<30 {
 		return nil, fmt.Errorf("processor: invalid memory bound")
 	}
-	var p cpu.Processor
+	v := &value{memory: cpu.NewAddressSpace(memory), plugin: starlark.NewDict(0)}
+	if linuxBreak != 0 {
+		if architecture != "amd64" {
+			return nil, fmt.Errorf("processor: linux_brk requires amd64")
+		}
+		task, err := linux.NewTask(v.memory, linuxBreak, linux.Config{MaxMemory: memory, Stdout: &v.stdout, Stderr: &v.stderr})
+		if err != nil {
+			return nil, err
+		}
+		v.task, v.cpu = task, task.CPU()
+		return v, nil
+	}
 	switch architecture {
 	case "arm64":
-		p = arm64.New()
+		v.cpu = arm64.New()
 	case "amd64":
-		p = &amd64.CPU{}
+		v.cpu = &amd64.CPU{}
 	default:
 		return nil, fmt.Errorf("processor: unsupported architecture %q", architecture)
 	}
-	return &value{cpu: p, memory: cpu.NewAddressSpace(memory), plugin: starlark.NewDict(0)}, nil
+	return v, nil
 }
