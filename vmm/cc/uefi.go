@@ -12,6 +12,7 @@ import (
 	"github.com/tinyrange/trex/emulator/uefi"
 	"github.com/tinyrange/trex/filesystem/fat"
 	"github.com/tinyrange/trex/filesystem/gpt"
+	"github.com/tinyrange/trex/memory"
 	"github.com/tinyrange/trex/storage"
 	"github.com/tinyrange/trex/vmm/ramfb"
 	"github.com/tinyrange/trex/windows/guid"
@@ -35,28 +36,14 @@ func (m efiMemory) physical(a uint64) (uint64, error) {
 	if s.Efer&(1<<10) == 0 {
 		return m.p.physical(a, s)
 	}
-	if a>>48 != 0 && a>>48 != 0xffff || (a>>47&1 == 0) != (a>>48 == 0) {
-		return 0, fmt.Errorf("noncanonical EFI address %#x", a)
-	}
-	table := s.Cr3 & 0x000ffffffffff000
-	for shift := uint(39); ; shift -= 9 {
-		b, err := m.p.memory(table+(a>>shift&511)*8, 8)
+	translation, err := memory.WalkAMD64(s.Cr3, a, func(address uint64) (uint64, error) {
+		b, err := m.p.memory(address, 8)
 		if err != nil {
 			return 0, err
 		}
-		e := binary.LittleEndian.Uint64(b)
-		if e&1 == 0 {
-			return 0, fmt.Errorf("unmapped EFI address %#x at level %d", a, shift)
-		}
-		table = e & 0x000ffffffffff000
-		if shift == 12 {
-			return table | a&4095, nil
-		}
-		if e&128 != 0 && (shift == 30 || shift == 21) {
-			mask := uint64(1)<<shift - 1
-			return table&^mask | a&mask, nil
-		}
-	}
+		return binary.LittleEndian.Uint64(b), nil
+	})
+	return translation.Physical, err
 }
 func (m efiMemory) chunk(a uint64, n int) ([]byte, error) {
 	p, err := m.physical(a)

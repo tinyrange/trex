@@ -62,6 +62,9 @@ def test():
     # write(1, 0x2000, 4); exit(7)
     p.map(0x1000, 4096, data=b"\xb8\x01\x00\x00\x00\xbf\x01\x00\x00\x00\xbe\x00\x20\x00\x00\xba\x04\x00\x00\x00\x0f\x05\xbf\x07\x00\x00\x00\xb8\x3c\x00\x00\x00\x0f\x05", access="rx")
     p.map(0x2000, 4096, data=b"test", access="r")
+    ranges = p.memory_ranges()
+    if len(ranges) != 2 or ranges[0].address != 0x1000 or ranges[0].size != 4096 or not ranges[0].execute or not ranges[1].readable or ranges[1].writable:
+        fail("unexpected prepared memory ranges", ranges)
     p.set_register("rip", 0x1000)
     r = p.run(1, stop_at=[0x1000])
     if r.reason != "breakpoint" or r.steps != 0 or r.exit_status != None or p.stdout:

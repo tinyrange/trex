@@ -4998,6 +4998,18 @@ Parses a ZIP archive (Stored, Deflate, Shrink and Implode) and exposes member fi
 
 Opens a Zstandard stream as a portable file with a 64 MiB decoder window limit. Frame headers provide decoded sizes when available; streams without content sizes require a counting pass. Reads and seeks replay decompression without extracting host files.
 
+### `binary.amd64_translate`
+
+`binary.amd64_translate(file, cr3, address) -> record`
+
+Walks four-level x86-64 page tables in a portable file representing physical memory starting at zero. Returns physical_address, page_size and the combined user, writable and execute permissions, assuming EFER.NXE. Accepts 4 KiB, 2 MiB and 1 GiB pages. Leaves all page-table bits unchanged.
+
+### `binary.amd64_user_page_tables`
+
+`binary.amd64_user_page_tables(kernel_root, base, mappings) -> file`
+
+Builds a four-level x86-64 root and 4 KiB userspace page tables. Each mapping is a tuple of virtual address, physical address, size, writable and execute. Returns a file to place at base. The upper-half root entries are copied from kernel_root and retain their physical references. Lower-half mappings are built from the supplied list.
+
 ### `binary.android_boot`
 
 `binary.android_boot(file) -> record`
@@ -5058,6 +5070,12 @@ Creates a stateful bit reader over binary input. Its read, peek, drop and align 
 
 Creates a bounded mutable byte builder. Append encoded values, reserve or patch regions, then obtain bytes or a file; capacity is an allocation hint and limit bounds growth.
 
+### `binary.bzimage_payload`
+
+`binary.bzimage_payload(file) -> file`
+
+Returns the embedded kernel payload of a Linux/x86-64 bzImage as a bounded file view. The caller can pass the view to the decompressor matching its magic. Uses Linux boot protocol 2.12 or later.
+
 ### `binary.concat`
 
 `binary.concat(parts) -> file`
@@ -5080,13 +5098,13 @@ Decodes a hex, Base64 or unpadded URL-safe Base64 string into bytes. This is the
 
 `binary.elf_structs(file, names)`
 
-Reads named DWARF structure tags from a portable ELF64 file. Returns a dictionary keyed by the requested names with each structure's size and a fields record of constant byte offsets. Missing definitions and conflicting layouts fail. The request accepts 1 to 64 names.
+Reads named structure tags from DWARF or Linux BTF v1 in a portable ELF64 file. Returns a dictionary keyed by the requested names with each structure's size and a fields record of constant byte offsets. BTF includes promoted members of anonymous aggregates. Missing definitions and conflicting layouts fail. The request accepts 1 to 64 names.
 
 ### `binary.elf_symbols`
 
 `binary.elf_symbols(file, maximum_symbols=1000000, maximum_string_bytes=16MiB, maximum_relocations=0)`
 
-Reads bounded ELF64 static and dynamic symbols and program headers from a portable file in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), load segments and an optional tls segment. Segment records contain address, offset, file_size, memory_size, flags and alignment. A positive maximum_relocations decodes allocated x86-64 dynamic RELA and RELR entries into records with address, type, symbol, signed addend and implicit_addend. For RELR, read the addend at the relocation address. Zero leaves relocations empty. The caller supplies the load bias and resolves and applies relocations.
+Reads bounded ELF64 static and dynamic symbols and program headers from a portable file in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), load segments and an optional tls segment. Segment records contain address, physical_address, offset, file_size, memory_size, flags and alignment. A positive maximum_relocations decodes allocated x86-64 dynamic RELA and RELR entries into records with address, type, symbol, signed addend and implicit_addend. For RELR, read the addend at the relocation address. Zero leaves relocations empty. The caller supplies the load bias and resolves and applies relocations.
 
 ### `binary.encode`
 
@@ -5800,7 +5818,7 @@ Creates an in-process 64-bit big-endian Power ISA partition in guest (supervisor
 
 `emulator.processor(architecture='arm64', memory=64MiB, linux_brk=0) -> processor`
 
-Creates a portable in-process ARM64 or AMD64 instruction context. map(address,size,data=None,access=rw) copies bounded bytes or files into owned sparse memory. read/write, get_register/set_register and plugin expose explicit state. A positive page-aligned linux_brk enables Linux/amd64 userspace syscall handling, with empty stdin and bounded stdout and stderr byte fields. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps, pc and exit_status. An exited Linux task stays stopped. ARM64 uses the baseline ARMv8-A processor. The caller supplies the initial code, memory and registers. close() releases the context.
+Creates a portable in-process ARM64 or AMD64 instruction context. map(address,size,data=None,access=rw) copies bounded bytes or files into owned sparse memory. memory_ranges() describes owned ranges and their effective permissions. read/write, get_register/set_register and plugin expose explicit state. A positive page-aligned linux_brk enables Linux/amd64 userspace syscall handling, with empty stdin and bounded stdout and stderr byte fields. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps, pc and exit_status. An exited Linux task stays stopped. ARM64 uses the baseline ARMv8-A processor. The caller supplies the initial code, memory and registers. close() releases the context.
 
 ### `emulator.s390`
 

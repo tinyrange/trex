@@ -43,7 +43,7 @@ func (*value) Freeze()               {}
 func (*value) Truth() starlark.Bool  { return starlark.True }
 func (*value) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: emulator.processor") }
 func (*value) AttrNames() []string {
-	return []string{"architecture", "plugin", "stdout", "stderr", "map", "read", "write", "get_register", "set_register", "run", "close"}
+	return []string{"architecture", "plugin", "stdout", "stderr", "map", "memory_ranges", "read", "write", "get_register", "set_register", "run", "close"}
 }
 func (v *value) Attr(name string) (starlark.Value, error) {
 	if name == "plugin" {
@@ -133,6 +133,22 @@ func (v *value) call(_ *starlark.Thread, builtin *starlark.Builtin, args starlar
 			return nil, err
 		}
 		return starlark.None, nil
+	case "memory_ranges":
+		if err := starlark.UnpackArgs(name, args, kwargs); err != nil {
+			return nil, err
+		}
+		mappings := v.memory.Mappings()
+		ranges := make([]starlark.Value, len(mappings))
+		for i, m := range mappings {
+			ranges[i] = starfile.NewRecord(starlark.StringDict{
+				"address":  starlark.MakeUint64(m.Start),
+				"size":     starlark.MakeUint64(m.Size),
+				"readable": starlark.Bool(m.Access&cpu.Read != 0),
+				"writable": starlark.Bool(m.Access&cpu.Write != 0),
+				"execute":  starlark.Bool(m.Access&cpu.Execute != 0),
+			})
+		}
+		return starlark.NewList(ranges), nil
 	case "read":
 		var address uint64
 		var size int

@@ -75,3 +75,15 @@ func OpenBZImage(source storage.Reader) (*BZImage, error) {
 func (i *BZImage) CopySetup(zeroPage *[4096]byte) {
 	copy(zeroPage[0x1f1:], i.setup)
 }
+
+// KernelPayload returns the embedded kernel as a bounded view. Its bytes
+// retain the compression format identified by their magic.
+func (i *BZImage) KernelPayload() (storage.Reader, error) {
+	const setupStart = 0x1f1
+	offset := int64(binary.LittleEndian.Uint32(i.setup[0x248-setupStart:]))
+	size := int64(binary.LittleEndian.Uint32(i.setup[0x24c-setupStart:]))
+	if size == 0 || offset > i.Payload.Size() || size > i.Payload.Size()-offset {
+		return nil, fmt.Errorf("bzImage embedded kernel payload is empty or outside protected-mode data")
+	}
+	return io.NewSectionReader(i.Payload, offset, size), nil
+}

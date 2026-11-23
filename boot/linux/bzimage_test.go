@@ -18,6 +18,8 @@ func TestOpenBZImage(t *testing.T) {
 	le.PutUint32(data[0x230:], 2<<20)
 	le.PutUint16(data[0x236:], 1)
 	le.PutUint32(data[0x238:], 2047)
+	le.PutUint32(data[0x248:], 1)
+	le.PutUint32(data[0x24c:], 6)
 	le.PutUint64(data[0x258:], 16<<20)
 	le.PutUint32(data[0x260:], 32<<20)
 	data[0x26c] = 0xf4 // Instruction after the setup header.
@@ -32,6 +34,22 @@ func TestOpenBZImage(t *testing.T) {
 	var payload [7]byte
 	if _, err := image.Payload.ReadAt(payload[:], 0); err != nil || string(payload[:]) != "payload" {
 		t.Fatalf("payload = %q, %v", payload, err)
+	}
+	embedded, err := image.KernelPayload()
+	if err != nil || embedded.Size() != 6 {
+		t.Fatalf("embedded kernel length: %v, %v", embedded, err)
+	}
+	if _, err := embedded.ReadAt(payload[:6], 0); err != nil || string(payload[:6]) != "ayload" {
+		t.Fatalf("embedded kernel bytes: %q, %v", payload[:6], err)
+	}
+	badExtent := bytes.Clone(data)
+	le.PutUint32(badExtent[0x24c:], 16)
+	outside, err := OpenBZImage(bytes.NewReader(badExtent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := outside.KernelPayload(); err == nil {
+		t.Fatal("accepted embedded payload which exceeded its parent extent")
 	}
 	var zeroPage [4096]byte
 	image.CopySetup(&zeroPage)

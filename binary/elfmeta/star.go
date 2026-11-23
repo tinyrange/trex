@@ -59,7 +59,7 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 
 func segmentValue(p elf.ProgHeader) starlark.Value {
 	return starfile.NewRecord(starlark.StringDict{
-		"address": starlark.MakeUint64(p.Vaddr), "offset": starlark.MakeUint64(p.Off),
+		"address": starlark.MakeUint64(p.Vaddr), "physical_address": starlark.MakeUint64(p.Paddr), "offset": starlark.MakeUint64(p.Off),
 		"file_size": starlark.MakeUint64(p.Filesz), "memory_size": starlark.MakeUint64(p.Memsz),
 		"alignment": starlark.MakeUint64(p.Align), "flags": starlark.MakeUint(uint(p.Flags)),
 	})

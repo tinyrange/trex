@@ -11,14 +11,14 @@ import (
 	"github.com/tinyrange/trex/storage"
 )
 
-// StructLayout describes a defined DWARF structure and the byte offsets of
+// StructLayout describes a defined structure and the byte offsets of
 // named members whose locations are constant.
 type StructLayout struct {
 	Size   uint64
 	Fields map[string]uint64
 }
 
-// StructLayouts resolves named DWARF structure tags in a bounded ELF64 file.
+// StructLayouts resolves named structure tags from DWARF or BTF in an ELF64 file.
 // Repeated declarations are ignored and conflicting definitions are rejected.
 func StructLayouts(source storage.Reader, names []string) (map[string]StructLayout, error) {
 	if source == nil || source.Size() <= 0 || source.Size() > 128<<20 {
@@ -32,6 +32,17 @@ func StructLayouts(source storage.Reader, names []string) (map[string]StructLayo
 		return nil, err
 	}
 	defer file.Close()
+	if file.Section(".debug_info") == nil && file.Section(".zdebug_info") == nil {
+		section := file.Section(".BTF")
+		if section == nil || section.Size > 128<<20 || section.Type == elf.SHT_NOBITS {
+			return nil, fmt.Errorf("elf_structs: missing or over-limit BTF section")
+		}
+		data, err := section.Data()
+		if err != nil {
+			return nil, fmt.Errorf("elf_structs: read BTF: %w", err)
+		}
+		return readBTFLayouts(data, names)
+	}
 	var debugSize uint64
 	for _, section := range file.Sections {
 		if strings.HasPrefix(section.Name, ".zdebug_") {
@@ -52,15 +63,9 @@ func StructLayouts(source storage.Reader, names []string) (map[string]StructLayo
 }
 
 func readStructLayouts(data *dwarf.Data, names []string) (map[string]StructLayout, error) {
-	if len(names) == 0 || len(names) > 64 {
-		return nil, fmt.Errorf("elf_structs: expected 1..64 structure names")
-	}
-	wanted := make(map[string]bool, len(names))
-	for _, name := range names {
-		if name == "" || wanted[name] {
-			return nil, fmt.Errorf("elf_structs: empty or duplicate structure name %q", name)
-		}
-		wanted[name] = true
+	wanted, err := requestedStructs(names)
+	if err != nil {
+		return nil, err
 	}
 
 	out := make(map[string]StructLayout, len(names))
@@ -85,11 +90,36 @@ func readStructLayouts(data *dwarf.Data, names []string) (map[string]StructLayou
 		if err != nil {
 			return nil, fmt.Errorf("elf_structs: %s: %w", name, err)
 		}
-		if prior, ok := out[name]; ok && (prior.Size != uint64(size) || !maps.Equal(prior.Fields, fields)) {
-			return nil, fmt.Errorf("elf_structs: conflicting definitions of %q", name)
+		if err := setStructLayout(out, name, StructLayout{Size: uint64(size), Fields: fields}); err != nil {
+			return nil, err
 		}
-		out[name] = StructLayout{Size: uint64(size), Fields: fields}
 	}
+	return requireStructs(out, names)
+}
+
+func requestedStructs(names []string) (map[string]bool, error) {
+	if len(names) == 0 || len(names) > 64 {
+		return nil, fmt.Errorf("elf_structs: expected 1..64 structure names")
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name == "" || wanted[name] {
+			return nil, fmt.Errorf("elf_structs: empty or duplicate structure name %q", name)
+		}
+		wanted[name] = true
+	}
+	return wanted, nil
+}
+
+func setStructLayout(out map[string]StructLayout, name string, layout StructLayout) error {
+	if prior, ok := out[name]; ok && (prior.Size != layout.Size || !maps.Equal(prior.Fields, layout.Fields)) {
+		return fmt.Errorf("elf_structs: conflicting definitions of %q", name)
+	}
+	out[name] = layout
+	return nil
+}
+
+func requireStructs(out map[string]StructLayout, names []string) (map[string]StructLayout, error) {
 	for _, name := range names {
 		if _, ok := out[name]; !ok {
 			return nil, fmt.Errorf("elf_structs: no definition of %q", name)
