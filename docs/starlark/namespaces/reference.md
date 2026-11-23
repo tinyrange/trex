@@ -5454,6 +5454,12 @@ Encodes a 64-bit unsigned integer as 8 bytes in little-endian order. Returns new
 
 Encodes a 8-bit unsigned integer as 1 bytes in single-byte order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
+### `binary.upx_dos_image`
+
+`binary.upx_dos_image(source, header_offset) -> file`
+
+Reads a DOS EXE load image from a v13 UPX PackHeader at the supplied offset. The supported payload uses NRV2B_8, no filter and a relocation-free original EXE with a 32-byte header. Validates the header and both Adler-32 checksums and returns the unpacked load image as a file.
+
 ### `binary.view`
 
 `binary.view(value, offset=0, size=None) -> byte_view`
@@ -6316,9 +6322,9 @@ Creates a QEMU audio-backend descriptor from its name and properties. It is conf
 
 ### `qemu.backend`
 
-`qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', display_zoom_to_fit=False, block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[])`
+`qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', display_zoom_to_fit=False, block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[], incoming=False)`
 
-Creates a QEMU implementation of the portable VMM backend with selected machine, acceleration, devices and transport policies. A separate vmm.start call launches the guest.
+Creates a QEMU implementation of the portable VMM backend with selected machine, acceleration, devices and transport policies. A separate vmm.start call launches the guest. incoming=True waits for checkpoint data before starting the virtual CPU and leaves the restored VM paused.
 
 ### `qemu.chardev`
 
@@ -6336,7 +6342,7 @@ Creates a QEMU device descriptor from a device model and properties. This is bac
 
 `qemu.extension(vm)`
 
-Returns the QEMU-specific control extension for an existing VM, including QMP/HMP and block statistics. Use portable VM methods when backend-specific control is unnecessary.
+Returns QEMU-specific control for an existing VM. checkpoint() streams paused VM state into a bounded in-memory file and leaves the source in QEMU's post-migration state. A source stopped at a GDB breakpoint requires qemu.option('-global', 'migration.store-global-state=off'). restore_checkpoint(source) loads the file into a fresh incoming=True instance with the same QEMU configuration and immutable disk bytes. Checkpoints carry CPU, RAM and device state. Disk data remains in the original immutable attachments.
 
 ### `qemu.netdev`
 
@@ -6403,6 +6409,12 @@ Evaluates supported Renvo make recipes against a virtual source tree and rebuild
 `rfe.backend(overlay_limit=268435456) -> vmm_backend`
 
 Creates an experimental in-process software x86 PC backend from Renvo x86.rfe. JIT-compiles hot 16-, 32- and 64-bit code using Renvo native blocks, without KVM or QEMU. Requires a supported 64-bit native-JIT host; unavailable executable memory is an error. Privileged/device/unsupported instructions use precise architectural slow paths. Shares BIOS, IDE, VGA, input and overlays with cc. MS-DOS 6.22 startup, Windows 3.11 standard/enhanced-mode Notepad, and Windows 98 SE Explorer/Notepad are verified. The graphical smokes verify keyboard input, PS/2 mouse-selected Save and changed bytes on the guest disk. Enhanced-mode paging and actual native-tier retirement are explicitly asserted. Implements basic x87, string port I/O, paging and protected/v8086 gates; parts of x87 and other legacy CPU/device features remain incomplete. overlay_limit bounds dirty snapshot memory in bytes. Inspect with vm.extension("rfe.v1").state().
+
+### `rfe.run_real_mode`
+
+`rfe.run_real_mode(memory, registers, instruction_limit) -> result`
+
+Runs an x86 CPU from supplied RAM at address zero and a dictionary of initial 16-bit registers. Uses A20-enabled addressing and the architectural interpreter with no PC devices. Returns the stop reason, diagnostic detail, retired count, registers, interrupt counts, and resulting RAM as a read-only file.
 
 ### `runtime.cpu_profile_start`
 
@@ -6546,7 +6558,7 @@ Describes the requested guest display mode and whether support is mandatory. Thi
 
 `vmm.linux_boot(kernel, initramfs=None, command_line='')`
 
-Creates portable direct Linux boot intent from borrowed immutable kernel and optional initramfs files plus a command line. Requires backend boot.linux capability; QEMU supports Linux hosts and x86 guests using anonymous inherited descriptors.
+Creates portable direct Linux boot intent from borrowed immutable kernel and optional initramfs files plus a command line. Requires the boot.linux capability. QEMU supports Linux hosts and x86 guests using anonymous inherited descriptors. The cc PC backend supports single-CPU x86_64 bzImage boot.
 
 ### `vmm.machine`
 
@@ -8141,7 +8153,7 @@ Methods and attributes: `close()`, `eof`, `error`, `input(packet, now=0)`, `poll
 
 The backend-specific extension of a running QEMU VM. qmp sends structured monitor requests, qmp_schema inspects available commands, hmp uses the human monitor and block_stats reports storage activity. process exposes backend lifecycle state; these operations are not portable to every VMM.
 
-Methods and attributes: `block_stats()`, `capabilities`, `hmp(command, timeout=30)`, `process`, `qmp(command, arguments={}, timeout=30)`, `qmp_schema(timeout=30)`.
+Methods and attributes: `block_stats()`, `capabilities`, `checkpoint(maximum=512MiB, timeout=30)`, `hmp(command, timeout=30)`, `process`, `qmp(command, arguments={}, timeout=30)`, `qmp_schema(timeout=30)`, `restore_checkpoint(source, timeout=30)`.
 
 ### `qemu_acpi_table` value
 

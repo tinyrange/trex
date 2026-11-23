@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinyrange/trex/vmm"
 	"j5.nz/cc/hypervisor"
 )
 
@@ -65,7 +66,7 @@ func TestPCIIDEConfiguration(t *testing.T) {
 		t.Fatal("disabled I/O decode still exposed the task file")
 	}
 	io(0x1f7, 1, true, 0xec) // A disabled command must not reach an ATA device.
-	p.ide = &ide{task: [8]byte{7: 0x50}, irq: func(uint32, bool) error { return nil }}
+	p.ide = newIDE(vmm.Disk{Device: testBlock(t, make([]byte, 512))}, vmm.CHSGeometry{}, func(uint32, bool) error { return nil })
 	io(0xcfc, 1, true, 1)
 	if io(0x1f7, 1, false, 0) != 0x50 {
 		t.Fatal("enabled I/O decode did not expose the task file")

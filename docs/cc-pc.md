@@ -9,6 +9,17 @@ small real-mode firmware entrypoints. Video calls exchange register values
 through I/O packets, including when a guest interprets the BIOS ROM. No external firmware binary or process
 is used.
 
+### Linux direct boot
+
+Use `vmm.linux_boot(kernel=..., initramfs=..., command_line=...)` on a
+single-CPU `x86_64` machine with `cc.backend()`. The kernel is an x86-64
+bzImage using boot protocol 2.12 or later. The loader places the original
+protected-mode payload and optional initramfs into guest RAM. It builds the
+boot parameters, E820 map, firmware pointer, bootloader RNG seed, and initial
+CPU state before the first guest instruction. A disk is optional.
+
+### Firmware boot
+
 UEFI requires `x86_64` and enables ACPI. Storage defaults to PCI IDE;
 `vmm.disk(..., bus="nvme")` selects the shared NVMe controller instead. It reads the GPT and FAT
 EFI System Partition through native parsers, loads `EFI/Boot/BootX64.efi`,
@@ -18,7 +29,7 @@ The graphics output protocol exposes a 1280×720 BGRX framebuffer with a
 hardware device path. Guest page tables translate firmware-call arguments;
 runtime address mapping updates the firmware tables and their checksums.
 Usable low RAM remains available for Windows startup stubs; VGA and firmware
-ranges are reserved. BIOS and direct-Darwin x86_64 machines accept 16 MiB–8 GiB RAM; i386 accepts up to 3 GiB and native x86_64 UEFI accepts up to 16 GiB. Low RAM ends at the PCI MMIO window (0xc0000000). Additional RAM is mapped above 4 GiB, with compact host backing. BIOS E820 and the Darwin/native UEFI maps describe both ranges; E801 reports only low RAM. Native memory inspection and DMA reject the PCI hole rather than aliasing it to RAM.
+ranges are reserved. BIOS, direct Darwin, and direct Linux x86_64 machines accept 16 MiB–8 GiB RAM. i386 accepts up to 3 GiB and native x86_64 UEFI accepts up to 16 GiB. Low RAM ends at the PCI MMIO window (0xc0000000). Additional RAM is mapped above 4 GiB, with compact host backing. The E820 and Darwin/native UEFI maps describe both ranges. E801 reports only low RAM. Native memory inspection and DMA reject accesses to the PCI hole.
 The `efi` inspection field contains the last 32 firmware calls and statuses.
 Unsupported firmware services stop execution with their name and arguments.
 
@@ -27,8 +38,8 @@ Unsupported firmware services stop execution with their name and arguments.
 
 Use `vmm.machine(architecture="x86_64", cpus=4, ...)` with
 `cc.backend(uefi=True, ...)` for four cores. The UEFI PC accepts one through
-four CPUs; legacy BIOS, direct Darwin and ARM64 profiles retain their existing
-single-CPU limits. The default remains one CPU.
+four CPUs. Legacy BIOS, direct Darwin, direct Linux, and ARM64 use one CPU.
+The default remains one CPU.
 
 Multicore CPUID describes one package, one hardware thread per core, and local
 APIC IDs matching the ACPI MADT and AML processors. It adds sanitized cache and

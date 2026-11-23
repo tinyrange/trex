@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinyrange/trex/vmm"
 	"j5.nz/cc/hypervisor"
 )
 
@@ -17,7 +18,7 @@ func (*acpiTestCPU) SetIRQ(uint32, bool) error { return nil }
 func TestACPIFirmwareTables(t *testing.T) {
 	for _, count := range []int{1, 4} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			p := &pc{cpus: make([]hypervisor.X86, count), ram: make([]byte, 1<<20), cpu: &acpiTestCPU{}, now: time.Now}
+			p := &pc{cpus: make([]hypervisor.X86, count), ram: make([]byte, 1<<20), cpu: &acpiTestCPU{}, now: time.Now, disk: vmm.Disk{Device: testBlock(t, make([]byte, 512))}}
 			if err := p.installACPI(); err != nil {
 				t.Fatal(err)
 			}

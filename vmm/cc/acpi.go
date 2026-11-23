@@ -94,6 +94,8 @@ func (a *acpiPM) io(ex hypervisor.X86Exit, now time.Time) error {
 	return a.updateIRQ()
 }
 
+const acpiRootPointer = 0xe0000
+
 // installACPI describes only devices present in this platform. Tables live
 // in the E820-reserved firmware window, outside the BIOS interrupt stubs.
 func (p *pc) installACPI() error {
@@ -155,8 +157,8 @@ func (p *pc) installACPI() error {
 		{Name: "IDE0", ID: "PNP0600", Ports: [][2]uint16{{0x1f0, 8}, {0x3f6, 1}}, IRQs: []uint8{14}},
 		{Name: "PM00", ID: "PNP0C02", Ports: [][2]uint16{{acpiPMBase, 12}}},
 	} {
-		if dev.Name == "IDE0" && (p.pciIDE != nil || p.nvme != nil) {
-			continue // PCI enumerates this controller and owns its resources.
+		if dev.Name == "IDE0" && (p.disk.Device == nil || p.pciIDE != nil || p.nvme != nil) {
+			continue
 		}
 		// Fixed legacy devices belong below the root bus. Windows starts
 		// that bus and obtains its routing interface before assigning the
@@ -261,7 +263,7 @@ func (p *pc) installACPI() error {
 	if err != nil {
 		return err
 	}
-	copy(p.ram[0xe0000:], rsdp)
+	copy(p.ram[acpiRootPointer:], rsdp)
 	p.acpi = &acpiPM{started: p.now(), control: 1, setIRQ: p.cpu.SetIRQ}
 	return nil
 }

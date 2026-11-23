@@ -181,7 +181,7 @@ func (p *pc) ideIO(ex hypervisor.X86Exit) error {
 			return err
 		}
 	}
-	if p.pciIDE != nil && !p.pciIDE.primaryEnabled() {
+	if p.ide == nil || p.ide.disk.Device == nil || p.pciIDE != nil && !p.pciIDE.primaryEnabled() {
 		if !ex.Write {
 			for i := range ex.Data {
 				ex.Data[i] = 0xff
