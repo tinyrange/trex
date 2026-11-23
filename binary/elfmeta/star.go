@@ -2,6 +2,7 @@ package elfmeta
 
 import (
 	"fmt"
+
 	"github.com/tinyrange/trex/storage"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
@@ -10,7 +11,7 @@ import (
 func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var source starlark.Value
 	options := Options{MaximumSymbols: 1000000, MaximumStringBytes: 16 << 20}
-	if err := starlark.UnpackArgs("elf_symbols", args, kwargs, "file", &source, "maximum_symbols?", &options.MaximumSymbols, "maximum_string_bytes?", &options.MaximumStringBytes); err != nil {
+	if err := starlark.UnpackArgs("elf_symbols", args, kwargs, "file", &source, "maximum_symbols?", &options.MaximumSymbols, "maximum_string_bytes?", &options.MaximumStringBytes, "maximum_relocations?", &options.MaximumRelocations); err != nil {
 		return nil, err
 	}
 	if options.MaximumSymbols <= 0 || options.MaximumStringBytes <= 0 {
@@ -36,5 +37,16 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 	for i, p := range image.Segments {
 		segments[i] = starfile.NewRecord(starlark.StringDict{"address": starlark.MakeUint64(p.Vaddr), "offset": starlark.MakeUint64(p.Off), "file_size": starlark.MakeUint64(p.Filesz), "memory_size": starlark.MakeUint64(p.Memsz), "flags": starlark.MakeUint(uint(p.Flags))})
 	}
-	return starfile.NewRecord(starlark.StringDict{"type": starlark.MakeUint(uint(image.Type)), "machine": starlark.MakeUint(uint(image.Machine)), "entry": starlark.MakeUint64(image.Entry), "little_endian": starlark.Bool(image.LittleEndian), "symbols": starlark.NewList(symbols), "segments": starlark.NewList(segments)}), nil
+	relocations := make([]starlark.Value, len(image.Relocations))
+	for i, r := range image.Relocations {
+		relocations[i] = starfile.NewRecord(starlark.StringDict{
+			"address": starlark.MakeUint64(r.Address), "type": starlark.MakeUint64(uint64(r.Type)),
+			"symbol": starlark.String(r.Symbol), "addend": starlark.MakeInt64(r.Addend),
+		})
+	}
+	return starfile.NewRecord(starlark.StringDict{
+		"type": starlark.MakeUint(uint(image.Type)), "machine": starlark.MakeUint(uint(image.Machine)),
+		"entry": starlark.MakeUint64(image.Entry), "little_endian": starlark.Bool(image.LittleEndian),
+		"symbols": starlark.NewList(symbols), "segments": starlark.NewList(segments), "relocations": starlark.NewList(relocations),
+	}), nil
 }

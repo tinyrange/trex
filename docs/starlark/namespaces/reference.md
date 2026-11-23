@@ -5078,9 +5078,9 @@ Decodes a hex, Base64 or unpadded URL-safe Base64 string into bytes. This is the
 
 ### `binary.elf_symbols`
 
-`binary.elf_symbols(file, maximum_symbols=1000000, maximum_string_bytes=16MiB)`
+`binary.elf_symbols(file, maximum_symbols=1000000, maximum_string_bytes=16MiB, maximum_relocations=0)`
 
-Reads bounded ELF64 static/dynamic symbols and load segments from a portable file, in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), and segments (address, offset, file_size, memory_size, flags). Addresses are ELF values, not runtime-relocated addresses; callers supply mapping/load bias. Zero-sized/undefined symbols are preserved, not assigned inferred extents. Rejects extended numbering, duplicate symbol-table kinds, compressed symbol/string metadata, malformed extents/names and resource-limit violations. Does not read host symbols or load code.
+Reads bounded ELF64 static/dynamic symbols and load segments from a portable file, in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), and segments (address, offset, file_size, memory_size, flags). A positive maximum_relocations reads allocated x86-64 ELF64 dynamic RELA entries and returns their address, type, symbol name, and signed addend in relocations. Zero leaves relocations empty. All addresses are ELF values. The caller supplies the load bias and resolves and applies relocations.
 
 ### `binary.encode`
 
