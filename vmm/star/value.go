@@ -66,6 +66,7 @@ func Builtins() starlark.StringDict {
 		"linux_boot":        starlark.NewBuiltin("linux_boot", linuxBootBuiltin),
 		"darwin_boot":       starlark.NewBuiltin("darwin_boot", darwinBootBuiltin),
 		"arm64_boot":        starlark.NewBuiltin("arm64_boot", arm64BootBuiltin),
+		"amd64_boot":        starlark.NewBuiltin("amd64_boot", amd64BootBuiltin),
 		"arm64_platform":    starlark.NewBuiltin("arm64_platform", arm64PlatformBuiltin),
 		"mmio":              starlark.NewBuiltin("mmio", mmioBuiltin),
 		"darwin_arm64_boot": starlark.NewBuiltin("darwin_arm64_boot", darwinARM64BootBuiltin),
@@ -195,6 +196,9 @@ func (v *vmmMachineValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhasha
 func (v *vmmMachineValue) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "boot":
+		if v.machine.AMD64Boot != nil {
+			return &amd64BootValue{boot: *v.machine.AMD64Boot}, nil
+		}
 		if v.machine.ARM64Boot != nil {
 			return &arm64BootValue{boot: *v.machine.ARM64Boot}, nil
 		}
@@ -437,8 +441,11 @@ func vmmMachineBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 		case *arm64BootValue:
 			copy := boot.boot
 			machine.ARM64Boot = &copy
+		case *amd64BootValue:
+			copy := boot.boot
+			machine.AMD64Boot = &copy
 		default:
-			return nil, fmt.Errorf("machine: boot must be vmm_linux_boot, vmm_darwin_boot, vmm_arm64_boot or None")
+			return nil, fmt.Errorf("machine: boot must be a VMM boot intent or None")
 		}
 	}
 	if err := appendTypedList(disksValue, "disks", func(index int, value starlark.Value) error {

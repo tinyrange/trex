@@ -6524,6 +6524,12 @@ Percent-encodes text for use as one URL path segment. It is not query-string enc
 
 Decodes percent escapes in URL path text. Malformed escape sequences produce an error.
 
+### `vmm.amd64_boot`
+
+`vmm.amd64_boot(ram, registers, cr3, gdt, gdt_limit, user=False, fs_base=0, gs_base=0, idt=0, idt_limit=0) -> vmm_amd64_boot`
+
+Creates an explicit single-CPU x86-64 long-mode handoff from a portable physical RAM file, a general-purpose register dictionary, CR3 and descriptor table addresses. cc loads the supplied RAM and starts at the supplied RIP with CPL3 when user=True. GDT entries must use the Linux x86-64 selectors 0x10, 0x18, 0x2b and 0x33. The caller supplies any kernel task state in RAM.
+
 ### `vmm.arm64_boot`
 
 `vmm.arm64_boot(image, address, memory_base, entry=None, registers=None, system=None) -> vmm_arm64_boot`

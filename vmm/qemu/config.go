@@ -121,6 +121,9 @@ func (b *qemuBackend) Validate(machine vmmapi.Machine) []vmmapi.ValidationIssue 
 	if machine.ARM64Boot != nil || machine.ARM64Platform != nil {
 		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.arm64_platform", Field: "platform", Message: "custom ARM64 handoffs and platforms are not supported by this backend"})
 	}
+	if machine.AMD64Boot != nil {
+		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.amd64_boot", Field: "boot", Message: "QEMU does not accept explicit AMD64 startup state"})
+	}
 	if machine.DarwinBoot != nil {
 		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.darwin_boot", Field: "boot", Message: "Darwin direct boot is not supported by this backend"})
 	}

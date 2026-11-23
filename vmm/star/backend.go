@@ -124,6 +124,9 @@ func validateVMM(machine VMMMachine, backend VMMBackend) []VMMValidationIssue {
 	if machine.ARM64Boot != nil {
 		require("boot.arm64", "boot", "AArch64 firmware boot", true)
 	}
+	if machine.AMD64Boot != nil {
+		require("boot.amd64", "boot", "constructed x86-64 startup", true)
+	}
 	if machine.StartPaused {
 		require("lifecycle.pause", "start_paused", "paused startup", true)
 	}
@@ -185,7 +188,7 @@ func validateVMMCore(machine VMMMachine) []VMMValidationIssue {
 		add("machine.cpus", "cpus", "CPU count must be positive")
 	}
 	bootCount := 0
-	for _, present := range []bool{machine.Boot != nil, machine.DarwinBoot != nil, machine.ARM64Boot != nil} {
+	for _, present := range []bool{machine.Boot != nil, machine.DarwinBoot != nil, machine.ARM64Boot != nil, machine.AMD64Boot != nil} {
 		if present {
 			bootCount++
 		}
@@ -206,6 +209,14 @@ func validateVMMCore(machine VMMMachine) []VMMValidationIssue {
 	}
 	if machine.DarwinBoot != nil {
 		if err := machine.DarwinBoot.Validate(); err != nil {
+			add("machine.boot", "boot", err.Error())
+		}
+	}
+	if machine.AMD64Boot != nil {
+		if machine.Architecture != "x86_64" || machine.CPUs != 1 {
+			add("machine.boot", "boot", "amd64_boot requires x86_64 and one CPU")
+		}
+		if err := machine.AMD64Boot.Validate(machine.Memory); err != nil {
 			add("machine.boot", "boot", err.Error())
 		}
 	}
