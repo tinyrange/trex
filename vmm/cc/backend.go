@@ -54,7 +54,7 @@ func Capabilities() []string {
 	return pcCapabilities()
 }
 func pcCapabilities() []string {
-	return []string{"boot.darwin", "disk", "disk.bus.ide", "disk.bus.nvme", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory", "channel.serial"}
+	return []string{"boot.darwin", "boot.linux", "boot.amd64", "disk", "disk.bus.ide", "disk.bus.nvme", "disk.snapshot", "disk.geometry.chs", "display.capturable", "screenshot", "input.key", "input.pointer", "lifecycle.pause", "lifecycle.stop", "extension.cc.v1", "network.ethernet", "channel.shared-memory", "channel.serial"}
 }
 func (b *Backend) ID() string {
 	if b.Name != "" {
@@ -109,7 +109,20 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		add("ide_model", "ich7-pata requires PCI IDE")
 	}
 	if m.Boot != nil {
-		add("boot", "cc does not support Linux direct boot")
+		if m.Architecture != "x86_64" || b.UEFI || m.CPUs != 1 || m.DarwinBoot != nil {
+			add("boot", "Linux direct boot requires a single x86_64 CPU without another boot profile")
+		}
+		if err := m.Boot.Validate(); err != nil {
+			add("boot", err.Error())
+		}
+	}
+	if m.AMD64Boot != nil {
+		if m.Architecture != "x86_64" || b.UEFI || m.CPUs != 1 || m.Boot != nil || m.DarwinBoot != nil || m.ARM64Boot != nil {
+			add("boot", "AMD64 state boot requires a single x86_64 CPU without another boot profile")
+		}
+		if err := m.AMD64Boot.Validate(m.Memory); err != nil {
+			add("boot", err.Error())
+		}
 	}
 	if m.DarwinBoot != nil {
 		if len(m.Networks) != 0 {
@@ -159,7 +172,7 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if m.Memory < 16<<20 || m.Memory > maxMemory || m.Memory%4096 != 0 {
 		add("memory", fmt.Sprintf("memory must be page-aligned and between 16 MiB and %d GiB", maxMemory>>30))
 	}
-	if len(m.Disks) != 1 {
+	if len(m.Disks) > 1 || len(m.Disks) == 0 && m.Boot == nil && m.AMD64Boot == nil {
 		add("disks", "cc PC requires one IDE or NVMe disk")
 	}
 	for i, d := range m.Disks {
@@ -244,7 +257,10 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 		}
 		return b.startARM64(ctx, m)
 	}
-	disk := m.Disks[0]
+	var disk vmm.Disk
+	if len(m.Disks) != 0 {
+		disk = m.Disks[0]
+	}
 	if disk.Snapshot {
 		limit := b.OverlayLimit
 		if limit == 0 {
@@ -312,7 +328,7 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 		cpu.Close()
 		return nil, err
 	}
-	platform, err := newPCBoot(cpu, ram[:m.Memory], disk, time.Now, m.DarwinBoot == nil)
+	platform, err := newPCBoot(cpu, ram[:m.Memory], disk, time.Now, m.Boot == nil && m.DarwinBoot == nil && m.AMD64Boot == nil)
 	if err != nil {
 		cpu.Close()
 		return nil, err
@@ -325,7 +341,7 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 	if disk.Bus == "nvme" {
 		platform.nvme = newPCINVMe(platform)
 		platform.nvme.controller.EnableAsyncIO(func() { _ = cpu.Cancel() })
-	} else if b.PCIIDE || b.UEFI {
+	} else if disk.Device != nil && (b.PCIIDE || b.UEFI) {
 		platform.pciIDE = newPCIIDE()
 		if b.IDEModel == "ich7-pata" {
 			platform.pciIDE = newICH7PATA()
@@ -404,6 +420,18 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 	}
 	if m.DarwinBoot != nil {
 		if err = platform.installDarwin(m.DarwinBoot); err != nil {
+			cpu.Close()
+			return nil, err
+		}
+	}
+	if m.Boot != nil {
+		if err = platform.installLinux(m.Boot); err != nil {
+			cpu.Close()
+			return nil, err
+		}
+	}
+	if m.AMD64Boot != nil {
+		if err = platform.installAMD64(m.AMD64Boot); err != nil {
 			cpu.Close()
 			return nil, err
 		}

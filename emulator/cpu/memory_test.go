@@ -35,6 +35,44 @@ func TestCheckMemory(t *testing.T) {
 	}
 }
 
+func TestFixedMappingAndPartialUnmapKeepOutsideBytesAndPermissions(t *testing.T) {
+	m := NewAddressSpace(8)
+	const base = 0x2000
+	if err := m.Map(base, []byte{1, 2, 3, 4, 5, 6, 7, 8}, Read|Write); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Protect(base+1, 6, Read); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MapFixed(base+6, []byte{9, 9, 9}, Read); err == nil {
+		t.Fatal("accepted over-budget replacement")
+	}
+	var before [8]byte
+	if err := m.ReadMemory(base, before[:], Read); err != nil || before != [8]byte{1, 2, 3, 4, 5, 6, 7, 8} {
+		t.Fatalf("failed replacement changed memory: %v, %v", before, err)
+	}
+	if err := m.MapFixed(base+3, []byte{0, 0}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if m.CheckMemory(base+1, 1, Write) == nil || m.CheckMemory(base+3, 2, Read) == nil || m.CheckMemory(base+6, 1, Write) == nil {
+		t.Fatal("fixed mapping lost its guard or an outside protection")
+	}
+	if _, err := m.Protect(base+3, 2, Read); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ReadMemory(base, before[:], Read); err != nil || before != [8]byte{1, 2, 3, 0, 0, 6, 7, 8} {
+		t.Fatalf("replacement bytes: %v, %v", before, err)
+	}
+	for range 2 {
+		if err := m.UnmapRange(base+2, 3); err != nil || m.Remaining() != 3 {
+			t.Fatalf("partial unmap: %v, %d bytes free", err, m.Remaining())
+		}
+	}
+	if m.CheckMemory(base+2, 1, Read) == nil || m.CheckMemory(base+6, 1, Write) == nil || m.CheckMemory(base+7, 1, Write) != nil {
+		t.Fatal("partial unmap changed the permissions of a surviving region")
+	}
+}
+
 func TestMappingViewTracksPermissionsAndOwnership(t *testing.T) {
 	m := NewAddressSpace(32)
 	const base = 0x600000000

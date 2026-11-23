@@ -72,6 +72,7 @@ func Builtins() starlark.StringDict {
 	attrs := starlark.StringDict{
 		"ibmi_procedures":              starlark.NewBuiltin("ibmi_procedures", ibmiProceduresBuiltin),
 		"ibmi_lid_directory":           starlark.NewBuiltin("ibmi_lid_directory", ibmiLIDDirectoryBuiltin),
+		"upx_dos_image":                starlark.NewBuiltin("upx_dos_image", upxDOSImageBuiltin),
 		"ibmi_dasd_index":              starlark.NewBuiltin("ibmi_dasd_index", ibmiDASDIndexBuiltin),
 		"rpm_metadata":                 starlark.NewBuiltin("rpm_metadata", rpm.Builtin),
 		"irix_executable":              starlark.NewBuiltin("irix_executable", irixbinary.Builtin),
@@ -80,8 +81,11 @@ func Builtins() starlark.StringDict {
 		"apple_device_tree":            starlark.NewBuiltin("apple_device_tree", appleDeviceTreeBuiltin),
 		"encode_apple_device_tree":     starlark.NewBuiltin("encode_apple_device_tree", encodeAppleDeviceTreeBuiltin),
 		"arm64_disassemble":            starlark.NewBuiltin("arm64_disassemble", arm64DisassembleBuiltin),
+		"amd64_translate":              starlark.NewBuiltin("amd64_translate", amd64TranslateBuiltin),
+		"amd64_user_page_tables":       starlark.NewBuiltin("amd64_user_page_tables", amd64UserPageTablesBuiltin),
 		"android_boot":                 starlark.NewBuiltin("android_boot", androidboot.Builtin),
 		"berkeley_db":                  starlark.NewBuiltin("berkeley_db", berkeleydb.Builtin),
+		"bzimage_payload":              starlark.NewBuiltin("bzimage_payload", bzimagePayloadBuiltin),
 		"software_update_catalog":      starlark.NewBuiltin("software_update_catalog", softwareUpdateCatalogBuiltin),
 		"software_update_distribution": starlark.NewBuiltin("software_update_distribution", softwareUpdateDistributionBuiltin),
 
@@ -105,6 +109,7 @@ func Builtins() starlark.StringDict {
 		"macho":                starlark.NewBuiltin("macho", machoBuiltin),
 		"perf":                 starlark.NewBuiltin("perf", perf.Builtin),
 		"elf_symbols":          starlark.NewBuiltin("elf_symbols", elfmeta.Builtin),
+		"elf_structs":          starlark.NewBuiltin("elf_structs", elfmeta.StructsBuiltin),
 		"ppc_instructions":     starlark.NewBuiltin("ppc_instructions", powerPCInstructionsBuiltin),
 		"ppc_census":           starlark.NewBuiltin("ppc_census", powerPCCensusBuiltin),
 		"locate_table":         starlark.NewBuiltin("locate_table", locateTableBuiltin),

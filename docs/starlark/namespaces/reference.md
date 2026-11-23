@@ -4998,6 +4998,18 @@ Parses a ZIP archive (Stored, Deflate, Shrink and Implode) and exposes member fi
 
 Opens a Zstandard stream as a portable file with a 64 MiB decoder window limit. Frame headers provide decoded sizes when available; streams without content sizes require a counting pass. Reads and seeks replay decompression without extracting host files.
 
+### `binary.amd64_translate`
+
+`binary.amd64_translate(file, cr3, address) -> record`
+
+Walks four-level x86-64 page tables in a portable file representing physical memory starting at zero. Returns physical_address, page_size and the combined user, writable and execute permissions, assuming EFER.NXE. Accepts 4 KiB, 2 MiB and 1 GiB pages. Leaves all page-table bits unchanged.
+
+### `binary.amd64_user_page_tables`
+
+`binary.amd64_user_page_tables(kernel_root, base, mappings, supervisor_mappings=[]) -> file`
+
+Builds a four-level x86-64 root and 4 KiB page tables. Each mapping is a tuple of virtual address, physical address, size, writable and execute. Returns a file to place at base. Lower-half mappings are user-accessible. Optional supervisor mappings can occupy unused upper-half branches. The other upper-half root entries are copied from kernel_root and retain their physical references.
+
 ### `binary.android_boot`
 
 `binary.android_boot(file) -> record`
@@ -5058,6 +5070,12 @@ Creates a stateful bit reader over binary input. Its read, peek, drop and align 
 
 Creates a bounded mutable byte builder. Append encoded values, reserve or patch regions, then obtain bytes or a file; capacity is an allocation hint and limit bounds growth.
 
+### `binary.bzimage_payload`
+
+`binary.bzimage_payload(file) -> file`
+
+Returns the embedded kernel payload of a Linux/x86-64 bzImage as a bounded file view. The caller can pass the view to the decompressor matching its magic. Uses Linux boot protocol 2.12 or later.
+
 ### `binary.concat`
 
 `binary.concat(parts) -> file`
@@ -5076,11 +5094,17 @@ Creates a sequential byte reader at the selected offset. Scalar reads and bytes(
 
 Decodes a hex, Base64 or unpadded URL-safe Base64 string into bytes. This is the inverse of binary.hex/base64, not a character-set decoder; use binary.text for text.
 
+### `binary.elf_structs`
+
+`binary.elf_structs(file, names)`
+
+Reads named structure tags from DWARF or Linux BTF v1 in a portable ELF64 file. Returns a dictionary keyed by the requested names with each structure's size and a fields record of constant byte offsets. BTF includes promoted members of anonymous aggregates. Missing definitions and conflicting layouts fail. The request accepts 1 to 64 names.
+
 ### `binary.elf_symbols`
 
-`binary.elf_symbols(file, maximum_symbols=1000000, maximum_string_bytes=16MiB)`
+`binary.elf_symbols(file, maximum_symbols=1000000, maximum_string_bytes=16MiB, maximum_relocations=0)`
 
-Reads bounded ELF64 static/dynamic symbols and load segments from a portable file, in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), and segments (address, offset, file_size, memory_size, flags). Addresses are ELF values, not runtime-relocated addresses; callers supply mapping/load bias. Zero-sized/undefined symbols are preserved, not assigned inferred extents. Rejects extended numbering, duplicate symbol-table kinds, compressed symbol/string metadata, malformed extents/names and resource-limit violations. Does not read host symbols or load code.
+Reads bounded ELF64 static and dynamic symbols and program headers from a portable file in either byte order. Returns type, machine, entry, little_endian, symbols (name, address, size, section, binding, type, visibility, dynamic), load segments and an optional tls segment. Segment records contain address, physical_address, offset, file_size, memory_size, flags and alignment. A positive maximum_relocations decodes allocated x86-64 dynamic RELA and RELR entries into records with address, type, symbol, signed addend and implicit_addend. For RELR, read the addend at the relocation address. Zero leaves relocations empty. The caller supplies the load bias and resolves and applies relocations.
 
 ### `binary.encode`
 
@@ -5466,6 +5490,12 @@ Encodes a 64-bit unsigned integer as 8 bytes in little-endian order. Returns new
 
 Encodes a 8-bit unsigned integer as 1 bytes in single-byte order. Returns new bytes; integer inputs outside the codec's range fail rather than silently truncating.
 
+### `binary.upx_dos_image`
+
+`binary.upx_dos_image(source, header_offset) -> file`
+
+Reads a DOS EXE load image from a v13 UPX PackHeader at the supplied offset. The supported payload uses NRV2B_8, no filter and a relocation-free original EXE with a 32-byte header. Validates the header and both Adler-32 checksums and returns the unpacked load image as a file.
+
 ### `binary.view`
 
 `binary.view(value, offset=0, size=None) -> byte_view`
@@ -5798,9 +5828,9 @@ Creates an in-process 64-bit big-endian Power ISA partition in guest (supervisor
 
 ### `emulator.processor`
 
-`emulator.processor(architecture='arm64', memory=64MiB) -> processor`
+`emulator.processor(architecture='arm64', memory=64MiB, linux_brk=0) -> processor`
 
-Creates a portable in-process ARM64 or AMD64 instruction context independently of executable formats and OS APIs. map(address,size,data=None,access=rw) copies bounded bytes/files into owned sparse memory; read/write, get_register/set_register and plugin expose explicit experiment state. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps and PC for breakpoint, halt, budget or fault. ARM64 uses the existing baseline ARMv8-A processor without optional PAuth. No code is implicitly loaded or executed. close() releases the context.
+Creates a portable in-process ARM64 or AMD64 instruction context. map(address,size,data=None,access=rw) copies bounded bytes or files into owned sparse memory. memory_ranges() describes owned ranges and their effective permissions. read/write, get_register/set_register and plugin expose explicit state. A positive page-aligned linux_brk enables Linux/amd64 userspace syscall handling, with empty stdin and bounded stdout and stderr byte fields. run(maximum_steps,stop_at=[]) stops before address breakpoints and returns reason, detail, steps, pc and exit_status. An exited Linux task stays stopped. ARM64 uses the baseline ARMv8-A processor. The caller supplies the initial code, memory and registers. close() releases the context.
 
 ### `emulator.r3000`
 
@@ -6334,9 +6364,9 @@ Creates a QEMU audio-backend descriptor from its name and properties. It is conf
 
 ### `qemu.backend`
 
-`qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', display_zoom_to_fit=False, block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[])`
+`qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', display_zoom_to_fit=False, block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[], incoming=False)`
 
-Creates a QEMU implementation of the portable VMM backend with selected machine, acceleration, devices and transport policies. A separate vmm.start call launches the guest.
+Creates a QEMU implementation of the portable VMM backend with selected machine, acceleration, devices and transport policies. A separate vmm.start call launches the guest. incoming=True waits for checkpoint data before starting the virtual CPU and leaves the restored VM paused.
 
 ### `qemu.chardev`
 
@@ -6354,7 +6384,7 @@ Creates a QEMU device descriptor from a device model and properties. This is bac
 
 `qemu.extension(vm)`
 
-Returns the QEMU-specific control extension for an existing VM, including QMP/HMP and block statistics. Use portable VM methods when backend-specific control is unnecessary.
+Returns QEMU-specific control for an existing VM. checkpoint() streams paused VM state into a bounded in-memory file and leaves the source in QEMU's post-migration state. A source stopped at a GDB breakpoint requires qemu.option('-global', 'migration.store-global-state=off'). restore_checkpoint(source) loads the file into a fresh incoming=True instance with the same QEMU configuration and immutable disk bytes. Checkpoints carry CPU, RAM and device state. Disk data remains in the original immutable attachments.
 
 ### `qemu.netdev`
 
@@ -6421,6 +6451,12 @@ Evaluates supported Renvo make recipes against a virtual source tree and rebuild
 `rfe.backend(overlay_limit=268435456) -> vmm_backend`
 
 Creates an experimental in-process software x86 PC backend from Renvo x86.rfe. JIT-compiles hot 16-, 32- and 64-bit code using Renvo native blocks, without KVM or QEMU. Requires a supported 64-bit native-JIT host; unavailable executable memory is an error. Privileged/device/unsupported instructions use precise architectural slow paths. Shares BIOS, IDE, VGA, input and overlays with cc. MS-DOS 6.22 startup, Windows 3.11 standard/enhanced-mode Notepad, and Windows 98 SE Explorer/Notepad are verified. The graphical smokes verify keyboard input, PS/2 mouse-selected Save and changed bytes on the guest disk. Enhanced-mode paging and actual native-tier retirement are explicitly asserted. Implements basic x87, string port I/O, paging and protected/v8086 gates; parts of x87 and other legacy CPU/device features remain incomplete. overlay_limit bounds dirty snapshot memory in bytes. Inspect with vm.extension("rfe.v1").state().
+
+### `rfe.run_real_mode`
+
+`rfe.run_real_mode(memory, registers, instruction_limit) -> result`
+
+Runs an x86 CPU from supplied RAM at address zero and a dictionary of initial 16-bit registers. Uses A20-enabled addressing and the architectural interpreter with no PC devices. Returns the stop reason, diagnostic detail, retired count, registers, interrupt counts, and resulting RAM as a read-only file.
 
 ### `runtime.cpu_profile_start`
 
@@ -6506,6 +6542,12 @@ Percent-encodes text for use as one URL path segment. It is not query-string enc
 
 Decodes percent escapes in URL path text. Malformed escape sequences produce an error.
 
+### `vmm.amd64_boot`
+
+`vmm.amd64_boot(ram, registers, cr3, gdt, gdt_limit, user=False, fs_base=0, gs_base=0, idt=0, idt_limit=0, syscall_entry=0, syscall_mask=0, kernel_gs_base=0, tss=0, tss_limit=0) -> vmm_amd64_boot`
+
+Creates an explicit single-CPU x86-64 long-mode handoff from a portable physical RAM file, a general-purpose register dictionary, CR3 and descriptor table addresses. cc loads the supplied RAM and starts at the supplied RIP with CPL3 when user=True. GDT entries use the Linux x86-64 selectors 0x10, 0x18, 0x2b and 0x33. With a nonzero supervisor-executable syscall_entry, KVM initializes STAR, LSTAR, SFMASK and the kernel GS base, then enables EFER.SCE. With tss and tss_limit, cc initializes the task register for a busy 64-bit TSS at GDT selector 0x40. The caller supplies descriptor contents and associated kernel task and per-CPU state in RAM.
+
 ### `vmm.arm64_boot`
 
 `vmm.arm64_boot(image, address, memory_base, entry=None, registers=None, system=None) -> vmm_arm64_boot`
@@ -6564,7 +6606,7 @@ Describes the requested guest display mode and whether support is mandatory. Thi
 
 `vmm.linux_boot(kernel, initramfs=None, command_line='')`
 
-Creates portable direct Linux boot intent from borrowed immutable kernel and optional initramfs files plus a command line. Requires backend boot.linux capability; QEMU supports Linux hosts and x86 guests using anonymous inherited descriptors.
+Creates portable direct Linux boot intent from borrowed immutable kernel and optional initramfs files plus a command line. Requires the boot.linux capability. QEMU supports Linux hosts and x86 guests using anonymous inherited descriptors. The cc PC backend supports single-CPU x86_64 bzImage boot.
 
 ### `vmm.machine`
 
@@ -8165,7 +8207,7 @@ Methods and attributes: `close()`, `eof`, `error`, `input(packet, now=0)`, `poll
 
 The backend-specific extension of a running QEMU VM. qmp sends structured monitor requests, qmp_schema inspects available commands, hmp uses the human monitor and block_stats reports storage activity. process exposes backend lifecycle state; these operations are not portable to every VMM.
 
-Methods and attributes: `block_stats()`, `capabilities`, `hmp(command, timeout=30)`, `process`, `qmp(command, arguments={}, timeout=30)`, `qmp_schema(timeout=30)`.
+Methods and attributes: `block_stats()`, `capabilities`, `checkpoint(maximum=512MiB, timeout=30)`, `hmp(command, timeout=30)`, `process`, `qmp(command, arguments={}, timeout=30)`, `qmp_schema(timeout=30)`, `restore_checkpoint(source, timeout=30)`.
 
 ### `qemu_acpi_table` value
 

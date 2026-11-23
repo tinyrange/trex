@@ -6,6 +6,25 @@ import (
 	"j5.nz/cc/hypervisor/x86state"
 )
 
+type pcMemoryRegion struct {
+	base, size uint64
+	kind       uint32
+}
+
+func pcMemoryMap(size uint64) []pcMemoryRegion {
+	regions := []pcMemoryRegion{
+		{0, 0xa0000, 1},
+		// The VGA aperture is device space. The firmware window has
+		// RAM backing but remains reserved.
+		{0xc0000, 0x40000, 2},
+		{0x100000, min(size, pciMemoryBase) - 0x100000, 1},
+	}
+	if size > pciMemoryBase {
+		regions = append(regions, pcMemoryRegion{highRAMBase, size - pciMemoryBase, 1})
+	}
+	return regions
+}
+
 // extendedMemory implements the E801 size query and the E820 system address
 // map. AH=88 alone cannot describe the RAM above 64 MiB. ROM remains
 // reserved even though firmware bytes have RAM backing in the backend.
@@ -21,22 +40,7 @@ func (p *pc) extendedMemory(r *x86state.Registers, s x86state.SystemRegisters) b
 	}
 	switch uint32(r.Rax) {
 	case 0xe820:
-		regions := []struct {
-			base, size uint64
-			kind       uint32
-		}{
-			{0, 0xa0000, 1},
-			// The VGA aperture is device address space, not firmware-owned
-			// memory. Claiming it here conflicts with NT 3.51 video resources.
-			{0xc0000, 0x40000, 2},
-			{0x100000, min(uint64(len(p.ram)), uint64(pciMemoryBase)) - 0x100000, 1},
-		}
-		if len(p.ram) > pciMemoryBase {
-			regions = append(regions, struct {
-				base, size uint64
-				kind       uint32
-			}{highRAMBase, uint64(len(p.ram)) - pciMemoryBase, 1})
-		}
+		regions := pcMemoryMap(uint64(len(p.ram)))
 		index := uint32(r.Rbx)
 		if uint32(r.Rdx) != 0x534d4150 || uint32(r.Rcx) < 20 || index >= uint32(len(regions)) {
 			return false

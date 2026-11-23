@@ -74,6 +74,7 @@ type qemuBackend struct {
 	displayZoomToFit  bool
 	blockTransport    string
 	firmware          string
+	incoming          bool
 	overlayLimit      int64
 	stderrLimit       int
 	devices           []*qemuSpecValue
@@ -119,6 +120,9 @@ func (b *qemuBackend) Validate(machine vmmapi.Machine) []vmmapi.ValidationIssue 
 	var issues []vmmapi.ValidationIssue
 	if machine.ARM64Boot != nil || machine.ARM64Platform != nil {
 		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.arm64_platform", Field: "platform", Message: "custom ARM64 handoffs and platforms are not supported by this backend"})
+	}
+	if machine.AMD64Boot != nil {
+		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.amd64_boot", Field: "boot", Message: "QEMU does not accept explicit AMD64 startup state"})
 	}
 	if machine.DarwinBoot != nil {
 		issues = append(issues, vmmapi.ValidationIssue{Code: "qemu.darwin_boot", Field: "boot", Message: "Darwin direct boot is not supported by this backend"})
@@ -248,7 +252,7 @@ func qemuCapabilities() []string {
 func qemuBackendBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	binaryName, machine, accelerator := "", "pc", "auto"
 	displayFrontend, blockTransport, firmware := "auto", "auto", "bios"
-	var displayZoomToFit bool
+	var displayZoomToFit, incoming bool
 	overlayLimit := int64(defaultQEMUOverlayLimit)
 	stderrLimit := defaultQEMUStderrLimit
 	var devices, netdevs, audiodevs, chardevs, options, acpiTables *starlark.List
@@ -262,6 +266,7 @@ func qemuBackendBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 		"display_zoom_to_fit?", &displayZoomToFit,
 		"block_transport?", &blockTransport,
 		"firmware?", &firmware,
+		"incoming?", &incoming,
 		"overlay_limit?", &overlayLimit,
 		"stderr_limit?", &stderrLimit,
 		"devices?", &devices,
@@ -303,6 +308,7 @@ func qemuBackendBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.T
 		binary: binaryName, machine: machine, accelerator: accelerator,
 		displayFrontend: displayFrontend, blockTransport: blockTransport, firmware: firmware,
 		displayZoomToFit: displayZoomToFit,
+		incoming:         incoming,
 		overlayLimit:     overlayLimit, stderrLimit: stderrLimit, capabilities: qemuCapabilities(),
 	}
 	var err error

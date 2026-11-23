@@ -74,6 +74,7 @@ type Machine struct {
 	Boot                 *LinuxBoot
 	DarwinBoot           *DarwinBoot
 	ARM64Boot            *ARM64Boot
+	AMD64Boot            *AMD64Boot
 	ARM64Platform        *ARM64Platform
 	Architecture         string
 	Memory               int64

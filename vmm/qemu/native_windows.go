@@ -5,6 +5,8 @@ package qemu
 import (
 	"fmt"
 	"os"
+
+	"github.com/tinyrange/trex/channel"
 )
 
 // Go's os/exec does not support ExtraFiles on Windows. Keep the backend out of
@@ -28,3 +30,7 @@ func qemuSocketpair() ([2]int, error) {
 
 // startQEMU rejects this platform before constructing inherited-file arguments.
 func qemuInheritedFDPath(int) string { return "" }
+
+func qemuWriteQMPWithFD(channel.ByteChannel, map[string]any, *os.File) error {
+	return fmt.Errorf("QMP descriptor passing is unavailable on Windows")
+}

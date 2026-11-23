@@ -85,18 +85,21 @@ func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Ti
 	p := &pc{cpu: cpu, ram: ram, disk: disk, now: now, started: now(), mode: 3, ports: make(map[uint16]byte)}
 	p.serial.setIRQ, p.serial.modem = cpu.SetIRQ, 0xb0
 	p.cmos[0x0a], p.cmos[0x0b] = 0x26, 2
-	p.geometry = vmm.CHSGeometry{Cylinders: int(disk.Device.Geometry().Size / 512 / 16 / 63), Heads: 16, Sectors: 63}
-	if disk.CHS != nil {
-		p.geometry = *disk.CHS
-	}
-	if p.geometry.Cylinders > 16383 {
-		p.geometry.Cylinders = 16383
+	if disk.Device != nil {
+		size := disk.Device.Geometry().Size
+		p.geometry = vmm.CHSGeometry{Cylinders: int(size / 512 / 16 / 63), Heads: 16, Sectors: 63}
+		if disk.CHS != nil {
+			p.geometry = *disk.CHS
+		}
+		if p.geometry.Cylinders > 16383 {
+			p.geometry.Cylinders = 16383
+		}
+		p.biosGeometry = p.geometry
+		if disk.CHS == nil {
+			p.biosGeometry = translatedGeometry(uint64(size / 512))
+		}
 	}
 	p.ide = newIDE(disk, p.geometry, cpu.SetIRQ)
-	p.biosGeometry = p.geometry
-	if disk.CHS == nil {
-		p.biosGeometry = translatedGeometry(uint64(disk.Device.Geometry().Size / 512))
-	}
 	p.vga = newVGA(ram[0xb8000:0xc0000])
 	p.keyboard = newKeyboard(cpu.SetIRQ)
 	if gate, ok := cpu.(interface{ SetA20(bool) error }); ok {
@@ -155,7 +158,9 @@ func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Ti
 	ram[0x449] = 3
 	ram[0x484] = 24
 	ram[0x485] = 16
-	ram[0x475] = 1
+	if disk.Device != nil {
+		ram[0x475] = 1
+	}
 	copy(ram[0xffff5:], []byte("09/13/26"))
 	ram[0xffffe] = 0xfc
 	// AT system configuration table and fixed disk parameter table.
@@ -172,6 +177,9 @@ func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Ti
 	p.vga.syncText()
 	if !legacyBoot {
 		return p, nil
+	}
+	if disk.Device == nil {
+		return nil, fmt.Errorf("legacy boot requires a disk")
 	}
 	if n, err := disk.Device.ReadAt(ram[0x7c00:0x7e00], 0); err != nil || n != 512 {
 		return nil, fmt.Errorf("read boot sector: %w", err)
@@ -201,8 +209,10 @@ func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Ti
 }
 
 func (p *pc) initializeCMOS() {
-	p.cmos[0x12] = 0xf0
-	p.cmos[0x19] = 47
+	if p.disk.Device != nil {
+		p.cmos[0x12] = 0xf0
+		p.cmos[0x19] = 47
+	}
 	p.cmos[0x15] = 0x80
 	p.cmos[0x16] = 2
 	extended := uint16(min((len(p.ram)-(1<<20))/1024, 65535))
@@ -393,7 +403,7 @@ func (p *pc) bios() error {
 	case 0x12:
 		setLow(&r.Rax, 640)
 	case 0x13:
-		if byte(r.Rdx) != 0x80 {
+		if byte(r.Rdx) != 0x80 || p.disk.Device == nil {
 			carry = true
 			setAH(&r.Rax, 1)
 			break

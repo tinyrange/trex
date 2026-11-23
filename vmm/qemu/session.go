@@ -222,6 +222,10 @@ func (v *qemuExtensionValue) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("qmp_schema", v.schemaBuiltin), nil
 	case "block_stats":
 		return starlark.NewBuiltin("block_stats", v.blockStatsBuiltin), nil
+	case "checkpoint":
+		return starlark.NewBuiltin("checkpoint", v.checkpointBuiltin), nil
+	case "restore_checkpoint":
+		return starlark.NewBuiltin("restore_checkpoint", v.restoreCheckpointBuiltin), nil
 	case "capabilities":
 		return starvalue.NewRecord(starlark.StringDict{
 			"accelerator": starlark.String(v.driver.backend.accelerator),
@@ -241,7 +245,7 @@ func (v *qemuExtensionValue) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (v *qemuExtensionValue) AttrNames() []string {
-	return []string{"block_stats", "capabilities", "hmp", "process", "qmp", "qmp_schema"}
+	return []string{"block_stats", "capabilities", "checkpoint", "hmp", "process", "qmp", "qmp_schema", "restore_checkpoint"}
 }
 
 func (v *qemuExtensionValue) blockStatsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

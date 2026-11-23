@@ -137,12 +137,14 @@ func (m *AddressSpace) accessAt(address uint64, r *region) (Access, int) {
 
 func NewAddressSpace(limit uint64) *AddressSpace { return &AddressSpace{limit: limit} }
 
+func (m *AddressSpace) Remaining() uint64 { return m.limit - m.used }
+
 func validRange(address uint64, size int) bool {
 	return size >= 0 && (size == 0 || uint64(size-1) <= math.MaxUint64-address)
 }
 
 func (m *AddressSpace) Map(address uint64, data []byte, access Access) error {
-	if len(data) == 0 || !validRange(address, len(data)) || access == 0 || access & ^(Read|Write|Execute) != 0 {
+	if len(data) == 0 || !validRange(address, len(data)) || access & ^(Read|Write|Execute) != 0 {
 		return fmt.Errorf("memory: invalid mapping at %#x", address)
 	}
 	if uint64(len(data)) > m.limit-m.used {
@@ -160,6 +162,65 @@ func (m *AddressSpace) Map(address uint64, data []byte, access Access) error {
 	clear(m.readCache[:])
 	m.trackedVersion++
 	return nil
+}
+
+// MapFixed installs a mapping, replacing only the bytes in its address range.
+// Permission overlays outside the range survive. Failed checks leave the
+// existing address space intact.
+func (m *AddressSpace) MapFixed(address uint64, data []byte, access Access) error {
+	if len(data) == 0 || !validRange(address, len(data)) || access&^(Read|Write|Execute) != 0 {
+		return fmt.Errorf("memory: invalid fixed mapping at %#x", address)
+	}
+	last := address + uint64(len(data)-1)
+	regions, replaced := m.regionsWithout(address, last)
+	if uint64(len(data)) > m.Remaining()+replaced {
+		return fmt.Errorf("memory: fixed mapping exceeds %d-byte budget", m.limit)
+	}
+	regions = append(regions, region{address, bytes.Clone(data), access})
+	sort.Slice(regions, func(i, j int) bool { return regions[i].start < regions[j].start })
+	m.replaceRegions(regions, m.used-replaced+uint64(len(data)), address, last)
+	return nil
+}
+
+// UnmapRange removes the covered parts of mappings and ignores holes.
+func (m *AddressSpace) UnmapRange(address uint64, size int) error {
+	if size <= 0 || !validRange(address, size) {
+		return fmt.Errorf("memory: invalid unmap range at %#x", address)
+	}
+	last := address + uint64(size-1)
+	regions, removed := m.regionsWithout(address, last)
+	if removed != 0 {
+		m.replaceRegions(regions, m.used-removed, address, last)
+	}
+	return nil
+}
+
+func (m *AddressSpace) regionsWithout(address, last uint64) ([]region, uint64) {
+	regions := make([]region, 0, len(m.regions)+2)
+	var replaced uint64
+	for _, r := range m.regions {
+		rLast := r.start + uint64(len(r.data)-1)
+		if rLast < address || r.start > last {
+			regions = append(regions, r)
+			continue
+		}
+		replaced += min(rLast, last) - max(r.start, address) + 1
+		if r.start < address {
+			regions = append(regions, region{r.start, bytes.Clone(r.data[:address-r.start]), r.access})
+		}
+		if rLast > last {
+			regions = append(regions, region{last + 1, bytes.Clone(r.data[last+1-r.start:]), r.access})
+		}
+	}
+	return regions, replaced
+}
+
+func (m *AddressSpace) replaceRegions(regions []region, used, address, last uint64) {
+	m.regions = regions
+	m.used = used
+	m.removeProtections(address, last)
+	clear(m.readCache[:])
+	m.trackedVersion++
 }
 
 func (m *AddressSpace) find(address uint64) *region {
@@ -263,21 +324,7 @@ func (m *AddressSpace) Unmap(address uint64) error {
 	for i, r := range m.regions {
 		if r.start == address {
 			last := address + uint64(len(r.data)-1)
-			var remaining []Protection
-			for _, p := range m.protections {
-				pLast := p.Start + p.Size - 1
-				if pLast < address || p.Start > last {
-					remaining = append(remaining, p)
-					continue
-				}
-				if p.Start < address {
-					remaining = append(remaining, Protection{p.Start, address - p.Start, p.Access})
-				}
-				if pLast > last {
-					remaining = append(remaining, Protection{last + 1, pLast - last, p.Access})
-				}
-			}
-			m.protections = remaining
+			m.removeProtections(address, last)
 			m.used -= uint64(len(r.data))
 			m.regions = append(m.regions[:i], m.regions[i+1:]...)
 			clear(m.readCache[:])
@@ -286,6 +333,24 @@ func (m *AddressSpace) Unmap(address uint64) error {
 		}
 	}
 	return fmt.Errorf("memory: no mapping starts at %#x", address)
+}
+
+func (m *AddressSpace) removeProtections(address, last uint64) {
+	var remaining []Protection
+	for _, p := range m.protections {
+		pLast := p.Start + p.Size - 1
+		if pLast < address || p.Start > last {
+			remaining = append(remaining, p)
+			continue
+		}
+		if p.Start < address {
+			remaining = append(remaining, Protection{p.Start, address - p.Start, p.Access})
+		}
+		if pLast > last {
+			remaining = append(remaining, Protection{last + 1, pLast - last, p.Access})
+		}
+	}
+	m.protections = remaining
 }
 
 // Protect changes permissions over a fully mapped range, returning its prior

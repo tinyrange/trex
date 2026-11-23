@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -79,6 +80,10 @@ func (c *qmpClient) negotiate(ctx context.Context) error {
 }
 
 func (c *qmpClient) Call(ctx context.Context, command string, arguments map[string]any) (any, error) {
+	return c.call(ctx, command, arguments, nil)
+}
+
+func (c *qmpClient) call(ctx context.Context, command string, arguments map[string]any, file *os.File) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -121,7 +126,12 @@ func (c *qmpClient) Call(ctx context.Context, command string, arguments map[stri
 		c.shutdown(ctx.Err())
 		close(canceled)
 	})
-	err := c.encoder.Encode(request)
+	var err error
+	if file == nil {
+		err = c.encoder.Encode(request)
+	} else {
+		err = qemuWriteQMPWithFD(c.channel, request, file)
+	}
 	if !stop() {
 		<-canceled
 	}

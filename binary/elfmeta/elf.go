@@ -12,7 +12,12 @@ import (
 	"github.com/tinyrange/trex/storage"
 )
 
-type Options struct{ MaximumSymbols, MaximumStringBytes int }
+type Options struct {
+	MaximumSymbols, MaximumStringBytes int
+	// MaximumRelocations enables reading allocated dynamic RELA and RELR records.
+	// Zero leaves relocation tables unread.
+	MaximumRelocations int
+}
 type Image struct {
 	Type         elf.Type
 	Machine      elf.Machine
@@ -20,6 +25,8 @@ type Image struct {
 	LittleEndian bool
 	Symbols      []Symbol
 	Segments     []elf.ProgHeader
+	TLS          *elf.ProgHeader
+	Relocations  []Relocation
 }
 type Symbol struct {
 	elf.Symbol
@@ -33,7 +40,8 @@ func Open(r storage.Reader, options Options) (*Image, error) {
 	if options.MaximumStringBytes == 0 {
 		options.MaximumStringBytes = 16 << 20
 	}
-	if options.MaximumSymbols < 1 || options.MaximumSymbols > 1000000 || options.MaximumStringBytes < 1 || options.MaximumStringBytes > 64<<20 {
+	if options.MaximumSymbols < 1 || options.MaximumSymbols > 1000000 || options.MaximumStringBytes < 1 || options.MaximumStringBytes > 64<<20 ||
+		options.MaximumRelocations < 0 || options.MaximumRelocations > 1000000 {
 		return nil, fmt.Errorf("elf_symbols: invalid resource limits")
 	}
 	if r == nil || r.Size() < 64 {
@@ -171,6 +179,14 @@ func Open(r storage.Reader, options Options) (*Image, error) {
 	out := &Image{Type: f.Type, Machine: f.Machine, Entry: f.Entry, LittleEndian: h[5] == 1}
 	out.Symbols = parsed
 	for _, p := range f.Progs {
+		if p.Type == elf.PT_TLS {
+			if out.TLS != nil || !within(p.Off, p.Filesz) || p.Filesz > p.Memsz ||
+				p.Memsz > ^uint64(0)-p.Vaddr || p.Align&(p.Align-1) != 0 {
+				return nil, fmt.Errorf("elf_symbols: invalid TLS segment")
+			}
+			tls := p.ProgHeader
+			out.TLS = &tls
+		}
 		if p.Type != elf.PT_LOAD {
 			continue
 		}
@@ -178,6 +194,12 @@ func Open(r storage.Reader, options Options) (*Image, error) {
 			return nil, fmt.Errorf("elf_symbols: invalid load segment")
 		}
 		out.Segments = append(out.Segments, p.ProgHeader)
+	}
+	if options.MaximumRelocations > 0 {
+		out.Relocations, err = readDynamicRelocations(f, parsed, options.MaximumRelocations)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

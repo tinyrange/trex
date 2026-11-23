@@ -33,7 +33,7 @@ func (b *Backend) validateARM64(m vmm.Machine) []vmm.ValidationIssue {
 	if m.Memory <= 0 || m.Memory%page != 0 || m.ARM64Boot != nil && m.ARM64Boot.MemoryBase%uint64(page) != 0 {
 		add("memory", "HVF RAM must align to host pages")
 	}
-	if m.ARM64Boot == nil || m.Boot != nil || m.DarwinBoot != nil {
+	if m.ARM64Boot == nil || m.Boot != nil || m.DarwinBoot != nil || m.AMD64Boot != nil {
 		add("boot", "ARM64 requires an explicit arm64_boot firmware handoff")
 	} else if err := m.ARM64Boot.Validate(m.Memory); err != nil {
 		add("boot", err.Error())

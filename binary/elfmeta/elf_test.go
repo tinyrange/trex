@@ -68,6 +68,30 @@ func fixture(order binary.ByteOrder) []byte {
 }
 func input(b []byte) *starfile.Bytes { return &starfile.Bytes{Name: "elf", Data: b} }
 
+func TestELFStaticTLSProjection(t *testing.T) {
+	le := binary.LittleEndian
+	b := fixture(le)
+	le.PutUint16(b[56:], 2)
+	header := b[120:]
+	le.PutUint32(header, uint32(elf.PT_TLS))
+	le.PutUint64(header[8:], 0x104)
+	le.PutUint64(header[16:], 0x2014)
+	le.PutUint64(header[32:], 4)
+	le.PutUint64(header[40:], 12)
+	le.PutUint64(header[48:], 8)
+	image, err := Open(input(b), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image.TLS == nil || image.TLS.Vaddr != 0x2014 || image.TLS.Off != 0x104 || image.TLS.Filesz != 4 || image.TLS.Memsz != 12 || image.TLS.Align != 8 || len(image.Segments) != 1 {
+		t.Fatalf("unexpected TLS or load projection: %+v", image)
+	}
+	le.PutUint64(header[48:], 3)
+	if _, err := Open(input(b), Options{}); err == nil {
+		t.Fatal("accepted invalid TLS alignment")
+	}
+}
+
 func TestELFSymbolsBothByteOrdersAndZeroSize(t *testing.T) {
 	for _, order := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
 		b := fixture(order)

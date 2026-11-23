@@ -833,7 +833,7 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 			}
 			c.resultFlags(value, width)
 			err = write(value)
-		case x86asm.XORPS, x86asm.PXOR, x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.ORPS, x86asm.PCMPEQW, x86asm.PCMPEQB, x86asm.PADDD, x86asm.PSUBQ, x86asm.PUNPCKLDQ, x86asm.PUNPCKLQDQ, x86asm.UNPCKLPD, x86asm.UNPCKHPD, x86asm.PSHUFLW, x86asm.PSHUFD:
+		case x86asm.XORPS, x86asm.PXOR, x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.ORPS, x86asm.PCMPEQB, x86asm.PCMPEQW, x86asm.PCMPEQD, x86asm.PADDD, x86asm.PADDQ, x86asm.PSUBQ, x86asm.PUNPCKLDQ, x86asm.PUNPCKHDQ, x86asm.PUNPCKLQDQ, x86asm.UNPCKLPD, x86asm.UNPCKHPD, x86asm.PSHUFLW, x86asm.PSHUFD:
 			destination, ok := inst.Args[0].(x86asm.Reg)
 			if !ok || destination < x86asm.X0 || destination > x86asm.X15 {
 				err = fmt.Errorf("invalid %s destination %v", inst.Op, inst.Args[0])
@@ -897,18 +897,26 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 						sum := binary.LittleEndian.Uint32(register[offset:]) + binary.LittleEndian.Uint32(value[offset:])
 						binary.LittleEndian.PutUint32(register[offset:], sum)
 					}
-				} else if inst.Op == x86asm.PSUBQ {
+				} else if inst.Op == x86asm.PADDQ || inst.Op == x86asm.PSUBQ {
 					register := &c.xmm[destination-x86asm.X0]
 					for offset := 0; offset < 16; offset += 8 {
-						difference := binary.LittleEndian.Uint64(register[offset:]) - binary.LittleEndian.Uint64(value[offset:])
-						binary.LittleEndian.PutUint64(register[offset:], difference)
+						left, right := binary.LittleEndian.Uint64(register[offset:]), binary.LittleEndian.Uint64(value[offset:])
+						if inst.Op == x86asm.PSUBQ {
+							right = -right
+						}
+						binary.LittleEndian.PutUint64(register[offset:], left+right)
 					}
-				} else if inst.Op == x86asm.PUNPCKLDQ {
+				} else if inst.Op == x86asm.PUNPCKLDQ || inst.Op == x86asm.PUNPCKHDQ {
 					before := c.xmm[destination-x86asm.X0]
 					var result [16]byte
+					start := 0
+					if inst.Op == x86asm.PUNPCKHDQ {
+						start = 8
+					}
 					for lane := 0; lane < 2; lane++ {
-						copy(result[8*lane:8*lane+4], before[4*lane:4*lane+4])
-						copy(result[8*lane+4:8*lane+8], value[4*lane:4*lane+4])
+						from := start + 4*lane
+						copy(result[8*lane:8*lane+4], before[from:from+4])
+						copy(result[8*lane+4:8*lane+8], value[from:from+4])
 					}
 					c.xmm[destination-x86asm.X0] = result
 				} else if inst.Op == x86asm.PUNPCKLQDQ || inst.Op == x86asm.UNPCKLPD {
@@ -934,6 +942,15 @@ func (c *CPU) Step(memory cpu.Memory) (cpu.Effect, error) {
 						if equal {
 							register[i], register[i+1] = 255, 255
 						}
+					}
+				} else if inst.Op == x86asm.PCMPEQD {
+					register := &c.xmm[destination-x86asm.X0]
+					for i := 0; i < 16; i += 4 {
+						var mask uint32
+						if binary.LittleEndian.Uint32(register[i:]) == binary.LittleEndian.Uint32(value[i:]) {
+							mask = ^uint32(0)
+						}
+						binary.LittleEndian.PutUint32(register[i:], mask)
 					}
 				} else {
 					for i := range value {
