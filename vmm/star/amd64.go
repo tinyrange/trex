@@ -25,7 +25,8 @@ func amd64BootBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		"cr3", &boot.PageTable, "gdt", &boot.GDT.Base, "gdt_limit", &boot.GDT.Limit,
 		"user?", &boot.User, "fs_base?", &boot.FSBase, "gs_base?", &boot.GSBase,
 		"idt?", &boot.IDT.Base, "idt_limit?", &boot.IDT.Limit,
-		"syscall_entry?", &boot.SyscallEntry, "syscall_mask?", &boot.SyscallMask, "kernel_gs_base?", &boot.KernelGSBase); err != nil {
+		"syscall_entry?", &boot.SyscallEntry, "syscall_mask?", &boot.SyscallMask, "kernel_gs_base?", &boot.KernelGSBase,
+		"tss?", &boot.TSSBase, "tss_limit?", &boot.TSSLimit); err != nil {
 		return nil, err
 	}
 	var ok bool

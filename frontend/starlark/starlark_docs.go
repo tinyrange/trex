@@ -399,7 +399,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"vmm.mmio":                          "vmm.mmio(address, size, read=None, write=None, widths=[1,2,4,8]) -> vmm_arm64_device",
 	"vmm.darwin_nvram":                  "vmm.darwin_nvram(values) -> bytes",
 	"vmm.arm64_boot":                    "vmm.arm64_boot(image, address, memory_base, entry=None, registers=None, system=None) -> vmm_arm64_boot",
-	"vmm.amd64_boot":                    "vmm.amd64_boot(ram, registers, cr3, gdt, gdt_limit, user=False, fs_base=0, gs_base=0, idt=0, idt_limit=0, syscall_entry=0, syscall_mask=0, kernel_gs_base=0) -> vmm_amd64_boot",
+	"vmm.amd64_boot":                    "vmm.amd64_boot(ram, registers, cr3, gdt, gdt_limit, user=False, fs_base=0, gs_base=0, idt=0, idt_limit=0, syscall_entry=0, syscall_mask=0, kernel_gs_base=0, tss=0, tss_limit=0) -> vmm_amd64_boot",
 	"vmm.darwin_arm64_boot":             "vmm.darwin_arm64_boot(kernel, device_tree, memory, memory_base, virtual_base, command_line='-v', entropy=None, payloads=None, nvram=None) -> vmm_arm64_boot",
 	"binary.arm64_disassemble":          "binary.arm64_disassemble(source, offset=0, address=0, count=32) -> list",
 	"binary.upx_dos_image":              "binary.upx_dos_image(source, header_offset) -> file",

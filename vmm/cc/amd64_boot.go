@@ -26,6 +26,9 @@ func (p *pc) installAMD64(boot *vmm.AMD64Boot) error {
 	s.Cs, s.Ss, s.Ds, s.Es, s.Fs, s.Gs = code, data, data, data, data, data
 	s.Fs.Base, s.Gs.Base = boot.FSBase, boot.GSBase
 	s.Gdt, s.Idt = boot.GDT, boot.IDT
+	if boot.TSSLimit != 0 {
+		s.Tr = x86state.Segment{Selector: 0x40, Base: boot.TSSBase, Limit: boot.TSSLimit, Type: 11, Present: 1}
+	}
 	s.Cr0 = 0x80010033                                       // PG, WP, NE, ET, MP, PE.
 	s.Cr2, s.Cr3, s.Cr4, s.Cr8 = 0, boot.PageTable, 0x620, 0 // PAE, OSFXSR, OSXMMEXCPT.
 	s.Efer = 0xd00                                           // LME, LMA, NXE.
