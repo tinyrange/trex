@@ -17,6 +17,9 @@ type AMD64Boot struct {
 	PageTable      uint64
 	GDT, IDT       x86state.DescriptorTable
 	FSBase, GSBase uint64
+	SyscallEntry   uint64
+	SyscallMask    uint32
+	KernelGSBase   uint64
 	User           bool
 }
 
@@ -34,6 +37,14 @@ func (b *AMD64Boot) Validate(ramSize int64) error {
 	entry, err := memory.TranslateAMD64(b.RAM, b.PageTable, b.Registers.Rip)
 	if err != nil || !entry.Execute || (b.User && !entry.User) || entry.Physical >= uint64(size) {
 		return fmt.Errorf("AMD64 handoff entry is unavailable at the requested privilege")
+	}
+	if b.SyscallEntry != 0 {
+		entry, err := memory.TranslateAMD64(b.RAM, b.PageTable, b.SyscallEntry)
+		if err != nil || !entry.Execute || entry.User || entry.Physical >= uint64(size) {
+			return fmt.Errorf("AMD64 syscall entry must map executable supervisor code in RAM")
+		}
+	} else if b.SyscallMask != 0 || b.KernelGSBase != 0 {
+		return fmt.Errorf("AMD64 syscall mask and kernel GS base require a syscall entry")
 	}
 	for address := b.GDT.Base; ; {
 		entry, err := memory.TranslateAMD64(b.RAM, b.PageTable, address)

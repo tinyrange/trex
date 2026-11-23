@@ -6526,9 +6526,9 @@ Decodes percent escapes in URL path text. Malformed escape sequences produce an 
 
 ### `vmm.amd64_boot`
 
-`vmm.amd64_boot(ram, registers, cr3, gdt, gdt_limit, user=False, fs_base=0, gs_base=0, idt=0, idt_limit=0) -> vmm_amd64_boot`
+`vmm.amd64_boot(ram, registers, cr3, gdt, gdt_limit, user=False, fs_base=0, gs_base=0, idt=0, idt_limit=0, syscall_entry=0, syscall_mask=0, kernel_gs_base=0) -> vmm_amd64_boot`
 
-Creates an explicit single-CPU x86-64 long-mode handoff from a portable physical RAM file, a general-purpose register dictionary, CR3 and descriptor table addresses. cc loads the supplied RAM and starts at the supplied RIP with CPL3 when user=True. GDT entries must use the Linux x86-64 selectors 0x10, 0x18, 0x2b and 0x33. The caller supplies any kernel task state in RAM.
+Creates an explicit single-CPU x86-64 long-mode handoff from a portable physical RAM file, a general-purpose register dictionary, CR3 and descriptor table addresses. cc loads the supplied RAM and starts at the supplied RIP with CPL3 when user=True. GDT entries use the Linux x86-64 selectors 0x10, 0x18, 0x2b and 0x33. With a nonzero supervisor-executable syscall_entry, KVM initializes STAR, LSTAR, SFMASK and the kernel GS base, then enables EFER.SCE. The caller supplies associated kernel task and per-CPU state in RAM.
 
 ### `vmm.arm64_boot`
 

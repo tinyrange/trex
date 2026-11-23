@@ -29,6 +29,23 @@ func (p *pc) installAMD64(boot *vmm.AMD64Boot) error {
 	s.Cr0 = 0x80010033                                       // PG, WP, NE, ET, MP, PE.
 	s.Cr2, s.Cr3, s.Cr4, s.Cr8 = 0, boot.PageTable, 0x620, 0 // PAE, OSFXSR, OSXMMEXCPT.
 	s.Efer = 0xd00                                           // LME, LMA, NXE.
+	if boot.SyscallEntry != 0 {
+		setter, ok := p.cpu.(interface {
+			SetSyscallRegisters(x86state.SyscallRegisters) error
+		})
+		if !ok {
+			return fmt.Errorf("cc backend cannot initialize AMD64 syscall registers")
+		}
+		// STAR selects __KERNEL_CS on SYSCALL and __USER32_CS as the
+		// base selector on SYSRET, which adds 16 for 64-bit user code.
+		if err := setter.SetSyscallRegisters(x86state.SyscallRegisters{
+			STAR: 0x0023001000000000, LSTAR: boot.SyscallEntry,
+			SFMASK: uint64(boot.SyscallMask), KernelGSBase: boot.KernelGSBase,
+		}); err != nil {
+			return err
+		}
+		s.Efer |= 1 // SCE.
+	}
 	s.InterruptBitmap = [4]uint64{}
 	if err := p.cpu.SetSystemRegisters(s); err != nil {
 		return fmt.Errorf("set AMD64 system registers: %w", err)

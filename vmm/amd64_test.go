@@ -25,7 +25,7 @@ func TestAMD64BootValidatesUserEntryAndGDT(t *testing.T) {
 	boot := AMD64Boot{
 		RAM: bytes.NewReader(ram), PageTable: root, User: true,
 		GDT:       x86state.DescriptorTable{Base: gdt, Limit: 55},
-		Registers: x86state.Registers{Rip: mapping.Virtual},
+		Registers: x86state.Registers{Rip: mapping.Virtual}, SyscallEntry: gdt,
 	}
 	if err := boot.Validate(16 << 20); err != nil {
 		t.Fatal(err)
@@ -35,6 +35,7 @@ func TestAMD64BootValidatesUserEntryAndGDT(t *testing.T) {
 		mutate func(*AMD64Boot)
 	}{
 		{"supervisor-only entry", func(b *AMD64Boot) { b.Registers.Rip = gdt }},
+		{"user-accessible syscall entry", func(b *AMD64Boot) { b.SyscallEntry = mapping.Virtual }},
 		{"unmapped GDT", func(b *AMD64Boot) { b.GDT.Base = 0x500000 }},
 		{"root outside RAM", func(b *AMD64Boot) { b.PageTable = ^uint64(0) &^ 4095 }},
 	} {
