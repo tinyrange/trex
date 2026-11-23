@@ -12,6 +12,18 @@ The adapter implements the same portable `hypervisor.X86` contract used by
 code are shared. Use `vm.extension("rfe.v1").state()` for bounded CPU/device and
 text-console inspection. The corresponding cc extension remains `cc.v1`.
 
+`rfe.run_real_mode(memory, registers, instruction_limit)` starts the
+architectural interpreter directly in x86 real mode. `memory` is a file or
+byte sequence mapped from address zero with A20 enabled. The register
+dictionary accepts 16-bit `ax`, `bx`, `cx`, `dx`, `sp`, `bp`, `si`, `di`, `ip`,
+`flags`, `cs`, `ds`, `es`, `ss`, `fs` and `gs`. Omitted registers start at
+zero, and FLAGS bit 1 is set. Supply the code, stack and any interrupt
+vectors in RAM. The interpreter runs without PC devices or external IRQs.
+The result records the stop reason (`halt`, `fault`, or `instruction_limit`),
+diagnostic detail, retired instruction count, 16-bit registers, interrupt
+counts by vector, and a read-only file of the resulting RAM. Full CPU and
+device checkpointing is a separate capability.
+
 The variant decodes 16-, 32- and 64-bit code. Real/protected/v8086 execution
 includes segmented addressing and stacks, code-size changes, 386 non-PAE
 paging, interrupt gates, TSS stack changes and v8086 IRET. The default PC

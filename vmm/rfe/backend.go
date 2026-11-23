@@ -29,14 +29,19 @@ func (*Backend) Truth() starlark.Bool      { return starlark.True }
 func (*Backend) Hash() (uint32, error)     { return 0, fmt.Errorf("unhashable: rfe backend") }
 func (b *Backend) VMMBackend() vmm.Backend { return b }
 func Builtins() starlark.StringDict {
-	return starlark.StringDict{"backend": starlark.NewBuiltin("rfe.backend", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-		limit := int64(256 << 20)
-		if err := starlark.UnpackArgs("rfe.backend", args, kwargs, "overlay_limit?", &limit); err != nil {
-			return nil, err
-		}
-		if limit <= 0 {
-			return nil, fmt.Errorf("rfe.backend: overlay_limit must be positive")
-		}
-		return &Backend{OverlayLimit: limit}, nil
-	})}
+	return starlark.StringDict{
+		"backend":       starlark.NewBuiltin("rfe.backend", backendBuiltin),
+		"run_real_mode": starlark.NewBuiltin("rfe.run_real_mode", runRealModeBuiltin),
+	}
+}
+
+func backendBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	limit := int64(256 << 20)
+	if err := starlark.UnpackArgs("rfe.backend", args, kwargs, "overlay_limit?", &limit); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, fmt.Errorf("rfe.backend: overlay_limit must be positive")
+	}
+	return &Backend{OverlayLimit: limit}, nil
 }

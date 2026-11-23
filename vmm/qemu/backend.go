@@ -112,6 +112,7 @@ type qemuDriver struct {
 	done          chan struct{}
 	mu            sync.Mutex
 	inputMu       sync.Mutex
+	migrationMu   sync.Mutex
 	captureMu     sync.Mutex
 	recordMu      sync.Mutex
 	recording     *qemuRecording
@@ -236,7 +237,10 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 	driver.extra = append(driver.extra, gdbChild)
 	gdbFD := 2 + len(driver.extra)
 	args = append(args, "-chardev", fmt.Sprintf("socket,id=trx-gdb,fd=%d", gdbFD), "-gdb", "chardev:trx-gdb")
-	if machine.StartPaused {
+	if backend.incoming {
+		args = append(args, "-incoming", "defer")
+	}
+	if machine.StartPaused || backend.incoming {
 		args = append(args, "-S")
 	}
 
