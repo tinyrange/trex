@@ -5006,9 +5006,9 @@ Walks four-level x86-64 page tables in a portable file representing physical mem
 
 ### `binary.amd64_user_page_tables`
 
-`binary.amd64_user_page_tables(kernel_root, base, mappings) -> file`
+`binary.amd64_user_page_tables(kernel_root, base, mappings, supervisor_mappings=[]) -> file`
 
-Builds a four-level x86-64 root and 4 KiB userspace page tables. Each mapping is a tuple of virtual address, physical address, size, writable and execute. Returns a file to place at base. The upper-half root entries are copied from kernel_root and retain their physical references. Lower-half mappings are built from the supplied list.
+Builds a four-level x86-64 root and 4 KiB page tables. Each mapping is a tuple of virtual address, physical address, size, writable and execute. Returns a file to place at base. Lower-half mappings are user-accessible. Optional supervisor mappings can occupy unused upper-half branches. The other upper-half root entries are copied from kernel_root and retain their physical references.
 
 ### `binary.android_boot`
 

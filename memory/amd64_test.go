@@ -43,6 +43,32 @@ func TestAMD64TranslationUsesEffectivePermissions(t *testing.T) {
 	}
 }
 
+func TestAMD64UserTablesAddSupervisorBranch(t *testing.T) {
+	const base = 0x1000
+	const vmemmap = 0xffffea0000000000
+	root := make([]byte, 4096)
+	mapping := AMD64Mapping{Virtual: vmemmap, Physical: 0x8000, Size: 8192, Writable: true}
+	tables, err := AMD64UserPageTables(root, base, nil, mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ram := make([]byte, 0xa000)
+	copy(ram[base:], tables)
+	got, err := TranslateAMD64(bytes.NewReader(ram), base, vmemmap+4097)
+	want := AMD64Translation{Physical: 0x9001, PageSize: 4096, Writable: true}
+	if err != nil || got != want {
+		t.Fatalf("supervisor translation = %+v, %v; want %+v", got, err, want)
+	}
+	entry := (vmemmap >> 39 & 511) * 8
+	binary.LittleEndian.PutUint64(root[entry:], 0x6003)
+	if _, err := AMD64UserPageTables(root, base, nil, mapping); err == nil {
+		t.Fatal("replaced an existing supervisor PML4 branch")
+	}
+	if _, err := AMD64UserPageTables(root, base, []AMD64Mapping{mapping}); err == nil {
+		t.Fatal("accepted a user mapping in the upper canonical half")
+	}
+}
+
 func TestAMD64UserTablesPreserveSupervisorBranches(t *testing.T) {
 	const base = 0x4000
 	kernelRoot := make([]byte, 4096)

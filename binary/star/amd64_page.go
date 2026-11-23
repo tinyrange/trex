@@ -35,14 +35,33 @@ func amd64TranslateBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlar
 func amd64UserPageTablesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var root starlark.Bytes
 	var base uint64
-	var entries *starlark.List
-	if err := starlark.UnpackArgs("amd64_user_page_tables", args, kwargs, "kernel_root", &root, "base", &base, "mappings", &entries); err != nil {
+	var entries, supervisor *starlark.List
+	if err := starlark.UnpackArgs("amd64_user_page_tables", args, kwargs, "kernel_root", &root, "base", &base, "mappings", &entries, "supervisor_mappings?", &supervisor); err != nil {
 		return nil, err
+	}
+	mappings, err := amd64Mappings(entries)
+	if err != nil {
+		return nil, err
+	}
+	upper, err := amd64Mappings(supervisor)
+	if err != nil {
+		return nil, err
+	}
+	data, err := memory.AMD64UserPageTables([]byte(root), base, mappings, upper...)
+	if err != nil {
+		return nil, err
+	}
+	return &starfile.Bytes{Name: "AMD64 page tables", Data: data}, nil
+}
+
+func amd64Mappings(entries *starlark.List) ([]memory.AMD64Mapping, error) {
+	if entries == nil {
+		return nil, nil
 	}
 	if entries.Len() > 16384 {
 		return nil, fmt.Errorf("amd64_user_page_tables: maximum 16384 mappings")
 	}
-	mappings := make([]memory.AMD64UserMapping, entries.Len())
+	mappings := make([]memory.AMD64Mapping, entries.Len())
 	for i := range mappings {
 		tuple, ok := entries.Index(i).(starlark.Tuple)
 		if !ok || len(tuple) != 5 {
@@ -53,9 +72,5 @@ func amd64UserPageTablesBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args st
 			return nil, err
 		}
 	}
-	data, err := memory.AMD64UserPageTables([]byte(root), base, mappings)
-	if err != nil {
-		return nil, err
-	}
-	return &starfile.Bytes{Name: "AMD64 user page tables", Data: data}, nil
+	return mappings, nil
 }

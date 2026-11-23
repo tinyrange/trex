@@ -301,7 +301,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"binary.elf_structs":                "binary.elf_structs(file, names)",
 	"binary.bzimage_payload":            "binary.bzimage_payload(file) -> file",
 	"binary.amd64_translate":            "binary.amd64_translate(file, cr3, address) -> record",
-	"binary.amd64_user_page_tables":     "binary.amd64_user_page_tables(kernel_root, base, mappings) -> file",
+	"binary.amd64_user_page_tables":     "binary.amd64_user_page_tables(kernel_root, base, mappings, supervisor_mappings=[]) -> file",
 	"binary.perf":                       "binary.perf(file, maximum_records=1000000, maximum_samples=1000000, maximum_string_bytes=1MiB) -> record",
 	"binary.plist":                      "binary.plist(source) -> value",
 	"binary.plist_encode":               "binary.plist_encode(value) -> file",
