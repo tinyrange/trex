@@ -24,6 +24,8 @@ type DASD3390 struct {
 	heads     uint32
 	devType   uint16
 	overlay   map[uint32][]ckd.Record
+	home      map[uint32][5]byte
+	overflow  map[uint32]map[int]bool // 2314 track and record index of continued segments
 	cache     map[uint32]*trackEntry
 	lru       trackEntry // sentinel of the most-recently-used list
 	cacheSize int        // decoded bytes held in cache
@@ -31,15 +33,18 @@ type DASD3390 struct {
 	devno     uint16
 
 	// positioning
-	cyl, head uint32
-	rec       int  // index of the record whose count area was last passed; -1 = at index (before R0 count)
-	afterData bool // orientation past the data area of rec (false: after count)
-	afterKey  bool
-	indexPass int
+	cyl, head      uint32
+	rec            int  // index of the record whose count area was last passed; -1 = at index (before R0 count)
+	afterData      bool // orientation past the data area of rec (false: after count)
+	afterKey       bool // the current record's key has already been searched
+	indexPass      int
+	seekIncomplete bool // the 2314 actuator reached its travel stop
+	plugRemoved    bool // without its identifier plug the 2314 has no address
 
 	// extent / locate record
 	extent     bool
 	mask       byte
+	maskSet    bool   // the 2314 accepts only one mask command per chain
 	extBeg     uint32 // begin track
 	extEnd     uint32 // end track
 	locate     bool
@@ -50,14 +55,17 @@ type DASD3390 struct {
 	lrSearched bool
 	lrFirst    bool
 
-	sense    [32]byte
-	rssd     byte // suborder of the last prepare-for-read-subsystem-data
-	reserved bool
-	pgid     [11]byte
-	chained  bool
-	prevCmd  byte
-	Stats    DASDStats
-	lastErr  error
+	sense        [32]byte
+	rssd         byte // suborder of the last prepare-for-read-subsystem-data
+	reserved     bool
+	pgid         [11]byte
+	chained      bool
+	prevCmd      byte
+	searchMatch  byte    // last full search-equal match in a 2314 write chain
+	formatErase  bool    // a rejected command left a 2314 format write to finish
+	spaceLengths [3]byte // key and data lengths supplied to 2314 Space Count
+	Stats        DASDStats
+	lastErr      error
 
 	// Tracks channel programs have read and written, one bit each.
 	usedRead, usedWritten []uint64
@@ -277,8 +285,9 @@ func (d *DASD3390) writable(t uint32) ([]ckd.Record, error) {
 }
 
 var (
-	errFileProtect   = errors.New("file protected: the file mask inhibits the operation")
-	errEndOfCylinder = errors.New("end of cylinder")
+	errFileProtect    = errors.New("file protected: the file mask inhibits the operation")
+	errEndOfCylinder  = errors.New("end of cylinder")
+	errTrackCondition = errors.New("track condition check")
 )
 
 // ioErr reports a track access error as unit check with sense data.
@@ -288,6 +297,8 @@ func (d *DASD3390) ioErr(err error) ([]byte, int, byte) {
 		return d.check(0, senseFileProtect, 0, err.Error())
 	case errEndOfCylinder:
 		return d.check(0, senseEndOfCyl, 0, err.Error())
+	case errTrackCondition:
+		return d.check(sense2314TrackCondition, 0, 0, err.Error())
 	}
 	return d.check(senseDataCheck, 0, 0, err.Error())
 }
@@ -365,16 +376,24 @@ func (v FormattedVolume) Track(t uint32) ([]ckd.Record, error) {
 
 func (d *DASD3390) Reset() {
 	d.extent, d.locate = false, false
+	d.mask, d.maskSet = 0, false
 	d.rec = -1
 	d.sense = [32]byte{}
 }
 
 func (d *DASD3390) StartChain() {
 	d.extent, d.locate = false, false
-	d.mask = 0
-	d.prevCmd = 0
+	d.mask, d.maskSet = 0, false
+	d.prevCmd, d.searchMatch = 0, 0
+	if d.devType == 0x2314 {
+		d.indexPass = 0
+	}
 }
-func (d *DASD3390) EndChain() {}
+func (d *DASD3390) EndChain() {
+	if d.devType == 0x2314 {
+		d.mask, d.maskSet = 0, false
+	}
+}
 
 const (
 	senseCmdReject  = 0x80
@@ -419,9 +438,42 @@ func (d *DASD3390) ok() byte { return usCE | usDE }
 
 // Exec executes one CCW command.
 func (d *DASD3390) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte) {
+	return d.exec(cmd, data, chained, nil, false)
+}
+
+func (d *DASD3390) exec(cmd byte, data []byte, chained bool, write *diskWrite2314, earlySeek bool) ([]byte, int, byte) {
 	d.Stats.Commands++
 	prev := d.prevCmd
+	match := d.searchMatch
 	d.prevCmd = cmd
+	if d.devType == 0x2314 {
+		d.searchMatch, d.formatErase = 0, false
+		if !command2314(cmd) {
+			d.check(senseCmdReject, 0, 0, fmt.Sprintf("command %02X", cmd))
+			return nil, 0, usUnitCheck
+		}
+		if b0, b1 := d.fileMaskReject2314(cmd); b0|b1 != 0 {
+			d.check(b0, b1, 0, fmt.Sprintf("file mask %02X rejects command %02X", d.mask, cmd))
+			return nil, 0, usUnitCheck
+		}
+		if d.seekIncomplete && cmd != 0x04 && cmd != 0x13 {
+			d.check(senseIntervReq, 0, 0, "actuator requires recalibration")
+			return nil, 0, usUnitCheck
+		}
+		if !writeChain2314(cmd, prev, match) {
+			d.formatErase = formatWrite2314(prev)
+			d.check(senseCmdReject, 0x10, 0, fmt.Sprintf("invalid command sequence %02X after %02X", cmd, prev))
+			return nil, 0, usUnitCheck
+		}
+		if d.checksDefect2314(cmd) {
+			return d.ioErr(errTrackCondition)
+		}
+		// One read-data or read-key-and-data CCW can intervene between
+		// an exact search and a format write.
+		if (cmd == 0x06 || cmd == 0x0e) && prev == match {
+			d.searchMatch = match
+		}
+	}
 	switch cmd {
 	case 0x02: // read IPL
 		d.cyl, d.head, d.rec = 0, 0, -1
@@ -438,9 +490,19 @@ func (d *DASD3390) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 		return d.check(0, senseNoRecord, 0, "read IPL: no record 1")
 	case 0x03: // no-operation
 		return nil, 0, d.ok()
+	case 0x0f: // space count
+		if d.devType == 0x2314 {
+			return d.spaceCount2314(prev, data)
+		}
 	case 0x04: // sense
 		s := d.sense
 		d.sense = [32]byte{}
+		if d.devType == 0x2314 {
+			s[3] |= 0x40 // the drive is online
+			if d.seekIncomplete {
+				s[3] |= sense2314SeekIncomplete
+			}
+		}
 		return s[:d.senseLen()], 0, d.ok()
 	case 0xe4: // sense ID
 		if !d.eckd() {
@@ -456,10 +518,17 @@ func (d *DASD3390) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 		if len(data) < 1 {
 			return d.reject("set file mask: short")
 		}
+		if d.devType == 0x2314 {
+			if data[0]&0x27 != 0 {
+				d.check(senseCmdReject, 0, 0, "set file mask: reserved bits")
+				return nil, 1, d.ok() | usUnitCheck
+			}
+			d.maskSet = true
+		}
 		d.mask = data[0]
 		return nil, 1, d.ok()
 	case 0x13: // recalibrate
-		d.cyl, d.head, d.rec, d.afterData = 0, 0, -1, false
+		d.recalibrate()
 		return nil, 0, d.ok()
 	case 0x17: // restore (2314): no operation
 		return nil, 0, d.ok()
@@ -507,55 +576,100 @@ func (d *DASD3390) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 		return d.defineExtent(data)
 	case 0x47: // locate record
 		return d.locateRecord(data)
-	case 0x07: // seek
-		return d.seek(data, 6)
-	case 0x0b: // seek cylinder
-		return d.seek(data, 6)
-	case 0x1b: // seek head
+	case 0x07, 0x0b, 0x1b: // seek, seek cylinder, seek head
+		if d.devType == 0x2314 {
+			return d.seek2314(cmd, data, earlySeek)
+		}
 		return d.seek(data, 6)
 	case 0x22: // read sector
 		return []byte{0}, 0, d.ok()
 	case 0x23: // set sector: rotational position only
 		return nil, min(len(data), 1), d.ok()
 	case 0x39: // search home address equal
+		if d.devType == 0x2314 {
+			return d.searchHA2314(cmd, data)
+		}
 		if len(data) < 4 {
 			return d.reject("search HA: short")
 		}
 		d.rec = -1
 		d.afterData = false
-		cc := uint32(be.Uint16(data[0:]))
-		hh := uint32(be.Uint16(data[2:]))
-		if cc == d.cyl && hh == d.head {
+		ha := d.homeAddress()
+		if compareBytes(data[:4], ha[1:]) == 0 {
+			d.searchMatch = cmd
 			return nil, 4, d.ok() | usSM
 		}
 		return nil, 4, d.ok()
+	case 0x19: // write home address
+		if d.devType != 0x2314 {
+			return d.reject(fmt.Sprintf("command %02X", cmd))
+		}
+		if d.ReadOnly {
+			return d.check(senseCmdReject, senseFileProtect, 0, "write home address inhibited")
+		}
+		var ha [5]byte
+		used := copy(ha[:], data)
+		if d.home == nil {
+			d.home = make(map[uint32][5]byte)
+		}
+		d.home[d.curTrack()] = ha
+		markTrack(&d.usedWritten, d.curTrack())
+		d.rec, d.afterData, d.afterKey, d.indexPass = -1, false, false, 0
+		d.Stats.Writes++
+		return nil, used, d.ok()
 	}
-	_ = prev
 	mt := cmd&0x80 != 0
 	base := cmd &^ 0x80
+	if d.devType == 0x2314 && mt {
+		switch base {
+		case 0x39:
+			return d.searchHA2314(cmd, data)
+		case 0x16, 0x1a: // multitrack commands that start at index
+			if err := d.stepHead2314(); err != nil {
+				return d.ioErr(err)
+			}
+		}
+	}
 	switch base {
+	case 0x2d, 0x4d, 0x6d, 0x25, 0x35, 0x45, 0x55, 0x65, 0x75:
+		if d.devType == 0x2314 {
+			return d.scan2314(base, prev, data, mt)
+		}
 	case 0x31, 0x51, 0x71: // search ID equal / high / equal-or-high
 		return d.searchID(base, data, mt)
 	case 0x29, 0x49, 0x69: // search key equal / high / equal-or-high
 		return d.searchKey(base, data, mt)
 	case 0x06: // read data
-		return d.readData(mt, false, false)
+		if d.devType == 0x2314 && prev == 0x0f {
+			return d.readSpaced2314(false)
+		}
+		return d.readData(mt, false, false, searchIDCommand(prev))
 	case 0x0e: // read key and data
-		return d.readData(mt, true, false)
+		if d.devType == 0x2314 && prev == 0x0f {
+			return d.readSpaced2314(true)
+		}
+		return d.readData(mt, true, false, searchIDCommand(prev))
 	case 0x1e: // read count, key and data
-		return d.readData(mt, true, true)
+		return d.readData(mt, true, true, false)
 	case 0x12: // read count
 		return d.readCount(mt)
 	case 0x16: // read record zero
 		return d.readR0()
 	case 0x1a: // read home address
 		d.rec = -1
-		return []byte{0, byte(d.cyl >> 8), byte(d.cyl), byte(d.head >> 8), byte(d.head)}, 0, d.ok()
+		ha := d.homeAddress()
+		return ha[:], 0, d.ok()
 	case 0x5e: // read multiple count, key and data
 		return d.readTrack()
 	case 0x05: // write data
+		if d.devType == 0x2314 {
+			return d.writeData2314(data, false, write)
+		}
 		return d.writeData(data, false)
 	case 0x0d: // write key and data
+		if d.devType == 0x2314 {
+			return d.writeData2314(data, true, write)
+		}
 		return d.writeData(data, true)
 	case 0x1d: // write count, key and data (0x9D: next track)
 		if mt {
@@ -582,6 +696,92 @@ func (d *DASD3390) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 		return d.erase(data)
 	}
 	return d.reject(fmt.Sprintf("command %02X", cmd))
+}
+
+func (d *DASD3390) homeAddress() [5]byte {
+	if ha, ok := d.home[d.curTrack()]; ok {
+		return ha
+	}
+	return [5]byte{0, byte(d.cyl >> 8), byte(d.cyl), byte(d.head >> 8), byte(d.head)}
+}
+
+// command2314 decodes the 2314 command byte independently of the encodings
+// for later storage controls (GA26-3599 Appendix B).
+func command2314(cmd byte) bool {
+	switch cmd {
+	case 0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x0b, 0x0d, 0x0f,
+		0x11, 0x13, 0x15, 0x19, 0x1b, 0x1d, 0x1f, 0x94, 0xb4:
+		return true
+	}
+	switch cmd & 0x7f {
+	case 0x06, 0x0e, 0x12, 0x16, 0x1a, 0x1e, // reads
+		0x29, 0x2d, 0x31, 0x39, 0x49, 0x4d, 0x51, 0x69, 0x6d, 0x71, // searches
+		0x25, 0x35, 0x45, 0x55, 0x65, 0x75: // continue scan
+		return true
+	}
+	return false
+}
+
+func writeChain2314(cmd, prev, match byte) bool {
+	switch cmd {
+	case 0x15: // write R0
+		return prev == 0x19 || prev == 0x39 && match == prev
+	case 0x01, 0x11, 0x1d: // write CKD or erase
+		return prev == 0x15 || prev == 0x11 || prev == 0x1d || prev == 0x01 || match == 0x31 || match == 0x29
+	case 0x05: // write data
+		return prev == match && (match == 0x31 || match == 0x29)
+	case 0x0d: // write key and data
+		return prev == 0x31 && match == prev
+	}
+	return true
+}
+
+func formatWrite2314(cmd byte) bool {
+	switch cmd {
+	case 0x01, 0x15, 0x19, 0x1d:
+		return true
+	}
+	return false
+}
+
+// fileMaskReject2314 reports initial-selection checks from the write and
+// seek controls in the 2314 file mask (GA26-3599, figure 27).
+func (d *DASD3390) fileMaskReject2314(cmd byte) (byte, byte) {
+	switch cmd {
+	case 0x19, 0x15: // write home address or R0
+		if d.mask&0xc0 != 0xc0 {
+			return senseCmdReject, senseFileProtect
+		}
+	case 0x01, 0x1d, 0x11: // write CKD or erase
+		permission := d.mask & 0xc0
+		if permission == 0x40 || permission == 0x80 {
+			return senseCmdReject, senseFileProtect
+		}
+	case 0x05, 0x0d: // write data or key and data
+		if d.mask&0xc0 == 0x40 {
+			return senseCmdReject, senseFileProtect
+		}
+	case 0x07, 0x0b, 0x1b, 0x13: // seek, seek cylinder, seek head or recalibrate
+		allowed := byte(0)
+		switch cmd {
+		case 0x0b:
+			allowed = 0x08
+		case 0x1b:
+			allowed = 0x10
+		}
+		if d.mask&0x18 > allowed {
+			return 0, senseFileProtect
+		}
+	case 0x1f: // repeated set file mask
+		if d.maskSet {
+			return senseCmdReject, 0x10 // invalid command sequence
+		}
+	case 0x02: // read IPL with file mask
+		if d.maskSet {
+			return senseCmdReject, 0
+		}
+	}
+	return 0, 0
 }
 
 func (d *DASD3390) seek(data []byte, n int) ([]byte, int, byte) {
@@ -617,7 +817,7 @@ func (d *DASD3390) advance(mt bool) ([]ckd.Record, bool, error) {
 		}
 		if d.rec+1 < len(r) {
 			d.rec++
-			d.afterData = false
+			d.afterData, d.afterKey = false, false
 			return r, true, nil
 		}
 		// index point
@@ -626,6 +826,15 @@ func (d *DASD3390) advance(mt bool) ([]ckd.Record, bool, error) {
 			return r, false, nil
 		}
 		if mt || d.locate {
+			if d.devType == 0x2314 {
+				if err := d.stepHead2314(); err != nil {
+					return r, false, err
+				}
+				if d.checksDefect2314(d.prevCmd) {
+					return r, false, errTrackCondition
+				}
+				continue
+			}
 			if !d.locate && !d.extent && d.mask&0x18 == 0x18 && !d.eckd() {
 				// On the 3830/3880 control units (3330, 3350) seek
 				// control 11 also inhibits multitrack operations: MVS 3.8
@@ -660,7 +869,8 @@ func (d *DASD3390) advance(mt bool) ([]ckd.Record, bool, error) {
 }
 
 func (d *DASD3390) searchID(op byte, data []byte, mt bool) ([]byte, int, byte) {
-	if len(data) < 5 {
+	n := min(len(data), 5)
+	if n < 5 && d.devType != 0x2314 {
 		return d.reject("search ID: short")
 	}
 	for {
@@ -669,11 +879,11 @@ func (d *DASD3390) searchID(op byte, data []byte, mt bool) ([]byte, int, byte) {
 			return d.ioErr(err)
 		}
 		if !ok {
-			return d.check(0, senseNoRecord, 0, fmt.Sprintf("search ID %X: no record", data[:5]))
+			return d.check(0, senseNoRecord, 0, fmt.Sprintf("search ID %X: no record", data[:n]))
 		}
 		x := r[d.rec]
 		id := [5]byte{byte(x.Cylinder >> 8), byte(x.Cylinder), byte(x.Head >> 8), byte(x.Head), x.Number}
-		cmp := compareBytes(id[:], data[:5])
+		cmp := compareBytes(id[:n], data[:n])
 		match := false
 		switch op {
 		case 0x31:
@@ -684,13 +894,24 @@ func (d *DASD3390) searchID(op byte, data []byte, mt bool) ([]byte, int, byte) {
 			match = cmp >= 0
 		}
 		if match {
+			if op == 0x31 && n == len(id) {
+				d.searchMatch = op
+			}
 			d.indexPass = 0
-			return nil, 5, d.ok() | usSM
+			return nil, len(id), d.ok() | usSM
 		}
 		// A failed search ends the command; the channel program loops
 		// with a TIC. The next search examines the next count area.
-		return nil, 5, d.ok()
+		return nil, len(id), d.ok()
 	}
+}
+
+func searchIDCommand(cmd byte) bool {
+	switch cmd & 0x7f {
+	case 0x31, 0x51, 0x71:
+		return true
+	}
+	return false
 }
 
 func (d *DASD3390) searchKey(op byte, data []byte, mt bool) ([]byte, int, byte) {
@@ -700,7 +921,7 @@ func (d *DASD3390) searchKey(op byte, data []byte, mt bool) ([]byte, int, byte) 
 	}
 	// Search key examines the next key area: records without a key, and
 	// record zero, are passed over within the command.
-	for d.rec < 0 || d.rec >= len(r) || d.afterData || len(r[d.rec].Key) == 0 || (d.rec == 0 && r[0].Number == 0) {
+	for d.rec < 0 || d.rec >= len(r) || d.afterData || d.afterKey || len(r[d.rec].Key) == 0 || (d.rec == 0 && r[0].Number == 0) {
 		r2, ok, err := d.advance(mt)
 		if err != nil {
 			return d.ioErr(err)
@@ -729,10 +950,15 @@ func (d *DASD3390) searchKey(op byte, data []byte, mt bool) ([]byte, int, byte) 
 		match = cmp >= 0
 	}
 	used := len(x.Key)
-	if used > len(data) {
-		used = len(data)
+	if d.devType == 0x2314 {
+		d.afterKey = true
+	} else {
+		used = min(used, len(data))
 	}
 	if match {
+		if op == 0x29 && len(data) >= len(x.Key) {
+			d.searchMatch = op
+		}
 		d.indexPass = 0
 		return nil, used, d.ok() | usSM
 	}
@@ -758,7 +984,7 @@ func countField(x ckd.Record) []byte {
 }
 
 // positionForRead returns the record whose data the next read transfers.
-func (d *DASD3390) positionForRead(mt bool, wantCount bool) (ckd.Record, bool, []byte, int, byte) {
+func (d *DASD3390) positionForRead(mt, wantCount, afterID bool) (ckd.Record, bool, []byte, int, byte) {
 	r, err := d.track(d.curTrack())
 	if err != nil {
 		_, n, s := d.check(senseDataCheck, 0, 0, err.Error())
@@ -771,7 +997,10 @@ func (d *DASD3390) positionForRead(mt bool, wantCount bool) (ckd.Record, bool, [
 			return r[d.rec], true, nil, 0, 0
 		}
 	}
-	if wantCount || d.rec < 0 || d.afterData || d.rec >= len(r) || (d.rec == 0 && r[0].Number == 0 && !d.locate) {
+	// A 2314 Search ID examines the count of any record including R0
+	// and leaves the head positioned to read its key and data.
+	skipR0 := !d.locate && !(d.devType == 0x2314 && afterID)
+	if wantCount || d.rec < 0 || d.afterData || d.rec >= len(r) || (d.rec == 0 && r[0].Number == 0 && skipR0) {
 		for {
 			rr, ok, err := d.advance(mt)
 			if err != nil {
@@ -792,8 +1021,8 @@ func (d *DASD3390) positionForRead(mt bool, wantCount bool) (ckd.Record, bool, [
 	return r[d.rec], true, nil, 0, 0
 }
 
-func (d *DASD3390) readData(mt, key, count bool) ([]byte, int, byte) {
-	x, ok, out, n, st := d.positionForRead(mt, count)
+func (d *DASD3390) readData(mt, key, count, afterID bool) ([]byte, int, byte) {
+	x, ok, out, n, st := d.positionForRead(mt, count, afterID)
 	if !ok {
 		return out, n, st
 	}
@@ -811,9 +1040,13 @@ func (d *DASD3390) readData(mt, key, count bool) ([]byte, int, byte) {
 	if d.locate {
 		d.lrCount--
 	}
-	if len(x.Data) == 0 && !count {
+	if len(x.Data) == 0 && (!count || d.devType == 0x2314) {
 		// End-of-file record: unit exception.
 		return buf, 0, d.ok() | usUnitExcept
+	}
+	if d.devType == 0x2314 {
+		buf, status := d.readOverflow2314(buf)
+		return buf, 0, status
 	}
 	return buf, 0, d.ok()
 }
@@ -849,7 +1082,11 @@ func (d *DASD3390) readR0() ([]byte, int, byte) {
 	d.rec = 0
 	d.afterData = true
 	x := r[0]
-	return append(append(countField(x), x.Key...), x.Data...), 0, d.ok()
+	status := d.ok()
+	if d.devType == 0x2314 && len(x.Data) == 0 {
+		status |= usUnitExcept
+	}
+	return append(append(countField(x), x.Key...), x.Data...), 0, status
 }
 
 func (d *DASD3390) readTrack() ([]byte, int, byte) {
@@ -940,7 +1177,10 @@ func (d *DASD3390) writeCKD(data []byte) ([]byte, int, byte) {
 		return d.check(0, senseFileProtect, 0, "format write inhibited")
 	}
 	if len(data) < 8 {
-		return d.reject("write CKD: short")
+		if d.devType != 0x2314 {
+			return d.reject("write CKD: short")
+		}
+		data = append(data, make([]byte, 8-len(data))...)
 	}
 	kl := int(data[5])
 	dl := int(be.Uint16(data[6:]))
@@ -963,10 +1203,18 @@ func (d *DASD3390) writeCKD(data []byte) ([]byte, int, byte) {
 	if pos > len(r) {
 		pos = len(r)
 	}
+	d.trimOverflow2314(t, pos)
+	if d.devType == 0x2314 && !d.fits2314(r[:pos], kl, dl) {
+		d.overlay[t] = r[:pos]
+		return d.check(0, sense2314TrackOverrun, 0, "write CKD: track overrun")
+	}
 	nr := ckd.Record{Cylinder: be.Uint16(data[0:]), Head: be.Uint16(data[2:]), Number: data[4],
 		Key: append([]byte(nil), data[8:8+kl]...), Data: append([]byte(nil), data[8+kl:8+kl+dl]...)}
 	r = append(r[:pos], nr)
 	d.overlay[t] = r
+	if d.devType == 0x2314 && d.prevCmd == 0x01 {
+		d.setOverflow2314(t, pos)
+	}
 	d.rec = pos
 	d.afterData = true
 	d.Stats.Writes++
@@ -981,17 +1229,43 @@ func (d *DASD3390) writeR0(data []byte) ([]byte, int, byte) {
 		return d.check(0, senseFileProtect, 0, "format write inhibited")
 	}
 	if len(data) < 8 {
-		return d.reject("write R0: short")
+		if d.devType != 0x2314 {
+			return d.reject("write R0: short")
+		}
+		data = append(data, make([]byte, 8-len(data))...)
 	}
 	kl := int(data[5])
 	dl := int(be.Uint16(data[6:]))
+	t := d.curTrack()
+	if d.devType == 0x2314 {
+		// A formatting write stops at the next index. The channel sends
+		// the eight count bytes, while the drive writes the flag and CRCs.
+		const revolution = diskRate2314 / 40 // 25 ms at nominal speed
+		const overhead = 73 + 9 + 43 + 1 + 4 + 41 + 4
+		limit := revolution - overhead
+		if d.homeAddress()[0]&0x40 != 0 {
+			limit -= 778 - 73 // extended home-address gap
+		}
+		if kl != 0 {
+			limit -= 41 + 4 // key gap and CRC
+		}
+		if 8+kl+dl > limit {
+			markTrack(&d.usedWritten, t)
+			d.overlay[t] = nil // the incomplete count and data are not a readable R0
+			delete(d.overflow, t)
+			d.uncache(t)
+			d.rec, d.afterData = -1, false
+			_, _, status := d.check(0, sense2314TrackOverrun, 0, "write R0: index before end of record")
+			return nil, min(limit, len(data)), status
+		}
+	}
 	if len(data) < 8+kl+dl {
 		data = append(data, make([]byte, 8+kl+dl-len(data))...)
 	}
-	t := d.curTrack()
 	nr := ckd.Record{Cylinder: be.Uint16(data[0:]), Head: be.Uint16(data[2:]), Number: data[4],
 		Key: append([]byte(nil), data[8:8+kl]...), Data: append([]byte(nil), data[8+kl:8+kl+dl]...)}
 	d.overlay[t] = []ckd.Record{nr}
+	delete(d.overflow, t)
 	d.uncache(t)
 	d.rec = 0
 	d.afterData = true
@@ -1009,6 +1283,7 @@ func (d *DASD3390) erase(data []byte) ([]byte, int, byte) {
 	}
 	if d.rec+1 < len(r) {
 		d.overlay[t] = r[:d.rec+1]
+		d.trimOverflow2314(t, d.rec+1)
 	}
 	return nil, len(data), d.ok()
 }

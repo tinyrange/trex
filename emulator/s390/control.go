@@ -1,6 +1,9 @@
 package s390
 
-import "fmt"
+import (
+	"fmt"
+	"math/bits"
+)
 
 // execB2 handles B2xx S- and RRE-format instructions.
 func (c *CPU) execB2() {
@@ -518,8 +521,66 @@ func (c *CPU) lra(r1 int, a uint32, b int) {
 	c.PSW.CC = 0
 }
 
-// diagnose is model dependent; this model implements none.
-func (c *CPU) diagnose(r1, r3 int, a uint32) {
+// diagnose dispatches model-specific maintenance operations.
+func (c *CPU) diagnose(a uint32, b int) {
+	if c.M.cfg.IOCE {
+		c.diagnoseIOCE(a)
+		return
+	}
+	if c.M.Model9020 && !c.M.cfg.IOCE {
+		mcw := c.fetchDouble(a, b)
+		switch (mcw >> 44) & 0xfff {
+		case 0x010: // Diagnostic SE 1 (MCW bit 48).
+			if mcw&^0x8000 == 0x0001000000000000 {
+				c.maintenance9020.diagnosticSE1 = mcw&0x8000 != 0
+				c.purgeTLB()
+				c.ipageValid = false
+				return
+			}
+		case 0xfd1: // Reset Checks, when MCW bit 50 is set.
+			if mcw&0x2000 != 0 {
+				c.maintenance9020.checks = 0
+			}
+			return
+		case 0xfd3: // Set Diagnose Accessible Register mask.
+			c.maintenance9020.darMask = c.fetchWord(a+8, b)
+			return
+		case 0xfd4: // Store Diagnose Accessible Register, then reset it.
+			c.storeWord(a+8, b, c.maintenance9020.dar)
+			c.maintenance9020.dar = 0
+			return
+		case 0xfd5:
+			// Define Storage, A27-2734-2 §8.5.1.9. The current model
+			// connects contiguous storage elements and no display elements.
+			c.storeByte(a+11, b, byte(c.storageElements9020()<<4))
+			return
+		case 0xfd6: // Store Processor Interrupt Register, then reset it.
+			c.storeByte(a+11, b, c.maintenance9020.pir&0x0e)
+			c.maintenance9020.pir = 0
+			return
+		case 0xfd7: // Logout FAA registers, in the order specified by §8.5.1.9.
+			// The single CE starts in state Three with the IPL storage
+			// element in the first ATR slot. Registers for absent
+			// configuration and external interfaces have no active bits.
+			s := &c.maintenance9020
+			atr := c.atr9020()
+			seMask := (uint32(1)<<c.storageElements9020() - 1) << (24 - c.storageElements9020())
+			registers := [...]uint32{0, 3<<30 | seMask, s.darMask, 0, s.checks, uint32(atr >> 8), uint32(atr&0xff) << 24, s.dar}
+			for i, reg := range registers {
+				var parity uint64
+				for j := 0; j < 4; j++ {
+					x := byte(reg >> (8 * j))
+					parity |= uint64(1-bits.OnesCount8(x)%2) << (60 + j)
+				}
+				if i == 0 {
+					parity |= uint64(s.pir&0x0e) << 32
+				}
+				c.storeDouble(a+uint32(i+1)*8, b, parity|uint64(reg))
+			}
+			s.pir, s.dar = 0, 0
+			return
+		}
+	}
 	c.program(pgmSpecification)
 }
 

@@ -18,9 +18,13 @@ type PSW struct {
 	// the I/O mask for channels 6 and up (bit 6) and the external mask, and
 	// the interruption code and ILC are part of the PSW.
 	S370, BC bool
-	SysMask  byte
-	IntCode  uint16
-	ILC      byte
+	// ASCII is System/360 PSW bit 12: decimal results use the preferred
+	// USASCII-8 sign and zone codes. S360 marks a System/360 PSW, in which
+	// bit 12 is the ASCII bit rather than the EC-mode bit.
+	ASCII, S360 bool
+	SysMask     byte
+	IntCode     uint16
+	ILC         byte
 }
 
 // Encode returns the 8-byte form of the PSW.
@@ -142,15 +146,17 @@ type CPU struct {
 	checkReason string
 	hitBreak    bool
 
-	extPending  uint32 // pending external interruption conditions (extXxx bits)
-	emergency   uint64 // CPU addresses that signalled emergency
-	extCallFrom uint16
+	extPending      uint32 // pending external interruption conditions (extXxx bits)
+	emergency       uint64 // CPU addresses that signalled emergency
+	extCallFrom     uint16
+	maintenance9020 maintenance9020
 
 	op         [6]byte
 	stores     uint64 // operand stores and clock reads, for spin detection
 	quiet      int    // consecutive interruption checks without a store
 	quietGR    [16]uint32
 	pswChanged bool
+	ioDelay    int // instructions before I/O interruptions are recognized (9020)
 	earlySpec  bool
 	ipageValid bool
 	ipageV     uint32
@@ -190,6 +196,7 @@ func (c *CPU) Reset(clear bool) {
 	c.Stopped = true
 	c.extPending = 0
 	c.emergency = 0
+	c.maintenance9020 = maintenance9020{}
 	c.purgeTLB()
 	if clear {
 		c.GR = [16]uint32{}
@@ -206,7 +213,7 @@ func (c *CPU) Reset(clear bool) {
 	c.CR[14] = 0xc2000000
 	if c.M.S370 {
 		c.CR[2] = 0xffffffff // channel masks
-		c.PSW.S370, c.PSW.BC = true, true
+		c.PSW.S370, c.PSW.BC, c.PSW.S360 = true, true, c.M.S360
 		c.itBase, c.itDone, c.itPending = c.M.tod, 0, false
 	}
 }
@@ -327,8 +334,13 @@ const (
 	extIntervalTimer
 )
 
-// CR0 subclass masks for external interruptions.
+// CR0 subclass masks for external interruptions. System/360 has no
+// control registers: the timer and the interrupt key are masked only by the
+// PSW's external mask.
 func (c *CPU) extEnabled(bit uint32) bool {
+	if c.M.S360 {
+		return bit == extIntervalTimer || bit == extInterruptKey
+	}
 	switch bit {
 	case extEmergency:
 		return c.CR[0]&(1<<14) != 0
@@ -471,9 +483,30 @@ func (c *CPU) takeSVC(code byte) {
 	c.swap(pswSVCOld, pswSVCNew)
 }
 
+// Alter stores data into absolute storage from the operator's console,
+// setting the reference and change bits and invalidating cached
+// instructions.
+func (m *Machine) Alter(a uint32, data []byte) {
+	for i, x := range data {
+		m.S.Mem[a+uint32(i)] = x
+		*m.S.key(a + uint32(i)) |= keyRef | keyChg
+	}
+	for _, c := range m.CPUs {
+		for p := a &^ 0x7ff; p < a+uint32(len(data)); p += 0x800 {
+			c.icache.invalidatePage(p)
+		}
+		c.ipageValid = false
+	}
+}
+
+// InterruptKey presses the operator INTERRUPT key: an external
+// interruption condition with code X'0040', subject to CR0 bit 25.
+func (c *CPU) InterruptKey() { c.extPending |= extInterruptKey }
+
 // Restart performs a restart interruption (the operator RESTART function).
 func (c *CPU) Restart() {
 	c.Stopped = false
+	c.maintenance9020.delayUntil = 0
 	c.swap(pswRestartOld, pswRestartNew)
 }
 

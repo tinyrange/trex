@@ -5536,14 +5536,12 @@ func (cw *cornwellFixture) TestCycleDecimalTest(t *testing.T) {
 	cw.setup()
 
 	for i, test := range cornwellDecimalCases {
-		// Preserve the upstream rows; these two expectations are specific to
-		// our architecture/model. The references and original results are in
-		// README.md. Both cases still execute and assert exact results.
+		// Preserve the upstream rows; this expectation is specific to our
+		// architecture. The reference and original result are in README.md.
+		// The case still executes and asserts exact results.
 		switch i {
 		case 30: // MP: L1 == L2; specification precedes invalid decimal data.
 			test.ex = pgmSpecification
-		case 207: // ED overlap is architecturally unpredictable.
-			test.out, test.ex = "40f4f0402120", pgmData
 		}
 		var res [256]byte
 		addr := uint32(0x1000)
@@ -5594,9 +5592,6 @@ func (cw *cornwellFixture) TestCycleDecimalTest(t *testing.T) {
 			}
 		}
 		result := string(res[:len(test.out)])
-		if i == 207 && result != test.out {
-			t.Errorf("overlapping ED partial result: got %s, expected %s", result, test.out)
-		}
 
 		if test.ex != 0 {
 			if !cw.trap {

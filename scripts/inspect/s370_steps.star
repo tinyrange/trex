@@ -29,13 +29,48 @@ def run_steps(m, steps):
             r = m.run(instructions = int(value))
             print("run: %s %s psw=%s %d instr time=%s" % (r.kind, r.detail, r.psw, r.instructions, m.time()))
         elif key == "until":
-            dev, _, text = value.partition(":")
-            print("until: " + _until(m, int(dev, 16), text, 200000000))
+            # until=DEV:TEXT[:BUDGET[:STEP]]
+            parts = value.split(":")
+            budget = int(parts[2]) if len(parts) > 2 else 200000000
+            step = int(parts[3]) if len(parts) > 3 else 2000000
+            print("until: " + _until(m, int(parts[0], 16), parts[1], budget, step))
         elif key == "type":
             dev, _, text = value.partition(":")
             m.type(int(dev, 16), text)
         elif key == "request":
             m.key(int(value, 16), "REQUEST")
+        elif key == "keys":
+            # keys=ADDR:N prints the storage keys of N blocks.
+            a, _, n = value.partition(":")
+            print("keys %s: %s" % (a, binary.hex(m.storage_keys(int(a, 16), int(n or "1")))))
+        elif key == "alter":
+            # alter=ADDR:HEX stores bytes as the console STORE function does.
+            a, _, data = value.partition(":")
+            m.alter(int(a, 16), binary.decode(data, "hex"))
+        elif key == "interrupt_key":
+            m.interrupt_key()
+        elif key == "stream":
+            # stream=DEV:BUDGET[:MAXLINES] runs in steps, printing new
+            # console lines from DEV as they appear.
+            parts = value.split(":")
+            dev, budget = int(parts[0], 16), int(parts[1])
+            most = int(parts[2]) if len(parts) > 2 else 1000000
+            seen, spent, shown = len(m.screens(dev)), 0, 0
+            for _ in range(1000000):
+                if spent >= budget or shown >= most:
+                    break
+                r = m.run(instructions = 5000000)
+                spent += 5000000
+                lines = m.screens(dev)
+                for line in lines[seen:]:
+                    if shown < most:
+                        print(line)
+                    shown += 1
+                seen = len(lines)
+                if r.kind in ["disabled-wait", "check-stop", "stopped", "idle"]:
+                    print("stream: %s %s" % (r.kind, r.psw))
+                    break
+            print("stream: %d lines, %d instructions" % (shown, spent))
         elif key == "key":
             dev, _, k = value.partition(":")
             m.key(int(dev, 16), k)
@@ -172,6 +207,23 @@ def run_steps(m, steps):
             for a in m.find(binary.decode(pat, "hex"), limit = 200):
                 b = max(a - int(ctx or "16"), 0)
                 print("%X %s" % (b, binary.hex(m.read(b, 2 * int(ctx or "16") + 16))))
+        elif key == "text":
+            # text=ADDR:LEN[:MIN] lists runs of printable EBCDIC of at
+            # least MIN (default 6) characters in real storage.
+            parts = value.split(":")
+            a, n = int(parts[0], 16), int(parts[1], 16)
+            least = int(parts[2]) if len(parts) > 2 else 6
+            data = m.read(a, n)
+            vals = list(data.elems())
+            start = -1
+            for i in range(len(vals) + 1):
+                ok = i < len(vals) and (vals[i] == 0x40 or (vals[i] >= 0x4a and vals[i] <= 0x7f) or (vals[i] >= 0x81 and vals[i] <= 0xf9))
+                if ok and start < 0:
+                    start = i
+                elif not ok and start >= 0:
+                    if i - start >= least:
+                        print("%X %s" % (a + start, binary.text(data[start:i], encoding = "cp037")))
+                    start = -1
         elif key == "reply":
             # reply=DEV:MSGID:TEXT finds the outstanding reply for MSGID
             # with D R,L on console DEV and answers it.

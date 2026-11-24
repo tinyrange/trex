@@ -27,6 +27,17 @@ type Config struct {
 	NoIdleSkip bool
 	// S370 selects the System/370 architecture instead of ESA/390.
 	S370 bool
+	// S360 selects the System/360 architecture (IBM System/360 Principles
+	// of Operation, A22-6821): System/370 basic-control operation without
+	// EC mode, control registers or the System/370 instructions, with PSW
+	// bit 12 selecting USASCII-8 decimal results. It implies S370.
+	S360 bool
+	// Model9020 adds behaviors of the IBM 9020's System/360-based
+	// processors that its diagnostics expect (see README.md). It implies
+	// S360.
+	Model9020 bool
+	// IOCE selects the standalone 9020 IOCE preprocessor. It implies Model9020.
+	IOCE bool
 }
 
 // Machine is an ESA/390 configuration: storage, CPUs, channel subsystem and
@@ -46,9 +57,11 @@ type Machine struct {
 
 	serviceSignal bool
 	serviceParam  uint32
-	// S370 is set for a System/370 machine.
+	// S370 is set for a System/370 machine, and also for System/360.
 	S370 bool
-	sclp *sclp
+	// S360 and Model9020 are set for System/360 and 9020 machines.
+	S360, Model9020 bool
+	sclp            *sclp
 
 	Events []Event
 	// BreakProgram stops Run (kind "program") when a program
@@ -152,6 +165,9 @@ type Event struct {
 }
 
 func NewMachine(cfg Config) *Machine {
+	if cfg.IOCE {
+		cfg.Model9020 = true
+	}
 	if cfg.Memory == 0 {
 		cfg.Memory = 64 << 20
 	}
@@ -176,12 +192,19 @@ func NewMachine(cfg Config) *Machine {
 	if m.todStep == 0 {
 		m.todStep = 1
 	}
-	m.CSS = newCSS(m)
-	m.sclp = &sclp{m: m}
+	if cfg.Model9020 {
+		cfg.S360 = true
+	}
+	if cfg.S360 {
+		cfg.S370 = true
+		m.S360, m.Model9020 = true, cfg.Model9020
+	}
 	if cfg.S370 {
 		m.S370 = true
 		m.S.setKeyBlock(11)
 	}
+	m.CSS = newCSS(m)
+	m.sclp = &sclp{m: m}
 	for i := 0; i < cfg.CPUs; i++ {
 		c := &CPU{M: m, S: m.S, Addr: uint16(i), SIEExits: map[byte]uint64{}, pgMask: 0xfff}
 		if m.S370 {
@@ -407,7 +430,7 @@ func (m *Machine) Run(budget uint64) StopReason {
 			continue
 		}
 		// Every running CPU is waiting.
-		if m.CSS.tickPCI(true) {
+		if m.CSS.tickPCI(true) || m.CSS.tick370() {
 			continue
 		}
 		for _, c := range m.CPUs {
@@ -426,7 +449,7 @@ func (m *Machine) Run(budget uint64) StopReason {
 			if c.Stopped {
 				continue
 			}
-			if c.PSW.IO || c.PSW.Ext || c.PSW.MC {
+			if c.PSW.IO || c.PSW.Ext || c.PSW.MC || c.maintenance9020.delayUntil != 0 {
 				allDisabled = false
 			}
 		}
@@ -470,7 +493,13 @@ func (m *Machine) nextDeadline() (uint64, bool) {
 	var best uint64
 	ok := false
 	for _, c := range m.CPUs {
-		if c.Stopped || !c.PSW.Ext {
+		if c.Stopped || c.Check {
+			continue
+		}
+		if t := c.maintenance9020.delayUntil; t > m.tod && (!ok || t < best) {
+			best, ok = t, true
+		}
+		if !c.PSW.Ext {
 			continue
 		}
 		if c.extEnabled(extClockComparator) && c.ClockComparator != ^uint64(0) {
@@ -579,11 +608,13 @@ func (c *CPU) runBatch(n int) (done int) {
 				c.intervalTimer() // the timer runs whatever the masks
 			}
 			c.M.CSS.tickPCI(false)
+			c.M.CSS.tick370()
 			if c.sie != nil {
 				if c.sieInterrupts() {
 					continue
 				}
 			} else if c.takeInterrupt() {
+				c.maintenance9020.delayUntil = 0
 				if c.Check {
 					return done
 				}
@@ -594,9 +625,20 @@ func (c *CPU) runBatch(n int) (done int) {
 		if c.PSW.Wait {
 			return done
 		}
+		if t := c.maintenance9020.delayUntil; t != 0 {
+			if t > c.M.tod {
+				return done
+			}
+			c.maintenance9020.delayUntil = 0
+		}
 		c.step()
 		done++
 		c.Instructions++
+		if c.ioDelay > 0 {
+			if c.ioDelay--; c.ioDelay == 0 {
+				c.pswChanged = true // recognize the pending interruption now
+			}
+		}
 		// The clock advances with each instruction, so a clock read or a
 		// timer stored mid-batch sees the exact time.
 		c.M.tod += c.M.todStep
@@ -606,6 +648,10 @@ func (c *CPU) runBatch(n int) (done int) {
 		}
 		if c.M.Breakpoints != nil && c.M.Breakpoints[c.PSW.IA] {
 			c.hitBreak = true
+			return done
+		}
+		if c.maintenance9020.delayUntil != 0 {
+			c.pswChanged = true
 			return done
 		}
 	}

@@ -136,6 +136,17 @@ func (c *CPU) realToAbs(r uint32) uint32 {
 	if r < 0x1000 {
 		return r + c.Prefix
 	}
+	if c.M.Model9020 && !c.M.cfg.IOCE {
+		// Diagnostic SE 1 lets maintenance code write the physical
+		// restart word without going through the selected PSA or ATR.
+		if c.maintenance9020.diagnosticSE1 && r&^uint32(bytesPer9020SE-1) == 0x800000 {
+			return r & (bytesPer9020SE - 1)
+		}
+		if c.maintenance9020.atrSet {
+			return c.translate9020(r)
+		}
+		return r
+	}
 	if r&^0xfff == c.Prefix {
 		return r - c.Prefix
 	}
@@ -402,7 +413,16 @@ func (c *CPU) storeByte(v uint32, b int, x byte) {
 	c.S.Mem[a] = x
 }
 
+// System/360 requires fixed-width storage operands to start on an
+// integral boundary (A22-6821-7 and 9020D/E A27-2734-2).
+func (c *CPU) checkAlignment360(v, width uint32) {
+	if c.M.S360 && v&(width-1) != 0 {
+		c.program(pgmSpecification)
+	}
+}
+
 func (c *CPU) fetchHalf(v uint32, b int) uint16 {
+	c.checkAlignment360(v, 2)
 	if p := c.span(v, 2, accFetch, b); p != nil {
 		return be.Uint16(p)
 	}
@@ -410,6 +430,7 @@ func (c *CPU) fetchHalf(v uint32, b int) uint16 {
 }
 
 func (c *CPU) fetchWord(v uint32, b int) uint32 {
+	c.checkAlignment360(v, 4)
 	if p := c.span(v, 4, accFetch, b); p != nil {
 		return be.Uint32(p)
 	}
@@ -421,6 +442,7 @@ func (c *CPU) fetchWord(v uint32, b int) uint32 {
 }
 
 func (c *CPU) fetchDouble(v uint32, b int) uint64 {
+	c.checkAlignment360(v, 8)
 	if p := c.span(v, 8, accFetch, b); p != nil {
 		return be.Uint64(p)
 	}
@@ -428,6 +450,7 @@ func (c *CPU) fetchDouble(v uint32, b int) uint64 {
 }
 
 func (c *CPU) storeHalf(v uint32, b int, x uint16) {
+	c.checkAlignment360(v, 2)
 	if p := c.span(v, 2, accStore, b); p != nil {
 		be.PutUint16(p, x)
 		return
@@ -438,6 +461,7 @@ func (c *CPU) storeHalf(v uint32, b int, x uint16) {
 }
 
 func (c *CPU) storeWord(v uint32, b int, x uint32) {
+	c.checkAlignment360(v, 4)
 	if p := c.span(v, 4, accStore, b); p != nil {
 		be.PutUint32(p, x)
 		return
@@ -449,6 +473,7 @@ func (c *CPU) storeWord(v uint32, b int, x uint32) {
 }
 
 func (c *CPU) storeDouble(v uint32, b int, x uint64) {
+	c.checkAlignment360(v, 8)
 	if p := c.span(v, 8, accStore, b); p != nil {
 		be.PutUint64(p, x)
 		return

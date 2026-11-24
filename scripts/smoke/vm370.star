@@ -56,7 +56,9 @@ def main(args):
         before = m.screen(OPERATOR).count("END OF RESTORE")
         m.type(OPERATOR, "restore all")
         _until(m, OPERATOR, "RESTORING " + volser, 20000000)
-        for _ in range(100):
+        # The tape drive is timed (3420 speeds): a restore takes one to two
+        # minutes of virtual time, which the idle waits skip.
+        for _ in range(4000):
             if m.screen(OPERATOR).count("END OF RESTORE") > before:
                 break
             m.run(instructions = 5000000)

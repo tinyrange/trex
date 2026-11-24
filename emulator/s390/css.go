@@ -3,6 +3,7 @@ package s390
 import (
 	"fmt"
 	"sort"
+	"time"
 )
 
 // Unit (device) status bits.
@@ -107,6 +108,20 @@ type Subchannel struct {
 	pciWait bool   // paused at blockAddr after a PCI CCW
 	pciIRQ  bool   // PCI interruption not yet taken
 	pciAt   uint64 // CPU instruction count when paused or interrupted
+
+	// System/370 timed operation (devices implementing Timed); see chan370.go.
+	timed        bool   // the device reports command timing
+	endCE, endDE uint64 // last CCW: TOD units to channel end, then to device end
+	ccws         int    // CCWs executed since START I/O
+	resumeAt     uint64 // chain paused at blockAddr until this TOD (command chaining waits for device end)
+	finishAt     uint64 // data transfer in progress: channel end at this TOD
+	deAt         uint64 // device working after channel end: device end at this TOD
+	deStatus     byte   // status presented with that device end
+	cuBusyUntil  uint64 // control-unit work that outlasts device end
+	cuEndWanted  bool   // a selection during the busy interval requests control-unit end
+	endAtDE      bool   // the paused chain ends at device end (holdChannelEnd)
+	devPending   bool   // the pending status is held by the device, not the subchannel
+	op           *ccwOp // CCW whose transfer completes at finishAt
 }
 
 const (
@@ -157,10 +172,92 @@ type ChannelSubsystem struct {
 	bydev   map[uint16]*Subchannel
 	crw     []uint32
 	crwPend bool
+	ipl     bool   // running the IPL channel program, which is not timed
+	next    uint64 // earliest System/370 timed transition, or zero
+	mach    []byte // 9020 IOCE MACH storage, separate from CE main storage
+	ioceATR [3]channelATR9020
+}
+
+type channelATR9020 struct {
+	Mask   uint64
+	Active bool
+}
+
+func (s *ChannelSubsystem) ioceAddresses(devno uint16) channelATR9020 {
+	if n := devno >> 10; n < 3 {
+		return s.ioceATR[n]
+	}
+	return channelATR9020{}
+}
+
+func (s *ChannelSubsystem) channelAddress(atr channelATR9020, addr uint32) uint32 {
+	if atr.Active && !s.machAddress(addr) {
+		return translateATR9020(atr.Mask, addr)
+	}
+	return addr
+}
+
+// Map the data addresses when the CCW is accepted. Split a transfer that
+// straddles an SE boundary, since adjacent ATR slots need not be adjacent
+// in physical storage. Keep transfer order for READ BACKWARD.
+func (s *ChannelSubsystem) channelSegments(atr channelATR9020, sg []segment, backward bool) []segment {
+	if !atr.Active {
+		return sg
+	}
+	var out []segment
+	for _, g := range sg {
+		if s.machAddress(g.addr) {
+			out = append(out, g)
+			continue
+		}
+		for g.n > 0 {
+			var n uint32
+			if backward {
+				n = min(g.n, g.addr&(bytesPer9020SE-1)+1)
+			} else {
+				n = min(g.n, bytesPer9020SE-g.addr&(bytesPer9020SE-1))
+			}
+			out = append(out, segment{addr: translateATR9020(atr.Mask, g.addr), n: n})
+			g.n -= n
+			if backward {
+				g.addr -= n
+			} else {
+				g.addr += n
+			}
+		}
+	}
+	return out
 }
 
 func newCSS(m *Machine) *ChannelSubsystem {
-	return &ChannelSubsystem{m: m, bydev: map[uint16]*Subchannel{}}
+	s := &ChannelSubsystem{m: m, bydev: map[uint16]*Subchannel{}}
+	if m.Model9020 {
+		s.mach = make([]byte, 0x1f000)
+	}
+	return s
+}
+
+const machBase = 0x00c00000
+
+func (s *ChannelSubsystem) machAddress(addr uint32) bool {
+	return len(s.mach) != 0 && addr&0x00c00000 == machBase
+}
+
+// channelStorage resolves a 9020 channel address with bits 8 and 9 set
+// to local IOCE storage. The last 4 KiB of the 128 KiB MACH store are
+// reserved for multiplexor UCWs (A27-2734-2, appendix H).
+func (s *ChannelSubsystem) channelStorage(addr, size uint32) []byte {
+	if s.machAddress(addr) {
+		offset := addr - machBase
+		if uint64(offset)+uint64(size) <= uint64(len(s.mach)) {
+			return s.mach[offset : offset+size]
+		}
+		return nil
+	}
+	if !s.m.S.valid(addr, size) {
+		return nil
+	}
+	return s.m.S.Mem[addr : addr+size]
 }
 
 // Attach adds a device at a device number and returns its subchannel number.
@@ -186,13 +283,19 @@ func (s *ChannelSubsystem) Attach(devno uint16, d Device) (uint16, error) {
 func (s *ChannelSubsystem) byDevice(devno uint16) *Subchannel { return s.bydev[devno] }
 
 func (s *ChannelSubsystem) reset() {
+	s.ioceATR = [3]channelATR9020{}
 	for _, x := range s.subs {
 		x.intparm, x.isc, x.enabled, x.mbi, x.mm, x.limit, x.multip, x.timing = 0, 0, s.m.S370, 0, 0, 0, false, false
 		x.lpm = 0x80
 		x.clearStatus()
+		x.blocked, x.pciWait, x.pciIRQ = false, false, false
+		x.resumeAt, x.finishAt, x.deAt, x.deStatus, x.devPending, x.endAtDE = 0, 0, 0, 0, false, false
+		x.cuBusyUntil, x.cuEndWanted = 0, false
+		x.op = nil
 		x.dev.Reset()
 	}
 	s.crw = nil
+	s.reschedule()
 }
 
 func (x *Subchannel) clearStatus() {
@@ -220,7 +323,7 @@ func (s *ChannelSubsystem) pendingInterrupt(cr6 uint32) *Subchannel {
 	return nil
 }
 
-func (s *ChannelSubsystem) nextDeadline() (uint64, bool) { return 0, false }
+func (s *ChannelSubsystem) nextDeadline() (uint64, bool) { return s.next, s.next != 0 }
 
 // Unsolicited presents an unsolicited status (for example attention) for a
 // device. It reports false when the subchannel is busy or already pending.
@@ -229,10 +332,11 @@ func (s *ChannelSubsystem) Unsolicited(devno uint16, status byte) bool {
 	if x == nil || !x.enabled {
 		return false
 	}
-	if x.pending || x.ac != 0 {
+	if x.pending || x.ac != 0 || x.blocked || x.finishAt != 0 {
 		x.attnHold = true
 		return false
 	}
+	x.devPending = true
 	x.fc = 0
 	x.ac = 0
 	x.sc = scAlert | scPending
@@ -611,11 +715,10 @@ const (
 )
 
 func (s *ChannelSubsystem) fetchCCW(addr uint32, fmt1 bool) (ccw, bool) {
-	m := s.m.S
-	if addr&7 != 0 || !m.valid(addr, 8) {
+	b := s.channelStorage(addr, 8)
+	if addr&7 != 0 || b == nil {
 		return ccw{}, false
 	}
-	b := m.Mem[addr:]
 	if fmt1 {
 		return ccw{cmd: b[0], flags: b[1], count: be.Uint16(b[2:]), addr: be.Uint32(b[4:]) & 0x7fffffff}, b[4]&0x80 == 0
 	}
@@ -627,27 +730,42 @@ type segment struct {
 	skip    bool // the CCW suppresses transfer to storage
 }
 
+// IDAW errors found by segments.
+const (
+	idaOK    = iota
+	idaFirst // the IDAW list address or the first IDAW is invalid
+	idaLater // a later IDAW is invalid; found during the transfer
+)
+
 // segments resolves a CCW's data area, including IDAW lists.
-func (s *ChannelSubsystem) segments(w ccw) ([]segment, bool) {
+func (s *ChannelSubsystem) segments(w ccw) ([]segment, int) {
 	if w.count == 0 {
-		return nil, true
+		return nil, idaOK
 	}
 	if w.flags&ccwIDA == 0 {
-		return []segment{{addr: w.addr, n: uint32(w.count)}}, true
+		return []segment{{addr: w.addr, n: uint32(w.count)}}, idaOK
 	}
 	var out []segment
 	left := uint32(w.count)
 	list := w.addr
 	if list&3 != 0 {
-		return nil, false
+		return nil, idaFirst
 	}
 	first := true
 	backward := w.cmd&0xf == 0xc
 	for left > 0 {
-		if !s.m.S.valid(list, 4) {
-			return nil, false
+		bad := idaLater
+		if first {
+			bad = idaFirst
 		}
-		a := be.Uint32(s.m.S.Mem[list:]) & 0x7fffffff
+		if !s.m.S.valid(list, 4) {
+			return nil, bad
+		}
+		raw := be.Uint32(s.m.S.Mem[list:])
+		if s.m.S370 && raw&0xff000000 != 0 {
+			return nil, bad // System/370 IDAWs hold 24-bit addresses
+		}
+		a := raw & 0x7fffffff
 		list += 4
 		var n uint32
 		if first {
@@ -662,7 +780,7 @@ func (s *ChannelSubsystem) segments(w ccw) ([]segment, bool) {
 				last = 0x7ff
 			}
 			if a&0x7ff != last {
-				return nil, false
+				return nil, bad
 			}
 			n = 0x800
 		}
@@ -673,7 +791,7 @@ func (s *ChannelSubsystem) segments(w ccw) ([]segment, bool) {
 		out = append(out, segment{addr: a, n: n})
 		left -= n
 	}
-	return out, true
+	return out, idaOK
 }
 
 func cmdIsRead(cmd byte) bool {
@@ -724,7 +842,7 @@ func (s *ChannelSubsystem) finish(x *Subchannel, orb, addr uint32) {
 // whether one was waiting.
 func (s *ChannelSubsystem) Resume(devno uint16) bool {
 	x := s.bydev[devno]
-	if x == nil || !x.blocked {
+	if x == nil || !x.blocked || x.resumeAt != 0 {
 		return false
 	}
 	s.resume(x)
@@ -735,19 +853,33 @@ func (s *ChannelSubsystem) Resume(devno uint16) bool {
 // for operator input.
 func (s *ChannelSubsystem) Waiting(devno uint16) bool {
 	x := s.bydev[devno]
-	return x != nil && x.blocked
+	return x != nil && x.blocked && x.resumeAt == 0 && !x.pciWait
 }
 
 // resume continues a waiting channel program at its next CCW.
 func (s *ChannelSubsystem) resume(x *Subchannel) {
 	x.blocked, x.pciWait = false, false
-	s.trace = s.trace[:0]
-	s.run(x, x.blockAddr, x.blockFmt1, 0, x.key)
-	if x.blocked {
+	if x.endAtDE {
+		x.endAtDE = false
+		s.programEnd(x)
 		return
 	}
+	s.trace = s.trace[:0]
+	s.run(x, x.blockAddr, x.blockFmt1, 0, x.key)
+	if x.blocked || x.finishAt != 0 {
+		return
+	}
+	s.programEnd(x)
+}
+
+// programEnd completes a channel program that waited or paused.
+func (s *ChannelSubsystem) programEnd(x *Subchannel) {
 	if ce, ok := x.dev.(ChainEnd); ok {
 		ce.EndChain()
+	}
+	if p, ok := x.dev.(*dau2701Port); ok && p.dau.cuEndWanted {
+		x.devStatus |= usCUE
+		p.dau.cuEndWanted = false
 	}
 	if s.m.TraceIO && !s.m.TraceIOSkip[x.devno] {
 		s.m.event("io", nil, fmt.Sprintf("resume %04X cmds %s -> dev %02X ch %02X ccw %06X resid %d", x.devno, s.traceString(), x.devStatus, x.schStatus, x.ccwaddr, x.residual))
@@ -757,18 +889,19 @@ func (s *ChannelSubsystem) resume(x *Subchannel) {
 		x.schStatus |= scsPCI
 	}
 	if s.m.S370 {
-		x.pending, x.irq = true, true
+		s.complete370(x, false)
 		return
 	}
 	s.finish(x, 0, x.blockAddr)
 }
 
-// tickPCI resumes channel programs paused after a PCI once the program has
-// had time to act on the interruption: a few thousand instructions after it
-// was taken, at once when every CPU waits (idle), or after a long delay
-// when the interruption stays masked.
+// tickPCI resumes channel programs paused after a PCI. An enabled program
+// gets time to update subsequent CCWs after accepting the interruption.
+// A masked System/360 channel keeps operating and can merge PCI with its
+// final ending status before the program enables interruptions.
 func (s *ChannelSubsystem) tickPCI(idle bool) bool {
-	now := s.m.CPUs[0].Instructions
+	cpu := s.m.CPUs[0]
+	now := cpu.Instructions
 	resumed := false
 	for _, x := range s.subs {
 		if !x.pciWait {
@@ -778,7 +911,8 @@ func (s *ChannelSubsystem) tickPCI(idle bool) bool {
 		if !s.m.S370 {
 			taken = !x.pending
 		}
-		if idle && taken || taken && now-x.pciAt >= 4000 || now-x.pciAt >= 200000 {
+		masked := s.m.S360 && !cpu.channelEnabled(x.devno>>8)
+		if masked || idle && taken || taken && now-x.pciAt >= 4000 || now-x.pciAt >= 200000 {
 			s.resume(x)
 			resumed = true
 		}
@@ -788,7 +922,19 @@ func (s *ChannelSubsystem) tickPCI(idle bool) bool {
 
 // run executes CCWs and fills the subchannel's status fields.
 func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32, key byte) {
-	mem := s.m.S
+	x.endCE, x.endDE = 0, 0
+	atr := s.ioceAddresses(x.devno)
+	// System/370 CCW rules (GA22-7000, chapter 12): a TIC may be neither
+	// the first CCW nor follow another TIC, command codes with low bits
+	// 0000 are invalid, and flag bits 38-39 must be zero.
+	s370 := s.m.S370 && !s.ipl
+	// Flag bits that must be zero: 38-39 on System/370, 37-39 (there is no
+	// indirect data addressing) on System/360.
+	zeroFlags := byte(ccwS | 1)
+	if s.m.S360 {
+		zeroFlags |= ccwIDA
+	}
+	prevTIC := false
 	for steps := 0; ; steps++ {
 		if steps > 1<<20 {
 			// A channel program that never ends (for example a search
@@ -799,25 +945,45 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			x.schStatus = scsIFCC
 			return
 		}
-		w, ok := s.fetchCCW(addr, fmt1)
+		physical := s.channelAddress(atr, addr)
+		w, ok := s.fetchCCW(physical, fmt1)
 		if !ok {
 			x.ccwaddr = addr + 8
 			x.schStatus = scsProgramCheck
 			x.devStatus = 0
 			return
 		}
+		if s370 && !s.fetchAllowed(physical, 8, key) {
+			// The 9020 multiplexor reports program check for a
+			// fetch-protected CCW. Its selector adds protection check
+			// (D30542 and D31544, routines 57 and 61).
+			x.ccwaddr = addr + 8
+			x.schStatus = scsProtection
+			if s.m.Model9020 {
+				x.schStatus = scsProgramCheck
+				if x.devno>>8 != 0 {
+					x.schStatus |= scsProtection
+				}
+			}
+			x.devStatus = 0
+			return
+		}
 		if w.cmd&0xf == 8 { // TIC
-			if w.addr&7 != 0 {
+			if w.addr&7 != 0 || s370 && (prevTIC || steps == 0 && x.ccws == 0) {
 				x.ccwaddr = addr + 8
 				x.schStatus = scsProgramCheck
+				x.devStatus = 0
 				return
 			}
+			prevTIC = true
 			addr = w.addr
 			continue
 		}
-		if !fmt1 && w.cmd == 0 || fmt1 && w.cmd == 0 {
+		prevTIC = false
+		if w.cmd == 0 || s370 && (w.cmd&0xf == 0 || w.flags&zeroFlags != 0) {
 			x.ccwaddr = addr + 8
 			x.schStatus = scsProgramCheck
+			x.devStatus = 0
 			return
 		}
 		if w.count == 0 && !fmt1 {
@@ -825,21 +991,44 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			x.schStatus = scsProgramCheck
 			return
 		}
-		// Gather data-chained CCWs.
+		// Gather data-chained CCWs. On a System/370 channel with a timed
+		// device, an invalid CCW in the data chain is found when the
+		// channel fetches it, after the device has started: the transfer
+		// up to it completes and the device then ends with program check.
+		transferChecks := s.m.S370 && !s.ipl && isTimed(x.dev)
 		cur := addr
 		chain := []ccw{w}
 		addrs := []uint32{addr}
+		chainErr := uint32(0) // address of an invalid data-chained CCW, plus 8
+		chainTIC := false
 		for chain[len(chain)-1].flags&ccwCD != 0 {
 			cur += 8
-			nw, ok := s.fetchCCW(cur, fmt1)
+			physical = s.channelAddress(atr, cur)
+			nw, ok := s.fetchCCW(physical, fmt1)
+			if ok && s370 && !s.fetchAllowed(physical, 8, key) {
+				ok = false
+			}
+			if ok && nw.cmd&0xf == 8 {
+				if nw.addr&7 != 0 || s370 && chainTIC {
+					ok = false
+				} else {
+					chainTIC = true
+					cur = nw.addr - 8
+					continue
+				}
+			}
+			chainTIC = false
+			if ok && s370 && nw.flags&zeroFlags != 0 {
+				ok = false
+			}
 			if !ok {
+				if transferChecks {
+					chainErr = cur + 8
+					break
+				}
 				x.ccwaddr = cur + 8
 				x.schStatus = scsProgramCheck
 				return
-			}
-			if nw.cmd&0xf == 8 {
-				cur = nw.addr - 8
-				continue
 			}
 			nw.cmd = w.cmd
 			chain = append(chain, nw)
@@ -848,6 +1037,12 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 		last := chain[len(chain)-1]
 		var segs []segment
 		total := uint32(0)
+		// On a System/370 channel with a timed device, data addresses and
+		// protection are checked as the data is transferred: the device has
+		// accepted the command and presents its ending status with the
+		// program or protection check. Otherwise they are checked first.
+		// An invalid first IDAW is always found before the device starts.
+		var dataErr byte
 		for _, cw := range chain {
 			// With skip set on an input command, the data address (including
 			// an IDAW list) is not used or checked.
@@ -856,24 +1051,38 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 				total += uint32(cw.count)
 				continue
 			}
-			sg, ok := s.segments(cw)
-			if !ok {
+			sg, ida := s.segments(cw)
+			if ida != idaOK {
+				if transferChecks && (ida == idaLater || len(segs) > 0) {
+					dataErr = scsProgramCheck
+					break
+				}
 				x.ccwaddr = cur + 8
 				x.schStatus = scsProgramCheck
 				return
 			}
+			valid := true
+			sg = s.channelSegments(atr, sg, w.cmd&0xf == 0xc)
 			for _, g := range sg {
 				start := g.addr
 				backward := w.cmd&0xf == 0xc
 				if backward {
 					start -= g.n - 1
 				}
-				if backward && g.n > g.addr+1 || !mem.valid(start, g.n) {
-					x.ccwaddr = cur + 8
-					x.schStatus = scsProgramCheck
-					x.devStatus = 0
-					return
+				if g.addr == ^uint32(0) || backward && g.n > g.addr+1 || s.machAddress(start) != s.machAddress(g.addr) ||
+					s.channelStorage(start, g.n) == nil {
+					valid = false
 				}
+			}
+			if !valid {
+				if transferChecks {
+					dataErr = scsProgramCheck
+					break
+				}
+				x.ccwaddr = cur + 8
+				x.schStatus = scsProgramCheck
+				x.devStatus = 0
+				return
 			}
 			if cw.flags&ccwSkip != 0 {
 				for i := range sg {
@@ -883,12 +1092,23 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			segs = append(segs, sg...)
 			total += uint32(cw.count)
 		}
+		if dataErr != 0 {
+			total = 0
+			for _, cw := range chain {
+				total += uint32(cw.count)
+			}
+			segs = nil
+		}
 		read := cmdIsRead(w.cmd)
 		var in []byte
-		if !read && total > 0 {
+		if !read && total > 0 && dataErr == 0 {
 			in = make([]byte, 0, total)
 			for _, g := range segs {
-				in = append(in, mem.Mem[g.addr:g.addr+g.n]...)
+				if transferChecks && !g.skip && !s.fetchAllowed(g.addr, g.n, key) {
+					dataErr = scsProtection
+					break
+				}
+				in = append(in, s.channelStorage(g.addr, g.n)...)
 			}
 		}
 		chained := last.flags&ccwCC != 0
@@ -896,7 +1116,47 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			x.blocked, x.blockAddr, x.blockFmt1 = true, addr, fmt1
 			return
 		}
-		out, used, status := x.dev.Exec(w.cmd, in, chained)
+		var out []byte
+		var used int
+		var status byte
+		var diskWrite *diskWrite2314
+		var diskCyl uint32
+		op := &ccwOp{Cmd: w.cmd, Last: last, Chain: chain, Addrs: addrs, Segs: segs, Total: total, Cur: cur,
+			Read: read, Chained: chained, Key: key, Fmt1: fmt1, Err: dataErr,
+			ChainErr: chainErr, Checked: transferChecks}
+		if d, ok := x.dev.(*ctc9020Side); ok && !s.ipl {
+			if d.selectCCW(x, op, in) {
+				if s.m.TraceIO && !s.m.TraceIOSkip[x.devno] {
+					s.m.event("io", nil, fmt.Sprintf("CTC %04X waiting for %04X cmd %02X ccw %06X", x.devno, d.peer.addr, op.Cmd, op.Cur))
+				}
+				return
+			}
+			out, used, status = op.Out, op.Used, op.Status
+		} else if d, ok := x.dev.(*dau2701Port); ok {
+			out, used, status = d.exec(w.cmd, in, int(total))
+		} else if d, ok := x.dev.(*UnitRecord); ok && d.port != nil {
+			out, used, status = d.exec2821(x, w.cmd, in, chained)
+		} else if d, ok := x.dev.(*DASD3390); ok && d.devType == 0x2314 && s.m.S360 && !s.ipl {
+			diskCyl = d.cyl
+			if w.cmd == 0x05 || w.cmd == 0x0d {
+				diskWrite = &diskWrite2314{}
+			}
+			out, used, status = d.exec(w.cmd, in, chained, diskWrite, s.m.Model9020)
+		} else {
+			out, used, status = x.dev.Exec(w.cmd, in, chained)
+		}
+		x.ccws++
+		x.endCE, x.endDE = s.timing(x, w.cmd, min(len(out)+used, int(total)), status, diskCyl)
+		switch x.dev.(type) {
+		case *ctc9020Side:
+			if status&usCE == 0 || status&usUnitExcept != 0 {
+				x.endCE = 0 // initial unit status
+			}
+		case *dau2701Port:
+			if status == usUnitCheck {
+				x.endCE = 0 // command rejected at selection
+			}
+		}
 		if s.m.TraceIO {
 			// Keep the last 64 commands: the end of a long chain is
 			// where it fails.
@@ -905,101 +1165,38 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			}
 			s.trace = append(s.trace, ioTrace{w.cmd, last.flags, total, status, in, out})
 		}
-		var moved uint32
-		if read {
-			moved = uint32(len(out))
-			if moved > total {
-				moved = total
-			}
-			off := uint32(0)
-			for _, g := range segs {
-				if off >= moved {
-					break
-				}
-				n := g.n
-				if off+n > moved {
-					n = moved - off
-				}
-				stored := true
-				if !g.skip {
-					if w.cmd&0xf == 0xc {
-						for j := uint32(0); j < n; j++ {
-							if !s.storeKeyed(g.addr-j, out[off+j:off+j+1], key) {
-								stored = false
-								break
-							}
-						}
-					} else {
-						stored = s.storeKeyed(g.addr, out[off:off+n], key)
-					}
-				}
-				if !stored {
-					x.ccwaddr = cur + 8
-					x.schStatus = scsProtection
-					x.devStatus = 0
-					return
-				}
-				off += n
-			}
-		} else {
-			moved = uint32(used)
-		}
-		x.ccwaddr = cur + 8
-		x.residual = uint16(total - moved)
-		// Within a data chain, the CSW names the CCW where the transfer
-		// stopped and that CCW's own residual count.
-		if len(chain) > 1 && moved < total {
-			rem := moved
-			for i, cw := range chain {
-				if rem < uint32(cw.count) || i == len(chain)-1 {
-					x.ccwaddr = addrs[i] + 8
-					x.residual = uint16(uint32(cw.count) - rem)
-					last = cw
-					break
-				}
-				rem -= uint32(cw.count)
-			}
-		}
-		x.devStatus = status
-		incorrect := false
-		if read && uint32(len(out)) != total && status&(usUnitCheck|usUnitExcept) == 0 {
-			incorrect = true
-		}
-		if !read && uint32(used) != total && status&(usUnitCheck|usUnitExcept) == 0 {
-			incorrect = true
-			if used == 0 && w.cmd&3 == 3 && chained {
-				incorrect = false // immediate command with chaining
-			}
-		}
-		// A PCI flag takes effect when its CCW takes control, so the
-		// condition is part of the final status however the CCW ends.
-		pci := false
-		for _, cw := range chain {
-			pci = pci || cw.flags&ccwPCI != 0
-		}
-		if incorrect && last.flags&ccwSLI == 0 {
-			x.schStatus = scsIncorrectLen
-			if pci {
-				x.schStatus |= scsPCI
-			}
+		op.Out, op.Used, op.Status, op.DiskWrite = out, used, status, diskWrite
+		if d, ok := x.dev.(*ctc9020Side); ok && d.control != 0 && status == usCE && chained && len(chain) == 1 && dataErr == 0 {
+			x.blocked, x.blockAddr, x.blockFmt1 = true, cur+8, fmt1
+			x.ac = acSubchActive | acDeviceActive
 			return
 		}
-		if status&(usUnitCheck|usUnitExcept|usAttention) != 0 || status&(usCE|usDE) != usCE|usDE {
-			if pci {
-				x.schStatus |= scsPCI
-			}
+		if _, ok := x.dev.(*Tape2401); ok && w.cmd == 0x01 && status == usCE|usDE {
+			op.TapeWrite = in
+		}
+		if dataErr != 0 && x.endCE == 0 {
+			// The device accepted the command; the check ends it.
+			x.endCE = durationTOD(10 * time.Microsecond)
+		}
+		if x.endCE > 0 {
+			// The channel remains active until the timed transfer ends.
+			x.op = op
+			x.ac = acSubchActive | acDeviceActive
+			x.finishAt = s.m.tod + x.endCE
+			s.reschedule()
 			return
 		}
-		if !chained {
-			if pci {
-				x.schStatus |= scsPCI
-			}
+		next, cont, pci := s.endCCW(x, op)
+		if !cont {
+			s.holdChannelEnd(x, op)
 			return
 		}
-		x.devStatus = 0
-		addr = cur + 8
-		if status&usSM != 0 {
-			addr += 8
+		x.ccws++ // status from a later CCW is not initial status
+		addr = next
+		if x.endDE > 0 && !pci {
+			// Command chaining proceeds at device end.
+			s.pauseChain(x, addr, fmt1, x.endDE)
+			return
 		}
 		if pci {
 			// Pause so the program can act on the interruption (for
@@ -1025,11 +1222,20 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 
 // storeKeyed writes channel data to absolute storage with key protection.
 func (s *ChannelSubsystem) storeKeyed(a uint32, data []byte, key byte) bool {
+	if s.machAddress(a) {
+		dst := s.channelStorage(a, uint32(len(data)))
+		if dst == nil {
+			return false
+		}
+		copy(dst, data)
+		return true
+	}
 	m := s.m.S
 	block := uint32(1) << m.KeyShift
 	for off := uint32(0); off < uint32(len(data)); {
 		k := m.key(a + off)
-		if key != 0 && *k>>4 != key {
+		// On the 9020 a channel may store into blocks whose key is zero.
+		if key != 0 && *k>>4 != key && !(s.m.Model9020 && *k>>4 == 0) {
 			return false
 		}
 		n := block - (a+off)&(block-1)
@@ -1053,10 +1259,249 @@ func (s *ChannelSubsystem) iplChannelProgram(x *Subchannel) error {
 		defer ce.EndChain()
 	}
 	x.clearStatus()
+	s.ipl = true
 	s.run(x, 0, false, 0, 0)
+	s.ipl = false
 	if x.schStatus != 0 || x.devStatus&(usUnitCheck|usUnitExcept) != 0 {
 		return fmt.Errorf("ipl: channel program failed: device status %02X subchannel status %02X at CCW %06X", x.devStatus, x.schStatus, x.ccwaddr)
 	}
 	x.clearStatus()
 	return nil
+}
+
+// ccwOp is a CCW the device has executed whose data and status the channel
+// has not yet completed. Fields are exported for checkpoints.
+type ccwOp struct {
+	Cmd                 byte
+	Last                ccw
+	Chain               []ccw
+	Addrs               []uint32
+	Segs                []segment
+	Total, Cur          uint32
+	ReadStored          uint32 // input bytes already delivered to storage or skipped
+	Out                 []byte
+	TapeWrite           []byte         // tape output is recorded only as bytes are transferred
+	DiskWrite           *diskWrite2314 // fields selected for a pending 2314 write
+	Used                int
+	Status              byte
+	Read, Chained, Fmt1 bool
+	Halted              bool
+	LengthOnException   bool
+	Key                 byte
+	Err                 byte   // channel status of a check found during the transfer
+	ChainErr            uint32 // an invalid data-chained CCW follows (its address plus 8)
+	Checked             bool   // checks are made during the transfer (see run)
+}
+
+// storeCCWInput delivers the newly arrived prefix of input. Data chaining
+// and skip apply to the logical byte offset even across timed updates.
+func (s *ChannelSubsystem) storeCCWInput(op *ccwOp, moved uint32) bool {
+	var off uint32
+	for _, g := range op.Segs {
+		if off >= moved {
+			break
+		}
+		end := off + g.n
+		lo, hi := max(off, op.ReadStored), min(end, moved)
+		if lo < hi {
+			if !g.skip {
+				if op.Cmd&0xf == 0xc {
+					for i := lo; i < hi; i++ {
+						if !s.storeKeyed(g.addr-(i-off), op.Out[i:i+1], op.Key) {
+							return false
+						}
+					}
+				} else if !s.storeKeyed(g.addr+(lo-off), op.Out[lo:hi], op.Key) {
+					return false
+				}
+			}
+			op.ReadStored = hi
+		}
+		off = end
+	}
+	return true
+}
+
+// endCCW stores a CCW's input data and sets the subchannel status. It
+// returns the address of the next CCW and whether command chaining
+// continues, and whether the CCW had the PCI flag.
+func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, pci bool) {
+	last, chain, total, cur, out, used, status := op.Last, op.Chain, op.Total, op.Cur, op.Out, op.Used, op.Status
+	// A PCI flag takes effect when its CCW takes control, so the
+	// condition is part of the final status however the CCW ends.
+	for _, cw := range chain {
+		pci = pci || cw.flags&ccwPCI != 0
+	}
+	if op.Err != 0 {
+		// No data reached storage; the device ends with its status.
+		x.ccwaddr, x.residual = op.Addrs[0]+8, uint16(chain[0].count)
+		x.devStatus, x.schStatus = status, op.Err
+		if pci {
+			x.schStatus |= scsPCI
+		}
+		return 0, false, pci
+	}
+	if len(op.TapeWrite) > 0 && used > 0 {
+		tape := x.dev.(*Tape2401)
+		status |= tape.finishWrite(op.TapeWrite[:used])
+	}
+	if op.DiskWrite != nil && len(op.DiskWrite.Fields) != 0 {
+		d := x.dev.(*DASD3390)
+		if err := d.commitWrite2314(op.DiskWrite, used, op.Halted); err != nil {
+			_, _, status = d.ioErr(err)
+		}
+	}
+	if !op.Read && used == 0 && op.Cmd&3 == 3 && len(chain) > 1 {
+		// An immediate control command ends at initiation: no data is
+		// transferred, so data chaining does not occur, and the CC flag is
+		// ignored when CD is on (A22-6821-7 p. 104).
+		x.ccwaddr, x.residual = op.Addrs[0]+8, chain[0].count
+		x.devStatus = status
+		if pci {
+			x.schStatus |= scsPCI
+		}
+		return 0, false, pci
+	}
+	var moved uint32
+	if op.Read {
+		moved = min(uint32(len(out)), total)
+		if !s.storeCCWInput(op, moved) {
+			// With checks made during the transfer, the device has
+			// started and ends with its own status.
+			x.ccwaddr = cur + 8
+			x.schStatus = scsProtection
+			x.devStatus = 0
+			if op.Checked {
+				x.devStatus = status
+			}
+			return 0, false, pci
+		}
+	} else {
+		// A device may report using more than the count: it wanted more
+		// data than the CCW supplied (incorrect length, no residual).
+		moved = min(uint32(used), total)
+	}
+	x.ccwaddr = cur + 8
+	x.residual = uint16(total - moved)
+	// Within a data chain, the CSW names the CCW where the transfer
+	// stopped and that CCW's own residual count.
+	if len(chain) > 1 && moved < total {
+		rem := moved
+		for i, cw := range chain {
+			if rem < uint32(cw.count) || i == len(chain)-1 {
+				x.ccwaddr = op.Addrs[i] + 8
+				x.residual = uint16(uint32(cw.count) - rem)
+				last = cw
+				break
+			}
+			rem -= uint32(cw.count)
+		}
+	}
+	x.devStatus = status
+	if op.ChainErr != 0 && moved == total {
+		// The count ran out and the next data-chained CCW is invalid.
+		x.ccwaddr, x.residual = op.ChainErr, 0
+		x.schStatus = scsProgramCheck
+		if pci {
+			x.schStatus |= scsPCI
+		}
+		return 0, false, pci
+	}
+	incorrect := false
+	checkLength := status&(usUnitCheck|usUnitExcept) == 0 || op.LengthOnException
+	if _, ok := x.dev.(*ctc9020Side); ok && status&usCE == 0 {
+		checkLength = false // the adapter did not accept the command
+	}
+	if d, ok := x.dev.(*DASD3390); ok && d.devType == 0x2314 && status&usCE != 0 {
+		checkLength = checkLength || d.lengthOnCheck2314(op.Cmd)
+	}
+	if op.Read && uint32(len(out)) != total && checkLength {
+		incorrect = true
+	}
+	if !op.Read && uint32(used) != total && checkLength {
+		incorrect = true
+		if used == 0 && op.Cmd&3 == 3 && status&(usUnitCheck|usUnitExcept) == 0 {
+			// A control command that transfers no data executes as an
+			// immediate operation: incorrect length is not indicated
+			// (A22-6821-7 p. 108; GA22-7000 chapter 12).
+			incorrect = false
+		}
+	}
+	// The 2803's tape write has no device-side record length. The
+	// channel count ending the write is therefore incorrect length.
+	if _, ok := x.dev.(*Tape2401); ok && op.Cmd == 0x01 && status == usCE|usDE {
+		incorrect = true
+	}
+	end := func() (uint32, bool, bool) {
+		if pci {
+			x.schStatus |= scsPCI
+		}
+		if d, ok := x.dev.(*DASD3390); s.m.S370 && ok && d.devType == 0x2314 &&
+			(d.formatErase || status == usCE|usDE && formatWrite2314(op.Cmd)) {
+			// A terminal format write erases through the next index point.
+			// This takes at most one revolution (GA26-3599-6).
+			x.cuBusyUntil = s.m.tod + durationTOD(25*time.Millisecond)
+			s.reschedule()
+		}
+		return 0, false, pci
+	}
+	suppressLength := last.flags&ccwSLI != 0 && (!s.m.S360 || last.flags&ccwCD == 0)
+	if incorrect && !suppressLength {
+		x.schStatus = scsIncorrectLen
+		return end()
+	}
+	if status&(usUnitCheck|usUnitExcept|usAttention) != 0 || status&(usCE|usDE) != usCE|usDE || !op.Chained {
+		return end()
+	}
+	x.devStatus = 0
+	next = cur + 8
+	if status&usSM != 0 {
+		next += 8
+	}
+	return next, true, pci
+}
+
+// pauseChain suspends command chaining at addr for d TOD units.
+func (s *ChannelSubsystem) pauseChain(x *Subchannel, addr uint32, fmt1 bool, d uint64) {
+	x.blocked, x.blockAddr, x.blockFmt1 = true, addr, fmt1
+	x.ac = acSubchActive | acDeviceActive
+	x.resumeAt = s.m.tod + d
+	s.reschedule()
+}
+
+// holdChannelEnd handles a command-chained CCW that ends the chain with unit
+// check or unit exception arriving with a later device end (a carriage space
+// sensing channel 9, a tape motion reaching a tape mark): the channel has
+// accepted channel end while waiting to chain, so the program sees one
+// interruption at device end, without channel end.
+func (s *ChannelSubsystem) holdChannelEnd(x *Subchannel, op *ccwOp) {
+	if !s.m.S370 || x.endDE == 0 || !op.Chained || x.blocked || x.finishAt != 0 ||
+		x.devStatus&(usUnitCheck|usUnitExcept) == 0 || x.devStatus&(usCE|usDE) != usCE|usDE ||
+		x.schStatus&^scsPCI != 0 {
+		return
+	}
+	x.devStatus &^= usCE
+	d := x.endDE
+	x.endDE = 0
+	x.endAtDE = true
+	s.pauseChain(x, x.blockAddr, op.Fmt1, d)
+}
+
+func isTimed(d Device) bool { _, ok := d.(Timed); return ok }
+
+// fetchAllowed reports whether the channel may fetch n bytes at a with the
+// subchannel key: a nonzero key must match blocks that are fetch protected.
+func (s *ChannelSubsystem) fetchAllowed(a, n uint32, key byte) bool {
+	if key == 0 || s.machAddress(a) {
+		return true
+	}
+	m := s.m.S
+	block := uint32(1) << m.KeyShift
+	for b := a &^ (block - 1); b < a+n; b += block {
+		k := *m.key(b)
+		if k>>4 != key && k&keyFetch != 0 {
+			return false
+		}
+	}
+	return true
 }

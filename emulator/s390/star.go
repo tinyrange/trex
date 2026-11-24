@@ -21,20 +21,34 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 	memory, cpus, mips := 64<<20, 1, 50
 	start := ""
 	idleSkip := true
-	arch := "esa390"
-	if err := starlark.UnpackArgs("s390", args, kwargs, "memory?", &memory, "cpus?", &cpus, "mips?", &mips, "start?", &start, "idle_skip?", &idleSkip, "architecture?", &arch); err != nil {
+	arch, model, element := "esa390", "", ""
+	if err := starlark.UnpackArgs("s390", args, kwargs, "memory?", &memory, "cpus?", &cpus, "mips?", &mips, "start?", &start, "idle_skip?", &idleSkip, "architecture?", &arch, "model?", &model, "element?", &element); err != nil {
 		return nil, err
 	}
-	if memory < 1<<20 || memory > 2<<30 || cpus < 1 || cpus > 16 || mips < 1 {
-		return nil, fmt.Errorf("s390: memory 1M..2G, cpus 1..16 and positive mips required")
+	if arch != "esa390" && arch != "s370" && arch != "s360" {
+		return nil, fmt.Errorf("s390: architecture must be \"esa390\", \"s370\" or \"s360\"")
 	}
-	if arch != "esa390" && arch != "s370" {
-		return nil, fmt.Errorf("s390: architecture must be \"esa390\" or \"s370\"")
+	if model != "" && (model != "9020" || arch != "s360") {
+		return nil, fmt.Errorf("s390: model must be \"9020\", with architecture \"s360\"")
 	}
-	if arch == "s370" && memory > 64<<20 {
+	if element != "" && (element != "ioce" || model != "9020" || cpus != 1) {
+		return nil, fmt.Errorf("s390: element must be \"ioce\", with model \"9020\" and one processor")
+	}
+	minMemory := 1 << 20
+	if element == "ioce" {
+		minMemory = 33 << 10
+	}
+	if memory < minMemory || memory > 2<<30 || cpus < 1 || cpus > 16 || mips < 1 {
+		return nil, fmt.Errorf("s390: memory %d..%d bytes, cpus 1..16 and positive mips required", minMemory, 2<<30)
+	}
+	if arch != "esa390" && memory > 64<<20 {
 		return nil, fmt.Errorf("s390: System/370 storage is at most 64M")
 	}
-	cfg := Config{Memory: memory, CPUs: cpus, MIPS: mips, NoIdleSkip: !idleSkip, S370: arch == "s370"}
+	if arch == "s360" && memory > 16<<20 {
+		return nil, fmt.Errorf("s390: System/360 storage is at most 16M")
+	}
+	cfg := Config{Memory: memory, CPUs: cpus, MIPS: mips, NoIdleSkip: !idleSkip, S370: arch != "esa390",
+		S360: arch == "s360", Model9020: model == "9020", IOCE: element == "ioce"}
 	if start != "" {
 		t, err := time.Parse(time.RFC3339, start)
 		if err != nil {
@@ -69,8 +83,8 @@ func (v *machineValue) Freeze()               {}
 func (v *machineValue) Truth() starlark.Bool  { return starlark.True }
 func (v *machineValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: s390 machine") }
 
-var machineMethods = []string{"dasd", "console", "ipl", "storage_load", "command", "messages", "unit_record", "cards", "output", "tape", "dasd_track", "subchannel", "translate", "run", "psw", "registers", "screen", "type", "key", "cursor",
-	"read", "unknown", "program_counts", "dasd_errors", "screens", "time", "break_at", "break_program", "break_svc", "clear_breaks", "events", "instructions", "restart", "trace_io", "event_limit", "history", "watch", "disassemble", "find", "scp_config", "profile", "interrupts", "screenshot", "web_terminals", "checkpoint", "restore", "disk_changes", "dasd_usage", "coverage", "transfer", "transfer_result", "ctc", "ctc_send", "ctc_packets"}
+var machineMethods = []string{"dasd", "console", "ipl", "storage_load", "command", "messages", "unit_record", "unit_record_switch", "cards", "carriage_tape", "output", "tape", "tape_record", "dasd_track", "subchannel", "translate", "run", "psw", "registers", "screen", "type", "key", "cursor",
+	"read", "unknown", "program_counts", "dasd_errors", "screens", "time", "break_at", "break_program", "break_svc", "clear_breaks", "events", "instructions", "restart", "interrupt_key", "alter", "storage_keys", "trace_io", "event_limit", "history", "watch", "disassemble", "find", "scp_config", "profile", "interrupts", "screenshot", "web_terminals", "checkpoint", "restore", "disk_changes", "dasd_usage", "coverage", "transfer", "transfer_result", "ctc", "ctc_send", "ctc_packets", "dau"}
 
 func (v *machineValue) AttrNames() []string { return machineMethods }
 
@@ -129,7 +143,8 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 			var devno int
 			var typ string
 			var cards *starlark.List
-			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "type", &typ, "cards?", &cards); err != nil {
+			reader := -1
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "type", &typ, "cards?", &cards, "reader?", &reader); err != nil {
 				return nil, err
 			}
 			t := map[string]uint16{"2540R": 0x2540, "3505": 0x3505, "2501": 0x2501, "2540P": 0x2541, "3525": 0x3525, "1403": 0x1403, "3211": 0x3211}[typ]
@@ -137,6 +152,12 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 				return nil, fmt.Errorf("unit_record: type must be 2540R, 3505, 2501, 2540P, 3525, 1403 or 3211")
 			}
 			u := &UnitRecord{Type: t}
+			if reader != -1 {
+				u.cardPeer = v.units[uint16(reader)]
+				if t != 0x2541 || u.cardPeer == nil || u.cardPeer.Type != 0x2540 || u.cardPeer.cardPeer != nil {
+					return nil, fmt.Errorf("unit_record: reader must identify an unpaired 2540 reader")
+				}
+			}
 			if cards != nil {
 				var lines []string
 				for i := 0; i < cards.Len(); i++ {
@@ -151,7 +172,38 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 			if err := v.m.CSS.AttachUnitRecord(uint16(devno), u); err != nil {
 				return nil, err
 			}
+			if u.cardPeer != nil {
+				u.cardPeer.cardPeer = u
+			}
 			v.units[uint16(devno)] = u
+			return starlark.None, nil
+		}), nil
+	case "unit_record_switch":
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var pairs *starlark.List
+			if err := starlark.UnpackArgs(name, args, kwargs, "pairs", &pairs); err != nil {
+				return nil, err
+			}
+			addresses := make([][2]uint16, pairs.Len())
+			for i := range addresses {
+				pair, ok := pairs.Index(i).(starlark.Tuple)
+				if !ok || len(pair) != 2 {
+					return nil, fmt.Errorf("%s: each pair must be a tuple of two device addresses", name)
+				}
+				for j, value := range pair {
+					var addr uint16
+					if err := starlark.AsInt(value, &addr); err != nil {
+						return nil, fmt.Errorf("%s: %w", name, err)
+					}
+					addresses[i][j] = addr
+				}
+			}
+			if err := v.m.CSS.Attach2821Switch(addresses); err != nil {
+				return nil, err
+			}
+			for _, pair := range addresses {
+				v.units[pair[1]] = v.units[pair[0]]
+			}
 			return starlark.None, nil
 		}), nil
 	case "subchannel":
@@ -195,45 +247,115 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			var devno int
 			var cards *starlark.List
-			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "cards", &cards); err != nil {
+			replace := false
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "cards", &cards, "replace?", &replace); err != nil {
 				return nil, err
 			}
 			u := v.units[uint16(devno)]
 			if u == nil || !u.reader() {
 				return nil, fmt.Errorf("cards: no card reader %04X", devno)
 			}
-			var lines []string
+			deck := make([][]byte, 0, cards.Len())
 			for i := 0; i < cards.Len(); i++ {
-				l, ok := starlark.AsString(cards.Index(i))
-				if !ok {
-					return nil, fmt.Errorf("cards: cards must be strings")
+				switch card := cards.Index(i).(type) {
+				case starlark.String:
+					deck = append(deck, cardImage(EncodeEBCDIC(string(card))))
+				case starlark.Bytes:
+					if len(card) != 80 {
+						return nil, fmt.Errorf("cards: raw card %d must have 80 EBCDIC bytes", i+1)
+					}
+					deck = append(deck, []byte(card))
+				default:
+					return nil, fmt.Errorf("cards: card %d must be text or bytes", i+1)
 				}
-				lines = append(lines, l)
 			}
-			u.Load(lines)
+			if replace {
+				u.cards = deck
+			} else {
+				u.cards = append(u.cards, deck...)
+			}
+			u.readyReader()
 			// Readying the reader presents device end.
 			v.m.CSS.Unsolicited(uint16(devno), usDE)
 			return starlark.None, nil
 		}), nil
-	case "output":
+	case "carriage_tape":
+		// carriage_tape(device, lines) installs a printer carriage tape:
+		// lines lists, for each line of the form from line 1, the channels
+		// (1-12) punched in it. The carriage is restored to channel 1.
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-			dev, err := devArg(name, args, kwargs)
-			if err != nil {
+			var devno int
+			var lines *starlark.List
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "lines", &lines); err != nil {
 				return nil, err
 			}
-			u := v.units[dev]
+			u := v.units[uint16(devno)]
+			if u == nil || !u.printer() {
+				return nil, fmt.Errorf("carriage_tape: no printer %04X", devno)
+			}
+			holes := make([][]int, lines.Len())
+			for i := range holes {
+				l, ok := lines.Index(i).(starlark.Indexable)
+				if !ok {
+					return nil, fmt.Errorf("carriage_tape: line %d must be a list of channels", i+1)
+				}
+				for j := 0; j < l.Len(); j++ {
+					c, err := starlark.AsInt32(l.Index(j))
+					if err != nil || c < 1 || c > 12 {
+						return nil, fmt.Errorf("carriage_tape: line %d: channels are 1-12", i+1)
+					}
+					holes[i] = append(holes[i], c)
+				}
+			}
+			if len(holes) == 0 {
+				return nil, fmt.Errorf("carriage_tape: no lines")
+			}
+			u.SetCarriageTape(holes)
+			return starlark.None, nil
+		}), nil
+	case "output":
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var dev int
+			raw := false
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &dev, "raw?", &raw); err != nil {
+				return nil, err
+			}
+			u := v.units[uint16(dev)]
 			if u == nil {
 				return nil, fmt.Errorf("output: no unit-record device %04X", dev)
+			}
+			if raw {
+				if u.Type != 0x2541 {
+					return nil, fmt.Errorf("output: raw cards require a 2540 punch")
+				}
+				deck := make([]starlark.Value, len(u.punched))
+				for i, card := range u.punched {
+					deck[i] = starlark.Bytes(card)
+				}
+				return starlark.NewList(deck), nil
 			}
 			return stringList(u.Output), nil
 		}), nil
 	case "tape":
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			var devno int
+			var eotInches int32
 			var file starlark.Value
-			format := "aws"
-			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "file", &file, "format?", &format); err != nil {
+			format, typ := "aws", "3420"
+			tracks := 9
+			converter := true
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "file", &file, "format?", &format, "type?", &typ,
+				"tracks?", &tracks, "converter?", &converter, "eot_inches?", &eotInches); err != nil {
 				return nil, err
+			}
+			if tracks != 9 && (tracks != 7 || typ != "2401") {
+				return nil, fmt.Errorf("tape: tracks must be 9, or 7 on a 2401")
+			}
+			if !converter && tracks != 7 {
+				return nil, fmt.Errorf("tape: converter applies to seven-track drives")
+			}
+			if eotInches < 0 || eotInches != 0 && (typ != "2401" || tracks != 9) {
+				return nil, fmt.Errorf("tape: eot_inches applies to nine-track 2401 reels and cannot be negative")
 			}
 			src, ok := file.(storage.Reader)
 			if !ok {
@@ -252,8 +374,51 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 			if err != nil {
 				return nil, err
 			}
-			_, err = v.m.CSS.Attach(uint16(devno), t)
+			var device Device = t
+			switch typ {
+			case "3420":
+			case "2401":
+				t.sevenTrack = tracks == 7
+				t.noConverter = !converter
+				drive := &Tape2401{Tape3420: t}
+				if eotInches != 0 {
+					drive.setReelEOT(int(eotInches))
+				}
+				drive.Reset()
+				device = drive
+			default:
+				return nil, fmt.Errorf("tape: type must be 3420 or 2401")
+			}
+			_, err = v.m.CSS.Attach(uint16(devno), device)
 			return starlark.None, err
+		}), nil
+	case "tape_record":
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var devno uint16
+			var index int
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "index", &index); err != nil {
+				return nil, err
+			}
+			x := v.m.CSS.bydev[devno]
+			if x == nil {
+				return nil, fmt.Errorf("tape_record: no device %04X", devno)
+			}
+			var tape *Tape3420
+			switch d := x.dev.(type) {
+			case *Tape3420:
+				tape = d
+			case *Tape2401:
+				tape = d.Tape3420
+			}
+			if tape == nil || index < 0 || index >= len(tape.blocks) {
+				return nil, fmt.Errorf("tape_record: no tape record %d on device %04X", index, devno)
+			}
+			r := &tape.blocks[index]
+			if r.mark {
+				return starlark.None, nil
+			}
+			data, err := r.bytes()
+			return starlark.Bytes(data), err
 		}), nil
 	case "command":
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -275,7 +440,19 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 		}), nil
 	case "restart":
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var se int
+			if err := starlark.UnpackArgs(name, args, kwargs, "storage_element?", &se); err != nil {
+				return nil, err
+			}
+			if se != 0 {
+				return starlark.None, v.m.Restart9020(se)
+			}
 			v.m.CPUs[0].Restart()
+			return starlark.None, nil
+		}), nil
+	case "interrupt_key":
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			v.m.CPUs[0].InterruptKey()
 			return starlark.None, nil
 		}), nil
 	case "web_terminals":
@@ -312,14 +489,39 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 			}
 			return starlark.None, v.m.Restore(r, disksOnly)
 		}), nil
+	case "dau":
+		// dau(device, peer=None): 2701 using device+1 through device+5.
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var dev uint16
+			peer := -1
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &dev, "peer?", &peer); err != nil {
+				return nil, err
+			}
+			if peer != -1 {
+				if peer < 0 || peer > 0xbf8 {
+					return nil, fmt.Errorf("dau: invalid peer address %d", peer)
+				}
+				return starlark.None, v.m.CSS.attach2701(dev, uint16(peer), true)
+			}
+			return starlark.None, v.m.CSS.Attach2701(dev)
+		}), nil
 	case "ctc":
 		// ctc(device): a 3088 CTC adapter carrying IP (CTCI) at device
 		// (read) and device+1 (write); web_terminals(network=...) connects
 		// it to the host.
+		// ctc(device, peer=...): paired selector interfaces on the 9020.
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-			dev, err := devArg(name, args, kwargs)
-			if err != nil {
+			var address uint
+			peer := -1
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &address, "peer?", &peer); err != nil {
 				return nil, err
+			}
+			if address > 0xffff || peer < -1 || peer > 0xffff {
+				return nil, fmt.Errorf("ctc: device address out of range")
+			}
+			dev := uint16(address)
+			if peer >= 0 {
+				return starlark.None, v.m.CSS.Attach9020CTC(dev, uint16(peer))
 			}
 			c, err := v.m.CSS.AttachCTCI(dev)
 			if err != nil {
@@ -521,8 +723,18 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			var devno int
 			var text string
-			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "text", &text); err != nil {
+			var cancel bool
+			if err := starlark.UnpackArgs(name, args, kwargs, "device", &devno, "text", &text, "cancel?", &cancel); err != nil {
 				return nil, err
+			}
+			if cancel {
+				x := v.m.CSS.bydev[uint16(devno)]
+				if x != nil {
+					if c, ok := x.dev.(*Console1052); ok {
+						return starlark.None, c.Cancel(text)
+					}
+				}
+				return nil, fmt.Errorf("type: cancel requires a 1052")
 			}
 			if lc := v.lineConsoles[uint16(devno)]; lc != nil {
 				lc.Type(text)
@@ -542,11 +754,28 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 				return nil, err
 			}
 			if lc := v.lineConsoles[uint16(devno)]; lc != nil {
+				if c, ok := v.m.CSS.bydev[uint16(devno)].dev.(*Console1052); ok && (key == "READY" || key == "NOT READY") {
+					c.SetReady(key == "READY")
+					return starlark.None, nil
+				}
 				if key != "REQUEST" {
-					return nil, fmt.Errorf("key: a 3215 has only the REQUEST key")
+					return nil, fmt.Errorf("key: unrecognized line-console key %q", key)
 				}
 				lc.Request()
 				return starlark.None, nil
+			}
+			if u := v.units[uint16(devno)]; u != nil && u.Type == 0x2541 {
+				if key != "START" && key != "STOP" {
+					return nil, fmt.Errorf("key: 2540 punch keys are START and STOP")
+				}
+				u.SetPunchReady(key == "START")
+				return starlark.None, nil
+			}
+			if disk := v.dasd[uint16(devno)]; disk != nil && disk.devType == 0x2314 {
+				if key != "INSERT ID PLUG" && key != "REMOVE ID PLUG" {
+					return nil, fmt.Errorf("key: 2314 controls are INSERT ID PLUG and REMOVE ID PLUG")
+				}
+				return starlark.None, v.m.CSS.Set2314Plug(uint16(devno), key == "INSERT ID PLUG")
 			}
 			t := v.consoles[uint16(devno)]
 			if t == nil {
@@ -570,6 +799,41 @@ func (v *machineValue) Attr(name string) (starlark.Value, error) {
 			}
 			r, c := t.Cursor()
 			return starlark.Tuple{starlark.MakeInt(r), starlark.MakeInt(c)}, nil
+		}), nil
+	case "storage_keys":
+		// storage_keys(address, count) returns the storage keys of count
+		// consecutive key blocks starting with the block holding address.
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var addr, n int
+			if err := starlark.UnpackArgs(name, args, kwargs, "address", &addr, "count", &n); err != nil {
+				return nil, err
+			}
+			block := 1 << v.m.S.KeyShift
+			out := make([]byte, 0, n)
+			for i := 0; i < n; i++ {
+				a := addr&^(block-1) + i*block
+				if a < 0 || !v.m.S.valid(uint32(a), 1) {
+					break
+				}
+				out = append(out, *v.m.S.key(uint32(a)))
+			}
+			return starlark.Bytes(out), nil
+		}), nil
+	case "alter":
+		// alter(address, data) stores into absolute storage as the
+		// operator's console STORE function does, for example to set
+		// sense switches a program keeps in storage.
+		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var addr int
+			var data starlark.Bytes
+			if err := starlark.UnpackArgs(name, args, kwargs, "address", &addr, "data", &data); err != nil {
+				return nil, err
+			}
+			if addr < 0 || !v.m.S.valid(uint32(addr), uint32(len(data))) {
+				return nil, fmt.Errorf("alter: range outside storage")
+			}
+			v.m.Alter(uint32(addr), []byte(data))
+			return starlark.None, nil
 		}), nil
 	case "read":
 		return b(func(args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -1032,6 +1296,14 @@ func (v *machineValue) addConsole(args starlark.Tuple, kwargs []starlark.Tuple) 
 	if history < 1 {
 		return nil, fmt.Errorf("console: history must be positive")
 	}
+	if typ == "1052" {
+		c := NewConsole1052()
+		if err := v.m.CSS.AttachConsole1052(uint16(devno), c); err != nil {
+			return nil, err
+		}
+		v.lineConsoles[uint16(devno)] = c.Console3215
+		return starlark.None, nil
+	}
 	if typ == "3215" {
 		lc := NewConsole3215()
 		if err := v.m.CSS.AttachLineConsole(uint16(devno), lc); err != nil {
@@ -1041,7 +1313,7 @@ func (v *machineValue) addConsole(args starlark.Tuple, kwargs []starlark.Tuple) 
 		return starlark.None, nil
 	}
 	if typ != "3270" {
-		return nil, fmt.Errorf("console: type must be 3270 or 3215")
+		return nil, fmt.Errorf("console: type must be 3270, 3215 or 1052")
 	}
 	t := NewConsole3270(rows, cols)
 	t.LogLimit = history
