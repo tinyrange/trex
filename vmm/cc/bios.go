@@ -75,6 +75,11 @@ type pc struct {
 	pciIDE          *pciIDE
 	pciDisplay      *pciDisplay
 	uhci            *uhci
+
+	runSlots         chan struct{}
+	runSlice         time.Duration
+	preparedTemplate []byte
+	rewind           *ramRewind
 }
 
 func newPC(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Time) (*pc, error) {

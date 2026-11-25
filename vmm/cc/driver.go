@@ -33,6 +33,10 @@ func (r request) execute() {
 
 type driver struct {
 	backend        *Backend
+	runSlots       chan struct{}
+	entered        bool
+	runMu          sync.Mutex
+	runCancel      context.CancelFunc
 	pc             *pc
 	cpuMu          sync.Mutex // protects cancellation targets across reconstruction
 	rebuild        func() (*pc, error)
@@ -63,7 +67,7 @@ func newRestartableDriver(ctx context.Context, p *pc, paused bool, rebuild func(
 }
 func newRestartableDriverFor(ctx context.Context, p *pc, paused bool, rebuild func() (*pc, error), backend *Backend) *driver {
 	ctx, cancel := context.WithCancel(ctx)
-	d := &driver{backend: backend, pc: p, ctx: ctx, cancel: cancel, rebuild: rebuild,
+	d := &driver{backend: backend, pc: p, ctx: ctx, cancel: cancel, rebuild: rebuild, runSlots: p.runSlots,
 		requests: make(chan request, 16),
 		events:   make(chan vmm.Event, 32),
 		ready:    make(chan struct{}, 1),
@@ -182,6 +186,7 @@ func (d *driver) loop() {
 			return
 		}
 		d.breakpointHit = false
+		d.entered = false
 		d.emit("reset", nil)
 	}
 }
@@ -230,12 +235,8 @@ func (d *driver) loopSingle() {
 			continue
 		default:
 		}
-		// Bound each native slice so a command cannot be lost in the small
-		// interval between enqueueing it and entering KVM_RUN. Allow native
-		// host delays (notably Linux's 10 ms split-lock mitigation) to finish.
-		ctx, cancel := context.WithTimeout(d.ctx, 50*time.Millisecond)
-		ex, err := d.pc.runDevices(ctx)
-		cancel()
+		d.entered = true
+		ex, err := d.runSingleSlice()
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			continue
 		}
@@ -268,6 +269,44 @@ func (d *driver) loopSingle() {
 		}
 	}
 }
+func (d *driver) runSingleSlice() (hypervisor.X86Exit, error) {
+	if d.runSlots == nil {
+		ctx, cancel := context.WithTimeout(d.ctx, 50*time.Millisecond)
+		defer cancel()
+		return d.pc.runDevices(ctx)
+	}
+
+	// Publish the cancellation before entry. A request enqueued after the
+	// length check will cancel this context, even if KVM has not entered yet.
+	ctx, cancel := context.WithCancel(d.ctx)
+	d.runMu.Lock()
+	if len(d.requests) != 0 {
+		d.runMu.Unlock()
+		cancel()
+		return hypervisor.X86Exit{}, context.Canceled
+	}
+	d.runCancel = cancel
+	d.runMu.Unlock()
+	defer func() {
+		d.runMu.Lock()
+		d.runCancel = nil
+		d.runMu.Unlock()
+		cancel()
+	}()
+	// Keep the remaining vCPUs parked in Go while at most one execution
+	// slot per available logical CPU enters the kernel. Only active holders
+	// arm a timer. A host command can interrupt either wait or execution.
+	select {
+	case d.runSlots <- struct{}{}:
+	case <-ctx.Done():
+		return hypervisor.X86Exit{}, ctx.Err()
+	}
+	defer func() { <-d.runSlots }()
+	slice, stop := context.WithTimeout(ctx, max(50*time.Millisecond, d.pc.runSlice))
+	defer stop()
+	return d.pc.runDevices(slice)
+}
+
 func (d *driver) call(ctx context.Context, fn func() error) error {
 	r := request{ctx: ctx, run: fn, reply: make(chan error, 1)}
 	select {
@@ -277,7 +316,15 @@ func (d *driver) call(ctx context.Context, fn func() error) error {
 		return &vmm.Error{Code: vmm.ErrorState, Message: "cc VM is closed"}
 	case d.requests <- r:
 	}
-	d.cancelCPUs()
+	if d.runSlots != nil {
+		d.runMu.Lock()
+		if d.runCancel != nil {
+			d.runCancel()
+		}
+		d.runMu.Unlock()
+	} else {
+		d.cancelCPUs()
+	}
 	select {
 	case err := <-r.reply:
 		return err
@@ -371,6 +418,7 @@ func (d *driver) Reset(context.Context) error {
 }
 func (d *driver) Powerdown(ctx context.Context) error {
 	return d.call(ctx, func() error {
+		d.pc.invalidateRewind()
 		if d.pc.acpi == nil {
 			return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "the legacy PC has no ACPI power button"}
 		}

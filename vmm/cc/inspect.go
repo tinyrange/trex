@@ -39,7 +39,92 @@ func (d *driver) Extension(ctx context.Context, name string) (starlark.Value, er
 		"symbolize":     starlark.NewBuiltin("cc.symbolize", i.symbolize),
 		"read_virtual":  starlark.NewBuiltin("cc.read_virtual", i.readVirtual),
 		"disassemble":   starlark.NewBuiltin("cc.disassemble", i.disassemble),
+
+		"prepare_rewind":       starlark.NewBuiltin("cc.prepare_rewind", i.prepareRewind),
+		"rewind_run":           starlark.NewBuiltin("cc.rewind_run", i.rewindRun),
+		"rewind":               starlark.NewBuiltin("cc.rewind", i.rewind),
+		"write_physical":       starlark.NewBuiltin("cc.write_physical", i.writePhysical),
+		"private_resident_ram": starlark.NewBuiltin("cc.private_resident_ram", i.privateResidentRAM),
+		"sample_physical":      starlark.NewBuiltin("cc.sample_physical", i.samplePhysical),
 	}), nil
+}
+
+// samplePhysical reads a bounded RAM range without stopping the guest. The
+// caller must account for concurrent guest writes within and between samples.
+func (i inspection) samplePhysical(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var address uint64
+	var size int
+	if err := starlark.UnpackArgs("cc.sample_physical", args, kwargs, "address", &address, "size", &size); err != nil {
+		return nil, err
+	}
+	if size < 1 || size > 65536 {
+		return nil, fmt.Errorf("sample_physical size must be 1..65536")
+	}
+	d := i.driver
+	d.cpuMu.Lock()
+	defer d.cpuMu.Unlock()
+	if d.platformClosed || d.runSlots == nil {
+		return nil, fmt.Errorf("sample_physical requires an open prepared AMD64 guest without asynchronous devices")
+	}
+	offset, err := ramOffset(uint64(len(d.pc.ram)), address, uint64(size))
+	if err != nil {
+		return nil, err
+	}
+	data, err := sampleRAM(d.pc.ram[offset : offset+uint64(size)])
+	if err != nil {
+		return nil, err
+	}
+	return starlark.Bytes(string(data)), nil
+}
+
+func (i inspection) privateResidentRAM(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackArgs("cc.private_resident_ram", args, kwargs); err != nil {
+		return nil, err
+	}
+	d := i.driver
+	d.cpuMu.Lock()
+	defer d.cpuMu.Unlock()
+	if d.platformClosed || len(d.pc.preparedTemplate) == 0 {
+		return nil, fmt.Errorf("private_resident_ram requires an open prepared direct VM")
+	}
+	bytes, err := privateResidentRAM(d.pc.ram[:len(d.pc.preparedTemplate)])
+	return starlark.MakeInt(bytes), err
+}
+
+func (i inspection) writePhysical(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var address uint64
+	var data starlark.Bytes
+	if err := starlark.UnpackArgs("cc.write_physical", args, kwargs, "address", &address, "data", &data); err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || len(data) > 65536 {
+		return nil, fmt.Errorf("write_physical size must be 1..65536")
+	}
+	err := i.driver.call(i.ctx, func() error {
+		state, err := i.driver.Status(i.ctx)
+		if err != nil {
+			return err
+		}
+		if state.Name != "paused" {
+			return fmt.Errorf("write_physical requires a paused VM")
+		}
+		return i.driver.pc.patchPhysical(address, string(data))
+	})
+	return starlark.None, err
+}
+
+func (p *pc) patchPhysical(address uint64, data string) error {
+	target, err := p.memory(address, uint64(len(data)))
+	if err != nil {
+		return err
+	}
+	if checkpoint := p.rewind; checkpoint != nil {
+		for page := address &^ 4095; page < address+uint64(len(data)); page += 4096 {
+			checkpoint.hostPages[page] = true
+		}
+	}
+	copy(target, data)
+	return nil
 }
 
 func (i inspection) breakpoint(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

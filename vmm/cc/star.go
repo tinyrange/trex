@@ -24,7 +24,7 @@ func (b *Backend) Truth() starlark.Bool    { return starlark.True }
 func (b *Backend) Hash() (uint32, error)   { return 0, fmt.Errorf("unhashable: cc backend") }
 func (b *Backend) VMMBackend() vmm.Backend { return b }
 func Builtins() starlark.StringDict {
-	return starlark.StringDict{"kernel_symbol": starlark.NewBuiltin("cc.kernel_symbol", kernelSymbolBuiltin), "boot_bsd": starlark.NewBuiltin("cc.boot_bsd", bsdBootBuiltin), "backend": starlark.NewBuiltin("cc.backend", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return starlark.StringDict{"prepare_ram": starlark.NewBuiltin("cc.prepare_ram", prepareRAMBuiltin), "kernel_symbol": starlark.NewBuiltin("cc.kernel_symbol", kernelSymbolBuiltin), "boot_bsd": starlark.NewBuiltin("cc.boot_bsd", bsdBootBuiltin), "backend": starlark.NewBuiltin("cc.backend", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		acpi, pciIDE, pciDisplay, hpet, uefi, usb := false, false, false, false, false, false
 		ideDMA := true
 		sb16 := false
