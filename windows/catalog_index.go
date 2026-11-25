@@ -2,7 +2,6 @@ package windows
 
 import (
 	"fmt"
-	"github.com/tinyrange/trex/windows/catalog"
 
 	"go.starlark.net/starlark"
 )
@@ -11,7 +10,7 @@ import (
 // Parse CTL entries, not arbitrary digest-sized octet strings in certificates
 // or attributes. Version 1 uses SPC indirect-data digests; version 2 uses the
 // subject identifier directly, matching CryptSvc's CTL iteration.
-func catalogIndexBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func catalogIndexBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	if err := starlark.UnpackArgs("catalog_index", args, kwargs, "file", &value); err != nil {
 		return nil, err
@@ -24,7 +23,7 @@ func catalogIndexBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.
 		var data []byte
 		data, err = bytesForBinaryValueLimited(value, 64<<20)
 		if err == nil {
-			entries, err = catalog.ParseIndex(data)
+			entries, err = cachedCatalogIndex(thread, data)
 		}
 	}
 	if err != nil {

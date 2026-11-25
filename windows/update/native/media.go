@@ -83,8 +83,7 @@ func (b *sharedByteBudget) Release(size int64) {
 }
 
 // MediaBuiltin prepares the caller-selected catalog revision as referenced
-// UUP media, not a bootable disk. It never discovers or ranks offers. Native
-// source-range caching does not persist parsed or constructed intermediates.
+// UUP media, not a bootable disk. It never discovers or ranks offers.
 func MediaBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var catalogArg, offerArg starlark.Value
 	var whilePreparing starlark.Value = starlark.None
@@ -505,6 +504,7 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 	if err != nil {
 		return nil, fmt.Errorf("update_media: servicing cache: %w", err)
 	}
+	servicingCache.WithDerivedCache(resources.Context(), resources.Derived)
 	// Source parsing does not depend on predecessor bindings. Overlap the
 	// independent additional packages with catalog-stage opening, but consume
 	// them below in the original order. Limited inspection keeps lazy admission.
@@ -603,7 +603,8 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 		servicingEffectPlans = append(servicingEffectPlans, effectPlan)
 		progress(fmt.Sprintf("update_media: closed stage %s after %s (%d packages, %d components)", updateStage.FeatureID, time.Since(started).Round(time.Millisecond), len(assemblyPlan.Packages), len(assemblyPlan.Components)))
 	}
-	openResident, openResidents := residentComponentMetadataBuiltins(install, imagePath)
+	manifests := uup.NewManifestCache(resources.Context(), resources.Derived)
+	openResident, openResidents := residentComponentMetadataBuiltins(install, imagePath, manifests)
 	if servicingOnly {
 		return starvalue.NewRecord(starlark.StringDict{
 			"kind":         starlark.String("windows-servicing-source"),
@@ -612,7 +613,7 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 			"language":     starlark.String(strings.ToLower(language)),
 			"install":      install, "image": starlark.String(imagePath), "bootsect": bootsectArg,
 			"offer_id": starlark.String(offer.ID), "offer_revision": starlark.MakeInt(offer.Revision),
-			"servicing_metadata":       servicingMetadataBuiltin(installedStages, installedStageMetadata),
+			"servicing_metadata":       servicingMetadataBuiltin(installedStages, installedStageMetadata, manifests, resources),
 			"release_read_caches":      releaseReadCachesBuiltin(install, installedStages, servicingCache),
 			"open_resident_component":  openResident,
 			"open_resident_components": openResidents,
@@ -1044,7 +1045,7 @@ func prepareSelectedMedia(resources *lifecycle.Resources, catalog *catalogValue,
 		"open_composition":             openComposition,
 		"open_payload":                 openOfferPayload,
 		"servicing_effects":            servicingEffects,
-		"servicing_metadata":           servicingMetadataBuiltin(installedStages, installedStageMetadata),
+		"servicing_metadata":           servicingMetadataBuiltin(installedStages, installedStageMetadata, manifests, resources),
 		"release_read_caches":          releaseReadCachesBuiltin(install, installedStages, servicingCache),
 		"open_resident_component":      openResident,
 		"open_resident_components":     openResidents,

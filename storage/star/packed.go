@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 	"github.com/tinyrange/trex/storage"
 	bytecache "github.com/tinyrange/trex/storage/cache"
 	"go.starlark.net/starlark"
@@ -30,6 +31,7 @@ var packedDecoder = sync.OnceValues(func() (*zstd.Decoder, error) {
 type PackedFileStore struct {
 	mu     sync.Mutex
 	writer *zstd.Encoder
+	lz4    *lz4.Compressor
 	buffer []byte
 	cache  *bytecache.Cache
 	next   uint64
@@ -42,14 +44,29 @@ type retainedChunkKey struct {
 }
 
 func NewPackedFileStore(cacheBytes int64, deduplicate bool) (*PackedFileStore, error) {
+	return newPackedFileStore(cacheBytes, deduplicate, false)
+}
+
+// NewFastPackedFileStore uses independent LZ4 blocks for frequently-read files.
+func NewFastPackedFileStore(cacheBytes int64, deduplicate bool) (*PackedFileStore, error) {
+	return newPackedFileStore(cacheBytes, deduplicate, true)
+}
+
+func newPackedFileStore(cacheBytes int64, deduplicate, fast bool) (*PackedFileStore, error) {
 	if cacheBytes < 0 {
 		return nil, fmt.Errorf("negative packed read cache limit")
 	}
-	writer, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(PackedChunkBytes), zstd.WithLowerEncoderMem(true))
-	if err != nil {
-		return nil, err
+	store := &PackedFileStore{cache: bytecache.New(cacheBytes)}
+	if fast {
+		store.lz4 = new(lz4.Compressor)
+		store.buffer = make([]byte, lz4.CompressBlockBound(PackedChunkBytes))
+	} else {
+		writer, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(PackedChunkBytes), zstd.WithLowerEncoderMem(true))
+		if err != nil {
+			return nil, err
+		}
+		store.writer = writer
 	}
-	store := &PackedFileStore{writer: writer, cache: bytecache.New(cacheBytes)}
 	if deduplicate {
 		store.chunks = make(map[retainedChunkKey][]byte)
 	}
@@ -59,6 +76,7 @@ func NewPackedFileStore(cacheBytes int64, deduplicate bool) (*PackedFileStore, e
 type retainedChunk struct {
 	data []byte
 	raw  bool
+	lz4  bool
 }
 
 type PackedFile struct {
@@ -98,6 +116,14 @@ func (f *PackedFile) chunk(index int) ([]byte, error) {
 	}
 	size := min(int64(PackedChunkBytes), f.length-int64(index)*PackedChunkBytes)
 	return f.cache.Get(bytecache.Key{Source: f.id, Index: index}, func() ([]byte, error) {
+		if chunk.lz4 {
+			data := make([]byte, size)
+			count, err := lz4.UncompressBlock(chunk.data, data)
+			if err != nil || count != len(data) {
+				return nil, fmt.Errorf("retained file %q chunk %d: invalid LZ4 block", f.name, index)
+			}
+			return data, nil
+		}
 		decoder, err := packedDecoder()
 		if err != nil {
 			return nil, err
@@ -153,10 +179,19 @@ func (*PackedFile) AttrNames() []string                        { return AttrName
 
 // packChunk requires the encoder lock and copies both compressed and raw data.
 func (s *PackedFileStore) packChunk(part []byte) (retainedChunk, error) {
-	s.buffer = s.writer.EncodeAll(part, s.buffer[:0])
-	chunk := retainedChunk{data: s.buffer}
-	if len(chunk.data) >= len(part) {
-		chunk.data, chunk.raw = part, true
+	var chunk retainedChunk
+	if s.lz4 != nil {
+		count, err := s.lz4.CompressBlock(part, s.buffer)
+		if err != nil {
+			return retainedChunk{}, err
+		}
+		chunk = retainedChunk{data: s.buffer[:count], lz4: true}
+	} else {
+		s.buffer = s.writer.EncodeAll(part, s.buffer[:0])
+		chunk = retainedChunk{data: s.buffer}
+	}
+	if len(chunk.data) == 0 || len(chunk.data) >= len(part) {
+		chunk = retainedChunk{data: part, raw: true}
 	}
 	// Carried files and unchanged regions in successive component versions
 	// can share immutable encoded bytes. This index lives only while packing

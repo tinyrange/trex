@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/tinyrange/trex/storage"
+	bytecache "github.com/tinyrange/trex/storage/cache"
 )
 
 const maxBlock = 64 << 20
@@ -19,7 +20,15 @@ type hashRecord struct {
 	offset, size int64
 	digest       [32]byte
 }
-type block struct{ logical, stored hashRecord }
+type block struct {
+	logical, stored hashRecord
+	cacheIndex      int
+}
+
+type blockIdentity struct {
+	stored       hashRecord
+	decodedBytes int64
+}
 
 // Entry is a borrowed, lazy stream member. Paths are package-relative, not
 // installed Windows paths. Reading verifies stored block digests; Verify also
@@ -33,11 +42,11 @@ type Entry struct {
 	archive  *Archive
 }
 type Archive struct {
-	Entries []*Entry
-	source  storage.Reader
-	mu      sync.Mutex
-	cached  *block
-	data    []byte
+	Entries     []*Entry
+	source      storage.Reader
+	cache       *bytecache.Cache
+	cacheSource uint64
+	decodeMu    sync.Mutex
 }
 
 func (d *Database) table(name, types string) (map[int64][]Cell, error) {
@@ -84,6 +93,7 @@ func safePath(s string) (string, error) {
 
 // Open indexes a full stream and its UnityDB. It does not select a product,
 // apply deltas, interpret installation manifests, or authenticate the publisher.
+// The stream must remain immutable while the archive is in use.
 func Open(database, stream storage.Reader) (*Archive, error) {
 	d, err := ReadDatabase(database)
 	if err != nil {
@@ -155,7 +165,7 @@ func openDatabase(d *Database, stream storage.Reader) (*Archive, error) {
 	for id := range packages {
 		sort.Strings(packages[id])
 	}
-	a := &Archive{source: stream}
+	a := &Archive{source: stream, cache: bytecache.New(2 * maxBlock), cacheSource: 1}
 	files := map[int64]*Entry{}
 	seen := map[string]bool{}
 	for _, r := range d.Tables["Files"] {
@@ -183,6 +193,7 @@ func openDatabase(d *Database, stream storage.Reader) (*Archive, error) {
 		}
 		sources[r[2].Number] = h
 	}
+	blockIndexes := make(map[blockIdentity]int)
 	for id, r := range tables["Blocks"] {
 		h, ok := hashes[r[3].Number]
 		source, has := sources[id]
@@ -190,7 +201,13 @@ func openDatabase(d *Database, stream storage.Reader) (*Archive, error) {
 		if !ok || !has || e == nil || r[1].Number != 1 || h.size > maxBlock || h.size <= 0 || h.digest != source.digest || h.offset > e.Size() || h.size > e.Size()-h.offset {
 			return nil, fmt.Errorf("c2r: invalid logical block")
 		}
-		e.blocks = append(e.blocks, block{logical: h, stored: source})
+		key := blockIdentity{stored: source, decodedBytes: h.size}
+		cacheIndex := blockIndexes[key]
+		if cacheIndex == 0 {
+			cacheIndex = len(blockIndexes) + 1
+			blockIndexes[key] = cacheIndex
+		}
+		e.blocks = append(e.blocks, block{logical: h, stored: source, cacheIndex: cacheIndex})
 	}
 	for _, e := range a.Entries {
 		sort.Slice(e.blocks, func(i, j int) bool { return e.blocks[i].logical.offset < e.blocks[j].logical.offset })
@@ -209,23 +226,26 @@ func openDatabase(d *Database, stream storage.Reader) (*Archive, error) {
 }
 func (e *Entry) Size() int64 { return e.hash.size }
 func (a *Archive) decode(b *block) ([]byte, error) {
-	if a.cached == b {
-		return a.data, nil
-	}
-	encoded := make([]byte, b.stored.size)
-	if _, err := a.source.ReadAt(encoded, b.stored.offset); err != nil {
-		return nil, err
-	}
-	if sha256.Sum256(encoded) != b.stored.digest {
-		return nil, fmt.Errorf("c2r: stored block SHA-256 mismatch")
-	}
-	data, err := inflate(encoded, b.logical.size)
+	key := bytecache.Key{Source: a.cacheSource, Index: b.cacheIndex}
+	value, err := a.cache.GetValue(key, func() (any, int64, error) {
+		// Keep one miss in flight per stream to bound temporary buffers. Hits
+		// can still complete while a different block is being read and decoded.
+		a.decodeMu.Lock()
+		defer a.decodeMu.Unlock()
+		encoded := make([]byte, b.stored.size)
+		if _, err := a.source.ReadAt(encoded, b.stored.offset); err != nil {
+			return nil, 0, err
+		}
+		if sha256.Sum256(encoded) != b.stored.digest {
+			return nil, 0, fmt.Errorf("c2r: stored block SHA-256 mismatch")
+		}
+		data, err := inflate(encoded, b.logical.size)
+		return data, int64(cap(data)), err
+	})
 	if err != nil {
 		return nil, err
 	}
-	a.cached = b
-	a.data = data
-	return data, nil
+	return value.([]byte), nil
 }
 func (e *Entry) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
@@ -238,8 +258,6 @@ func (e *Entry) ReadAt(p []byte, off int64) (int, error) {
 		return 0, io.EOF
 	}
 	a := e.archive
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	n := 0
 	i := sort.Search(len(e.blocks), func(i int) bool { return e.blocks[i].logical.offset+e.blocks[i].logical.size > off })
 	for i < len(e.blocks) && n < len(p) {

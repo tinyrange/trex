@@ -188,6 +188,8 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("path_index", d.pathIndexBuiltin), nil
 	case "path_names":
 		return starlark.NewBuiltin("path_names", d.pathNamesBuiltin), nil
+	case "hardlink_paths":
+		return starlark.NewBuiltin("hardlink_paths", d.hardLinkPathsBuiltin), nil
 	case "files":
 		return d.fileList(), nil
 	case "fat_short_path":
@@ -196,7 +198,33 @@ func (d *Directory) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 func (d *Directory) AttrNames() []string {
-	return []string{"clone", "fat_short_path", "files", "find", "get_metadata", "get_security", "hardlink", "list_dir", "mkdir", "path_index", "path_names", "remove", "rmdir", "set_attributes", "set_extended_attributes", "set_file_attributes", "set_reparse", "set_security", "set_times", "write"}
+	return []string{"clone", "fat_short_path", "files", "find", "get_metadata", "get_security", "hardlink", "hardlink_paths", "list_dir", "mkdir", "path_index", "path_names", "remove", "rmdir", "set_attributes", "set_extended_attributes", "set_file_attributes", "set_reparse", "set_security", "set_times", "write"}
+}
+
+func (d *Directory) hardLinkPathsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs("hardlink_paths", args, kwargs, "path", &name); err != nil {
+		return nil, err
+	}
+	name = storage.CleanPath(name)
+	if _, exists := d.files[name]; !exists {
+		return nil, fmt.Errorf("hardlink_paths: file %q does not exist", name)
+	}
+	if id := d.metadata[name].HardLink; id != 0 {
+		names := make([]string, 0, len(d.hardLinkNames[id]))
+		for _, alias := range d.hardLinkNames[id] {
+			if _, exists := d.files[alias]; exists {
+				names = append(names, alias)
+			}
+		}
+		sort.Strings(names)
+		values := make([]starlark.Value, len(names))
+		for i, alias := range names {
+			values[i] = starlark.String(alias)
+		}
+		return starlark.NewList(values), nil
+	}
+	return starlark.NewList([]starlark.Value{starlark.String(name)}), nil
 }
 
 func (d *Directory) hardlinkBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

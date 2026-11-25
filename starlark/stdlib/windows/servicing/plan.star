@@ -8,7 +8,7 @@ load("@stdlib//windows/servicing:population.star", "prepare_servicing_population
 load("@stdlib//windows/servicing:package_store.star", "package_metadata_executions")
 
 
-def plan_package_phases(base, image, closure, hives=None, work_limit=2097152, editions=["Microsoft-Windows-ProfessionalEdition"]):
+def plan_package_phases(base, image, closure, hives=None, work_limit=2097152, editions=["Microsoft-Windows-ProfessionalEdition"], cache_inputs=None):
     """Return install population and a compact, independently owned closure.
 
     StageChain ordering is captured before install planning. Both phases use
@@ -22,13 +22,21 @@ def plan_package_phases(base, image, closure, hives=None, work_limit=2097152, ed
     selection, or host output occurs here. Source objects may retain lazy
     readers; keep their backing capabilities alive through construction.
     """
-    prepared = prepare_servicing_population(base, image, closure, hives=hives,
-        work_limit=work_limit, editions=editions)
-    stage = prepared("stage").deployment_plan()
-    catalog_hint_packages = [e.package for e in stage.executions]
-    stage = None
-    population = prepared("install").deployment_plan()
-    prepared = None
+    def build():
+        prepared = prepare_servicing_population(base, image, closure, hives=hives,
+            work_limit=work_limit, editions=editions)
+        stage = prepared("stage").deployment_plan()
+        catalog_hint_packages = [e.package for e in stage.executions]
+        stage = None
+        return catalog_hint_packages, prepared("install").deployment_plan()
+    if cache_inputs != None and hives != None:
+        # Serialized policy groups preserve order and distinguish their bounds
+        # without conflating adjacent root, edition or source strings.
+        key = [json.encode(group) for group in [cache_inputs, closure["roots"], editions]]
+        catalog_hint_packages, population = windows.cbs_cached_phases(
+            closure["software"], hives["COMPONENTS"], closure["files"], key, work_limit, build)
+    else:
+        catalog_hint_packages, population = build()
     needed = {a.package.lower(): True for a in population.deployment_actions(changed_only=True)}
     needed.update({e.package.lower(): True for e in package_metadata_executions(population, list(closure["files"]))})
     files = {name: file for name, file in closure["files"].items() if name.lower() in needed}

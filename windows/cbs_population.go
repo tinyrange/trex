@@ -196,6 +196,7 @@ type cbsPopulationRecord struct {
 	names            map[string]string
 	executions       *starlark.List
 	frozen           bool
+	captured         *uup.CBSPhasePlan
 }
 
 func (r *cbsPopulationRecord) Attr(name string) (starlark.Value, error) {

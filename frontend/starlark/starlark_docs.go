@@ -198,7 +198,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"http_post_json":                    "http_post_json(url, body, maximum=8MiB, timeout=60, tls_roots=None, response=False, headers=None, http_version='auto') -> file or response dict",
 	"http_get":                          "http_get(url, maximum=64MiB, timeout=60) -> file",
 	"http_file":                         "http_file(urls, size=None, name='HTTP range file', chunk_bytes=4MiB, cache_bytes=256MiB) -> file; omitted size uses HEAD discovery",
-	"mirror_file":                       "mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file",
+	"mirror_file":                       "mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None, background=False) -> file or request",
 	"exists":                            "exists(name) -> bool",
 	"open":                              "open(name) -> file",
 	"create_output":                     "create_output(name, size) -> file with flush() and close()",

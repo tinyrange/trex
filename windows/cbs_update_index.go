@@ -75,11 +75,20 @@ func (v *cbsIndexValue) Attr(name string) (starlark.Value, error) {
 		}), nil
 	case "with_components":
 		return starlark.NewBuiltin("cbs_update_index.with_components", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-			var entries *starlark.List
+			var entries starlark.Value
 			if err := starlark.UnpackArgs("cbs_update_index.with_components", args, kwargs, "components", &entries); err != nil {
 				return nil, err
 			}
-			components, err := cbsComponentSnapshot(entries)
+			var components *uup.CBSComponentStateIndex
+			var err error
+			switch input := entries.(type) {
+			case *cbsResidentInventoryValue:
+				components, err = uup.NewCBSComponentStateIndex(input.inventory.Components)
+			case *starlark.List:
+				components, err = cbsComponentSnapshot(input)
+			default:
+				return nil, fmt.Errorf("CBS components require an inventory or list")
+			}
 			if err != nil {
 				return nil, err
 			}

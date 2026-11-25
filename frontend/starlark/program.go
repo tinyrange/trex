@@ -8,6 +8,8 @@ import (
 	"io"
 	"io/fs"
 	"strings"
+
+	"github.com/tinyrange/trex/storage"
 )
 
 // Program runs trusted application policy from a closed, caller-owned filesystem.
@@ -21,6 +23,7 @@ type Program struct {
 	Args          []string
 	Builtins      starlark.StringDict
 	Print         func(string)
+	DerivedCache  storage.DerivedCache
 	// Optional scoped repl() console. The caller owns the streams and must unblock
 	// Input on cancellation; nil Input leaves interactive evaluation unavailable.
 	Input               io.Reader
@@ -45,6 +48,7 @@ func RunProgram(ctx context.Context, p Program) (err error) {
 	thread := &starlark.Thread{Name: "application", Load: loader.Load}
 	thread.SetLocal(moduleLoaderKey, loader)
 	resources := installRuntimeResources(thread)
+	resources.Derived = p.DerivedCache
 	installInternet(thread, p.AllowInternet)
 	defer func() {
 		var eval *starlark.EvalError
@@ -75,6 +79,7 @@ func RunProgram(ctx context.Context, p Program) (err error) {
 		select {
 		case <-ctx.Done():
 			thread.Cancel(ctx.Err().Error())
+			resources.Cancel()
 		case <-finished:
 		}
 	}()

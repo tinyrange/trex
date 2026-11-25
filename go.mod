@@ -6,6 +6,7 @@ require (
 	github.com/benhoyt/goawk v1.32.0
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/klauspost/compress v1.18.6
+	github.com/pierrec/lz4/v4 v4.1.21
 	github.com/pjbgf/sha1cd v0.6.0
 	github.com/therootcompany/xz v1.0.1
 	github.com/tinyrange/gowin v0.0.0-20260809233042-3f02e7d42a2d

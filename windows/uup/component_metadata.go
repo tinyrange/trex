@@ -17,9 +17,14 @@ type ComponentMetadataIndex struct {
 	open            func(string) (storage.Reader, error)
 	release         func(string)
 	bindPredecessor func(AssemblyIdentity, string)
+	cache           *ManifestCache
 }
 
 func NewComponentMetadataIndex(stage *CumulativeStage) (*ComponentMetadataIndex, error) {
+	return NewCachedComponentMetadataIndex(stage, nil)
+}
+
+func NewCachedComponentMetadataIndex(stage *CumulativeStage, cache *ManifestCache) (*ComponentMetadataIndex, error) {
 	if stage == nil {
 		return nil, fmt.Errorf("component metadata requires a stage")
 	}
@@ -30,6 +35,7 @@ func NewComponentMetadataIndex(stage *CumulativeStage) (*ComponentMetadataIndex,
 	index, err := newComponentMetadataIndex(entries, stage.openAssemblyFile, stage.releaseAssemblyFile)
 	if err == nil {
 		index.bindPredecessor = stage.bindComponentPredecessor
+		index.cache = cache
 	}
 	return index, err
 }
@@ -208,7 +214,7 @@ func (index *ComponentMetadataIndex) read(candidate manifestPath, wanted []byte)
 	if file.Size() < 0 || file.Size() > maximumAssemblyManifestSize {
 		return nil, fmt.Errorf("component metadata exceeds manifest size bound")
 	}
-	parsed, err := parseAssemblyFile(file)
+	parsed, err := parseCachedAssemblyFile(file, index.cache)
 	if err != nil {
 		return nil, fmt.Errorf("component metadata %q: %w", candidate.Path, err)
 	}
@@ -233,6 +239,10 @@ func (index *ComponentMetadataIndex) read(candidate manifestPath, wanted []byte)
 // and its native wcp dictionary. It does not use a later update's selected plan,
 // substitute a newer component, or infer deployment ownership from availability.
 func NewResidentComponentMetadataIndex(base *wim.Archive, imagePath string) (*ComponentMetadataIndex, error) {
+	return NewCachedResidentComponentMetadataIndex(base, imagePath, nil)
+}
+
+func NewCachedResidentComponentMetadataIndex(base *wim.Archive, imagePath string, cache *ManifestCache) (*ComponentMetadataIndex, error) {
 	if base == nil {
 		return nil, fmt.Errorf("resident component metadata requires a base WIM")
 	}
@@ -265,5 +275,9 @@ func NewResidentComponentMetadataIndex(base *wim.Archive, imagePath string) (*Co
 		}
 		return file, nil
 	}
-	return newComponentMetadataIndex(entries, open, decoder.releaseAssemblyFile)
+	index, err := newComponentMetadataIndex(entries, open, decoder.releaseAssemblyFile)
+	if err == nil {
+		index.cache = cache
+	}
+	return index, err
 }

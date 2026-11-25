@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/tinyrange/trex/archive/wim"
+	"github.com/tinyrange/trex/lifecycle"
+	"github.com/tinyrange/trex/storage"
 	starvalue "github.com/tinyrange/trex/storage/star"
 	"github.com/tinyrange/trex/windows/uup"
 	"go.starlark.net/starlark"
@@ -13,7 +15,7 @@ import (
 
 // Each record indexes the complete metadata namespace, not the preliminary
 // selected effects. Building it does not authorize servicing or change an image.
-func servicingMetadataBuiltin(stages []*uup.CumulativeStage, metadata []uup.UpdateStagePlan) *starlark.Builtin {
+func servicingMetadataBuiltin(stages []*uup.CumulativeStage, metadata []uup.UpdateStagePlan, manifests *uup.ManifestCache, resources *lifecycle.Resources) *starlark.Builtin {
 	type cached struct {
 		once  sync.Once
 		value starlark.Value
@@ -43,18 +45,24 @@ func servicingMetadataBuiltin(stages []*uup.CumulativeStage, metadata []uup.Upda
 		if selected < 0 {
 			return nil, fmt.Errorf("servicing_metadata: unknown installed-OS feature %q", feature)
 		}
-		contentOnce.Do(func() { contentCache, contentError = newStageContentCache(64 << 20) })
+		contentOnce.Do(func() {
+			contentCache, contentError = newStageContentCache(64 << 20)
+			if contentError == nil && resources != nil {
+				contentCache.ctx = resources.Context()
+				contentCache.disk, _ = resources.Derived.(storage.VerifiedContentCache)
+			}
+		})
 		if contentError != nil {
 			return nil, contentError
 		}
 		c := &cache[selected]
 		c.once.Do(func() {
-			index, err := uup.NewPackageMetadataIndex(stages[selected])
+			index, err := uup.NewCachedPackageMetadataIndex(stages[selected], manifests)
 			if err != nil {
 				c.err = err
 				return
 			}
-			components, err := uup.NewComponentMetadataIndex(stages[selected])
+			components, err := uup.NewCachedComponentMetadataIndex(stages[selected], manifests)
 			if err != nil {
 				c.err = err
 				return
@@ -156,7 +164,7 @@ func packageMetadataRecord(index *uup.PackageMetadataIndex, components *uup.Comp
 	return starvalue.NewRecord(starlark.StringDict{"packages": starlark.NewList(packages), "roots": starlark.NewList(roots), "open_package": open, "open_packages": openMany, "open_catalog": openCatalog, "open_catalogs": packageCatalogBatchBuiltin(index), "open_component": openComponent, "plan_components": exactComponentPlanWithCacheBuiltin(stage, components, contentCache)})
 }
 
-func residentComponentMetadataBuiltins(base *wim.Archive, imagePath string) (*starlark.Builtin, *starlark.Builtin) {
+func residentComponentMetadataBuiltins(base *wim.Archive, imagePath string, manifests *uup.ManifestCache) (*starlark.Builtin, *starlark.Builtin) {
 	var once sync.Once
 	var index *uup.ComponentMetadataIndex
 	var indexErr error
@@ -165,7 +173,7 @@ func residentComponentMetadataBuiltins(base *wim.Archive, imagePath string) (*st
 		if err := starlark.UnpackArgs("open_resident_component", args, kwargs, "identity", &identity); err != nil {
 			return nil, err
 		}
-		once.Do(func() { index, indexErr = uup.NewResidentComponentMetadataIndex(base, imagePath) })
+		once.Do(func() { index, indexErr = uup.NewCachedResidentComponentMetadataIndex(base, imagePath, manifests) })
 		if indexErr != nil {
 			return nil, indexErr
 		}
@@ -195,7 +203,7 @@ func residentComponentMetadataBuiltins(base *wim.Archive, imagePath string) (*st
 			}
 			identities[i] = []byte(identity)
 		}
-		once.Do(func() { index, indexErr = uup.NewResidentComponentMetadataIndex(base, imagePath) })
+		once.Do(func() { index, indexErr = uup.NewCachedResidentComponentMetadataIndex(base, imagePath, manifests) })
 		if indexErr != nil {
 			return nil, indexErr
 		}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -130,6 +131,67 @@ func TestStreamRandomAccessAndIntegrity(t *testing.T) {
 		t.Fatalf("corruption not detected: %v", err)
 	}
 }
+
+type countingStream struct {
+	*bytes.Reader
+	reads atomic.Int64
+}
+
+func (s *countingStream) ReadAt(p []byte, off int64) (int, error) {
+	s.reads.Add(1)
+	return s.Reader.ReadAt(p, off)
+}
+
+func TestStreamCachesInterleavedBlocksAcrossMembers(t *testing.T) {
+	db, stream, plain := fixture(t)
+	source := &countingStream{Reader: bytes.NewReader(stream)}
+	archive, err := Open(bytes.NewReader(db), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 32; i++ {
+		offset := int64(24 * ((i / 2) % 2))
+		entry := archive.Entries[i%len(archive.Entries)]
+		var data [3]byte
+		if _, err := entry.ReadAt(data[:], offset); err != nil || !bytes.Equal(data[:], plain[offset:offset+3]) {
+			t.Fatalf("member %s at %d got %q, %v", entry.Path, offset, data, err)
+		}
+	}
+	if got := source.reads.Load(); got != 2 {
+		t.Fatalf("source reads = %d, want one per stored block", got)
+	}
+}
+
+func TestStreamCacheSeparatesBlockDigestClaims(t *testing.T) {
+	db, stream, _ := fixture(t)
+	d, err := ReadDatabase(bytes.NewReader(db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Alias the first stored extent with a different claimed digest.
+	wrong := sha256.Sum256([]byte("different bytes"))
+	d.Tables["Digests"] = append(d.Tables["Digests"], []Cell{{Number: 4}, {Text: base64.StdEncoding.EncodeToString(wrong[:]), IsText: true}})
+	for _, row := range []int{1, 2} {
+		alias := append([]Cell(nil), d.Tables["Hashes"][row]...)
+		alias[0].Number = int64(5 + row)
+		alias[4].Number = 4
+		d.Tables["Hashes"] = append(d.Tables["Hashes"], alias)
+	}
+	d.Tables["Blocks"][2][3].Number = 6
+	d.Tables["BlockSource"][2][3].Number = 7
+	a, err := openDatabase(d, bytes.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data [3]byte
+	if _, err := a.Entries[0].ReadAt(data[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Entries[1].ReadAt(data[:], 0); err == nil || !strings.Contains(err.Error(), "SHA-256 mismatch") {
+		t.Fatalf("cached block bypassed digest verification: %v", err)
+	}
+}
+
 func TestStreamRejectsInvalidReferencesAndExtents(t *testing.T) {
 	data, stream, _ := fixture(t)
 	for name, mutate := range map[string]func(*Database){

@@ -2,6 +2,7 @@ package native
 
 import (
 	"container/list"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tinyrange/trex/storage"
 	bytecache "github.com/tinyrange/trex/storage/cache"
 	starfile "github.com/tinyrange/trex/storage/star"
 )
@@ -19,6 +21,8 @@ const maximumStageCacheEntry = (512 << 20) + (1 << 20)
 // random disk read only inflates the requested 64-KiB chunks. At most two small
 // targets reconstruct concurrently; large targets retain exclusive admission.
 type stageContentCache struct {
+	ctx         context.Context
+	disk        storage.VerifiedContentCache
 	mu          sync.Mutex
 	loadMu      sync.RWMutex
 	smallLoads  chan struct{}
@@ -94,14 +98,6 @@ func (c *stageContentCache) get(r *reopenedStageReader) (file starfile.File, err
 		close(flight.done)
 		c.mu.Unlock()
 	}()
-	if r.size < 8<<20 {
-		c.smallLoads <- struct{}{}
-		c.loadMu.RLock()
-		defer func() { c.loadMu.RUnlock(); <-c.smallLoads }()
-	} else {
-		c.loadMu.Lock()
-		defer c.loadMu.Unlock()
-	}
 	c.mu.Lock()
 	c.stats.Misses++
 	c.mu.Unlock()
@@ -111,20 +107,63 @@ func (c *stageContentCache) get(r *reopenedStageReader) (file starfile.File, err
 		c.stats.LoadNanoseconds += uint64(time.Since(started))
 		c.mu.Unlock()
 	}()
-	data, err := loadStageContent(r)
-	if err != nil {
-		return nil, err
+	var release func()
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	var sourceData []byte
+	var sourceError error
+	load := func() ([]byte, error) {
+		if release != nil {
+			return sourceData, sourceError
+		}
+		// A verified disk hit does not reconstruct content. Admit only an
+		// actual cold load, and hold its slot until its working bytes have
+		// been packed or published.
+		if r.size < 8<<20 {
+			c.smallLoads <- struct{}{}
+			c.loadMu.RLock()
+			release = func() { c.loadMu.RUnlock(); <-c.smallLoads }
+		} else {
+			c.loadMu.Lock()
+			release = c.loadMu.Unlock
+		}
+		sourceData, sourceError = loadStageContent(r)
+		return sourceData, sourceError
 	}
-	packed, err := c.codec.Pack("staged content", data)
-	if err != nil {
-		return nil, err
+	var packed starfile.File
+	var diskIndexBytes int64
+	if c.disk != nil && r.cacheOnDisk && r.expectedSHA256 != nil {
+		disk, diskErr := c.disk.GetOrBuildContent(c.ctx, *r.expectedSHA256, r.size, load)
+		if sourceError != nil {
+			return nil, sourceError
+		}
+		if diskErr == nil {
+			packed = starfile.NewReader("verified staged content", disk)
+			// The disk reader keeps its offset/digest index in memory.
+			diskIndexBytes = 128 + 64*storage.CeilDiv(r.size, starfile.PackedChunkBytes)
+		}
+	}
+	if packed == nil {
+		data, err := load()
+		if err != nil {
+			return nil, err
+		}
+		packed, err = c.codec.Pack("staged content", data)
+		if err != nil {
+			return nil, err
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stats.Loads++
-	c.stats.LoadedBytes += uint64(len(data))
+	c.stats.LoadedBytes += uint64(r.size)
 	weight := packed.Size() + 128
-	if chunks, ok := packed.(*retainedFile); ok {
+	if diskIndexBytes != 0 {
+		weight = diskIndexBytes
+	} else if chunks, ok := packed.(*retainedFile); ok {
 		weight = chunks.RetainedBytes()
 	}
 	// Decoded target size, not just compressed weight, selects the large slot:
@@ -133,7 +172,7 @@ func (c *stageContentCache) get(r *reopenedStageReader) (file starfile.File, err
 	// reads must not evict a large target between its paging/scanning requests:
 	// rebuilding it repeatedly can starve queued guest registry reads even when
 	// every backing operation eventually succeeds. Both sets remain bounded.
-	if c.limit > 0 && (r.size > c.limit || weight > c.limit) && weight <= maximumStageCacheEntry {
+	if c.limit > 0 && diskIndexBytes == 0 && (r.size > c.limit || weight > c.limit) && weight <= maximumStageCacheEntry {
 		if c.oversized != nil {
 			c.stats.Evictions++
 		}
