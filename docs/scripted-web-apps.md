@@ -59,6 +59,16 @@ mutex. Console streaming and input stay independent of that mutex. Image
 construction in a handler is synchronous, so other scripted HTTP handlers wait;
 existing RFB sessions continue to operate.
 
+Because a long handler holds that mutex, the native adapter also serves
+`GET /_trex/activity?after=N&wait=SECONDS&busy=ROUTE` without it (session token
+required, like any private route). It returns `{busy, route, busyMs, next,
+truncated, lines:[{n, at, text}]}`: the path of the request that currently owns
+the script, and the last 400 lines the script passed to `print()` after line
+`N`. With `wait` (at most 25 s) it long-polls until a new line, a change from
+the client's last observed `busy` route, or timeout. Pass `next - 1` as the
+following `after`. Print output still reaches the server console. Use it to
+show progress of synchronous construction/boot work; it is not a job queue.
+
 `web.browse(root, request, path="/relative/path")` supports mounting a native
 archive tree under a script-selected prefix. The optional path changes only
 resolution; method, query, pagination, and raw/range response behavior are

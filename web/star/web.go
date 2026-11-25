@@ -132,6 +132,7 @@ type Application struct {
 	RequestLogger *slog.Logger
 	requestID     atomic.Uint64
 	mu            *sync.Mutex
+	activity      *activityLog
 	thread        *starlark.Thread
 	handler       starlark.Callable
 }
@@ -141,6 +142,10 @@ func NewApplication(thread *starlark.Thread, handler starlark.Callable) *Applica
 }
 
 func (a *Application) ServeHTTP(w http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == ActivityPath {
+		a.activity.ServeHTTP(w, request)
+		return
+	}
 	started := time.Now()
 	id := a.requestID.Add(1)
 	logged := &requestWriter{ResponseWriter: w}
@@ -188,6 +193,8 @@ func (a *Application) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	handling := time.Now()
 	result, err := func() (starlark.Value, error) {
 		defer a.mu.Unlock()
+		a.activity.enter(request.URL.Path)
+		defer a.activity.leave()
 		a.thread.SetLocal(requestPhasesKey, phases)
 		defer a.thread.SetLocal(requestPhasesKey, nil)
 		return starlark.Call(a.thread, a.handler, starlark.Tuple{value}, nil)

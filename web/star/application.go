@@ -30,7 +30,9 @@ func NewApplicationWithMutex(thread *starlark.Thread, handler starlark.Callable,
 	if mu == nil {
 		mu = &sync.Mutex{}
 	}
-	return &Application{thread: thread, handler: handler, mu: mu}
+	activity := newActivityLog()
+	captureActivity(thread, activity)
+	return &Application{thread: thread, handler: handler, mu: mu, activity: activity}
 }
 func applicationBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var handler starlark.Callable
