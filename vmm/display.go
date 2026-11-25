@@ -12,6 +12,13 @@ type DisplaySource interface {
 	Input(context.Context, Input) error
 }
 
+// ReusableDisplaySource may capture into a caller-owned framebuffer to avoid
+// allocating on each poll. The caller lends dst exclusively until the call
+// returns. The result may be a replacement and must not alias guest memory.
+type ReusableDisplaySource interface {
+	CaptureInto(ctx context.Context, dst *image.RGBA) (*image.RGBA, error)
+}
+
 // ResizeDisplaySource optionally changes the guest's desktop resolution. Resize
 // returns nil only after the guest has applied the requested pixel dimensions;
 // rejecting a mode or canceling the request returns an error. It must honor ctx

@@ -268,18 +268,26 @@ func (d *driver) loopSingle() {
 		}
 	}
 }
-func (d *driver) call(ctx context.Context, fn func() error) error {
+func (d *driver) submit(ctx context.Context, fn func() error) (<-chan error, error) {
 	r := request{ctx: ctx, run: fn, reply: make(chan error, 1)}
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	case <-d.done:
-		return &vmm.Error{Code: vmm.ErrorState, Message: "cc VM is closed"}
+		return nil, &vmm.Error{Code: vmm.ErrorState, Message: "cc VM is closed"}
 	case d.requests <- r:
 	}
 	d.cancelCPUs()
+	return r.reply, nil
+}
+
+func (d *driver) call(ctx context.Context, fn func() error) error {
+	reply, err := d.submit(ctx, fn)
+	if err != nil {
+		return err
+	}
 	select {
-	case err := <-r.reply:
+	case err := <-reply:
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
@@ -439,7 +447,30 @@ func (d *driver) Capture(ctx context.Context) (*image.RGBA, error) {
 		frame, err = d.pc.capture()
 		return err
 	})
-	return frame, err
+	if err != nil {
+		return nil, err
+	}
+	return frame, nil
+}
+
+func (d *driver) CaptureInto(ctx context.Context, dst *image.RGBA) (*image.RGBA, error) {
+	var frame *image.RGBA
+	reply, err := d.submit(ctx, func() error {
+		var err error
+		frame, err = d.pc.captureInto(dst)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	// After submission, a canceled request either exits before capture or
+	// completes its in-progress copy before the caller can reuse dst.
+	select {
+	case err := <-reply:
+		return frame, err
+	case <-d.done:
+		return nil, &vmm.Error{Code: vmm.ErrorState, Message: "cc VM is closed"}
+	}
 }
 
 func (d *driver) Screenshot(ctx context.Context, format string) (starfile.File, error) {
@@ -460,7 +491,11 @@ func (d *driver) Screenshot(ctx context.Context, format string) (starfile.File, 
 }
 
 func (p *pc) capture() (*image.RGBA, error) {
-	frame, err := ramfb.Capture(p.displayMemory())
+	return p.captureInto(nil)
+}
+
+func (p *pc) captureInto(dst *image.RGBA) (*image.RGBA, error) {
+	frame, err := ramfb.CaptureInto(p.displayMemory(), dst)
 	if frame != nil || err != nil {
 		return frame, err
 	}

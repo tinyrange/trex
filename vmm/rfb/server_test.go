@@ -24,6 +24,54 @@ func (d *testDisplay) Capture(context.Context) (*image.RGBA, error) {
 	return f, nil
 }
 func (d *testDisplay) Input(_ context.Context, i vmm.Input) error { d.inputs <- i; return nil }
+
+type reusableDisplay struct{ *testDisplay }
+
+func (d *reusableDisplay) CaptureInto(ctx context.Context, dst *image.RGBA) (*image.RGBA, error) {
+	if dst == nil || dst.Rect != d.frame.Rect {
+		return d.Capture(ctx)
+	}
+	copy(dst.Pix, d.frame.Pix)
+	return dst, nil
+}
+
+func TestIncrementalUpdatesReuseTwoIndependentFrames(t *testing.T) {
+	frame := image.NewRGBA(image.Rect(0, 0, 4, 3))
+	d := &reusableDisplay{&testDisplay{frame: frame}}
+	ch := &bufferChannel{}
+	s := session{ctx: context.Background(), ch: ch, display: d, width: 4, height: 3,
+		format: []byte{32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 0, 8, 16, 0, 0, 0}}
+	req := []byte{1, 0, 0, 0, 0, 0, 4, 0, 3}
+	if err := s.update(req); err != nil {
+		t.Fatal(err)
+	}
+	first := s.previous
+	frame.SetRGBA(2, 1, color.RGBA{R: 7, A: 255})
+	ch.Reset()
+	if err := s.update(req); err != nil {
+		t.Fatal(err)
+	}
+	if ch.Len() != 20 || s.previous == first || s.spare != first || first.RGBAAt(2, 1).R != 0 {
+		t.Fatalf("current frame overwrote the comparison frame: %v", ch.Bytes())
+	}
+	second := s.previous
+	ch.Reset()
+	if err := s.update(req); err != nil {
+		t.Fatal(err)
+	}
+	if ch.Len() != 4 || s.previous != second || s.spare != first {
+		t.Fatal("unchanged frame did not reuse the scratch buffer")
+	}
+	frame.SetRGBA(2, 1, color.RGBA{R: 8, A: 255})
+	ch.Reset()
+	if err := s.update(req); err != nil {
+		t.Fatal(err)
+	}
+	if ch.Len() != 20 || s.previous != first || s.spare != second {
+		t.Fatal("buffers were not exchanged after an incremental update")
+	}
+}
+
 func TestSessionPixelsInputAndRelease(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()

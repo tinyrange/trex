@@ -2,6 +2,7 @@ package ramfb
 
 import (
 	"encoding/binary"
+	"image"
 	"testing"
 )
 
@@ -23,6 +24,9 @@ func TestCaptureLayoutAndOwnership(t *testing.T) {
 	if f.RGBAAt(0, 1).B != 7 {
 		t.Fatal("capture aliases guest RAM")
 	}
+	if reused, err := CaptureInto(m, f); err != nil || reused != f || f.RGBAAt(0, 1).B != 99 {
+		t.Fatalf("capture did not reuse and refresh its destination: %v", err)
+	}
 	binary.LittleEndian.PutUint32(m[16:], 7)
 	if _, err := Capture(m); err == nil {
 		t.Fatal("short stride accepted")
@@ -35,6 +39,31 @@ func TestCaptureLayoutAndOwnership(t *testing.T) {
 	if f, err := Capture(m); err != nil || f != nil {
 		t.Fatal("inactive mode did not yield VGA fallback")
 	}
+}
+
+func BenchmarkCapture1080p(b *testing.B) {
+	const width, height = 1920, 1080
+	memory := make([]byte, Pixels+width*height*4)
+	for i, value := range []uint32{Magic, 1, width, height, width * 4, 1} {
+		binary.LittleEndian.PutUint32(memory[i*4:], value)
+	}
+	b.Run("allocate", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := Capture(memory); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("reuse", func(b *testing.B) {
+		frame := image.NewRGBA(image.Rect(0, 0, width, height))
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := CaptureInto(memory, frame); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 func TestMonochromeCaptureUsesBitOrderWidthAndPaddedRows(t *testing.T) {

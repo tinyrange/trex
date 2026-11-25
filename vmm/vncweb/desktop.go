@@ -1,10 +1,12 @@
 package vncweb
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
+	"html"
 	"net/http"
 	"sync"
 
@@ -17,6 +19,7 @@ import (
 // the handler before releasing the workspace's displays.
 type Desktop struct {
 	console  *Server
+	app      http.Handler
 	password [32]byte
 	cookie   string
 	ctx      context.Context
@@ -42,6 +45,18 @@ func NewDesktop(workspace vmm.Workspace, password, origin string) (*Desktop, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Desktop{console: console, password: sha256.Sum256([]byte(password)), cookie: "trex-session-" + console.Token[:12], ctx: ctx, cancel: cancel}, nil
+}
+
+// NewDesktopApplication serves an application behind the desktop login. The
+// application owns "/" and additional routes, while the desktop retains
+// "/login", "/console", "/rfb", "/desktop.js", and "/client.js".
+func NewDesktopApplication(workspace vmm.Workspace, password, origin string, app http.Handler) (*Desktop, error) {
+	desktop, err := NewDesktop(workspace, password, origin)
+	if err != nil {
+		return nil, err
+	}
+	desktop.app = app
+	return desktop, nil
 }
 
 // Close cancels and joins all handlers, including hijacked WebSockets which
@@ -77,25 +92,20 @@ func (d *Desktop) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/login" {
 		switch r.Method {
 		case http.MethodGet:
-			// Fetch serializes Origin as null for non-CORS form POSTs from a
-			// no-referrer document. Preserve the origin for our same-origin
-			// form without sending referrers to other origins. Never accept
-			// Origin: null as a workaround: opaque origins are untrusted.
-			w.Header().Set("Referrer-Policy", "same-origin")
-			d.asset(w, "login.html", "text/html; charset=utf-8")
+			d.login(w, http.StatusOK, "")
 		case http.MethodPost:
 			if !d.console.ValidOrigin(r, false) {
-				http.Error(w, "origin mismatch", http.StatusForbidden)
+				http.Error(w, "Reopen the launcher from your session link and sign in there.", http.StatusForbidden)
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 			if err := r.ParseForm(); err != nil {
-				http.Error(w, "invalid login form", http.StatusBadRequest)
+				d.login(w, http.StatusBadRequest, "Enter the session token and try again.")
 				return
 			}
 			password := sha256.Sum256([]byte(r.PostForm.Get("token")))
 			if subtle.ConstantTimeCompare(password[:], d.password[:]) != 1 {
-				http.Error(w, "invalid password", http.StatusForbidden)
+				d.login(w, http.StatusForbidden, "That token did not match. Try the token for this session.")
 				return
 			}
 			// Omitting Path scopes the cookie to the browser-visible login directory,
@@ -109,13 +119,13 @@ func (d *Desktop) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if r.Method != http.MethodGet {
+	if d.app == nil && r.Method != http.MethodGet {
 		http.Error(w, "GET required", http.StatusMethodNotAllowed)
 		return
 	}
 	cookie, err := r.Cookie(d.cookie)
 	if err != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(d.console.Token)) != 1 {
-		if r.URL.Path == "/" {
+		if r.Method == http.MethodGet && r.URL.Path == "/" {
 			w.Header().Set("Location", "login")
 			w.WriteHeader(http.StatusSeeOther)
 		} else {
@@ -124,7 +134,30 @@ func (d *Desktop) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/":
+	case "/console":
+		if d.app == nil {
+			http.NotFound(w, r)
+			return
+		}
+	case "/rfb", "/desktop.js", "/client.js":
+	default:
+		if d.app != nil {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead && !d.console.ValidOrigin(r, false) {
+				http.Error(w, "Reopen the launcher from your session link and try again.", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'")
+			w.Header().Set("Referrer-Policy", "same-origin")
+			d.app.ServeHTTP(w, r)
+			return
+		}
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	switch r.URL.Path {
+	case "/", "/console":
 		d.asset(w, "desktop.html", "text/html; charset=utf-8")
 	case "/desktop.js":
 		d.asset(w, "desktop.js", "text/javascript; charset=utf-8")
@@ -142,6 +175,19 @@ func (d *Desktop) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+
+func (d *Desktop) login(w http.ResponseWriter, status int, message string) {
+	// An origin is required on same-origin form posts, including retries.
+	w.Header().Set("Referrer-Policy", "same-origin")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	data, _ := assets.ReadFile("login.html")
+	if message != "" {
+		data = bytes.Replace(data, []byte("<!-- login message -->"), []byte(`<p role="alert">`+html.EscapeString(message)+`</p>`), 1)
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(data)
+}
+
 func (d *Desktop) asset(w http.ResponseWriter, name, contentType string) {
 	w.Header().Set("Content-Type", contentType)
 	data, _ := assets.ReadFile(name)
