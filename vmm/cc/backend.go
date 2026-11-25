@@ -117,8 +117,15 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 		}
 	}
 	if m.AMD64Boot != nil {
+		if _, prepared := m.AMD64Boot.RAM.(preparedRAM); prepared && b.CPUFactory != nil {
+			add("boot", "prepared AMD64 RAM requires the native cc accelerator")
+		}
 		if m.Architecture != "x86_64" || b.UEFI || m.CPUs != 1 || m.Boot != nil || m.DarwinBoot != nil || m.ARM64Boot != nil {
 			add("boot", "AMD64 state boot requires a single x86_64 CPU without another boot profile")
+		}
+		if ram, ok := m.AMD64Boot.RAM.(*preparedRAMValue); ok && ram.sharedWorkers &&
+			(len(m.Disks) != 0 || len(m.Networks) != 0 || b.USB || b.SB16 || b.HPET) {
+			add("boot", "shared direct workers require a PIT-free handoff without asynchronous devices")
 		}
 		if err := m.AMD64Boot.Validate(m.Memory); err != nil {
 			add("boot", err.Error())
@@ -286,7 +293,17 @@ func (b *Backend) Start(ctx context.Context, m vmm.Machine) (vmm.Driver, error) 
 func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk) (*pc, error) {
 	var cpus []hypervisor.X86
 	var err error
-	if b.CPUFactory != nil {
+	var prepared *preparedRAMValue
+	if m.AMD64Boot != nil {
+		prepared, _ = m.AMD64Boot.RAM.(*preparedRAMValue)
+	}
+	if prepared != nil && prepared.sharedWorkers {
+		var cpu hypervisor.X86
+		cpu, err = prepared.newDirectCPU(ctx)
+		if err == nil {
+			cpus = []hypervisor.X86{cpu}
+		}
+	} else if b.CPUFactory != nil {
 		var cpu hypervisor.X86
 		cpu, err = b.CPUFactory(ctx)
 		if err == nil {
@@ -431,6 +448,13 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 		}
 	}
 	if m.AMD64Boot != nil {
+		if prepared, ok := m.AMD64Boot.RAM.(*preparedRAMValue); ok && disk.Device == nil && len(m.Networks) == 0 && !b.USB && !b.SB16 {
+			platform.runSlots = prepared.runSlots
+			if dedicated, ok := cpu.(interface{ RunSlot() chan struct{} }); ok {
+				platform.runSlots = dedicated.RunSlot()
+				platform.runSlice = 100 * time.Millisecond
+			}
+		}
 		if err = platform.installAMD64(m.AMD64Boot); err != nil {
 			cpu.Close()
 			return nil, err

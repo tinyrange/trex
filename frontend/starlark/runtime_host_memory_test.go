@@ -35,10 +35,12 @@ func TestHostMemoryCgroupPaths(t *testing.T) {
 		}
 	}
 	paths := hostMemoryCgroupPaths("0::/user.slice/service\n")
-	if len(paths) != 12 || paths[0] != "/sys/fs/cgroup/user.slice/service/memory.current" || paths[6] != "/sys/fs/cgroup/user.slice/memory.current" {
+	if len(paths) != 14 || paths[0] != "/sys/fs/cgroup/user.slice/service/memory.current" ||
+		paths[2] != "/sys/fs/cgroup/user.slice/service/memory.high" ||
+		paths[9] != "/sys/fs/cgroup/user.slice/memory.high" {
 		t.Fatalf("paths=%v", paths)
 	}
-	if got := hostMemoryCgroupPaths("0::/" + strings.Repeat("a/", 100) + "b"); len(got) != 96 {
+	if got := hostMemoryCgroupPaths("0::/" + strings.Repeat("a/", 100) + "b"); len(got) != 112 {
 		t.Fatalf("unbounded ancestry: %d", len(got))
 	}
 }

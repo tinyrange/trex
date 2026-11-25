@@ -10,7 +10,12 @@ import (
 
 func (p *pc) installAMD64(boot *vmm.AMD64Boot) error {
 	size := boot.RAM.Size()
-	if _, err := io.ReadFull(io.NewSectionReader(boot.RAM, 0, size), p.ram[:size]); err != nil {
+	if prepared, ok := boot.RAM.(preparedRAM); ok {
+		if err := prepared.mapPrivate(p.ram[:size]); err != nil {
+			return fmt.Errorf("map private AMD64 physical RAM: %w", err)
+		}
+		p.preparedTemplate = prepared.rewindTemplate()
+	} else if _, err := io.ReadFull(io.NewSectionReader(boot.RAM, 0, size), p.ram[:size]); err != nil {
 		return fmt.Errorf("load AMD64 physical RAM: %w", err)
 	}
 	s, err := p.cpu.SystemRegisters()

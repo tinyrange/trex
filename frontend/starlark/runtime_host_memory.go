@@ -39,7 +39,7 @@ func runtimeHostMemoryBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args star
 	if runtime.GOOS == "linux" {
 		paths := []string{
 			proc + "/status", proc + "/stat", "/proc/meminfo", "/proc/vmstat", proc + "/cgroup",
-			"/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max",
+			"/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.high",
 			"/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/memory.events",
 			"/sys/fs/cgroup/memory.swap.current", "/sys/fs/cgroup/memory.swap.max",
 		}
@@ -83,7 +83,7 @@ func hostMemoryCgroupPaths(text string) []string {
 		}
 		var result []string
 		for depth := 0; member != "/" && depth < 16; depth++ {
-			for _, leaf := range []string{"memory.current", "memory.max", "memory.peak", "memory.events", "memory.swap.current", "memory.swap.max"} {
+			for _, leaf := range []string{"memory.current", "memory.max", "memory.high", "memory.peak", "memory.events", "memory.swap.current", "memory.swap.max"} {
 				result = append(result, "/sys/fs/cgroup"+member+"/"+leaf)
 			}
 			member = path.Dir(member)

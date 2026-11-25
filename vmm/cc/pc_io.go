@@ -16,6 +16,9 @@ func (p *pc) run(ctx context.Context) (hypervisor.X86Exit, error) {
 
 func (p *pc) runDevices(ctx context.Context) (hypervisor.X86Exit, error) {
 	return p.runWithHandler(ctx, func(ex hypervisor.X86Exit) (bool, error) {
+		if ex.Reason == hypervisor.X86ExitIO || ex.Reason == hypervisor.X86ExitMMIO {
+			p.invalidateRewind()
+		}
 		switch ex.Reason {
 		case hypervisor.X86ExitIO:
 			// Bulk disk data can use hundreds of native exits per sector.
