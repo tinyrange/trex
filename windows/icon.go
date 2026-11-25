@@ -242,13 +242,19 @@ func absInt(value int) int {
 }
 
 func neResources(data []byte, header int) ([]peResource, error) {
-	if header < 0 || header+0x28 > len(data) {
+	if header < 0 || header > len(data)-0x28 {
 		return nil, fmt.Errorf("NE header outside file")
 	}
 	resourceTable := header + int(binary.LittleEndian.Uint16(data[header+0x24:header+0x26]))
 	residentNames := header + int(binary.LittleEndian.Uint16(data[header+0x26:header+0x28]))
-	if resourceTable < header || resourceTable+2 > len(data) || residentNames < resourceTable || residentNames > len(data) {
+	if resourceTable < header+0x40 || resourceTable > len(data) || residentNames < resourceTable || residentNames > len(data) {
 		return nil, fmt.Errorf("NE resource table outside file")
+	}
+	if resourceTable == residentNames {
+		return nil, nil
+	}
+	if residentNames-resourceTable < 2 {
+		return nil, fmt.Errorf("truncated NE resource alignment")
 	}
 	shift := uint(binary.LittleEndian.Uint16(data[resourceTable : resourceTable+2]))
 	if shift > 31 {

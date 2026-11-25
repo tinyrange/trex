@@ -2,6 +2,7 @@
 
 load(":stdlib_test.star", stdlib = "TEST_SUITE")
 load(":stdlib_internal_test.star", stdlib_internal = "TEST_SUITE")
+load(":native_registrar_blockers_test.star", native_registrar_blockers = "TEST_SUITE")
 load(":emulation_conformance_test.star", emulation_conformance = "TEST_SUITE")
 load(":reactos_test.star", reactos = "TEST_SUITE")
 load(":media_decode_test.star", media_decode = "TEST_SUITE")
@@ -83,5 +84,6 @@ TEST_SUITES = [
     reactos,
     stdlib,
     stdlib_internal,
+    native_registrar_blockers,
     emulation_conformance,
 ]

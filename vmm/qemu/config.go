@@ -239,7 +239,7 @@ func qemuCapabilities() []string {
 	capabilities := []string{
 		"channel.console", "channel.custom", "channel.debugger", "channel.serial",
 		"debugger.gdb", "disk", "disk.bus.auto", "disk.bus.floppy", "disk.bus.ide", "disk.bus.virtio", "disk.bus.nvme", "disk.geometry.chs",
-		"disk.snapshot", "display.capturable", "display.interactive", "extension.qemu.v1",
+		"disk.snapshot", "disk.media.replace", "display.capturable", "display.interactive", "extension.qemu.v1",
 		"input.key", "input.pointer", "input.text", "lifecycle.pause", "lifecycle.powerdown",
 		"lifecycle.reset", "lifecycle.stop", "network.bridge", "network.nat", "screenshot", "video.record",
 	}

@@ -1,5 +1,6 @@
 """Small composable Win32 API models used by registration-time execution."""
 
+load(":typelib.star", "typelib_patches")
 load(":facts.star", "guid_bytes")
 load(":common.star", "expand_environment")
 load("@stdlib//windows:command_line.star", "command_line_arguments")
@@ -2067,10 +2068,20 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                         )
         return True
 
+    def file_has_mapping(entry):
+        # Views keep a section alive even after its last handle is closed;
+        # conversely an unmapped section still has a live mapping handle.
+        return any([same_file(view["mapping"].get("file"), entry) for view in state["views"].values()]) or any([
+            type(handle) == "dict" and handle.get("kind") == "mapping" and same_file(handle["value"].get("file"), entry)
+            for handle in state["handles"].values()
+        ])
+
     def replace_file_contents(entry, value, machine):
-        if len(value) != entry.get("size", len(entry.get("data", b""))) and any([same_file(view["mapping"].get("file"), entry) for view in state["views"].values()]):
-            fail("resizing a file with live mapped views is not modeled")
+        if len(value) != file_size(entry) and file_has_mapping(entry):
+            state["last_error"] = 1224  # ERROR_USER_MAPPED_FILE
+            return False
         if not write_file_data(entry, 0, value, machine = machine):
+            state["last_error"] = 112  # ERROR_DISK_FULL (modeled file limit)
             return False
         entry.update({"data": value, "size": len(value), "dirty": True})
         return True
@@ -4400,7 +4411,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             target = directory + "\\" + prefix + suffix + ".tmp"
             _write_string(machine, args[3], target, wide)
             if args[2] == 0:
-                state["paths"][_normalize_virtual_path(target)] = {"directory": False, "data": b"", "dirty": True}
+                state["paths"][_normalize_virtual_path(target)] = {"directory": False, "data": b"", "size": 0, "dirty": True}
             state["last_error"] = 0
             return unique
         if name in ["createdirectorya", "createdirectoryw"]:
@@ -4500,7 +4511,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
             elif disposition in [0, 4, 5]:
                 if existing.get("directory", False):
                     return complete(0xc00000ba)
-                replace_file_contents(existing, b"", machine)
+                if not replace_file_contents(existing, b"", machine):
+                    return complete(0xc0000243)  # STATUS_USER_MAPPED_FILE
                 existing.update({"allocation_size": allocation, "attributes": attributes})
                 information = 0 if disposition == 0 else 3  # FILE_SUPERSEDED / FILE_OVERWRITTEN
             entry = state["paths"][target]
@@ -4552,10 +4564,11 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 if existing != None:
                     state["last_error"] = 80  # ERROR_FILE_EXISTS
                     return (1 << (machine.pointer_size * 8)) - 1
-                state["paths"][target] = {"directory": False, "data": b"", "dirty": True}
+                state["paths"][target] = {"directory": False, "data": b"", "size": 0, "dirty": True}
             elif disposition == 2:  # CREATE_ALWAYS truncates the existing object, not its aliases.
                 if existing != None:
-                    replace_file_contents(existing, b"", machine)
+                    if not replace_file_contents(existing, b"", machine):
+                        return (1 << (machine.pointer_size * 8)) - 1
                 else:
                     state["paths"][target] = {"directory": False, "data": b"", "size": 0, "dirty": True}
                 state["last_error"] = 183 if existing != None else 0
@@ -4565,7 +4578,7 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                     return (1 << (machine.pointer_size * 8)) - 1
             elif disposition == 4:  # OPEN_ALWAYS
                 if existing == None:
-                    state["paths"][target] = {"directory": False, "data": b"", "dirty": True}
+                    state["paths"][target] = {"directory": False, "data": b"", "size": 0, "dirty": True}
                     state["last_error"] = 0
                 else:
                     state["last_error"] = 183
@@ -4573,7 +4586,8 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 if existing == None:
                     state["last_error"] = 2
                     return (1 << (machine.pointer_size * 8)) - 1
-                replace_file_contents(existing, b"", machine)
+                if not replace_file_contents(existing, b"", machine):
+                    return (1 << (machine.pointer_size * 8)) - 1
             else:
                 state["last_error"] = 87  # ERROR_INVALID_PARAMETER
                 return (1 << (machine.pointer_size * 8)) - 1
@@ -4729,15 +4743,24 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 state["last_error"] = 6
                 return 0
             entry = opened["file"]
-            data = entry_data(entry)
+            if not opened.get("desired_access", 0) & 0x50000002 or not entry.get("writable", True):
+                state["last_error"] = 5  # GENERIC_WRITE / FILE_WRITE_DATA required
+                return 0
+            if file_has_mapping(entry):
+                state["last_error"] = 1224  # ERROR_USER_MAPPED_FILE
+                return 0
             size = opened["offset"]
+            if size > maximum_file_size:
+                state["last_error"] = 112
+                return 0
+            data = entry_data(entry)
             output = binary.builder(capacity = max(1, size), limit = maximum_file_size)
             output.append(data[:min(size, len(data))])
             if size > len(data):
                 output.reserve(size - len(data))
             updated = output.bytes()
-            if updated != data:
-                replace_file_contents(entry, updated, machine)
+            if updated != data and not replace_file_contents(entry, updated, machine):
+                return 0
             return 1
         if name == "setfiletime":
             opened = file_handle(args[0])
@@ -4848,7 +4871,6 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 return 0
             if destination != None:
                 if not replace_file_contents(destination, data, machine):
-                    state["last_error"] = 112
                     return 0
                 destination.update(copied)  # Overwrite the file, not just one name.
             else:
@@ -4884,7 +4906,6 @@ def kernel32_plugin(module_path = "", version = {}, environment = {}, volumes = 
                 return 0
             if destination != None:
                 if not replace_file_contents(destination, data, machine):
-                    state["last_error"] = 112
                     return 0
                 destination.update(copied)
             else:
@@ -8019,7 +8040,7 @@ def _registered_type_library(identifier, major, minor, lcid, registrations):
         return matches[0]
     return None
 
-def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
+def oleaut_plugin(type_libraries = {}, registered_type_libraries = [], registry = None):
     """Models bounded Automation values and explicit type-library actions.
 
     `type_libraries` maps installed Windows paths to in-memory files. Loading a
@@ -8028,7 +8049,22 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
     installed `path`, allowing LoadRegTypeLib to resolve without a host registry.
     """
     libraries = {path.replace("/", "\\").lower(): file for path, file in type_libraries.items()}
-    state = {"actions": [], "arrays": {}, "error_info": 0, "next_object": 0}
+    state = {"actions": [], "arrays": {}, "error_info": 0, "next_object": 0, "type_library_objects": {}, "registrations": list(registered_type_libraries)}
+
+    def documentation_outputs(event, subject, library):
+        args = event.args
+        if "name" not in subject:
+            return 0x80004001
+        if (args[3] or args[4]) and ("documentation" not in subject or "help_context" not in subject):
+            return 0x80004001
+        if args[5] and "help_file" not in library:
+            return 0x80004001
+        for output, value in [(args[2], subject["name"]), (args[3], subject.get("documentation", "")), (args[5], library.get("help_file", ""))]:
+            if output:
+                event.machine.write_pointer(output, bstr(event.machine, value) if value else 0)
+        if args[4]:
+            event.machine.write_u32le(args[4], subject["help_context"])
+        return 0
 
     def type_info_object(machine, library, info, index):
         identifier = state["next_object"]
@@ -8037,7 +8073,7 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
         def query_interface(event):
             if not event.args[2]:
                 return 0x80070057
-            event.machine.write_u32le(event.args[2], event.args[0])
+            event.machine.write_pointer(event.args[2], event.args[0])
             return 0
         def add_ref(event):
             return 2
@@ -8051,15 +8087,43 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
                     "guid": info.get("guid", ""),
                 })
                 args = event.args
-                if name in ["GetTypeAttr", "GetTypeComp", "GetFuncDesc", "GetVarDesc", "GetRefTypeInfo", "CreateInstance", "GetContainingTypeLib"]:
+                if name == "GetTypeAttr":
+                    if not args[1]:
+                        return 0x80070057
+                    attributes = info.get("attributes")
+                    # Alias descriptors require separately decoded TYPEDESCs.
+                    if attributes == None or info["kind"] == 6:
+                        return 0x80004001
+                    m = event.machine
+                    width = m.pointer_size
+                    attr = m.allocate(size=96 if width == 8 else 76, name="TYPEATTR")
+                    m.write(attr, b"\x00" * (96 if width == 8 else 76))
+                    m.write(attr, guid_bytes(info.get("guid") or "{00000000-0000-0000-0000-000000000000}"))
+                    m.write_u32le(attr+16, attributes["lcid"])
+                    m.write_u32le(attr+24, 0xffffffff)
+                    m.write_u32le(attr+28, 0xffffffff)
+                    base = 32+width
+                    m.write_u32le(attr+base, attributes["instance_size"])
+                    m.write_u32le(attr+base+4, info["kind"])
+                    values = [attributes["function_count"],attributes["variable_count"],attributes["implemented_count"],attributes["vtable_size"],attributes["alignment"],info["flags"] & 0xffff,attributes["major"],attributes["minor"]]
+                    for n,value in enumerate(values):
+                        m.write_u16le(attr+base+8+2*n,value)
+                    state.setdefault("type_attributes",{})[attr] = identifier
+                    m.write_pointer(args[1],attr)
+                    return 0
+                if name == "ReleaseTypeAttr":
+                    owned = state.setdefault("type_attributes",{})
+                    if owned.get(args[1]) == identifier:
+                        event.machine.free(args[1])
+                        owned.pop(args[1])
+                    return None
+                if name in [ "GetTypeComp", "GetFuncDesc", "GetVarDesc", "GetRefTypeInfo", "CreateInstance", "GetContainingTypeLib"]:
                     if args[len(args) - 1]:
                         event.machine.write_u32le(args[len(args) - 1], 0)
                 elif name == "GetDocumentation":
-                    if args[2]:
-                        event.machine.write_u32le(args[2], bstr(event.machine, info.get("name", "")))
-                    for address in args[3:]:
-                        if address:
-                            event.machine.write_u32le(address, 0)
+                    if args[1] & 0xffffffff != 0xffffffff:
+                        return 0x80004001  # Member documentation not parsed.
+                    return documentation_outputs(event, info, library)
                 elif name == "GetIDsOfNames":
                     return 0x80020006  # DISP_E_UNKNOWNNAME
                 return None if name in ["ReleaseTypeAttr", "ReleaseFuncDesc", "ReleaseVarDesc"] else 0x80004001
@@ -8089,13 +8153,13 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
             ("ReleaseFuncDesc", interface_method("ReleaseFuncDesc"), 2),
             ("ReleaseVarDesc", interface_method("ReleaseVarDesc"), 2),
         ]
-        vtable = binary.builder(capacity = len(methods) * 4)
+        vtable = binary.builder(capacity = len(methods) * machine.pointer_size)
         for name, callback, argc in methods:
             address = machine.provide_export(callback, module = "trex.typeinfo", name = name + str(identifier), argc = argc)
-            vtable.u32le(address)
+            vtable.u64le(address) if machine.pointer_size == 8 else vtable.u32le(address)
         vtable_address = machine.allocate(value = vtable.bytes(), name = "ITypeInfo.vtable")
-        value = binary.builder(capacity = 4)
-        value.u32le(vtable_address)
+        value = binary.builder(capacity = machine.pointer_size)
+        value.u64le(vtable_address) if machine.pointer_size == 8 else value.u32le(vtable_address)
         return machine.allocate(value = value.bytes(), name = "ITypeInfo")
 
     def type_library_object(machine, registration = None):
@@ -8123,7 +8187,7 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
                 if name == "GetTypeInfo":
                     if args[1] >= len(types) or not args[2]:
                         return 0x8002802B  # TYPE_E_ELEMENTNOTFOUND
-                    event.machine.write_u32le(args[2], type_info_object(event.machine, library, types[args[1]], args[1]))
+                    event.machine.write_pointer(args[2], type_info_object(event.machine, library, types[args[1]], args[1]))
                     return 0
                 if name == "GetTypeInfoType":
                     if args[1] >= len(types) or not args[2]:
@@ -8136,10 +8200,10 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
                         if types[index].get("guid", "").upper() == requested.upper():
                             if not args[2]:
                                 return 0x80070057
-                            event.machine.write_u32le(args[2], type_info_object(event.machine, library, types[index], index))
+                            event.machine.write_pointer(args[2], type_info_object(event.machine, library, types[index], index))
                             return 0
                     if args[2]:
-                        event.machine.write_u32le(args[2], 0)
+                        event.machine.write_pointer(args[2], 0)
                     return 0x8002802B
                 if name == "GetLibAttr" and "guid" in library:
                     if not args[1]:
@@ -8160,13 +8224,10 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
                     if args[len(args) - 1]:
                         event.machine.write_u32le(args[len(args) - 1], 0)
                 elif name == "GetDocumentation":
-                    index = args[1]
-                    value = library.get("name", "") if index == 0xffffffff else (types[index].get("name", "") if index < len(types) else "")
-                    if args[2]:
-                        event.machine.write_u32le(args[2], bstr(event.machine, value))
-                    for address in args[3:]:
-                        if address:
-                            event.machine.write_u32le(address, 0)
+                    index = args[1] & 0xffffffff
+                    if index != 0xffffffff and index >= len(types):
+                        return 0x80070057
+                    return documentation_outputs(event, library if index == 0xffffffff else types[index], library)
                 elif name == "IsName" and args[3]:
                     event.machine.write_u32le(args[3], 0)
                 elif name == "FindName" and args[5]:
@@ -8196,6 +8257,7 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
             machine.write_pointer(vtable_address + index * machine.pointer_size, address)
         value = machine.allocate(size = machine.pointer_size, name = "ITypeLib")
         machine.write_pointer(value, vtable_address)
+        state["type_library_objects"][value] = registration
         return value
 
     def bstr(machine, value):
@@ -8269,25 +8331,52 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
             stride *= elements
         return meta["data"] + offset * meta["element_size"]
 
+    def register_type_library(registration, path, help_directory = None):
+        if registration == None or registry == None:
+            return 0x80004001
+        library = registration["library"]
+        if library["syskind"] not in [0, 1, 3]:
+            return 0x80004001
+        selected = {library["guid"].upper(): True}
+        patches = typelib_patches([library], path, selected, selected, register_classes=False)
+        for patch in patches:
+            value = help_directory if help_directory != None and patch["key"].lower().endswith("/helpdir") else patch["value"]
+            registry.set_value(patch["hive"],patch["key"],patch["name"],patch["type"],value)
+        state["registrations"].append({"path":path,"library":library})
+        return 0
+
     def load_type_library(machine, path, output, registration):
+        if not output or registration not in [0,1,2]:
+            return 0x80070057
         resolved = _resolve_type_library_path(path, libraries)
-        state["actions"].append({
-            "kind": "type_library",
-            "path": path,
-            "registration": registration,
-            "found": resolved != None,
-            "resolved": resolved or "",
-        })
-        if resolved == None or not output:
-            if output:
-                machine.write_pointer(output, 0)
-            return 0x80029c4a  # TYPE_E_CANTLOADLIBRARY
-        registered = None
-        for item in registered_type_libraries:
-            if item["path"].replace("/", "\\").lower() == resolved:
-                registered = item
+        state["actions"].append({"kind":"type_library","path":path,"registration":registration,"found":resolved!=None,"resolved":resolved or ""})
+        if resolved == None:
+            machine.write_pointer(output,0)
+            return 0x80029c4a
+        loaded = None
+        for item in state["registrations"]:
+            if item["path"].replace("/","\\").lower() == resolved:
+                loaded=item
                 break
-        machine.write_pointer(output, type_library_object(machine, registered))
+        if loaded == None and resolved.endswith((".tlb",".olb")):
+            source=libraries[resolved]
+            if source.size>=2 and source.bytes(0,2)==b"MZ":
+                candidates=windows.pe(source).typelibs
+                if len(candidates)!=1:
+                    machine.write_pointer(output,0)
+                    return 0x80029c4a
+                library=candidates[0]
+            else:
+                library=windows.type_library(source)
+            loaded={"path":resolved,"library":library}
+        # REGKIND_DEFAULT registers a bare filename, not an absolute path.
+        absolute = path.startswith("\\\\") or len(path)>1 and path[1]==":"
+        if registration==1 or registration==0 and not absolute:
+            result=register_type_library(loaded,resolved)
+            if result:
+                machine.write_pointer(output,0)
+                return result
+        machine.write_pointer(output,type_library_object(machine,loaded))
         return 0
 
     def callback(event, ordinal):
@@ -8442,7 +8531,7 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
                 args[1],
                 args[2],
                 args[3],
-                registered_type_libraries,
+                state["registrations"],
             )
             state["actions"].append({
                 "kind": "load_registered_type_library",
@@ -8456,13 +8545,17 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
             if not args[4]:
                 return 0x80070057  # E_INVALIDARG
             if registration == None:
-                machine.write_u32le(args[4], 0)
+                machine.write_pointer(args[4], 0)
                 return 0x8002801D  # TYPE_E_LIBNOTREGISTERED
-            machine.write_u32le(args[4], type_library_object(machine, registration))
+            machine.write_pointer(args[4], type_library_object(machine, registration))
             return 0
         if ordinal == 163:  # RegisterTypeLib
             state["actions"].append({"kind": "register_type_library", "object": args[0]})
-            return 0
+            path = machine.read_cstring(args[1],encoding="utf16le") if args[1] else ""
+            if not path:
+                return 0x80070057
+            help_directory = machine.read_cstring(args[2],encoding="utf16le") if args[2] else None
+            return register_type_library(state["type_library_objects"].get(args[0]),path,help_directory)
         if ordinal == 183:  # LoadTypeLibEx
             path = machine.read_cstring(args[0], encoding = "utf16le")
             return load_type_library(machine, path, args[2], args[1])
@@ -8554,29 +8647,14 @@ def oleaut_plugin(type_libraries = {}, registered_type_libraries = []):
     return emulator.plugin(install, name = "windows.oleaut32", state = state)
 
 def com_plugin(registry):
-    """Models COM registration APIs as explicit registry writes."""
-    signatures = {"coregisterpsclsid": 2}
+    """Compatibility entry point for process-local COM registration.
 
-    def callback(event):
-        interface = _guid_text(event.machine, event.args[0])
-        proxy = _guid_text(event.machine, event.args[1])
-        registry.set_value(
-            hive = "SOFTWARE",
-            key = "/Classes/Interface/" + interface + "/ProxyStubClsid32",
-            name = "(default)",
-            type = "REG_SZ",
-            value = proxy,
-        )
-        return 0
-
-    def install(machine):
-        for name, argc in signatures.items():
-            machine.provide_export(callback, module = "ole32.dll", name = name, argc = argc)
-        for imported in machine.imports_named(signatures):
-            name = imported.name.lower()
-            if name in signatures and imported.module.lower() == "ole32.dll":
-                machine.hook(callback, address = imported.address, argc = signatures[name])
-    return emulator.plugin(install, name = "windows.com-registration")
+    CoRegisterPSClsid does not modify HKCR. Keep the legacy registry argument
+    for callers, but use the same process-owned COM state as ole32_plugin.
+    The neutral runner installs only its existing ole32_plugin instance so
+    initialization and registrar calls share one state.
+    """
+    return ole32_plugin()
 
 def _hex(value, width):
     text = hex(value)[2:].upper()
@@ -9176,6 +9254,9 @@ def msvcrt_plugin(kernel = None):
         "_waccess": 2,
         "_wfullpath": 3,
         "_wstat64": 2,
+        "_wstat": 2,
+        "?_set_se_translator@@yap6axipau_exception_pointers@@@zp6axi0@z@z": 1,
+        "?_set_se_translator@@yap6axipeau_exception_pointers@@@zp6axi0@z@z": 1,
         "_getpid": 0,
         "_wfindfirst": 2,
         "_wfindnext": 2,
@@ -9251,6 +9332,7 @@ def msvcrt_plugin(kernel = None):
         "wcslen": 1,
         "wcsnlen": 2,
         "wcstombs": 3,
+        "wctomb": 2,
         "wcscpy": 2,
         "wcscpy_s": 3,
         "wcscat": 2,
@@ -9400,10 +9482,10 @@ def msvcrt_plugin(kernel = None):
         if operation == "r" and (entry == None or entry.get("directory", False)):
             return 0
         if operation == "w":
-            entry = {"directory": False, "data": b"", "dirty": True}
+            entry = {"directory": False, "data": b"", "size": 0, "dirty": True}
             paths[normalized] = entry
         elif operation == "a" and entry == None:
-            entry = {"directory": False, "data": b"", "dirty": True}
+            entry = {"directory": False, "data": b"", "size": 0, "dirty": True}
             paths[normalized] = entry
         if entry == None or entry.get("directory", False):
             return 0
@@ -9851,6 +9933,16 @@ def msvcrt_plugin(kernel = None):
                 error = kernel.state["last_error"]
                 event.machine.write_u32le(errno_address(event.machine), 2 if error in [2, 3] else 13)
             return 0 if ok else 0xffffffff
+        if name.startswith("?_set_se_translator@@"):
+            # The setter's state is per thread. It does not invoke or fabricate
+            # a translated exception; exceptional execution remains owned by
+            # the exception model and fails closed if unsupported.
+            thread = kernel.state.get("current_thread") if kernel != None else None
+            thread_id = thread["id"] if thread != None else 8
+            translators = state.setdefault("se_translators",{})
+            previous = translators.get(thread_id,0)
+            translators[thread_id] = args[0]
+            return previous
         if name == "_getpid":
             if kernel == None:
                 fail("_getpid requires emulated process identity")
@@ -9858,7 +9950,7 @@ def msvcrt_plugin(kernel = None):
             if result.reason != "return":
                 fail("process identity query stopped: " + result.detail)
             return result.value
-        if name == "_wstat64":
+        if name in ["_wstat", "_wstat64"]:
             source, output = args
             if not source or not output or kernel == None:
                 event.machine.write_u32le(errno_address(event.machine), 22)
@@ -9883,17 +9975,34 @@ def msvcrt_plugin(kernel = None):
             mode |= (mode & 0x1c0) >> 3 | (mode & 0x1c0) >> 6
             absolute = _dos_nt_path(path, kernel.state["current_directory"])
             drive = "abcdefghijklmnopqrstuvwxyz".find(absolute[4:5].lower()) if absolute != None and absolute[5:6] == ":" else 0
-            event.machine.write(output, b"\x00" * 56)
+            size = event.machine.read_u32le(temporary + 32) | event.machine.read_u32le(temporary + 28) << 32
+            size = 0 if directory else size
+            time_bytes = 8 if name == "_wstat64" or event.machine.pointer_size == 8 else 4
+            times = []
+            for offset in [12,20,4]:
+                ticks = event.machine.read_u64le(temporary+offset)
+                times.append(ticks//10000000-11644473600 if ticks else 0)
+            if (name == "_wstat" and size > 0x7fffffff) or (time_bytes == 4 and any([value < -0x80000000 or value > 0x7fffffff for value in times])):
+                event.machine.free(temporary)
+                event.machine.write_u32le(errno_address(event.machine),132) # EOVERFLOW
+                return 0xffffffff
+            structure_size = 56 if name == "_wstat64" else (48 if time_bytes == 8 else 36)
+            event.machine.write(output,b"\x00"*structure_size)
             event.machine.write_u32le(output, max(0, drive))
             event.machine.write_u32le(output + 16, max(0, drive))
             event.machine.write_u16le(output + 6, mode)
             event.machine.write_u16le(output + 8, 1)
-            size = event.machine.read_u32le(temporary + 32) | event.machine.read_u32le(temporary + 28) << 32
-            event.machine.write_u64le(output + 24, 0 if directory else size)
-            for destination, offset in [(32, 12), (40, 20), (48, 4)]:
-                ticks = event.machine.read_u64le(temporary + offset)
-                seconds = ticks // 10000000 - 11644473600 if ticks else 0
-                event.machine.write_u64le(output + destination, seconds & 0xffffffffffffffff)
+            if name == "_wstat64":
+                event.machine.write_u64le(output+24,size)
+            else:
+                event.machine.write_u32le(output+20,size)
+            first_time = 32 if name == "_wstat64" else 24
+            for index,seconds in enumerate(times):
+                destination = output+first_time+index*time_bytes
+                if time_bytes == 8:
+                    event.machine.write_u64le(destination,seconds&0xffffffffffffffff)
+                else:
+                    event.machine.write_u32le(destination,seconds&0xffffffff)
             event.machine.free(temporary)
             return 0
         if name == "_wfullpath":
@@ -10242,6 +10351,20 @@ def msvcrt_plugin(kernel = None):
             if len(value) < args[2]:
                 event.machine.write(args[0] + len(value) * 2, b"\x00\x00")
             return min(len(value), args[2])
+        if name == "wctomb":
+            # Legacy MSVCRT stateless C locale, not an inferred ACP/UTF-8
+            # conversion. A different locale needs its real code-page facts.
+            if state.get("locale", "C") not in ["C", "POSIX"]:
+                event.machine.stop("unsupported-locale", detail="wctomb requires explicit non-C locale conversion")
+                return 0
+            if not args[0]:
+                return 0
+            character = args[1] & 0xffff
+            if character > 0xff:
+                event.machine.write_u32le(errno_address(event.machine), 42)  # EILSEQ
+                return 0xffffffff
+            event.machine.write(args[0], bytes([character]))
+            return 1
         if name == "wcstombs":
             value = event.machine.read_cstring(args[1], encoding = "utf16le")
             if not args[0]:

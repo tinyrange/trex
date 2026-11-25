@@ -651,8 +651,9 @@ func hasMOFQualifier(qualifiers []mofQualifier, name string) bool {
 }
 
 type wmiObjectContext struct {
-	serverName string
-	namespace  string
+	serverName    string
+	namespace     string
+	methodOrigins map[string]uint32
 }
 
 func buildWMIParameterClassPart(method mofFeature, output bool, context wmiObjectContext) ([]byte, error) {
@@ -675,6 +676,7 @@ func buildWMIParameterClassPart(method mofFeature, output bool, context wmiObjec
 				Values: []mofValue{{
 					Kind:     mofValueInteger,
 					Unsigned: uint64(parameterIndex),
+					Integer:  int64(parameterIndex),
 				}},
 				Flavors: []string{"ToInstance", "DisableOverride"},
 			})
@@ -799,8 +801,14 @@ func buildWMIMethodPart(class mofClass, depth uint32, context wmiObjectContext) 
 			return nil, err
 		}
 		descriptors = binary.LittleEndian.AppendUint32(descriptors, name)
-		descriptors = append(descriptors, 0, 0, 0, 0)
-		descriptors = binary.LittleEndian.AppendUint32(descriptors, depth)
+		flags, origin := uint32(0), depth
+		if inheritedDepth, ok := context.methodOrigins[strings.ToLower(method.Name)]; ok {
+			// Overrides keep their original declaring depth and are marked as
+			// overrides, rather than creating a second unrelated method slot.
+			flags, origin = 0x20, inheritedDepth
+		}
+		descriptors = binary.LittleEndian.AppendUint32(descriptors, flags)
+		descriptors = binary.LittleEndian.AppendUint32(descriptors, origin)
 		descriptors = binary.LittleEndian.AppendUint32(descriptors, qualifierHandle)
 		descriptors = binary.LittleEndian.AppendUint32(descriptors, inputHandle)
 		descriptors = binary.LittleEndian.AppendUint32(descriptors, outputHandle)

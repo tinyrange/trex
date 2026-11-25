@@ -138,6 +138,11 @@ func (c *Cache) GetValue(key Key, load func() (any, int64, error)) (any, error) 
 	}
 	entry.data, entry.err, entry.weight = data, err, weight
 	if err == nil && weight <= c.maxBytes {
+		// Reserve retained space before charging the completed value. Besides
+		// keeping the retained high-water within the budget, subtraction avoids
+		// overflowing c.bytes when an admitted weight is near MaxInt64. Loader
+		// working memory and values still held by callers are not cache storage.
+		c.evictToLocked(c.maxBytes - weight)
 		entry.element = c.lru.PushFront(entry)
 		c.bytes += weight
 		if c.bytes > c.peakBytes {

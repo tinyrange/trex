@@ -90,6 +90,7 @@ type fat32Node struct {
 	short      [11]byte
 	attr       byte
 	writeOrder uint64
+	times      fatTimestamps
 }
 
 type fat32Build struct {
@@ -251,6 +252,22 @@ func (b *fat32Build) importDirectory(dir *filesystemapi.Directory) error {
 		}
 		if node != nil {
 			node.attr = fat32Attributes(attributes)
+		}
+	}
+	for name, metadata := range snapshot.Metadata {
+		name = storage.CleanPath(name)
+		var node *fat32Node
+		if candidate := byPath[strings.ToLower(name)]; candidate != nil {
+			node = candidate
+		} else if parent := byPath[strings.ToLower(path.Dir(name))]; parent != nil {
+			node = fat32ChildByName(parent, path.Base(name))
+		}
+		if node != nil {
+			times, err := fatTimes(metadata)
+			if err != nil {
+				return fmt.Errorf("fat: %s: %w", name, err)
+			}
+			node.times = times
 		}
 	}
 	for _, node := range b.nodes {
@@ -555,7 +572,7 @@ func (b *fat32Build) directoryData(node *fat32Node) []byte {
 		if child.dir {
 			attr |= fatAttrDir
 		}
-		entries = append(entries, fat32DirEntry(child.name, child.cluster, uint32(child.size), attr, child.short)...)
+		entries = append(entries, child.directoryEntry(attr)...)
 	}
 	size := fsinternal.Align(int64(len(entries)+32), int64(clusterSize))
 	if size == 0 {

@@ -117,7 +117,9 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
             info = event.machine.read_pointer(proxy_files + file_index * pointer_size)
             if info == 0:
                 break
-            proxy_vtables = event.machine.read_pointer(info)
+            # Registration uses CInterfaceStubHeader, whose IID and dispatch
+            # count are stable for both interpreted and stubless proxy layouts.
+            stub_vtables = event.machine.read_pointer(info + pointer_size)
             names = event.machine.read_pointer(info + 2 * pointer_size)
             table = event.machine.read_u32le(info + 5 * pointer_size)
             table_size = table & 0xffff
@@ -125,10 +127,10 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
             if table_version not in [1, 2] or table_size > maximum_interfaces:
                 fail("unsupported ProxyFileInfo table version/size %d/%d" % (table_version, table_size))
             for interface_index in range(table_size):
-                proxy_vtable = event.machine.read_pointer(proxy_vtables + interface_index * pointer_size)
-                if proxy_vtable == 0:
+                stub_vtable = event.machine.read_pointer(stub_vtables + interface_index * pointer_size)
+                if stub_vtable == 0:
                     continue
-                iid_address = event.machine.read_pointer(proxy_vtable + pointer_size)
+                iid_address = event.machine.read_pointer(stub_vtable)
                 if iid_address == 0:
                     continue
                 iid = _guid(event.machine, iid_address)
@@ -141,6 +143,8 @@ def rpc_plugin(registry, module, maximum_files = 4096, maximum_interfaces = 6553
                     if name_address:
                         _set_string(registry, key, "(default)", event.machine.read_cstring(name_address))
                 _set_string(registry, key + "/ProxyStubClsid32", "(default)", proxy_clsid)
+                methods = event.machine.read_u32le(stub_vtable + 2 * pointer_size)
+                _set_string(registry, key + "/NumMethods", "(default)", str(methods))
         return 0
 
     def get_class_object(event):

@@ -61,6 +61,7 @@ type fatDirEntry struct {
 	attr    byte
 	cluster uint32
 	size    int64
+	times   fatTimestamps
 }
 
 func newFATImage(file starfile.File) (*fatImage, error) {
@@ -283,6 +284,14 @@ func parseFATDirectory(data []byte, base string, fatType int) []fatDirEntry {
 			attr:    attr,
 			cluster: cluster,
 			size:    int64(binary.LittleEndian.Uint32(raw[28:32])),
+			times: fatTimestamps{
+				creationHundredths: raw[13],
+				creationTime:       binary.LittleEndian.Uint16(raw[14:16]),
+				creationDate:       binary.LittleEndian.Uint16(raw[16:18]),
+				accessDate:         binary.LittleEndian.Uint16(raw[18:20]),
+				writeTime:          binary.LittleEndian.Uint16(raw[22:24]),
+				writeDate:          binary.LittleEndian.Uint16(raw[24:26]),
+			},
 		}
 		entries = append(entries, entry)
 	}

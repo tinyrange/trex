@@ -69,6 +69,7 @@ func testMSFTTypeLib(t *testing.T) []byte {
 	binary.LittleEndian.PutUint32(data[0x1c:], 1)
 	binary.LittleEndian.PutUint32(data[0x20:], typeCount)
 	binary.LittleEndian.PutUint32(data[0x38:], 0)
+	binary.LittleEndian.PutUint32(data[0x3c:], ^uint32(0))
 	for index := 0; index < msftTypeLibSegmentCount; index++ {
 		entry := segmentDirectory + index*16
 		binary.LittleEndian.PutUint32(data[entry:], ^uint32(0))
@@ -98,8 +99,53 @@ func testMSFTTypeLib(t *testing.T) []byte {
 	binary.LittleEndian.PutUint32(typeInfo[0x2c:], 24)
 	binary.LittleEndian.PutUint32(typeInfo[0x30:], msftTypeFlagDual|msftTypeFlagAutomation)
 	binary.LittleEndian.PutUint32(typeInfo[0x34:], uint32(len(libraryName)))
+	binary.LittleEndian.PutUint32(typeInfo[0x3c:], ^uint32(0))
 	copy(data[nameOffset:], libraryName)
 	copy(data[nameOffset+len(libraryName):], interfaceName)
 	copy(data[stringOffset:], stringEntry)
 	return data
+}
+
+func TestMSFTDocumentationFactsAndBounds(t *testing.T) {
+	data := testMSFTTypeLib(t)
+	directory := msftTypeLibHeaderSize + 4
+	typeOffset := int(binary.LittleEndian.Uint32(data[directory:]))
+	binary.LittleEndian.PutUint32(data[0x2c:], 12345)
+	binary.LittleEndian.PutUint32(data[0x3c:], 0)
+	binary.LittleEndian.PutUint32(data[typeOffset+0x3c:], 0)
+	binary.LittleEndian.PutUint32(data[typeOffset+0x44:], 6789)
+	binary.LittleEndian.PutUint32(data[typeOffset:], msftTypeKindDispatch|(8<<11))
+	binary.LittleEndian.PutUint32(data[typeOffset+0x18:], 7|(3<<16))
+	binary.LittleEndian.PutUint32(data[typeOffset+0x4c:], 2|(28<<16))
+	binary.LittleEndian.PutUint32(data[typeOffset+0x50:], 64)
+	binary.LittleEndian.PutUint32(data[typeOffset+0x38:], 1|(2<<16))
+	lib, err := parseMSFTTypeLib(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lib.documentation != "User Accounts 2.3 Type Library" || lib.helpFile != lib.documentation || lib.helpContext != 12345 || !lib.typeInfo[0].documentationKnown || lib.typeInfo[0].documentation != lib.documentation || lib.typeInfo[0].helpContext != 6789 {
+		t.Fatalf("lost documentation: %#v / %#v", lib, lib.typeInfo[0])
+	}
+	for name, want := range map[string]uint32{"lcid": 1033, "instance_size": 64, "function_count": 7, "variable_count": 3, "implemented_count": 2, "vtable_size": 28, "alignment": 8, "major": 1, "minor": 2} {
+		if lib.typeInfo[0].attributes[name] != want {
+			t.Fatalf("attribute %s = %d, want %d", name, lib.typeInfo[0].attributes[name], want)
+		}
+	}
+	for _, offset := range []int{0x3c, typeOffset + 0x3c} {
+		bad := append([]byte(nil), data...)
+		binary.LittleEndian.PutUint32(bad[offset:], 0x7fffffff)
+		if _, err := parseMSFTTypeLib(bad); err == nil {
+			t.Fatalf("accepted invalid documentation offset at %#x", offset)
+		}
+	}
+	binary.LittleEndian.PutUint32(data[0x24:], ^uint32(0))
+	binary.LittleEndian.PutUint32(data[0x3c:], ^uint32(0))
+	binary.LittleEndian.PutUint32(data[typeOffset+0x3c:], ^uint32(0))
+	lib, err = parseMSFTTypeLib(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lib.documentation != "" || lib.description != lib.name || lib.helpFile != "" || lib.typeInfo[0].documentation != "" {
+		t.Fatal("absent documentation became an invented string")
+	}
 }

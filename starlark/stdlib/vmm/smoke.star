@@ -654,7 +654,9 @@ def wait_for_frame_match(
     deadline = started_at + timeout
     expected_dimensions = image.info(expected)
     latest = checkpoint(vm)
-    comparison = frame_delta(expected, latest)
+    # A boot can change resolution before the first sample. Unmatched
+    # dimensions are not comparable and must never count as a stable match.
+    comparison = None
     stable = 0
     while vm.running and clock.monotonic() < deadline:
         latest_dimensions = image.info(latest)

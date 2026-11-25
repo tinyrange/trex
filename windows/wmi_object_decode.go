@@ -25,13 +25,16 @@ func wmiUpperUTF16SHA256(value string) string {
 type wmiDecodedProperty struct {
 	feature       mofFeature
 	index, offset uint32
+	depth         uint32
 	code          uint32
 }
 type wmiDecodedClass struct {
+	raw            []byte
 	class          mofClass
 	revision       uint64
 	properties     []wmiDecodedProperty
 	defaults, heap []byte
+	derivation     []byte
 }
 
 type wmiObjectCursor struct {
@@ -240,10 +243,10 @@ func wmiDecodeQualifiers(data, heap []byte) ([]mofQualifier, error) {
 		}
 		// Preserve declared propagation/override flavors for inherited properties.
 		if flavor[0]&1 != 0 {
-			q.Flavors = append(q.Flavors, "ToSubclass")
+			q.Flavors = append(q.Flavors, "ToInstance")
 		}
 		if flavor[0]&2 != 0 {
-			q.Flavors = append(q.Flavors, "ToInstance")
+			q.Flavors = append(q.Flavors, "ToSubclass")
 		}
 		if flavor[0]&0x10 != 0 {
 			q.Flavors = append(q.Flavors, "DisableOverride")
@@ -265,12 +268,12 @@ func decodeWMIClassRecord(data []byte) (*wmiDecodedClass, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &wmiDecodedClass{class: mofClass{Super: super}, revision: binary.LittleEndian.Uint64(revisionRaw)}
+	r := &wmiDecodedClass{raw: data, class: mofClass{Super: super}, revision: binary.LittleEndian.Uint64(revisionRaw)}
 	p := wmiObjectCursor{data: part}
 	p.take(1)
 	nameOffset := p.u32()
 	defaultsSize := p.u32()
-	p.sized()
+	r.derivation = p.sized()
 	qualifierData := p.sized()
 	count := p.u32()
 	refs := p.take(uint64(count) * 8)
@@ -310,7 +313,7 @@ func decodeWMIClassRecord(data []byte) (*wmiDecodedClass, error) {
 		code := d.u32()
 		rawIndex := d.take(2)
 		offset := d.u32()
-		d.u32()
+		depth := d.u32()
 		qdata := d.sized()
 		if d.err != nil {
 			return nil, d.err
@@ -334,7 +337,7 @@ func decodeWMIClassRecord(data []byte) (*wmiDecodedClass, error) {
 				return nil, fmt.Errorf("wmi object: reference %s has no target type", name)
 			}
 		}
-		r.properties = append(r.properties, wmiDecodedProperty{feature: mofFeature{Kind: "property", Name: name, Type: typ, Qualifiers: quals}, index: uint32(binary.LittleEndian.Uint16(rawIndex)), offset: offset, code: code})
+		r.properties = append(r.properties, wmiDecodedProperty{feature: mofFeature{Kind: "property", Name: name, Type: typ, Qualifiers: quals}, index: uint32(binary.LittleEndian.Uint16(rawIndex)), offset: offset, code: code, depth: depth})
 	}
 	sort.Slice(r.properties, func(i, j int) bool { return r.properties[i].index < r.properties[j].index })
 	return r, nil

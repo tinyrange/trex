@@ -96,6 +96,7 @@ func Builtins() starlark.StringDict {
 		"bits":                 starlark.NewBuiltin("bits", binaryBitsBuiltin),
 		"builder":              starlark.NewBuiltin("builder", binaryBuilderBuiltin),
 		"concat":               starlark.NewBuiltin("concat", binaryConcatBuiltin),
+		"zeros":                starlark.NewBuiltin("zeros", binaryZerosBuiltin),
 		"snapshot":             starlark.NewBuiltin("snapshot", binarySnapshotBuiltin),
 		"snapshot_many":        starlark.NewBuiltin("snapshot_many", binarySnapshotManyBuiltin),
 		"cursor":               starlark.NewBuiltin("cursor", binaryCursorBuiltin),

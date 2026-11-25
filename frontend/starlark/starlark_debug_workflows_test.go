@@ -913,3 +913,64 @@ func putWorkflow32(data []byte, address int, value uint32) {
 func putWorkflow16(data []byte, address int, value uint16) {
 	binary.LittleEndian.PutUint16(data[address:], value)
 }
+
+func TestAutomationGuestShutdownRequiresDurabilityEvent(t *testing.T) {
+	event := func(backend string, guest bool, reason string) starlark.Value {
+		payload := starlark.NewDict(2)
+		_ = payload.SetKey(starlark.String("guest"), starlark.Bool(guest))
+		_ = payload.SetKey(starlark.String("reason"), starlark.String(reason))
+		return &workflowObject{typeName: "vm_event", attrs: starlark.StringDict{"backend": starlark.String(backend), "payload": payload}}
+	}
+	cases := []struct {
+		name      string
+		events    []starlark.Value
+		timeout   int
+		bound     int
+		want      bool
+		wantError bool
+		consumed  int
+	}{
+		{"guest", []starlark.Value{event("qemu.shutdown", true, "guest-shutdown")}, 1, 8, true, false, 1},
+		{"host_quit", []starlark.Value{event("qemu.shutdown", false, "guest-shutdown")}, 1, 8, false, false, 1},
+		{"wrong_reason", []starlark.Value{event("qemu.shutdown", true, "host-qmp-quit")}, 1, 8, false, false, 1},
+		{"reset_before_shutdown", []starlark.Value{event("qemu.reset", true, "guest-reset"), event("qemu.shutdown", true, "guest-shutdown")}, 1, 8, false, false, 1},
+		{"panic", []starlark.Value{event("qemu.guest_panicked", true, "")}, 1, 8, false, false, 1},
+		{"noise_then_guest", []starlark.Value{event("qemu.stop", false, ""), event("qemu.shutdown", true, "guest-shutdown")}, 1, 8, true, false, 2},
+		{"deadline", nil, 0, 8, false, false, 0},
+		{"event_bound", []starlark.Value{event("qemu.stop", false, ""), event("qemu.stop", false, "")}, 1, 2, false, true, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			thread, _, err := newStarlarkRuntime("-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := workflowModule(t, thread, "@stdlib//vmm:automation.star")
+			ready := make(chan struct{}, len(tc.events))
+			for range tc.events {
+				ready <- struct{}{}
+			}
+			consumed := 0
+			vm := &workflowObject{typeName: "shutdown_vm", ready: ready, attrs: starlark.StringDict{}}
+			vm.attrs["next_event"] = workflowBuiltin("next_event", func(_ *starlark.Thread, _ starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
+				if consumed >= len(tc.events) {
+					return nil, fmt.Errorf("observer read past fixture events")
+				}
+				value := tc.events[consumed]
+				consumed++
+				return value, nil
+			})
+			value, err := starlark.Call(thread, module["wait_guest_shutdown"], starlark.Tuple{vm, starlark.MakeInt(tc.timeout), starlark.MakeInt(tc.bound)}, nil)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "event bound") {
+					t.Fatalf("wanted bounded observation failure, got %v / %v", value, err)
+				}
+			} else if err != nil || value != starlark.Bool(tc.want) {
+				t.Fatalf("shutdown result %v / %v, want %v", value, err, tc.want)
+			}
+			if consumed != tc.consumed {
+				t.Fatalf("consumed %d events, want %d", consumed, tc.consumed)
+			}
+		})
+	}
+}

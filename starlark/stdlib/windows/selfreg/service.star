@@ -14,6 +14,8 @@ _SIGNATURES = {
     "openscmanagerw": 3,
     "openservicea": 3,
     "openservicew": 3,
+    "queryserviceconfiga": 4,
+    "queryserviceconfigw": 4,
     "queryserviceconfig2a": 5,
     "queryserviceconfig2w": 5,
     "queryservicestatus": 2,
@@ -78,7 +80,6 @@ def _multi_string(machine, address, wide):
     if not address:
         return []
     encoding = "utf16le" if wide else "ascii"
-    width = 2 if wide else 1
     values = []
     cursor = address
     while True:
@@ -86,7 +87,7 @@ def _multi_string(machine, address, wide):
         if not value:
             return values
         values.append(value)
-        cursor += (len(value) + 1) * width
+        cursor += len(binary.encode(value, encoding = encoding, nul = True))
 
 def _service_is_active(status):
     return status != None and len(status) >= 2 and status[1] >= 2 and status[1] <= 7
@@ -203,7 +204,9 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
             default_account = _create_service_default_account(args[4], args[11])
             if default_account:
                 set_value(service, "ObjectName", "REG_SZ", default_account)
-            return handle("service", service)
+            number = handle("service", service)
+            state["handles"][number]["access"] = args[3] & 0xffffffff
+            return number
         if name.startswith("openservice"):
             manager = state["handles"].get(args[0])
             service = _cstring(machine, args[1], wide)
@@ -219,7 +222,11 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
                 if type(kind) == "int" and kind != 0:
                     known = service
                     state["services"][service.lower()] = service
-            return handle("service", known) if known != None else 0
+            if known == None:
+                return 0
+            number = handle("service", known)
+            state["handles"][number]["access"] = args[2] & 0xffffffff
+            return number
         if name.startswith("changeserviceconfig2"):
             service = service_for(args[0])
             if service == None:
@@ -238,6 +245,55 @@ def service_manager_plugin(registry, continuation_limit = 64, instruction_limit 
             configure(machine, service, wide, args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
             if args[10]:
                 set_value(service, "DisplayName", "REG_SZ", _cstring(machine, args[10], wide))
+            return 1
+        if name in ["queryserviceconfiga", "queryserviceconfigw"]:
+            service = service_for(args[0])
+            if service == None:
+                return service_error(6)  # ERROR_INVALID_HANDLE
+            # GENERIC_READ/ALL include SERVICE_QUERY_CONFIG. MAXIMUM_ALLOWED
+            # uses the SCM's currently modeled unrestricted security context.
+            if not state["handles"][args[0]]["access"] & 0x92000001:
+                return service_error(5)  # ERROR_ACCESS_DENIED
+            if not args[3]:
+                return service_error(87)  # ERROR_INVALID_PARAMETER
+            key = service_key(service)
+            def value(name, default):
+                return registry.get_value("SYSTEM", key, name, default)
+            dependencies = value("DependOnService", []) + ["+" + group for group in value("DependOnGroup", [])]
+            strings = [
+                value("ImagePath", ""),
+                value("Group", ""),
+                "\x00".join(dependencies) + "\x00" if dependencies else "\x00",
+                value("ObjectName", ""),
+                value("DisplayName", service),
+            ]
+            encoded = [binary.encode(text, encoding = "utf16le" if wide else "ascii", nul = True) for text in strings]
+            # QUERY_SERVICE_CONFIG has DWORDs mixed with native pointers;
+            # sizeof is 36 on x86 and 64 on Win64 (including padding).
+            width = machine.pointer_size
+            first_pointer = (12 + width - 1) & ~(width - 1)
+            tag_offset = first_pointer + 2 * width
+            dependencies_offset = (tag_offset + 4 + width - 1) & ~(width - 1)
+            header_size = dependencies_offset + 3 * width
+            required = header_size
+            for data in encoded:
+                required += len(data)
+            capacity = args[2] & 0xffffffff
+            if capacity < required:
+                machine.write_u32le(args[3], required)
+                return service_error(122)  # ERROR_INSUFFICIENT_BUFFER
+            if not args[1]:
+                return service_error(87)
+            output = args[1]
+            machine.write(output, b"\x00" * header_size)
+            for index, field in enumerate(["Type", "Start", "ErrorControl"]):
+                machine.write_u32le(output + 4 * index, value(field, 0))
+            machine.write_u32le(output + tag_offset, value("Tag", 0))
+            cursor = output + header_size
+            for offset, data in zip([first_pointer, first_pointer + width, dependencies_offset, dependencies_offset + width, dependencies_offset + 2 * width], encoded):
+                machine.write_pointer(output + offset, cursor)
+                machine.write(cursor, data)
+                cursor += len(data)
             return 1
         if name.startswith("queryserviceconfig2"):
             service = service_for(args[0])

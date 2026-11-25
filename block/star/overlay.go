@@ -53,10 +53,13 @@ type overlayBlockDevice struct {
 	snapshots  atomic.Uint64
 	cowBytes   atomic.Uint64
 
-	traceMu    sync.Mutex
-	traceLimit int
-	traceNext  uint64
-	trace      []blockOverlayOperation
+	traceMu       sync.Mutex
+	traceLimit    int
+	traceNext     uint64
+	trace         []blockOverlayOperation
+	coverageLimit int
+	readCoverage  byteCoverage
+	writeCoverage byteCoverage
 }
 
 type OverlayDevice = overlayBlockDevice
@@ -109,11 +112,13 @@ func blockOverlayBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.
 	maxDirty := int64(defaultBlockOverlayLimit)
 	chunkSize := int64(defaultBlockOverlayChunk)
 	traceOperations := 0
+	coverageRanges := 0
 	if err := starlark.UnpackArgs("overlay", args, kwargs,
 		"base", &value,
 		"max_dirty_bytes?", &maxDirty,
 		"chunk_size?", &chunkSize,
 		"trace_operations?", &traceOperations,
+		"coverage_ranges?", &coverageRanges,
 	); err != nil {
 		return nil, err
 	}
@@ -128,6 +133,12 @@ func blockOverlayBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.
 	if traceOperations < 0 || traceOperations > 65536 {
 		return nil, fmt.Errorf("overlay: trace_operations must be between 0 and 65536")
 	}
+	if coverageRanges < 0 || coverageRanges > 1048576 {
+		return nil, fmt.Errorf("overlay: coverage_ranges must be between 0 and 1048576")
+	}
+	overlay.coverageLimit = coverageRanges
+	overlay.readCoverage.limit = coverageRanges
+	overlay.writeCoverage.limit = coverageRanges
 	overlay.traceLimit = traceOperations
 	return NewValue("overlay", overlay), nil
 }
@@ -323,10 +334,21 @@ func (d *overlayBlockDevice) ZeroAt(off, length int64) error {
 }
 
 func (d *overlayBlockDevice) recordOperation(kind string, offset, length int64) {
-	if d.traceLimit == 0 {
+	if d.traceLimit == 0 && d.coverageLimit == 0 {
 		return
 	}
 	d.traceMu.Lock()
+	if d.coverageLimit > 0 {
+		if kind == "read" {
+			d.readCoverage.add(offset, length)
+		} else {
+			d.writeCoverage.add(offset, length)
+		}
+	}
+	if d.traceLimit == 0 {
+		d.traceMu.Unlock()
+		return
+	}
 	d.traceNext++
 	operation := blockOverlayOperation{sequence: d.traceNext, kind: kind, offset: offset, length: length}
 	if len(d.trace) < d.traceLimit {
@@ -489,6 +511,9 @@ func (d *overlayBlockDevice) Stats() starlark.StringDict {
 	d.mu.RUnlock()
 	d.traceMu.Lock()
 	operations := append([]blockOverlayOperation(nil), d.trace...)
+	uniqueReads, uniqueWrites := d.readCoverage.bytes, d.writeCoverage.bytes
+	coverageComplete := d.coverageLimit > 0 && !d.readCoverage.overflow && !d.writeCoverage.overflow
+	readRanges, writeRanges := len(d.readCoverage.ranges), len(d.writeCoverage.ranges)
 	d.traceMu.Unlock()
 	sort.Slice(indices, func(i, j int) bool { return indices[i] < indices[j] })
 	dirtyExtents := make([]starlark.Value, 0, len(indices))
@@ -518,19 +543,26 @@ func (d *overlayBlockDevice) Stats() starlark.StringDict {
 		}))
 	}
 	return starlark.StringDict{
-		"chunks":              starlark.MakeInt(chunks),
-		"copy_on_write_bytes": starlark.MakeUint64(d.cowBytes.Load()),
-		"dirty_bytes":         starlark.MakeInt64(dirtyBytes),
-		"dirty_extents":       starlark.NewList(dirtyExtents),
-		"leases":              starlark.MakeInt(leases),
-		"max_dirty_bytes":     starlark.MakeInt64(d.maxDirty),
-		"read_bytes":          starlark.MakeUint64(d.readBytes.Load()),
-		"reads":               starlark.MakeUint64(d.reads.Load()),
-		"recent_operations":   starlark.NewList(recentOperations),
-		"sealed":              starlark.Bool(sealed),
-		"snapshots":           starlark.MakeUint64(d.snapshots.Load()),
-		"write_bytes":         starlark.MakeUint64(d.writeBytes.Load()),
-		"writes":              starlark.MakeUint64(d.writes.Load()),
+		"coverage_enabled":      starlark.Bool(d.coverageLimit > 0),
+		"coverage_complete":     starlark.Bool(coverageComplete),
+		"coverage_ranges_limit": starlark.MakeInt(d.coverageLimit),
+		"read_ranges":           starlark.MakeInt(readRanges),
+		"write_ranges":          starlark.MakeInt(writeRanges),
+		"unique_read_bytes":     starlark.MakeInt64(uniqueReads),
+		"unique_write_bytes":    starlark.MakeInt64(uniqueWrites),
+		"chunks":                starlark.MakeInt(chunks),
+		"copy_on_write_bytes":   starlark.MakeUint64(d.cowBytes.Load()),
+		"dirty_bytes":           starlark.MakeInt64(dirtyBytes),
+		"dirty_extents":         starlark.NewList(dirtyExtents),
+		"leases":                starlark.MakeInt(leases),
+		"max_dirty_bytes":       starlark.MakeInt64(d.maxDirty),
+		"read_bytes":            starlark.MakeUint64(d.readBytes.Load()),
+		"reads":                 starlark.MakeUint64(d.reads.Load()),
+		"recent_operations":     starlark.NewList(recentOperations),
+		"sealed":                starlark.Bool(sealed),
+		"snapshots":             starlark.MakeUint64(d.snapshots.Load()),
+		"write_bytes":           starlark.MakeUint64(d.writeBytes.Load()),
+		"writes":                starlark.MakeUint64(d.writes.Load()),
 	}
 }
 

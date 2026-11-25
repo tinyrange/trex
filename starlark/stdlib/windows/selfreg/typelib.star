@@ -26,7 +26,7 @@ def _selected_libraries(pe, referenced):
                 break
     return selected, interfaces
 
-def typelib_patches(libraries, module, selected, interface_libraries):
+def typelib_patches(libraries, module, selected, interface_libraries, register_classes = True):
     """Builds registry operations from parsed type-library facts."""
     _, directory, _, _ = module_parts(module)
     output = []
@@ -40,12 +40,12 @@ def typelib_patches(libraries, module, selected, interface_libraries):
             patch(key, "(default)", library.get("description", library["name"]), if_absent = True),
             patch(key + "/Flags", "(default)", hex(library["flags"])[2:], if_absent = True),
             patch(key + "/HELPDIR", "(default)", directory, if_absent = True),
-            patch(key + "/%s/win32" % hex(library["lcid"])[2:], "(default)", module, if_absent = True),
+            patch(key + "/%s/%s" % (hex(library["lcid"])[2:], "win64" if library["syskind"] == 3 else "win16" if library["syskind"] == 0 else "win32"), "(default)", module, if_absent = True),
         ])
         for info in library["types"]:
             if not info["guid"] or not info["name"]:
                 continue
-            if info["kind"] == _KIND_COCLASS:
+            if info["kind"] == _KIND_COCLASS and register_classes:
                 class_key = "/Classes/CLSID/" + info["guid"]
                 output.extend([
                     patch(class_key, "(default)", info["name"], if_absent = True),
