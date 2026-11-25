@@ -108,8 +108,9 @@ func parseSLTGTypeLib(data []byte) (msftTypeLib, error) {
 	nameOffset := r.word()
 	r.text()
 	lib.description = r.text()
-	r.text()  // Help file.
-	r.dword() // Help context.
+	lib.documentation = lib.description
+	lib.helpFile = r.text()
+	lib.helpContext = r.dword()
 	lib.syskind = uint32(r.word())
 	lib.language = uint32(r.word())
 	// SLTG uses a neutral locale for localized libraries at registration time.

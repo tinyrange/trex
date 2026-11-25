@@ -15,10 +15,16 @@ type wmiClassLayout struct {
 	namespace  string
 }
 
-func (r *wmiRepositoryFile) classLayout(namespace, name string) (*wmiClassLayout, error) {
-	if r.modern == nil {
-		return nil, fmt.Errorf("wmi repository: class_layout currently requires a modern repository")
+// nameHash distinguishes NT5 MD5 indexes from NT6+ SHA-256 indexes. The
+// class record/layout codec is shared; inspection never rewrites source data.
+func (r *wmiRepositoryFile) nameHash(value string) string {
+	if r.modern != nil {
+		return wmiUpperUTF16SHA256(value)
 	}
+	return wmiUpperUTF16MD5(value)
+}
+
+func (r *wmiRepositoryFile) classLayout(namespace, name string) (*wmiClassLayout, error) {
 	records := make(map[[2]uint32][]byte, len(r.records))
 	for _, rec := range r.records {
 		records[[2]uint32{rec.logicalPage, rec.id}] = rec.data
@@ -40,7 +46,7 @@ func (r *wmiRepositoryFile) classLayout(namespace, name string) (*wmiClassLayout
 		var data []byte
 		foundNS := ""
 		for _, candidate := range []string{ns, "__SYSTEMCLASS"} {
-			prefix := "NS_" + wmiUpperUTF16SHA256(candidate) + `\CD_` + wmiUpperUTF16SHA256(name) + "."
+			prefix := "NS_" + r.nameHash(candidate) + `\CD_` + r.nameHash(name) + "."
 			for _, page := range r.pages {
 				for _, key := range page.keys {
 					if strings.HasPrefix(key, prefix) {
@@ -172,5 +178,5 @@ func (r *wmiRepositoryFile) classLayoutBuiltin(_ *starlark.Thread, _ *starlark.B
 	for i, p := range layout.properties {
 		props[i] = starfile.NewRecord(starlark.StringDict{"property": mofFeatureValue(p.feature), "index": starlark.MakeUint(uint(p.index)), "offset": starlark.MakeUint(uint(p.offset)), "declaring_class": starlark.String(layout.declaring[i])})
 	}
-	return starfile.NewRecord(starlark.StringDict{"class": mofClassValue(layout.definition.class), "revision": starlark.MakeUint64(layout.definition.revision), "properties": starlark.NewList(props)}), nil
+	return starfile.NewRecord(starlark.StringDict{"class": mofClassValue(layout.definition.class), "revision": starlark.MakeUint64(layout.definition.revision), "properties": starlark.NewList(props), "derivation": &starfile.Bytes{Name: "class-derivation", Data: append([]byte(nil), layout.definition.derivation...)}}), nil
 }

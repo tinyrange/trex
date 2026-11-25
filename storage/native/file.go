@@ -43,6 +43,7 @@ func Builtins() starlark.StringDict {
 		"mirror_file":    starlark.NewBuiltin("mirror_file", mirrorFileBuiltin),
 		"exists":         starlark.NewBuiltin("exists", existsBuiltin),
 		"open":           starlark.NewBuiltin("open", openBuiltin),
+		"create_output":  starlark.NewBuiltin("create_output", createOutputBuiltin),
 		"stdout":         starlark.NewBuiltin("stdout", stdoutBuiltin),
 		"write":          starlark.NewBuiltin("write", writeBuiltin),
 	}

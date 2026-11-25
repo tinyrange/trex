@@ -661,9 +661,11 @@ def exercise(architecture):
     iid = machine.allocate(value=b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff")
     clsid = machine.allocate(value=b"\x10\x20\x30\x40\x50\x60\x70\x80\x90\xa0\xb0\xc0\xd0\xe0\xf0\x01")
     name = machine.allocate(value=b"ITest\x00")
-    vtables = pointers([pointers([0,iid]),0])
+    stub = pointers([iid,0,0,0])
+    machine.write_u32le(stub+2*width,26)
+    stubs = pointers([stub,0])
     names = pointers([name,0])
-    info = pointers([vtables,0,names,0,0,0])
+    info = pointers([0,stubs,names,0,0,0])
     machine.write_u32le(info+5*width,0x20001)
     files = pointers([info,0])
     result = machine.call(machine.resolve_export("rpcrt4.dll",name="NdrDllRegisterProxy"),args=[0,files,clsid])
@@ -671,6 +673,7 @@ def exercise(architecture):
     key = "/Classes/Interface/{33221100-5544-7766-8899-AABBCCDDEEFF}"
     check(registry.get_value("SOFTWARE",key,"(default)","") == "ITest")
     check(registry.get_value("SOFTWARE",key+"/ProxyStubClsid32","(default)","") == "{40302010-6050-8070-90A0-B0C0D0E0F001}")
+    check(registry.get_value("SOFTWARE",key+"/NumMethods","(default)","") == "26")
 exercise("x86")
 exercise("amd64")
 `)
@@ -686,7 +689,7 @@ def exercise(architecture):
     machine = emulator.machine(architecture=architecture,code=b"\xc3")
     path = "C:\\Windows\\fixture.tlb"
     # The plugin receives an explicit, already-indexed library catalogue.
-    machine.use(oleaut_plugin(type_libraries={path:binary.concat([b"MSFT"])}))
+    machine.use(oleaut_plugin(type_libraries={path:binary.concat([b"MSFT"])},registered_type_libraries=[{"path":path,"library":{"types":[]}}]))
     text = machine.allocate(value=binary.encode(path,encoding="utf16le",nul=True))
     output = machine.allocate(value=b"\xaa"*(machine.pointer_size+4))
     result = machine.call(machine.resolve_export("oleaut32.dll",name="LoadTypeLib"),args=[text,output])
@@ -1484,6 +1487,239 @@ def exercise(architecture):
     if kernel.state["handles"][reference]["value"]["id"]!=8:fail("wrong thread")
     if machine.read(output+machine.pointer_size,8)!=b"\xaa"*8:fail("output overwrite")
     if call("DuplicateHandle",[123,thread,process,output,0,0,2])!=0:fail("invalid process accepted")
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestTypeLibraryDocumentationAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "oleaut_plugin")
+def check(condition):
+    if not condition:
+        fail("type-library documentation ABI/contract check failed")
+def bstr_text(machine, slot, expected):
+    address=machine.read_pointer(slot)
+    encoded=binary.encode(expected,encoding="utf16le")
+    if not expected:
+        check(address==0)
+    else:
+        check(address!=0 and machine.read_u32le(address-4)==len(encoded))
+        check(machine.read(address,len(encoded))==encoded and machine.read(address+len(encoded),2)==b"\x00\x00")
+    check(machine.read(slot+machine.pointer_size,4)==b"\xaa"*4)
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    library={"guid":"{420B2830-E718-11CF-893D-00A0C9054228}","major":1,"minor":0,"lcid":0,"name":"Scripting","documentation":"Script library","help_context":1234,"help_file":"script.hlp",
+        "types":[{"name":"FileSystemObject","documentation":"File-system object","help_context":4321,"kind":5,"flags":2,"guid":"{420B2830-E718-11CF-893D-00A0C9054228}","attributes":{"lcid":1033,"instance_size":4,"function_count":7,"variable_count":3,"implemented_count":2,"vtable_size":28,"alignment":4,"major":1,"minor":2}}, {"name":"UnknownDocumentation"}]}
+    machine.use(oleaut_plugin(registered_type_libraries=[{"library":library,"path":"fixture.tlb"}]))
+    guid=machine.allocate(value=b"\x30\x28\x0b\x42\x18\xe7\xcf\x11\x89\x3d\x00\xa0\xc9\x05\x42\x28")
+    output=machine.allocate(size=machine.pointer_size)
+    result=machine.call(machine.resolve_export("oleaut32.dll",name="LoadRegTypeLib"),args=[guid,1,0,0,output])
+    check(result.reason=="return" and result.value==0)
+    obj=machine.read_pointer(output)
+    method=machine.read_pointer(machine.read_pointer(obj)+9*machine.pointer_size)
+    slots=[machine.allocate(value=b"\xaa"*(machine.pointer_size+4)) for unused in range(3)]
+    context=machine.allocate(value=b"\xaa"*8)
+    for index,name,doc,help_context in [(0xffffffff,"Scripting","Script library",1234),(0,"FileSystemObject","File-system object",4321)]:
+        result=machine.call(method,args=[obj,index,slots[0],slots[1],context,slots[2]])
+        check(result.reason=="return" and result.value==0)
+        bstr_text(machine,slots[0],name)
+        bstr_text(machine,slots[1],doc)
+        bstr_text(machine,slots[2],"script.hlp")
+        check(machine.read_u32le(context)==help_context and machine.read(context+4,4)==b"\xaa"*4)
+    if architecture=="amd64":
+        result=machine.call(method,args=[obj,0xffffffffffffffff,0,0,0,0])
+        check(result.reason=="return" and result.value==0)
+    result=machine.call(method,args=[obj,0xffffffff,0,0,0,0])
+    check(result.reason=="return" and result.value==0)
+    before=[machine.read(slot,machine.pointer_size+4) for slot in slots]+[machine.read(context,8)]
+    for invalid in [2,0xfffffffe]:
+        result=machine.call(method,args=[obj,invalid,slots[0],slots[1],context,slots[2]])
+        check(result.reason=="return" and result.value==0x80070057)
+        check(before==[machine.read(slot,machine.pointer_size+4) for slot in slots]+[machine.read(context,8)])
+    result=machine.call(method,args=[obj,1,slots[0],slots[1],context,slots[2]])
+    check(result.reason=="return" and result.value==0x80004001)
+    check(before==[machine.read(slot,machine.pointer_size+4) for slot in slots]+[machine.read(context,8)])
+    # Retrieve an actual ITypeInfo and check its native TYPEATTR layout,
+    # name/documentation method, pointer canary, and owned release.
+    get_info=machine.read_pointer(machine.read_pointer(obj)+4*machine.pointer_size)
+    result=machine.call(get_info,args=[obj,0,slots[0]])
+    check(result.reason=="return" and result.value==0)
+    info=machine.read_pointer(slots[0])
+    check(machine.read(slots[0]+machine.pointer_size,4)==b"\xaa"*4)
+    table=machine.read_pointer(info)
+    get_attr=machine.read_pointer(table+3*machine.pointer_size)
+    result=machine.call(get_attr,args=[info,slots[0]])
+    check(result.reason=="return" and result.value==0)
+    attr=machine.read_pointer(slots[0])
+    check(machine.read(attr,16)==machine.read(guid,16))
+    check(machine.read_u32le(attr+16)==1033 and machine.read_u32le(attr+24)==0xffffffff)
+    if architecture=="x86":
+        check(machine.read_u32le(attr+36)==4 and machine.read_u32le(attr+40)==5)
+        check(machine.read_u16le(attr+44)==7 and machine.read_u16le(attr+54)==2 and machine.read_u16le(attr+58)==2)
+        check(machine.read(attr+60,16)==b"\x00"*16)
+    else:
+        check(info>0xffffffff and attr>0xffffffff)
+        check(machine.read_u32le(attr+40)==4 and machine.read_u32le(attr+44)==5)
+        check(machine.read_u16le(attr+48)==7 and machine.read_u16le(attr+58)==2 and machine.read_u16le(attr+62)==2)
+        check(machine.read(attr+64,32)==b"\x00"*32)
+    result=machine.call(machine.read_pointer(table+12*machine.pointer_size),args=[info,0xffffffff,slots[0],slots[1],context,slots[2]])
+    check(result.reason=="return" and result.value==0)
+    bstr_text(machine,slots[0],"FileSystemObject")
+    bstr_text(machine,slots[1],"File-system object")
+    check(machine.read_u32le(context)==4321)
+    release=machine.read_pointer(table+19*machine.pointer_size)
+    result=machine.call(release,args=[info,attr])
+    check(result.reason=="return")
+    # A null output fails without allocating an attribute.
+    result=machine.call(get_attr,args=[info,0])
+    check(result.reason=="return" and result.value==0x80070057)
+    # Unknown optional documentation does not prevent a known name-only query.
+    result=machine.call(method,args=[obj,1,slots[0],0,0,0])
+    check(result.reason=="return" and result.value==0)
+    bstr_text(machine,slots[0],"UnknownDocumentation")
+    library["documentation"]=""
+    library["help_file"]=""
+    result=machine.call(method,args=[obj,0xffffffff,slots[0],slots[1],0,slots[2]])
+    check(result.reason=="return" and result.value==0)
+    bstr_text(machine,slots[1],"")
+    bstr_text(machine,slots[2],"")
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestLegacyWctombCLocaleAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "msvcrt_plugin")
+def check(condition):
+    if not condition:
+        fail("legacy C-locale wctomb contract failed")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    machine.use(msvcrt_plugin())
+    function=machine.resolve_export("msvcrt.dll",name="wctomb")
+    errno_fn=machine.resolve_export("msvcrt.dll",name="_errno")
+    result=machine.call(errno_fn)
+    check(result.reason=="return")
+    errno=result.value
+    output=machine.allocate(value=b"\xaa"*4)
+    for char in [0,65,255]:
+        result=machine.call(function,args=[output,char])
+        check(result.reason=="return" and result.value==1)
+        check(machine.read(output,4)==bytes([char,170,170,170]))
+    before=machine.read(output,4)
+    result=machine.call(function,args=[output,0x100])
+    check(result.reason=="return" and (result.value&0xffffffff)==0xffffffff)
+    check(machine.read_u32le(errno)==42 and machine.read(output,4)==before)
+    result=machine.call(function,args=[0,65])
+    check(result.reason=="return" and result.value==0)
+    locale=machine.allocate(value=b"unsupported\x00")
+    machine.call(machine.resolve_export("msvcrt.dll",name="setlocale"),args=[0,locale])
+    result=machine.call(function,args=[output,65])
+    check(result.reason=="unsupported-locale" and machine.read(output,4)==before)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestTypeLibraryRegistrationEffectsAcrossArchitectures(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "oleaut_plugin")
+load("@stdlib//windows/selfreg:registry.star", "registry_plugin")
+def check(condition):
+    if not condition:
+        fail("type-library registration effects contract failed")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    registry=registry_plugin()
+    machine.use(registry)
+    path=r"C:\Windows\fixture.tlb"
+    library={"guid":"{420B2830-E718-11CF-893D-00A0C9054228}","name":"Fixture","description":"Fixture library","major":1,"minor":2,"lcid":0,"flags":0,"syskind":3 if architecture=="amd64" else 1,
+        "types":[{"guid":"{0D43FE01-F093-11CF-8940-00A0C9054228}","name":"Class","kind":5,"flags":2},{"guid":"{00020400-0000-0000-C000-000000000046}","name":"Interface","kind":4,"flags":64}]}
+    machine.use(oleaut_plugin(type_libraries={path:binary.concat([b"MSFT"])},registered_type_libraries=[{"path":path,"library":library}],registry=registry))
+    text=machine.allocate(value=binary.encode(path,encoding="utf16le",nul=True))
+    output=machine.allocate(value=b"\xaa"*(machine.pointer_size+4))
+    load_fn=machine.resolve_export("oleaut32.dll",name="LoadTypeLibEx")
+    for mode in [2,0]:
+        result=machine.call(load_fn,args=[text,mode,output])
+        check(result.reason=="return" and result.value==0 and not registry.patches())
+    obj=machine.read_pointer(output)
+    register=machine.resolve_export("oleaut32.dll",name="RegisterTypeLib")
+    result=machine.call(register,args=[obj,text,0])
+    check(result.reason=="return" and result.value==0)
+    patches=registry.patches()
+    platform="win64" if architecture=="amd64" else "win32"
+    key="/classes/typelib/"+library["guid"].lower()+"/1.2/0/"+platform
+    check(any([p["key"].lower()==key and p["value"]==path for p in patches]))
+    check(any(["/classes/interface/" in p["key"].lower() for p in patches]))
+    check(not any(["/classes/clsid/" in p["key"].lower() for p in patches]))
+    check(machine.read(output+machine.pointer_size,4)==b"\xaa"*4)
+    before=registry.patches()
+    result=machine.call(load_fn,args=[text,99,output])
+    check(result.reason=="return" and result.value==0x80070057 and registry.patches()==before)
+    result=machine.call(register,args=[0,text,0])
+    check(result.reason=="return" and result.value==0x80004001 and registry.patches()==before)
+    # Explicit REGKIND_REGISTER reaches the same persisted effect, not just
+    # a successful object load. All writes are modeled registry operations.
+    result=machine.call(load_fn,args=[text,1,output])
+    check(result.reason=="return" and result.value==0)
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestLegacyCRTStatLayoutsAndOverflow(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "msvcrt_plugin")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    kernel=kernel32_plugin(files={r"C:\files\a.dll":b"abc",r"C:\files\huge.bin":binary.extents(1<<32,[])})
+    machine.use([kernel,msvcrt_plugin(kernel=kernel)])
+    stat=machine.resolve_export("msvcrt.dll",name="_wstat")
+    errno_result=machine.call(machine.resolve_export("msvcrt.dll",name="_errno"))
+    errno=errno_result.value
+    width=48 if architecture=="amd64" else 36
+    output=machine.allocate(value=b"\xaa"*(width+8))
+    def source(path):
+        return machine.allocate(value=binary.encode(path,encoding="utf16le",nul=True))
+    for path,size,directory in [(r"C:\files\a.dll",3,False),(r"C:\files",0,True)]:
+        result=machine.call(stat,args=[source(path),output])
+        if result.reason!="return" or result.value!=0:fail(result.detail)
+        if machine.read_u32le(output+20)!=size or bool(machine.read_u16le(output+6)&0x4000)!=directory:fail("legacy stat size/type")
+        if machine.read_u16le(output+8)!=1 or machine.read(output+width,8)!=b"\xaa"*8:fail("legacy stat bounds")
+    for path in [r"C:\files\huge.bin",r"C:\missing"]:
+        machine.write(output,b"\xaa"*(width+8))
+        result=machine.call(stat,args=[source(path),output])
+        expected_errno=132 if "huge" in path else 2
+        if result.reason!="return" or result.value!=0xffffffff or machine.read_u32le(errno)!=expected_errno:fail("legacy stat failure")
+        if machine.read(output,width+8)!=b"\xaa"*(width+8):fail("failure mutated output")
+    if machine.call(stat,args=[0,output]).value!=0xffffffff or machine.read_u32le(errno)!=22:fail("null stat input")
+exercise("x86")
+exercise("amd64")
+`)
+}
+
+func TestCRTSETranslatorSetterPerThreadAndNativeWidth(t *testing.T) {
+	architectureScript(t, `
+load("@stdlib//windows/selfreg:win32.star", "kernel32_plugin", "msvcrt_plugin")
+def exercise(architecture):
+    machine=emulator.machine(architecture=architecture,code=b"\xc3")
+    kernel=kernel32_plugin()
+    crt=msvcrt_plugin(kernel=kernel)
+    machine.use([kernel,crt])
+    name="?_set_se_translator@@YAP6AXIPEAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z" if architecture=="amd64" else "?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z"
+    setter=machine.resolve_export("msvcrt.dll",name=name)
+    pointer=0x123456789 if architecture=="amd64" else 0x12345678
+    def set(value):
+        result=machine.call(setter,args=[value])
+        if result.reason!="return":fail(result.detail)
+        return result.value
+    if set(pointer)!=0 or set(pointer+16)!=pointer:fail("translator previous pointer")
+    kernel.state["current_thread"]={"id":99}
+    if set(pointer+32)!=0:fail("translator leaked across threads")
+    kernel.state["current_thread"]=None
+    if set(0)!=pointer+16 or set(0)!=0:fail("translator reset/thread isolation")
 exercise("x86")
 exercise("amd64")
 `)

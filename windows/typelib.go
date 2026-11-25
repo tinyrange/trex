@@ -29,23 +29,30 @@ type msftTypeLibSegment struct {
 }
 
 type msftTypeInfo struct {
-	guid  string
-	name  string
-	kind  uint32
-	flags uint32
+	guid               string
+	name               string
+	kind               uint32
+	flags              uint32
+	documentation      string
+	helpContext        uint32
+	documentationKnown bool
+	attributes         map[string]uint32
 }
 
 type msftTypeLib struct {
-	guid        string
-	name        string
-	description string
-	major       uint16
-	minor       uint16
-	language    uint32
-	lcid        uint32
-	flags       uint32
-	syskind     uint32
-	typeInfo    []msftTypeInfo
+	guid          string
+	name          string
+	description   string
+	documentation string
+	helpFile      string
+	helpContext   uint32
+	major         uint16
+	minor         uint16
+	language      uint32
+	lcid          uint32
+	flags         uint32
+	syskind       uint32
+	typeInfo      []msftTypeInfo
 }
 
 func peTypeLibsBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -75,12 +82,28 @@ func typeLibRecords(libraries []msftTypeLib) (*starlark.List, error) {
 		for _, info := range library.typeInfo {
 			row := starlark.NewDict(4)
 			for name, value := range map[string]starlark.Value{
-				"guid":  starlark.String(info.guid),
-				"name":  starlark.String(info.name),
-				"kind":  starlark.MakeUint(uint(info.kind)),
-				"flags": starlark.MakeUint(uint(info.flags)),
+				"guid":                starlark.String(info.guid),
+				"name":                starlark.String(info.name),
+				"kind":                starlark.MakeUint(uint(info.kind)),
+				"flags":               starlark.MakeUint(uint(info.flags)),
+				"documentation_known": starlark.Bool(info.documentationKnown),
 			} {
 				if err := row.SetKey(starlark.String(name), value); err != nil {
+					return nil, err
+				}
+			}
+			if info.documentationKnown {
+				_ = row.SetKey(starlark.String("documentation"), starlark.String(info.documentation))
+				_ = row.SetKey(starlark.String("help_context"), starlark.MakeUint(uint(info.helpContext)))
+			}
+			if info.attributes != nil {
+				attributes := starlark.NewDict(len(info.attributes))
+				for name, value := range info.attributes {
+					if err := attributes.SetKey(starlark.String(name), starlark.MakeUint(uint(value))); err != nil {
+						return nil, err
+					}
+				}
+				if err := row.SetKey(starlark.String("attributes"), attributes); err != nil {
 					return nil, err
 				}
 			}
@@ -88,16 +111,19 @@ func typeLibRecords(libraries []msftTypeLib) (*starlark.List, error) {
 		}
 		row := starlark.NewDict(10)
 		for name, value := range map[string]starlark.Value{
-			"guid":        starlark.String(library.guid),
-			"name":        starlark.String(library.name),
-			"description": starlark.String(library.description),
-			"major":       starlark.MakeUint(uint(library.major)),
-			"minor":       starlark.MakeUint(uint(library.minor)),
-			"language":    starlark.MakeUint(uint(library.language)),
-			"lcid":        starlark.MakeUint(uint(library.lcid)),
-			"flags":       starlark.MakeUint(uint(library.flags)),
-			"syskind":     starlark.MakeUint(uint(library.syskind)),
-			"types":       starlark.NewList(types),
+			"guid":          starlark.String(library.guid),
+			"name":          starlark.String(library.name),
+			"description":   starlark.String(library.description),
+			"documentation": starlark.String(library.documentation),
+			"help_file":     starlark.String(library.helpFile),
+			"help_context":  starlark.MakeUint(uint(library.helpContext)),
+			"major":         starlark.MakeUint(uint(library.major)),
+			"minor":         starlark.MakeUint(uint(library.minor)),
+			"language":      starlark.MakeUint(uint(library.language)),
+			"lcid":          starlark.MakeUint(uint(library.lcid)),
+			"flags":         starlark.MakeUint(uint(library.flags)),
+			"syskind":       starlark.MakeUint(uint(library.syskind)),
+			"types":         starlark.NewList(types),
 		} {
 			if err := row.SetKey(starlark.String(name), value); err != nil {
 				return nil, err
@@ -170,17 +196,32 @@ func parseMSFTTypeLib(data []byte) (msftTypeLib, error) {
 			return msftTypeLib{}, fmt.Errorf("library description: %w", err)
 		}
 	}
+	documentation := ""
+	if descriptionOffset >= 0 {
+		documentation = description
+	}
+	helpFile := ""
+	helpFileOffset := int(int32(binary.LittleEndian.Uint32(data[0x3c:])))
+	if helpFileOffset >= 0 {
+		helpFile, err = msftTypeLibString(data, segments, helpFileOffset)
+		if err != nil {
+			return msftTypeLib{}, fmt.Errorf("library help file: %w", err)
+		}
+	}
 	version := binary.LittleEndian.Uint32(data[0x18:])
 	library := msftTypeLib{
-		guid:        guid,
-		name:        name,
-		description: description,
-		major:       uint16(version),
-		minor:       uint16(version >> 16),
-		language:    binary.LittleEndian.Uint32(data[0x0c:]),
-		lcid:        binary.LittleEndian.Uint32(data[0x10:]),
-		flags:       binary.LittleEndian.Uint32(data[0x1c:]),
-		syskind:     varFlags & 0x0f,
+		guid:          guid,
+		name:          name,
+		description:   description,
+		documentation: documentation,
+		helpFile:      helpFile,
+		helpContext:   binary.LittleEndian.Uint32(data[0x2c:]),
+		major:         uint16(version),
+		minor:         uint16(version >> 16),
+		language:      binary.LittleEndian.Uint32(data[0x0c:]),
+		lcid:          binary.LittleEndian.Uint32(data[0x10:]),
+		flags:         binary.LittleEndian.Uint32(data[0x1c:]),
+		syskind:       varFlags & 0x0f,
 	}
 	typeSegment := segments[msftTypeInfoSegment]
 	if typeSegment.length < typeCount*msftTypeInfoSize {
@@ -202,11 +243,33 @@ func parseMSFTTypeLib(data []byte) (msftTypeLib, error) {
 		if err != nil {
 			return msftTypeLib{}, fmt.Errorf("type %d name: %w", index, err)
 		}
+		entryDocumentation := ""
+		entryDocOffset := int(int32(binary.LittleEndian.Uint32(entry[0x3c:])))
+		if entryDocOffset >= 0 {
+			entryDocumentation, err = msftTypeLibString(data, segments, entryDocOffset)
+			if err != nil {
+				return msftTypeLib{}, fmt.Errorf("type %d documentation: %w", index, err)
+			}
+		}
 		library.typeInfo = append(library.typeInfo, msftTypeInfo{
-			guid:  entryGUID,
-			name:  entryName,
-			kind:  binary.LittleEndian.Uint32(entry) & 0x0f,
-			flags: binary.LittleEndian.Uint32(entry[0x30:]),
+			guid:               entryGUID,
+			name:               entryName,
+			kind:               binary.LittleEndian.Uint32(entry) & 0x0f,
+			flags:              binary.LittleEndian.Uint32(entry[0x30:]),
+			documentation:      entryDocumentation,
+			helpContext:        binary.LittleEndian.Uint32(entry[0x44:]),
+			documentationKnown: true,
+			attributes: map[string]uint32{
+				"lcid":              library.language,
+				"instance_size":     binary.LittleEndian.Uint32(entry[0x50:]),
+				"function_count":    uint32(binary.LittleEndian.Uint16(entry[0x18:])),
+				"variable_count":    uint32(binary.LittleEndian.Uint16(entry[0x1a:])),
+				"implemented_count": uint32(binary.LittleEndian.Uint16(entry[0x4c:])),
+				"vtable_size":       uint32(binary.LittleEndian.Uint16(entry[0x4e:])),
+				"alignment":         (binary.LittleEndian.Uint32(entry) >> 11) & 0x1f,
+				"major":             uint32(binary.LittleEndian.Uint16(entry[0x38:])),
+				"minor":             uint32(binary.LittleEndian.Uint16(entry[0x3a:])),
+			},
 		})
 	}
 	return library, nil

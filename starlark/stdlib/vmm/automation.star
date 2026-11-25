@@ -150,3 +150,28 @@ def repeat_ui(vm, procedure, count, settle = 0, screenshots = True):
             captures.append(checkpoint(vm))
         index += 1
     return captures
+
+
+def wait_guest_shutdown(vm, timeout = 180, max_events = 4096):
+    """Requires a guest-origin clean QMP shutdown, not backend quit or reset.
+
+    Consume this event before offline filesystem reads. Stopping/closing the
+    emulator is a separate cleanup action and cannot establish durability.
+    """
+    if timeout < 0 or max_events < 1 or max_events > 65536:
+        fail("invalid guest-shutdown observation bound")
+    deadline = clock.monotonic() + timeout
+    for unused in range(max_events):
+        remaining = deadline - clock.monotonic()
+        if remaining <= 0:
+            return False
+        if debug.select([vm], timeout = remaining) == None:
+            return False
+        event = vm.next_event(timeout = 0)
+        if event == None:
+            continue
+        if event.backend == "qemu.shutdown":
+            return event.payload.get("guest", False) and event.payload.get("reason") == "guest-shutdown"
+        if event.backend in ["qemu.reset", "qemu.guest_panicked"]:
+            return False
+    fail("guest-shutdown observation exceeded event bound")

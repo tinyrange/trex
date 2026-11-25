@@ -551,6 +551,13 @@ Waits using selectable VM events while draining them deterministically.
 
 Returns the first event whose kind is in kinds before timeout.
 
+### `wait_guest_shutdown`
+
+Requires a guest-origin clean QMP shutdown, not backend quit or reset.
+
+    Consume this event before offline filesystem reads. Stopping/closing the
+    emulator is a separate cleanup action and cannot establish durability.
+
 ### `wait_until`
 
 Evaluates predicate after each VM event until it returns a value.
@@ -2129,7 +2136,12 @@ Small composable Win32 API models used by registration-time execution.
 
 ### `com_plugin`
 
-Models COM registration APIs as explicit registry writes.
+Compatibility entry point for process-local COM registration.
+
+    CoRegisterPSClsid does not modify HKCR. Keep the legacy registry argument
+    for callers, but use the same process-owned COM state as ole32_plugin.
+    The neutral runner installs only its existing ole32_plugin instance so
+    initialization and registrar calls share one state.
 
 ### `common_controls_plugin`
 
@@ -4458,6 +4470,12 @@ Like auto, but also proposes named virtual filesystems from directory listings. 
 
 Materializes a list of binary values into one bytes value, preserving order. Use binary.concat when a lazy file composition is preferable.
 
+### `create_output`
+
+`create_output(name, size) -> file with flush() and close()`
+
+Creates a caller-named retained final file with fixed logical size (1 byte through 64 GiB), exclusive creation and mode 0600. Existing files and symlinks are rejected; parents must already exist. Returns a random-access file usable with block.device for independent deployment/Setup controls. Writes cannot exceed the declared size. flush() syncs to storage; close() syncs and closes, and lifecycle cleanup also syncs/closes without deleting the output. Unwritten ranges read as zero and may remain sparse. This explicit host-path output is a final artifact, not an implicit intermediate or temporary overlay spill. Partial outputs remain after failed construction or cancellation and must not be mistaken for completed images.
+
 ### `digest`
 
 `digest(value, algorithm='sha256') -> bytes`
@@ -5514,6 +5532,12 @@ Parses XML into namespace-aware immutable document and node values. Size, depth 
 
 Parses a list of at most 4096 XML inputs with 1..8 native workers (default 4), preserving input order and duplicates as independent immutable documents. XML options and per-document validation match binary.xml. Input/file conversion runs on the caller thread before parsing; workers receive owned byte snapshots and never call Starlark. total_maximum bounds aggregate input bytes (default and maximum 256 MiB). Input conversion errors precede parsing; otherwise the lowest failing input index determines the error after all workers join, with no partial result.
 
+### `binary.zeros`
+
+`binary.zeros(size) -> read-only file`
+
+Returns an immutable, bounded all-zero file with the requested nonnegative signed-64-bit logical size. Construction retains only the size; it does not allocate or read a buffer proportional to that size, create host files, or promise storage persistence. Reads allocate only caller-requested result buffers under the usual file API. Supports normal file slicing and block.device for a read-only zero base; mutation requires an explicit overlay. Negative or out-of-range sizes fail.
+
 ### `binary.zlib`
 
 `binary.zlib(source, maximum=16MiB)`
@@ -5544,11 +5568,17 @@ Wraps a file as a block device with declared logical and physical block geometry
 
 Creates an NBD protocol server for a block device. serve(channel) processes requests over a supplied byte channel; constructing the server does not open a listening socket.
 
+### `block.observe`
+
+`block.observe(base, coverage_ranges=262144) -> block device with traffic/coverage stats`
+
+Observes read/write/zero completed bytes and exact unique byte unions without adding storage. Forwards geometry, capabilities, leases, flushes, sparse-backend terminal failures and extents to the borrowed base. coverage_ranges bounds each read/write union (1..1048576); coverage_complete becomes false on overflow, with affected unique counts frozen lower bounds. Trim is forwarded but is not counted as a write. Stats include errors, flushes, traffic and available base dirty residency. No physical-I/O inference is made.
+
 ### `block.overlay`
 
-`block.overlay(base, max_dirty_bytes=128MiB, chunk_size=64KiB, trace_operations=0)`
+`block.overlay(base, max_dirty_bytes=128MiB, chunk_size=64KiB, trace_operations=0, coverage_ranges=0)`
 
-Creates a bounded writable copy-on-write layer over a base block device. Writes affect the overlay, leaving the base unchanged; max_dirty_bytes bounds retained changes.
+Creates a bounded writable copy-on-write layer over a base block device. Writes affect the overlay, leaving the base unchanged; max_dirty_bytes bounds retained changes. Optional coverage_ranges (0 disables, maximum 1048576) bounds exact unions of successful read and write/zero byte ranges separately. stats.unique_read_bytes and unique_write_bytes include repeated accesses only once, including writes equal to the base. coverage_complete is false when disabled or either union exceeds its range bound; after overflow affected counts remain frozen lower bounds. No I/O behavior changes on observation overflow.
 
 ### `block.temporary_overlay`
 
@@ -6008,9 +6038,9 @@ Parses an existing FAT volume into a filesystem view. Use fat12, fat16 or fat32 
 
 ### `filesystem.fat12`
 
-`filesystem.fat12(directory, size, boot_code=None, hidden_sectors=0, label='NO NAME', file_order=[], directory_label=True, extended_bpb=False, chs=None) -> file`
+`filesystem.fat12(directory, size, boot_code=None, hidden_sectors=0, label='NO NAME', file_order=[], directory_label=True, extended_bpb=False, chs=None, root_entries=512) -> file`
 
-Builds a FAT12 volume from a directory with the requested size, boot metadata and file order. The returned file is an in-memory image, not a mounted filesystem.
+Builds a FAT12 volume from a directory with requested size, boot metadata and file order. root_entries defaults to512 and must be a positive multiple of16 within16..65520; BPB, root extent, data origin and capacity checks use the same value. Explicit224 plus CHS80/2/18 is the tested DOS6.22 1.44MiB workload-floppy policy, not a global default change. Returns an in-memory image, not a mounted filesystem.
 
 ### `filesystem.fat16`
 
@@ -6253,6 +6283,12 @@ Decodes HTML character references in a string. It does not parse or validate mar
 `image.compare(left, right, threshold=8, maximum=128MiB, max_pixels=16MiP) -> record`
 
 Compares decoded images and returns difference measurements using the specified per-pixel threshold. Pixel differences alone are not proof that a guest application launched successfully.
+
+### `image.crop`
+
+`image.crop(source, x, y, width, height, maximum=128MiB, max_pixels=16MiP) -> file; PNG with only selected pixels, no source metadata`
+
+Copies a positive-size, source-relative rectangle into a new PNG file. Rejects rectangles outside the image and enforces the input byte and decoded pixel limits. The output contains only the selected pixels and carries no source metadata.
 
 ### `image.decode`
 
@@ -7222,6 +7258,12 @@ Serializes package resource references into a DMR section. Inputs are bounded en
 
 Serializes declared package SID, ARI flags, inbox status and capabilities into a DMR security section. Encoding these fields neither verifies signatures nor establishes package trust.
 
+### `windows.dmr_sections`
+
+`windows.dmr_sections(file, max_bytes=67108864) -> list`
+
+Inspects a native DMR container envelope from a portable file and returns ordered tag/data dictionaries, retaining unknown and repeated section tags. data values are owned byte-backed files. max_bytes defaults to64MiB, must be within36bytes..1GiB, and bounds the input before and after reading. Uses the strict native container parser, rejecting invalid bounds/overlap. Does not interpret unknown payloads, construct an activation graph, perform registration, execute a package or prove activation readiness.
+
 ### `windows.dmr_target_platform`
 
 `windows.dmr_target_platform(target_device_family_name, minimum_version, maximum_version_tested) -> file`
@@ -7547,6 +7589,12 @@ Inspects original imported relocation heads of a native Windows NE image. Each r
 
 Expands internal NE relocation chains without loading or modifying the image. Returns source segment/offset/type, resolved target segment/offset, original entry ordinal when used, and additive status. Validates chain bounds, cycles, targets, and maximum_references. Imported and operating-system fixups are outside this view; iterated relocation storage is rejected.
 
+### `windows.ne_resources`
+
+`windows.ne_resources(file) -> list`
+
+Strict read-only Windows NE resource-table inspection using the native icon reader. Returns records with type/name (#N for numeric IDs), size, raw data bytes and optional Win16 ANSI VERSIONINFO fixed-version record (file/product four-part lists, flags_mask, flags, os, type, subtype). Validates executable/table/name/count/alignment/payload bounds. Non-NE and malformed files fail; absent/unknown fixed versions are None. No loader, execution, translation-string interpretation or release-label inference.
+
 ### `windows.object_ace`
 
 `windows.object_ace(type, flags, mask, sid, object_type='', inherited_type='') -> bytes`
@@ -7669,7 +7717,13 @@ Expands percent-delimited registration variables in replacement-dictionary order
 
 `windows.registry31(entries, sources=[]) -> file`
 
-Constructs a Windows 3.1 SHCC3.10 registry file from class-path string entries and optional REGEDIT text source files. Explicit entries override sources; keys match case-insensitively. Uses Windows-1252 strings and rejects output exceeding 64 KiB. Does not launch REGEDIT or modify a live registry.
+Constructs a Windows 3.1 SHCC3.10 registry from class paths mapped to strings or None and optional REGEDIT text source files. None and source key-only lines without an equals sign create keys with no value; explicit empty strings or equals-empty directives create present empty values. Explicit entries override sources; keys match case-insensitively. Uses Windows-1252 strings and rejects output exceeding64KiB. Does not launch REGEDIT or modify a live registry.
+
+### `windows.registry31_entries`
+
+`windows.registry31_entries(file) -> dict`
+
+Reads reachable SHCC3.10 Win16 registration keys as original-spelling backslash-separated paths, including the .classes root. Each value is an unnamed Windows-1252 string, or None when unset; empty strings differ. A valid empty tree returns an empty dictionary. Ignores unreachable hash/free records and allocator slack. Rejects malformed record/string bounds, indexes, cycles/shared keys, invalid components, duplicate case-folded paths and key/string aliasing. Input <=1MiB, depth <=256 and expanded paths <=16MiB. Native portable file inspection, not host registry access or mutation.
 
 ### `windows.registry_children`
 
@@ -8007,7 +8061,7 @@ Builds a Windows NT Winsock 2 Protocol_Catalog9 PackedCatalogItem from an ASCII 
 
 `windows.wmi_repository(files=None, documents=None, default_namespace='root\cimv2', server_name='')`
 
-Parses supplied repository files, builds an NT5 repository from MOF documents alone, or appends documents to supplied modern repository files. Modern append preserves the original object store, imports existing class layouts and defaults, rejects replacement identities, and rebuilds a checksummed index with three ordered mapping checkpoints. No WMI service or compiler is executed. Modern repositories expose class_layout(namespace, name) and instances(namespace, name); intrinsic classes resolve through __SYSTEMCLASS. Creating a namespace still requires explicit policy for its __NAMESPACE entry, __thisNAMESPACE security descriptor and __SystemSecurity singleton; parsing or appending MOF does not infer namespace security.
+Parses supplied repository files, builds an NT5 repository from MOF documents alone, or appends documents to supplied modern repository files. Modern append preserves the original object store, imports existing class layouts and defaults, rejects replacement identities, and rebuilds a checksummed index with three ordered mapping checkpoints. No WMI service or compiler is executed. Both NT5 and modern repositories expose read-only class_layout(namespace, name) and instances(namespace, name); class_layout includes the original compressed derivation bytes. method_sections(namespace, name) inspects bounded original method descriptors, override flags, declaring depths, qualifiers, and embedded input/output parameter layouts without rewriting the repository. Intrinsic classes resolve through __SYSTEMCLASS. Creating a namespace still requires explicit policy for its __NAMESPACE entry, __thisNAMESPACE security descriptor and __SystemSecurity singleton; parsing or appending MOF does not infer namespace security.
 
 ### `windows.wow64_registry_key`
 
@@ -8319,9 +8373,9 @@ Methods and attributes: `close()`, `stats`, `stop() -> file`.
 
 ### `vm` value
 
-A live virtual machine. Input helpers send guest keys, text or pointer events; screenshot captures the display. resize(width, height, timeout=60) requests an exact live guest resolution and returns only after it is applied; resize_ready reports current guest-driver readiness. Unsupported modes, guest rejection, and timeout raise errors. Cancellation does not undo a mode change already in progress. pause/resume/reset/powerdown/shutdown/stop control lifecycle, wait observes completion and next_event consumes events. channel and debugger open declared guest endpoints; extensions expose backend-specific features. Check capabilities before using optional operations.
+A live virtual machine. Input helpers send guest keys, text or pointer events; screenshot captures the display. resize(width, height, timeout=60) requests an exact live guest resolution and returns only after it is applied; resize_ready reports current guest-driver readiness. Unsupported modes, guest rejection, and timeout raise errors. Cancellation does not undo a mode change already in progress. pause/resume/reset/powerdown/shutdown/stop control lifecycle, wait observes completion and next_event consumes events. channel and debugger open declared guest endpoints; extensions expose backend-specific features. replace_media(name, source, timeout=30) replaces read-only distribution media using a native file or block_device without full materialization or host-path reopen. The QEMU backend supports non-snapshot floppy media of the same size and IDE CD-ROM media. Guest reads remain attributable to source wrappers. An error after submission may leave the medium changed or empty; inspect state and do not automatically retry. Owned transports remain alive until VM close. Check capabilities before using optional operations.
 
-Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `record(width=1440, height=900, fps=30, maximum=64MiB, duration=600, lossless=False)`, `reset(timeout=30)`, `resize(width, height, timeout=60)`, `resize_ready`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
+Methods and attributes: `backend_id`, `capabilities`, `channel(name, timeout=30)`, `chord(keys)`, `debugger(protocol, create=False, paused=False, timeout=30)`, `detach()`, `extension(name)`, `has_capability(name)`, `key(key, down=True)`, `next_event(timeout=-1)`, `pause(timeout=30)`, `pointer(x=0, y=0, absolute=False, buttons=[], wheel=0)`, `powerdown(timeout=30)`, `record(width=1440, height=900, fps=30, maximum=64MiB, duration=600, lossless=False)`, `replace_media(name, source, timeout=30)`, `reset(timeout=30)`, `resize(width, height, timeout=60)`, `resize_ready`, `result`, `resume(timeout=30)`, `running`, `screenshot(format='png', timeout=30)`, `send_keys(keys)`, `send_text(text)`, `shutdown(timeout=30, force=True, force_timeout=10)`, `status`, `stop(timeout=30)`, `tap(key)`, `type_and_enter(text, enter='enter')`, `wait(timeout=-1)`.
 
 ### `vmm_arm64_boot` value
 

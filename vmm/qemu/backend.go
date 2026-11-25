@@ -55,22 +55,26 @@ type qemuNBDExport struct {
 	listener net.Listener
 	server   *nbdapi.NBDServer
 	done     chan error
+	cancel   context.CancelFunc
 }
 
 func newQEMUNBDExport(ctx context.Context, device blockpkg.Device, name string) (*qemuNBDExport, string, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
+		cancel()
 		return nil, "", err
 	}
 	server, err := nbdapi.NewNBDServer(device, name, nbdapi.DefaultMaxRequest)
 	if err != nil {
 		listener.Close()
+		cancel()
 		return nil, "", err
 	}
 	if metrics := lifecycle.MetricsFromContext(ctx); metrics != nil {
 		server.SetMetrics(metrics)
 	}
-	export := &qemuNBDExport{listener: listener, server: server, done: make(chan error, 1)}
+	export := &qemuNBDExport{listener: listener, server: server, done: make(chan error, 1), cancel: cancel}
 	go func() {
 		connection, err := listener.Accept()
 		_ = listener.Close()
@@ -84,6 +88,7 @@ func newQEMUNBDExport(ctx context.Context, device blockpkg.Device, name string) 
 }
 
 func (e *qemuNBDExport) Close() {
+	e.cancel()
 	_ = e.listener.Close()
 }
 
@@ -102,6 +107,9 @@ type qemuDriver struct {
 	channels      map[string]channelpkg.ByteChannel
 	gdb           channelpkg.ByteChannel
 	exports       []*qemuNBDExport
+	exportMu      sync.Mutex
+	exportsClosed bool
+	mediaMu       sync.Mutex
 	extra         []*os.File
 	capture       *os.File
 	captureFD     int
@@ -298,7 +306,7 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 			}
 		}
 		if bus == "floppy" {
-			deviceArg := "floppy,drive=" + node
+			deviceArg := fmt.Sprintf("floppy,id=trx-media-%d,drive=%s", index, node)
 			if disk.Unit >= 0 {
 				deviceArg += fmt.Sprintf(",unit=%d", disk.Unit)
 			}
@@ -309,6 +317,9 @@ func startQEMU(parent context.Context, backend *qemuBackend, machine vmmapi.Mach
 				frontend = "ide-cd"
 			}
 			deviceArg := frontend + ",drive=" + node
+			if disk.Media == "cdrom" {
+				deviceArg += fmt.Sprintf(",id=trx-media-%d", index)
+			}
 			if disk.CHS != nil {
 				physicalCylinders, physicalHeads := disk.CHS.Cylinders, disk.CHS.Heads
 				biosTranslation := "auto"
@@ -567,10 +578,11 @@ func (d *qemuDriver) releaseTransports() {
 			_ = d.recording.Close()
 		}
 		d.recordMu.Unlock()
-		for _, export := range d.exports {
+		exports := d.exportSnapshot(true)
+		for _, export := range exports {
 			export.Close()
 		}
-		for _, export := range d.exports {
+		for _, export := range exports {
 			<-export.done
 		}
 		for _, channel := range d.channels {

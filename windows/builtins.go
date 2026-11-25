@@ -67,6 +67,7 @@ func Builtins() starlark.StringDict {
 		"bitmap_info":                      bitmapInfoBuiltin,
 		"icon":                             windowsIconBuiltin,
 		"pe":                               peObjectBuiltin,
+		"ne_resources":                     neResourcesBuiltin,
 		"cli_inspect":                      cliInspectBuiltin,
 		"type_library":                     typeLibraryBuiltin,
 		"pe32_executable":                  pe32ExecutableBuiltin,
@@ -84,6 +85,7 @@ func Builtins() starlark.StringDict {
 		"acme_table":                       acmeTableBuiltin,
 		"patch_ini":                        patchINIBuiltin,
 		"registry31":                       registry31Builtin,
+		"registry31_entries":               registry31EntriesBuiltin,
 		"acme_plan":                        acmePlanBuiltin,
 		"sdk_inf_plan":                     sdkInfPlanBuiltin,
 		"setup_inf":                        setupInfBuiltin,
@@ -182,6 +184,7 @@ func Builtins() starlark.StringDict {
 		"dmr_mutable_paths":                dmrMutablePathsBuiltin,
 		"dmr_trailer":                      dmrTrailerBuiltin,
 		"dmr_container":                    dmrContainerBuiltin,
+		"dmr_sections":                     dmrSectionsBuiltin,
 		"update_media":                     updatenative.MediaBuiltin,
 		"update_catalog":                   updatenative.CatalogBuiltin,
 	}

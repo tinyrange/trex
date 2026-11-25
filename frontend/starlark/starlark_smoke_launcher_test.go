@@ -96,3 +96,55 @@ func TestSmokeLauncherConfirmation(t *testing.T) {
 		})
 	}
 }
+
+// Resolution transitions must neither crash pixel comparison nor qualify as a match.
+func TestSmokeFrameMatchResolutionTransitions(t *testing.T) {
+	frames := make([]starlark.Value, 2)
+	for i, width := range []int{128, 64} {
+		var data bytes.Buffer
+		if err := png.Encode(&data, image.NewRGBA(image.Rect(0, 0, width, 96))); err != nil {
+			t.Fatal(err)
+		}
+		frames[i] = &starfile.Bytes{Name: "frame.png", Data: data.Bytes()}
+	}
+	for _, test := range []struct {
+		name      string
+		converges bool
+	}{
+		{"mismatched-first-frame-then-stable", true},
+		{"persistent-wrong-resolution-is-not-success", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			thread, _, err := newStarlarkRuntime("-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := workflowModule(t, thread, "@stdlib//vmm:smoke.star")
+			vm := newWorkflowVM()
+			vm.value.attrs["backend_id"] = starlark.String("test")
+			vm.value.attrs["running"] = starlark.True
+			vm.value.attrs["status"] = starlark.String("running")
+			vm.value.attrs["result"] = starlark.None
+			captures := 0
+			vm.value.attrs["screenshot"] = workflowBuiltin("screenshot", func(_ *starlark.Thread, _ starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
+				captures++
+				if test.converges && captures > 1 {
+					return frames[0], nil
+				}
+				return frames[1], nil
+			})
+			result := workflowCallKw(t, thread, module, "wait_for_frame_match", starlark.Tuple{vm.value, frames[0]}, []starlark.Tuple{
+				{starlark.String("timeout"), starlark.Float(0.15)},
+				{starlark.String("sample_interval"), starlark.Float(0.001)},
+				{starlark.String("stable_samples"), starlark.MakeInt(2)},
+			}).(*starlark.Dict)
+			passed, _, _ := result.Get(starlark.String("passed"))
+			if passed != starlark.Bool(test.converges) {
+				t.Fatalf("result=%s", result)
+			}
+			if test.converges && captures < 3 {
+				t.Fatalf("only %d captures; stability not established", captures)
+			}
+		})
+	}
+}

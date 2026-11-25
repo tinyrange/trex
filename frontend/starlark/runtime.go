@@ -357,6 +357,7 @@ func predeclared() starlark.StringDict {
 		"mirror_file":    nativeIO["mirror_file"],
 		"exists":         nativeIO["exists"],
 		"open":           nativeIO["open"],
+		"create_output":  nativeIO["create_output"],
 		"repl":           starlark.NewBuiltin("repl", replBuiltin),
 		"load_fresh":     starlark.NewBuiltin("load_fresh", loadFreshBuiltin),
 		"launcher":       starlark.NewBuiltin("launcher", launcherBuiltin),

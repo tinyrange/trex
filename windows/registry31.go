@@ -20,7 +20,7 @@ func registry31Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	if err := starlark.UnpackArgs("registry31", args, kwargs, "entries", &entries, "sources?", &sources); err != nil {
 		return nil, err
 	}
-	values := map[string]string{}
+	values := map[string]*string{}
 	if sources != nil {
 		for i := 0; i < sources.Len(); i++ {
 			f, ok := sources.Index(i).(starfile.File)
@@ -49,22 +49,28 @@ func registry31Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 				if !strings.HasPrefix(strings.ToUpper(key), prefix) {
 					continue // REGEDIT 3.1 treats all other lines as comments.
 				}
-				if !found {
-					value = ""
+				var parsed *string
+				if found {
+					text := strings.TrimSpace(value)
+					parsed = &text
 				}
-				values[strings.ToLower(key[len(prefix):])] = strings.TrimSpace(value)
+				values[strings.ToLower(key[len(prefix):])] = parsed
 			}
 		}
 	}
 	for _, pair := range entries.Items() {
 		k, ok := starlark.AsString(pair[0])
 		v, valid := starlark.AsString(pair[1])
-		if !ok || !valid {
-			return nil, fmt.Errorf("registry31: entries must map class paths to strings")
+		if !ok || (!valid && pair[1] != starlark.None) {
+			return nil, fmt.Errorf("registry31: entries must map class paths to strings or None")
 		}
-		values[strings.ToLower(k)] = v
+		var parsed *string
+		if valid {
+			parsed = &v
+		}
+		values[strings.ToLower(k)] = parsed
 	}
-	data, err := buildRegistry31(values)
+	data, err := buildRegistry31Entries(values)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +85,15 @@ type registry31Node struct {
 }
 
 func buildRegistry31(values map[string]string) ([]byte, error) {
+	entries := make(map[string]*string, len(values))
+	for key, value := range values {
+		v := value
+		entries[key] = &v
+	}
+	return buildRegistry31Entries(entries)
+}
+
+func buildRegistry31Entries(values map[string]*string) ([]byte, error) {
 	root := &registry31Node{name: ".classes", children: map[string]*registry31Node{}}
 	keys := make([]string, 0, len(values))
 	for k := range values {
@@ -102,7 +117,11 @@ func buildRegistry31(values map[string]string) ([]byte, error) {
 			}
 			node = next
 		}
-		node.value, node.hasValue = values[key], true
+		if value := values[key]; value != nil {
+			node.value, node.hasValue = *value, true
+		} else {
+			node.value, node.hasValue = "", false
+		}
 	}
 	// One bucket is a valid hash table and places every interned string in one
 	// circular chain. It avoids depending on the undocumented string hash.

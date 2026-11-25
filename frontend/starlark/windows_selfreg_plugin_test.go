@@ -1441,10 +1441,12 @@ func TestRPCProxyPluginParsesProxyFileInfo(t *testing.T) {
 	iid := allocate([]byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
 	clsid := allocate([]byte{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0, 0x01})
 	name := allocate([]byte("ITest\x00"))
-	proxyVtbl := allocate(words(0, iid))
-	proxyVtbls := allocate(words(proxyVtbl, 0))
+	// Proxy tables are not registration metadata. A valid stub alone supplies
+	// the IID and method count, including the IUnknown slots.
+	stubVtbl := allocate(words(iid, 0, 26, 0))
+	stubVtbls := allocate(words(stubVtbl, 0))
 	names := allocate(words(name, 0))
-	info := allocate(words(proxyVtbls, 0, names, 0, 0, 2<<16|1))
+	info := allocate(words(0, stubVtbls, names, 0, 0, 2<<16|1))
 	files := allocate(words(info, 0))
 	address := machine.ResolveExport("rpcrt4.dll", "NdrDllRegisterProxy", 0, 0)
 	resultValue, err := machine.CallAddress(thread, address, []uint32{0, files, clsid})
@@ -1461,8 +1463,13 @@ func TestRPCProxyPluginParsesProxyFileInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	patches := patchesValue.(*starlark.List)
-	if patches.Len() != 5 {
-		t.Fatalf("captured %d patches, want 5: %v", patches.Len(), patches)
+	if patches.Len() != 6 {
+		t.Fatalf("captured %d patches, want 6: %v", patches.Len(), patches)
+	}
+	methodPatch := patches.Index(5).(*starlark.Dict)
+	methodValue, _, _ := methodPatch.Get(starlark.String("value"))
+	if got, _ := starlark.AsString(methodValue); got != "26" {
+		t.Fatalf("NumMethods = %q, want decimal 26", got)
 	}
 	interfacePatch := patches.Index(3).(*starlark.Dict)
 	key, _, _ := interfacePatch.Get(starlark.String("key"))

@@ -33,8 +33,12 @@ func FAT12Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 	label := "NO NAME"
 	directoryLabel := true
 	extendedBPB := false
-	if err := starlark.UnpackArgs("fat12", args, kwargs, "directory", &value, "size", &size, "boot_code?", &bootCodeValue, "hidden_sectors?", &hiddenSectors, "label?", &label, "file_order?", &fileOrderValue, "directory_label?", &directoryLabel, "extended_bpb?", &extendedBPB, "chs?", &chsValue); err != nil {
+	rootEntries := 512
+	if err := starlark.UnpackArgs("fat12", args, kwargs, "directory", &value, "size", &size, "boot_code?", &bootCodeValue, "hidden_sectors?", &hiddenSectors, "label?", &label, "file_order?", &fileOrderValue, "directory_label?", &directoryLabel, "extended_bpb?", &extendedBPB, "chs?", &chsValue, "root_entries?", &rootEntries); err != nil {
 		return nil, err
+	}
+	if rootEntries <= 0 || rootEntries > 65535 || rootEntries%16 != 0 {
+		return nil, fmt.Errorf("fat12: root_entries must be a positive multiple of 16 within 16..65520")
 	}
 	dir, ok := value.(*filesystemapi.Directory)
 	if !ok {
@@ -65,7 +69,7 @@ func FAT12Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 	if err != nil {
 		return nil, fmt.Errorf("fat12: chs: %w", err)
 	}
-	return buildFATImageWithOptionsAndGeometryAndBPB(dir, int64(size), bootCode, int64(hiddenSectors), volumeLabel, fileOrder, directoryLabel, extendedBPB, chs, 12)
+	return buildFATImageWithRootEntries(dir, int64(size), bootCode, int64(hiddenSectors), volumeLabel, fileOrder, directoryLabel, extendedBPB, chs, 12, int64(rootEntries))
 }
 
 func FAT16Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -114,6 +118,7 @@ func FAT16Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, 
 }
 
 type fat16Build struct {
+	rootEntries       int64
 	fatBits           int
 	size              int64
 	totalSectors      int64
@@ -153,11 +158,19 @@ func buildFAT16ImageWithOptionsAndGeometryAndBPB(dir *filesystemapi.Directory, s
 }
 
 func buildFATImageWithOptionsAndGeometryAndBPB(dir *filesystemapi.Directory, size int64, bootCode []byte, hiddenLBA int64, volumeLabel [11]byte, fileOrder []string, directoryLabel, extendedBPB bool, chs *vmm.CHSGeometry, fatBits int) (starfile.File, error) {
+	return buildFATImageWithRootEntries(dir, size, bootCode, hiddenLBA, volumeLabel, fileOrder, directoryLabel, extendedBPB, chs, fatBits, fat16RootEntries)
+}
+
+func buildFATImageWithRootEntries(dir *filesystemapi.Directory, size int64, bootCode []byte, hiddenLBA int64, volumeLabel [11]byte, fileOrder []string, directoryLabel, extendedBPB bool, chs *vmm.CHSGeometry, fatBits int, rootEntries int64) (starfile.File, error) {
+	if rootEntries <= 0 || rootEntries > 65535 || rootEntries%16 != 0 {
+		return nil, fmt.Errorf("fat: invalid root entry capacity")
+	}
 	if fatBits != 12 && fatBits != 16 {
 		return nil, fmt.Errorf("fat: unsupported allocation width %d", fatBits)
 	}
 	b := &fat16Build{
 		fatBits:        fatBits,
+		rootEntries:    rootEntries,
 		size:           size,
 		totalSectors:   size / fat32SectorSize,
 		nextCluster:    fat16FirstCluster,
@@ -255,7 +268,7 @@ func (b *fat16Build) applyFileOrder(paths []string) error {
 }
 
 func (b *fat16Build) layout() error {
-	b.rootDirSectors = fsinternal.CeilDiv(fat16RootEntries*32, fat32SectorSize)
+	b.rootDirSectors = fsinternal.CeilDiv(b.rootEntries*32, fat32SectorSize)
 	for _, candidate := range []int64{1, 2, 4, 8, 16, 32, 64, 128} {
 		sectorsPerFAT := int64(1)
 		for {
@@ -429,7 +442,7 @@ func (b *fat16Build) bootSector() []byte {
 	sector[13] = byte(b.sectorsPerCluster)
 	binary.LittleEndian.PutUint16(sector[14:16], uint16(fat16ReservedSectors))
 	sector[16] = byte(fat16FATs)
-	binary.LittleEndian.PutUint16(sector[17:19], uint16(fat16RootEntries))
+	binary.LittleEndian.PutUint16(sector[17:19], uint16(b.rootEntries))
 	if b.totalSectors < 65536 {
 		binary.LittleEndian.PutUint16(sector[19:21], uint16(b.totalSectors))
 		binary.LittleEndian.PutUint32(sector[32:36], 0)
@@ -480,14 +493,14 @@ func (b *fat16Build) directoryData(node *fat32Node) ([]byte, error) {
 		if child.dir {
 			attr |= fatAttrDir
 		}
-		entry := fat32DirEntry(child.name, child.cluster, uint32(child.size), attr, child.short)
+		entry := child.directoryEntry(attr)
 		binary.LittleEndian.PutUint16(entry[20:22], b.eaHandles[child])
 		entries = append(entries, entry...)
 	}
 	if node == b.root {
-		maximum := int(fat16RootEntries * 32)
+		maximum := int(b.rootEntries * 32)
 		if len(entries)+32 > maximum {
-			return nil, fmt.Errorf("fat16: root directory needs %d entries, limit is %d", (len(entries)+31)/32+1, fat16RootEntries)
+			return nil, fmt.Errorf("fat16: root directory needs %d entries, limit is %d", (len(entries)+31)/32+1, b.rootEntries)
 		}
 		data := make([]byte, maximum)
 		copy(data, entries)

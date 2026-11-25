@@ -7,6 +7,7 @@ import (
 	starfile "github.com/tinyrange/trex/storage/star"
 	"hash/crc32"
 	"io"
+	"math"
 	"sort"
 	"strings"
 
@@ -585,13 +586,22 @@ func buildWMIRepositoryDocumentsWithOptions(documents []*mofDocument, defaultNam
 		if err != nil {
 			return nil, err
 		}
+		methodOrigins := make(map[string]uint32)
+		for ancestor := len(chain) - 1; ancestor >= 1; ancestor-- {
+			for _, feature := range chain[ancestor].class.Features {
+				name := strings.ToLower(feature.Name)
+				if _, exists := methodOrigins[name]; feature.Kind == "method" && !exists {
+					methodOrigins[name] = uint32(len(chain) - 1 - ancestor)
+				}
+			}
+		}
 		record, err := buildWMIClassRecord(
 			entry.class,
 			ancestors,
 			properties,
 			uint32(len(chain)-1),
 			revision,
-			wmiObjectContext{serverName: options.serverName, namespace: entry.namespace},
+			wmiObjectContext{serverName: options.serverName, namespace: entry.namespace, methodOrigins: methodOrigins},
 		)
 		if err != nil {
 			return nil, fmt.Errorf("wmi repository: %s/%s: %w", entry.namespace, entry.class.Name, err)
@@ -860,10 +870,12 @@ func (r *wmiRepositoryFile) Freeze()               {}
 func (r *wmiRepositoryFile) Truth() starlark.Bool  { return starlark.True }
 func (r *wmiRepositoryFile) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: %s", r.Type()) }
 func (r *wmiRepositoryFile) AttrNames() []string {
-	return []string{"class_layout", "files", "instances", "keys", "pages", "records"}
+	return []string{"class_layout", "files", "instances", "keys", "method_sections", "pages", "records"}
 }
 func (r *wmiRepositoryFile) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "method_sections":
+		return starlark.NewBuiltin("method_sections", r.methodSectionsBuiltin), nil
 	case "instances":
 		return starlark.NewBuiltin("instances", r.instancesBuiltin), nil
 	case "class_layout":
@@ -971,8 +983,13 @@ func parseWMIRepositoryMapping(data []byte) (wmiRepositoryMapping, error) {
 		if end != wmiMappingEnd {
 			return wmiMappingSection{}, fmt.Errorf("wmi repository: invalid %s end marker %#x", name, end)
 		}
-		seen := make([]bool, physicalPages)
-		for _, page := range append(append([]uint32(nil), section.base...), section.free...) {
+		// Deleted logical slots have no physical allocation. Bound bookkeeping by
+		// the input entries, not an untrusted declared physical page count.
+		seen := make(map[uint32]bool)
+		for slot, page := range append(append([]uint32(nil), section.base...), section.free...) {
+			if page == math.MaxUint32 && slot < len(section.base) {
+				continue
+			}
 			if page >= physicalPages {
 				return wmiMappingSection{}, fmt.Errorf("wmi repository: %s page %d exceeds physical page count %d", name, page, physicalPages)
 			}
@@ -981,8 +998,8 @@ func parseWMIRepositoryMapping(data []byte) (wmiRepositoryMapping, error) {
 			}
 			seen[page] = true
 		}
-		if uint64(len(section.base))+uint64(len(section.free)) != uint64(physicalPages) {
-			return wmiMappingSection{}, fmt.Errorf("wmi repository: %s maps %d of %d physical pages", name, len(section.base)+len(section.free), physicalPages)
+		if uint64(len(seen)) != uint64(physicalPages) {
+			return wmiMappingSection{}, fmt.Errorf("wmi repository: %s maps %d of %d physical pages", name, len(seen), physicalPages)
 		}
 		return section, nil
 	}
@@ -1025,6 +1042,9 @@ func serializeWMIRepositoryMapping(mapping wmiRepositoryMapping) []byte {
 func resolveWMIIndexPages(section wmiMappingSection, data []byte) ([]uint32, error) {
 	pages := append([]uint32(nil), section.base...)
 	for logical, physical := range pages {
+		if physical == math.MaxUint32 {
+			continue
+		}
 		offset := uint64(physical) * wmiRepositoryPageSize
 		if offset+wmiRepositoryPageSize > uint64(len(data)) {
 			return nil, fmt.Errorf("wmi repository: index page %d is truncated", physical)
@@ -1082,7 +1102,11 @@ func parseWMIRepositoryRecords(section wmiMappingSection, data []byte) ([]wmiRep
 		}
 		cachePages[logical] = true
 		physical := physicalPages[logical]
-		page := data[int(physical)*wmiRepositoryPageSize : int(physical+1)*wmiRepositoryPageSize]
+		pageOffset := uint64(physical) * wmiRepositoryPageSize
+		if pageOffset+wmiRepositoryPageSize > uint64(len(data)) {
+			return nil, fmt.Errorf("wmi repository: object cache page %d is unmapped or truncated", logical)
+		}
+		page := data[pageOffset : pageOffset+wmiRepositoryPageSize]
 		if crc32.ChecksumIEEE(page) != checksum {
 			return nil, fmt.Errorf("wmi repository: object cache page %d checksum mismatch", logical)
 		}
@@ -1090,7 +1114,7 @@ func parseWMIRepositoryRecords(section wmiMappingSection, data []byte) ([]wmiRep
 	var records []wmiRepositoryRecord
 	continuations := make(map[int]bool)
 	for logical, physical := range physicalPages {
-		if logical == 0 {
+		if logical == 0 || physical == math.MaxUint32 {
 			continue
 		}
 		if continuations[logical] {
@@ -1140,6 +1164,9 @@ func parseWMIRepositoryRecords(section wmiMappingSection, data []byte) ([]wmiRep
 				amount := min(size-copied, uint32(wmiRepositoryPageSize)-within)
 				physicalPage := physicalPages[logicalPage]
 				physicalOffset := uint64(physicalPage)*wmiRepositoryPageSize + uint64(within)
+				if physicalOffset+uint64(amount) > uint64(len(data)) {
+					return nil, fmt.Errorf("wmi repository: object record %d crosses unmapped or truncated page %d", recordID, logicalPage)
+				}
 				copy(recordData[copied:copied+amount], data[physicalOffset:physicalOffset+uint64(amount)])
 				copied += amount
 			}
@@ -1240,6 +1267,9 @@ func parseWMIRepositoryIndex(section wmiMappingSection, data []byte) ([]wmiRepos
 	}
 	pages := make([]wmiRepositoryIndexPage, 0, len(physicalPages))
 	for logical, physical := range physicalPages {
+		if physical == math.MaxUint32 {
+			continue
+		}
 		offset := uint64(physical) * wmiRepositoryPageSize
 		if offset+wmiRepositoryPageSize > uint64(len(data)) {
 			return nil, fmt.Errorf("wmi repository: index page %d is truncated", physical)

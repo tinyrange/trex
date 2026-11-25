@@ -142,7 +142,7 @@ func (d *qemuDriver) Detach(context.Context) error {
 	if d.recording != nil && !d.recording.Stats().Done {
 		return fmt.Errorf("cannot detach a VM with an active recording")
 	}
-	if len(d.exports) != 0 {
+	if len(d.exportSnapshot(false)) != 0 {
 		return &vmmapi.Error{Code: vmmapi.ErrorUnsupported, Message: "cannot detach a VM whose NBD exports are owned by this runtime"}
 	}
 	d.mu.Lock()
@@ -252,8 +252,9 @@ func (v *qemuExtensionValue) blockStatsBuiltin(_ *starlark.Thread, _ *starlark.B
 	if err := starlark.UnpackArgs("block_stats", args, kwargs); err != nil {
 		return nil, err
 	}
-	values := make([]starlark.Value, len(v.driver.exports))
-	for index, export := range v.driver.exports {
+	exports := v.driver.exportSnapshot(false)
+	values := make([]starlark.Value, len(exports))
+	for index, export := range exports {
 		stats := nbdapi.StatsStarlark(export.server.Stats())
 		stats["index"] = starlark.MakeInt(index)
 		values[index] = starvalue.NewRecord(stats)

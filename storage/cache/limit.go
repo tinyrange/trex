@@ -19,7 +19,11 @@ func (c *Cache) SetLimit(maxBytes int64) {
 }
 
 func (c *Cache) evictLocked() {
-	for c.bytes > c.maxBytes {
+	c.evictToLocked(c.maxBytes)
+}
+
+func (c *Cache) evictToLocked(limit int64) {
+	for c.bytes > limit {
 		oldestElement := c.lru.Back()
 		if oldestElement == nil {
 			break

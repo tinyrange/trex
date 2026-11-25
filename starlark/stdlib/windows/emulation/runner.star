@@ -14,7 +14,7 @@ load("@stdlib//windows/selfreg:setupapi.star", "setupapi_plugin")
 load("@stdlib//windows/selfreg:advpack.star", "advpack_plugin")
 load("@stdlib//windows/selfreg:loadperf.star", "loadperf_plugin")
 load("@stdlib//windows/selfreg:facts.star", "class_ids")
-load("@stdlib//windows/selfreg:win32.star", "com_plugin", "common_controls_plugin", "environment_plugin", "event_log_plugin", "gdi32_plugin", "kernel32_plugin", "lz32_plugin", "msvcrt_plugin", "netapi_plugin", "ole32_plugin", "oleaut_plugin", "resource_plugin", "security_plugin", "shell32_plugin", "shell_plugin", "user32_plugin", "userenv_plugin", "version_plugin", "winsock_helper_plugin", "winsock_plugin")
+load("@stdlib//windows/selfreg:win32.star", "common_controls_plugin", "environment_plugin", "event_log_plugin", "gdi32_plugin", "kernel32_plugin", "lz32_plugin", "msvcrt_plugin", "netapi_plugin", "ole32_plugin", "oleaut_plugin", "resource_plugin", "security_plugin", "shell32_plugin", "shell_plugin", "user32_plugin", "userenv_plugin", "version_plugin", "winsock_helper_plugin", "winsock_plugin")
 load("@stdlib//windows/selfreg:msxml.star", "msxml_dom_provider")
 load("@stdlib//windows/selfreg:comcat.star", "component_categories_provider")
 load("@stdlib//windows/selfreg:wer.star", "wer_plugin")
@@ -318,6 +318,11 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
             output[path] = value
         return output
     available_type_libraries = dict(type_libraries)
+    # Standalone installed type libraries stay lazy and are parsed only when
+    # the original registrar names them. Availability is not registration.
+    for name, source in files.items():
+        if name.lower().endswith((".tlb", ".olb")):
+            available_type_libraries[name.replace("/", "\\").lower()] = source
     registered_type_libraries = []
     for name, image in module_images.items():
         normalized_name = name.replace("/", "\\").lower()
@@ -331,6 +336,7 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
     automation = oleaut_plugin(
         type_libraries = available_type_libraries,
         registered_type_libraries = registered_type_libraries,
+        registry = registry,
     )
     crt = msvcrt_plugin(kernel = kernel)
     exceptions = exception_plugin(kernel = kernel)
@@ -444,7 +450,6 @@ def run(file, module, export = "DllRegisterServer", arguments = [], prepare = No
         performance,
         ole,
         automation,
-        com_plugin(registry),
         crypto,
         cryptoapi,
         bcrypt,

@@ -9,8 +9,13 @@ import (
 )
 
 func decodeWMIModernInstance(raw []byte, layout *wmiClassLayout) (map[string]mofValue, error) {
+	return decodeWMIInstanceWithHash(raw, layout, wmiUpperUTF16SHA256)
+}
+
+func decodeWMIInstanceWithHash(raw []byte, layout *wmiClassLayout, nameHash func(string) string) (map[string]mofValue, error) {
 	c := wmiObjectCursor{data: raw}
-	hashRaw := c.take(128)
+	expectedHash := nameHash(layout.definition.class.Name)
+	hashRaw := c.take(uint64(len(expectedHash) * 2))
 	c.take(16)
 	body := c.sized()
 	if c.err != nil {
@@ -20,7 +25,7 @@ func decodeWMIModernInstance(raw []byte, layout *wmiClassLayout) (map[string]mof
 	if err != nil {
 		return nil, err
 	}
-	if hash != wmiUpperUTF16SHA256(layout.definition.class.Name) {
+	if hash != expectedHash {
 		return nil, fmt.Errorf("wmi object: instance class hash mismatch")
 	}
 	p := wmiObjectCursor{data: body}
@@ -92,7 +97,7 @@ func (r *wmiRepositoryFile) instancesBuiltin(_ *starlark.Thread, _ *starlark.Bui
 	for _, rec := range r.records {
 		records[[2]uint32{rec.logicalPage, rec.id}] = rec
 	}
-	prefix := "NS_" + wmiUpperUTF16SHA256(normalizeWMINamespace(namespace, `ROOT\CIMV2`)) + `\CI_` + wmiUpperUTF16SHA256(name) + `\IL_`
+	prefix := "NS_" + r.nameHash(normalizeWMINamespace(namespace, `ROOT\CIMV2`)) + `\CI_` + r.nameHash(name) + `\IL_`
 	var results []starlark.Value
 	for _, page := range r.pages {
 		for _, key := range page.keys {
@@ -101,7 +106,7 @@ func (r *wmiRepositoryFile) instancesBuiltin(_ *starlark.Thread, _ *starlark.Bui
 				p, _ := strconv.ParseUint(parts[1], 10, 32)
 				id, _ := strconv.ParseUint(parts[2], 10, 32)
 				rec := records[[2]uint32{uint32(p), uint32(id)}]
-				values, err := decodeWMIModernInstance(rec.data, layout)
+				values, err := decodeWMIInstanceWithHash(rec.data, layout, r.nameHash)
 				if err != nil {
 					return nil, fmt.Errorf("instance %s: %w", key, err)
 				}

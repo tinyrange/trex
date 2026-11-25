@@ -3,6 +3,7 @@ package windows
 import (
 	"bytes"
 	"encoding/binary"
+	"go.starlark.net/starlark"
 	"strings"
 	"testing"
 )
@@ -87,5 +88,54 @@ func TestWMIModernSampledPageChecksum(t *testing.T) {
 	page[512] ^= 0xff
 	if wmiModernPageCRC(page) == want {
 		t.Fatal("sampled byte did not affect page checksum")
+	}
+}
+
+func TestWMILegacyClassAndInstanceInspection(t *testing.T) {
+	doc, err := parseMOF(`
+class Parent {[key] string Name; boolean Enabled=TRUE;};
+[provider("Example")] class Child : Parent { uint32 Count; };
+instance of Child { Name="sample"; Count=42; };
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := buildWMIRepositoryDocuments([]*mofDocument{doc}, `root\cimv2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout, err := repository.classLayout(`root\cimv2`, "Child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(layout.properties) != 3 || layout.declaring[0] != "Parent" || layout.declaring[2] != "Child" {
+		t.Fatalf("lost inheritance: %#v", layout)
+	}
+	instances, err := repository.instancesBuiltin(nil, nil, starlark.Tuple{starlark.String(`root\cimv2`), starlark.String("Child")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := instances.(*starlark.List)
+	if list.Len() != 1 {
+		t.Fatalf("legacy instances: %v", list)
+	}
+	record := list.Index(0).(starlark.HasAttrs)
+	value, _ := record.Attr("properties")
+	properties := value.(*starlark.Dict)
+	for name, want := range map[string]starlark.Value{"Name": starlark.String("sample"), "Enabled": starlark.True, "Count": starlark.MakeInt(42)} {
+		got, found, err := properties.Get(starlark.String(name))
+		if err == nil && found {
+			got, err = got.(starlark.HasAttrs).Attr("value")
+		}
+		if err != nil || !found || got.String() != want.String() {
+			t.Fatalf("property %s: %v %v", name, got, err)
+		}
+	}
+	for _, rec := range repository.records {
+		if len(rec.data) > 64 {
+			if _, err := decodeWMIInstanceWithHash(rec.data, layout, wmiUpperUTF16SHA256); err == nil {
+				t.Fatal("legacy record accepted with SHA-256 instance identity")
+			}
+		}
 	}
 }

@@ -17,8 +17,8 @@ func syntheticSLTG() []byte {
 	w(0)
 	w(0xffff)
 	s("Example library")
-	w(0xffff)
-	d(0)
+	s("example.hlp")
+	d(2468)
 	w(1)
 	w(0x409)
 	d(0)
@@ -70,7 +70,7 @@ func TestParseSLTGTypeLib(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lib.name != "Example" || lib.description != "Example library" || lib.major != 2 || lib.minor != 3 || lib.language != 0x409 || lib.lcid != 0 || lib.flags != 1 || lib.syskind != 1 || lib.guid != "{A5064420-D541-11D4-9523-00B0D022CA64}" {
+	if lib.documentation != "Example library" || lib.helpFile != "example.hlp" || lib.helpContext != 2468 || lib.name != "Example" || lib.description != "Example library" || lib.major != 2 || lib.minor != 3 || lib.language != 0x409 || lib.lcid != 0 || lib.flags != 1 || lib.syskind != 1 || lib.guid != "{A5064420-D541-11D4-9523-00B0D022CA64}" {
 		t.Fatalf("library: %#v", lib)
 	}
 	if len(lib.typeInfo) != 1 || lib.typeInfo[0].name != "ITest" || lib.typeInfo[0].kind != 4 || lib.typeInfo[0].flags != 0x140 {

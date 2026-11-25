@@ -66,6 +66,7 @@ func Builtins() starlark.StringDict {
 		"cache":   starlark.NewBuiltin("cache", blockCacheBuiltin),
 		"device":  starlark.NewBuiltin("device", blockDeviceBuiltin),
 		"overlay": starlark.NewBuiltin("overlay", blockOverlayBuiltin),
+		"observe": starlark.NewBuiltin("observe", blockObserveBuiltin),
 		"view":    starlark.NewBuiltin("view", blockViewBuiltin),
 	}
 }

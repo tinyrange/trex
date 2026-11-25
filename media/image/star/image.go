@@ -22,6 +22,7 @@ const (
 func Builtins() starlark.StringDict {
 	return starlark.StringDict{
 		"compare": starlark.NewBuiltin("image.compare", imageCompareBuiltin),
+		"crop":    starlark.NewBuiltin("image.crop", imageCropBuiltin),
 		"decode":  starlark.NewBuiltin("image.decode", imageDecodeBuiltin),
 		"info":    starlark.NewBuiltin("image.info", imageInfoBuiltin),
 		"pixel":   starlark.NewBuiltin("image.pixel", imagePixelBuiltin),
