@@ -75,6 +75,8 @@ func Builtins() starlark.StringDict {
 		"switch":            starlark.NewBuiltin("switch", switchBuiltin),
 		"workspace":         starlark.NewBuiltin("workspace", workspaceBuiltin),
 		"start":             starlark.NewBuiltin("start", vmmStartBuiltin),
+		"resume_many":       starlark.NewBuiltin("resume_many", vmmCohortBuiltin("resume")),
+		"close_many":        starlark.NewBuiltin("close_many", vmmCohortBuiltin("close")),
 		"validate":          starlark.NewBuiltin("validate", vmmValidateBuiltin),
 	}
 }

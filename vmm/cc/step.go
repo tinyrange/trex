@@ -31,6 +31,8 @@ func (i inspection) step(_ *starlark.Thread, _ *starlark.Builtin, args starlark.
 		if state.Name != "paused" {
 			return fmt.Errorf("native stepping requires a paused VM")
 		}
+		d.entered = true
+		d.pc.invalidateRewind()
 		debug, ok := d.pc.cpu.(interface{ SetSingleStep(bool) error })
 		if !ok {
 			return fmt.Errorf("native single stepping unavailable")

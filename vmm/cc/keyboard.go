@@ -313,6 +313,7 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 				}
 			}
 			return d.call(ctx, func() error {
+				d.pc.invalidateRewind()
 				if d.pc.uhci != nil {
 					return d.pc.uhci.devices[1].point(uint16(input.X), uint16(input.Y), buttons, input.Wheel)
 				}
@@ -338,10 +339,16 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 				return &vmm.Error{Code: vmm.ErrorInvalid, Message: "unknown mouse button"}
 			}
 		}
-		return d.call(ctx, func() error { return d.pc.keyboard.mouseMove(int(input.X), -int(input.Y), buttons) })
+		return d.call(ctx, func() error {
+			d.pc.invalidateRewind()
+			return d.pc.keyboard.mouseMove(int(input.X), -int(input.Y), buttons)
+		})
 	}
 	if input.Kind == "key" {
-		return d.call(ctx, func() error { return d.pc.keyEvent(input.Key, input.Down) })
+		return d.call(ctx, func() error {
+			d.pc.invalidateRewind()
+			return d.pc.keyEvent(input.Key, input.Down)
+		})
 	}
 	if input.Kind != "keys" {
 		return &vmm.Error{Code: vmm.ErrorUnsupported, Message: "cc input supports key transitions and key chords"}
@@ -362,6 +369,7 @@ func (d *driver) Input(ctx context.Context, input vmm.Input) error {
 		return nil
 	}
 	if err := d.call(ctx, func() error {
+		d.pc.invalidateRewind()
 		for _, key := range input.Keys {
 			if err := d.pc.keyEvent(key, true); err != nil {
 				return err
