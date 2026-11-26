@@ -27,12 +27,17 @@ type PackageMetadataIndex struct {
 	catalogs map[string]string
 	open     func(string) (storage.Reader, error)
 	release  func(string)
+	cache    *ManifestCache
 }
 
 // NewPackageMetadataIndex indexes raw and express MUMs without evaluating parent
 // applicability or loading every manifest. Construct after the stage's content
 // resolvers have been bound; those resolvers are also used for express MUMs.
 func NewPackageMetadataIndex(stage *CumulativeStage) (*PackageMetadataIndex, error) {
+	return NewCachedPackageMetadataIndex(stage, nil)
+}
+
+func NewCachedPackageMetadataIndex(stage *CumulativeStage, cache *ManifestCache) (*PackageMetadataIndex, error) {
 	if stage == nil {
 		return nil, fmt.Errorf("package metadata requires a stage")
 	}
@@ -40,11 +45,15 @@ func NewPackageMetadataIndex(stage *CumulativeStage) (*PackageMetadataIndex, err
 	if err != nil {
 		return nil, err
 	}
-	return newPackageMetadataIndex(entries, stage.openAssemblyFile, stage.releaseAssemblyFile)
+	return newPackageMetadataIndexWithCache(entries, stage.openAssemblyFile, stage.releaseAssemblyFile, cache)
 }
 
 func newPackageMetadataIndex(entries []stageMetadataEntry, open func(string) (storage.Reader, error), release func(string)) (*PackageMetadataIndex, error) {
-	result := &PackageMetadataIndex{byName: map[string]PackageMetadataEntry{}, catalogs: map[string]string{}, open: open, release: release}
+	return newPackageMetadataIndexWithCache(entries, open, release, nil)
+}
+
+func newPackageMetadataIndexWithCache(entries []stageMetadataEntry, open func(string) (storage.Reader, error), release func(string), cache *ManifestCache) (*PackageMetadataIndex, error) {
+	result := &PackageMetadataIndex{byName: map[string]PackageMetadataEntry{}, catalogs: map[string]string{}, open: open, release: release, cache: cache}
 	names := graphStringStore{seen: make(map[string]string)}
 	for _, entry := range entries {
 		if !strings.EqualFold(path.Ext(entry.Name), ".cat") {
@@ -123,7 +132,7 @@ func (index *PackageMetadataIndex) readManifest(name string) (*AssemblyManifest,
 	if file.Size() < 0 || file.Size() > maximumAssemblyManifestSize {
 		return nil, nil, fmt.Errorf("package metadata %q exceeds manifest size bound", name)
 	}
-	parsed, err := parseAssemblyFile(file)
+	parsed, err := parseCachedAssemblyFile(file, index.cache)
 	if err != nil {
 		return nil, nil, fmt.Errorf("package metadata %q: %w", name, err)
 	}

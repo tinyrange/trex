@@ -9,12 +9,12 @@ import (
 
 func cbsInitialComponentsBuiltin(index *uup.CBSUpdateStateIndex) *starlark.Builtin {
 	return starlark.NewBuiltin("cbs_update_index.initial_component_states", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-		var values *starlark.Dict
+		var values starlark.Value
 		var packages *starlark.List
 		if err := starlark.UnpackArgs("initial_component_states", args, kwargs, "deployments", &values, "packages", &packages); err != nil {
 			return nil, err
 		}
-		if values.Len() > 1<<20 || packages.Len() > uup.MaxCBSPackageContexts {
+		if packages.Len() > uup.MaxCBSPackageContexts {
 			return nil, fmt.Errorf("CBS initial component input bound exceeded")
 		}
 		names := make([]string, packages.Len())
@@ -25,70 +25,18 @@ func cbsInitialComponentsBuiltin(index *uup.CBSUpdateStateIndex) *starlark.Built
 				return nil, fmt.Errorf("CBS initial package name must be string")
 			}
 		}
-		deployments := make([]uup.CBSInitialDeployment, 0, values.Len())
-		total, sources := 0, 0
-		for _, item := range values.Items() {
-			fields, ok := item[1].(*starlark.Dict)
-			if !ok {
-				return nil, fmt.Errorf("CBS initial deployment values must be dict")
-			}
-			identity, found, err := fields.Get(starlark.String("appid"))
-			if err != nil {
-				return nil, err
-			}
-			if !found {
-				return nil, fmt.Errorf("CBS initial deployment lacks appid")
-			}
-			data, ok := identity.(starlark.Bytes)
-			if !ok || len(data) > 64<<10 {
-				return nil, fmt.Errorf("CBS initial appid requires bounded bytes")
-			}
-			id, err := uup.ParseCSIIdentity([]byte(data))
-			if err != nil {
-				return nil, err
-			}
-			total += len(data)
-			if total > 256<<20 {
-				return nil, fmt.Errorf("CBS initial source bytes exceed bound")
-			}
-			d := uup.CBSInitialDeployment{Identity: id, Sources: map[string]uint32{}}
-			for _, pair := range fields.Items() {
-				name, ok := starlark.AsString(pair[0])
-				if !ok {
-					return nil, fmt.Errorf("CBS initial source name must be string")
-				}
-				if len(name) < 2 {
-					continue
-				}
-				var state uint32
-				switch name[:2] {
-				case "i!":
-					state = 0x70
-				case "s!":
-					state = 0x40
-				case "p!":
-					state = 0x20
-				default:
-					continue
-				}
-				data, ok := pair[1].(starlark.Bytes)
-				if !ok || len(data) > 64<<10 {
-					return nil, fmt.Errorf("CBS initial source requires bounded bytes")
-				}
-				total += len(data)
-				sources++
-				if total > 256<<20 || sources > 1<<20 {
-					return nil, fmt.Errorf("CBS initial source bytes/count exceed bound")
-				}
-				source, err := uup.ParseCBSDeploymentSource([]byte(data))
-				if err != nil {
-					return nil, err
-				}
-				if d.Sources[source.Primary] < state {
-					d.Sources[source.Primary] = state
-				}
-			}
-			deployments = append(deployments, d)
+		var deployments []uup.CBSInitialDeployment
+		var err error
+		switch input := values.(type) {
+		case *cbsResidentInventoryValue:
+			deployments = input.inventory.Deployments()
+		case *starlark.Dict:
+			deployments, err = cbsInitialDeployments(input)
+		default:
+			return nil, fmt.Errorf("CBS initial deployments require an inventory or dict")
+		}
+		if err != nil {
+			return nil, err
 		}
 		result, err := index.InitialComponentStates(names, deployments)
 		if err != nil {
@@ -119,4 +67,76 @@ func cbsInitialComponentsBuiltin(index *uup.CBSUpdateStateIndex) *starlark.Built
 		}
 		return out, nil
 	})
+}
+
+func cbsInitialDeployments(values *starlark.Dict) ([]uup.CBSInitialDeployment, error) {
+	if values.Len() > 1<<20 {
+		return nil, fmt.Errorf("CBS initial component input bound exceeded")
+	}
+	deployments := make([]uup.CBSInitialDeployment, 0, values.Len())
+	total, sources := 0, 0
+	for _, item := range values.Items() {
+		fields, ok := item[1].(*starlark.Dict)
+		if !ok {
+			return nil, fmt.Errorf("CBS initial deployment values must be dict")
+		}
+		identity, found, err := fields.Get(starlark.String("appid"))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, fmt.Errorf("CBS initial deployment lacks appid")
+		}
+		data, ok := identity.(starlark.Bytes)
+		if !ok || len(data) > 64<<10 {
+			return nil, fmt.Errorf("CBS initial appid requires bounded bytes")
+		}
+		id, err := uup.ParseCSIIdentity([]byte(data))
+		if err != nil {
+			return nil, err
+		}
+		total += len(data)
+		if total > 256<<20 {
+			return nil, fmt.Errorf("CBS initial source bytes exceed bound")
+		}
+		d := uup.CBSInitialDeployment{Identity: id, Sources: map[string]uint32{}}
+		for _, pair := range fields.Items() {
+			name, ok := starlark.AsString(pair[0])
+			if !ok {
+				return nil, fmt.Errorf("CBS initial source name must be string")
+			}
+			if len(name) < 2 {
+				continue
+			}
+			var state uint32
+			switch name[:2] {
+			case "i!":
+				state = 0x70
+			case "s!":
+				state = 0x40
+			case "p!":
+				state = 0x20
+			default:
+				continue
+			}
+			data, ok := pair[1].(starlark.Bytes)
+			if !ok || len(data) > 64<<10 {
+				return nil, fmt.Errorf("CBS initial source requires bounded bytes")
+			}
+			total += len(data)
+			sources++
+			if total > 256<<20 || sources > 1<<20 {
+				return nil, fmt.Errorf("CBS initial source bytes/count exceed bound")
+			}
+			source, err := uup.ParseCBSDeploymentSource([]byte(data))
+			if err != nil {
+				return nil, err
+			}
+			if d.Sources[source.Primary] < state {
+				d.Sources[source.Primary] = state
+			}
+		}
+		deployments = append(deployments, d)
+	}
+	return deployments, nil
 }

@@ -42,11 +42,12 @@ const (
 	wimMaximumMetadataBytes = int64(1 << 30)
 )
 
-func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func Builtin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	referenceValue := starlark.Value(starlark.None)
 	cacheBytes := int64(bytecache.DefaultBytes)
-	if err := starlark.UnpackArgs("wim", args, kwargs, "file", &value, "references?", &referenceValue, "cache_bytes?", &cacheBytes); err != nil {
+	var cacheIdentity string
+	if err := starlark.UnpackArgs("wim", args, kwargs, "file", &value, "references?", &referenceValue, "cache_bytes?", &cacheBytes, "verified_cache_identity?", &cacheIdentity); err != nil {
 		return nil, err
 	}
 	file, ok := value.(starfile.File)
@@ -70,7 +71,17 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 			references = append(references, reference)
 		}
 	}
-	return OpenWithReferencesCache(file, references, cacheBytes)
+	if cacheIdentity == "" {
+		return OpenWithReferencesCache(file, references, cacheBytes)
+	}
+	if len(references) != 0 {
+		return nil, fmt.Errorf("wim: a cache identity requires a single verified archive source")
+	}
+	derived, err := verifiedDerivedChunks(thread, cacheIdentity)
+	if err != nil {
+		return nil, err
+	}
+	return openWithReferencesDerived(file, references, cacheBytes, derived)
 }
 
 type Archive struct {
@@ -100,6 +111,7 @@ type Archive struct {
 	recentMisses     [64]string
 	missCount        uint64
 	cacheSource      uint64
+	derivedChunks    *derivedChunkCache
 }
 
 type image struct {
@@ -237,11 +249,15 @@ func OpenWithReferences(file storage.Reader, references []storage.Reader) (*Arch
 // OpenWithReferencesCache opens a referenced WIM set with an explicit bounded
 // in-memory decompressed-chunk cache. The cache is never persisted.
 func OpenWithReferencesCache(file storage.Reader, references []storage.Reader, maximumCacheBytes int64) (*Archive, error) {
+	return openWithReferencesDerived(file, references, maximumCacheBytes, nil)
+}
+
+func openWithReferencesDerived(file storage.Reader, references []storage.Reader, maximumCacheBytes int64, derived *derivedChunkCache) (*Archive, error) {
 	if maximumCacheBytes < 0 {
 		return nil, fmt.Errorf("wim: negative cache bound %d", maximumCacheBytes)
 	}
 	store := bytecache.New(maximumCacheBytes)
-	archive, err := OpenWithCache(file, store, 1)
+	archive, err := openWithCache(file, store, 1, true, derived)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +273,7 @@ func OpenWithReferencesCache(file storage.Reader, references []storage.Reader, m
 // it suitable for format inspection and reference-set validation.
 func OpenResourceIndexWithReferences(file storage.Reader, references []storage.Reader) (*Archive, error) {
 	store := bytecache.New(bytecache.DefaultBytes)
-	archive, err := openWithCache(file, store, 1, false)
+	archive, err := openWithCache(file, store, 1, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +297,7 @@ func (w *Archive) addReferenceIndexes(store *bytecache.Cache, references []stora
 		go func() {
 			defer group.Done()
 			for index := range jobs {
-				reference, err := openWithCache(references[index], store, uint64(index+2), false)
+				reference, err := openWithCache(references[index], store, uint64(index+2), false, nil)
 				results[index] = result{archive: reference, err: err}
 			}
 		}()
@@ -399,10 +415,10 @@ func (w *Archive) AddExternalResources(resources []ExternalResource) error {
 }
 
 func OpenWithCache(file storage.Reader, store *bytecache.Cache, source uint64) (*Archive, error) {
-	return openWithCache(file, store, source, true)
+	return openWithCache(file, store, source, true, nil)
 }
 
-func openWithCache(file storage.Reader, store *bytecache.Cache, source uint64, readImages bool) (*Archive, error) {
+func openWithCache(file storage.Reader, store *bytecache.Cache, source uint64, readImages bool, derived *derivedChunkCache) (*Archive, error) {
 	if file == nil {
 		return nil, fmt.Errorf("wim: nil source")
 	}
@@ -420,6 +436,9 @@ func openWithCache(file storage.Reader, store *bytecache.Cache, source uint64, r
 	if headerSize < wimHeaderSize {
 		return nil, fmt.Errorf("wim: unsupported header size %d", headerSize)
 	}
+	if derived == nil {
+		derived = derivedWIMMember(file)
+	}
 	w := &Archive{
 		file:            file,
 		flags:           binary.LittleEndian.Uint32(header[16:20]),
@@ -432,6 +451,7 @@ func openWithCache(file storage.Reader, store *bytecache.Cache, source uint64, r
 		xml:             parseWIMResource(header[72:96]),
 		boot:            parseWIMResource(header[96:120]),
 		cacheStore:      store, cacheSource: source,
+		derivedChunks: derived,
 	}
 	// Construction-only input table: runtime lookup uses byHash/history and
 	// decoded images. No lazy reader needs this second full resource inventory.
@@ -658,6 +678,9 @@ func (w *Archive) MetadataFiles() []NamedFile {
 	}
 	return result
 }
+
+// SourceSize reports the size of the archive's primary input.
+func (w *Archive) SourceSize() int64 { return w.file.Size() }
 
 func (w *Archive) String() string       { return "<wim>" }
 func (w *Archive) Type() string         { return "wim" }
@@ -1484,7 +1507,7 @@ func (w *Archive) readResource(resource wimResource) ([]byte, error) {
 			if index%workers != worker {
 				continue
 			}
-			data, err := w.readChunk(resource, chunk)
+			data, err := w.readDerivedChunk(resource, chunk)
 			if err != nil {
 				errs[worker] = err
 				return
@@ -1675,7 +1698,9 @@ func (w *Archive) cachedResourceChunk(resource wimResource, chunk wimChunk) ([]b
 		OriginalSize: resource.originalSize,
 		Index:        chunk.index,
 	}
-	return w.cacheStore.Get(key, func() ([]byte, error) { return w.readChunk(resource, chunk) })
+	return w.cacheStore.Get(key, func() ([]byte, error) {
+		return w.readDerivedChunk(resource, chunk)
+	})
 }
 
 func (w *Archive) virtualFile(name string) starfile.File {

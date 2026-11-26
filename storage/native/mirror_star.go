@@ -18,6 +18,7 @@ func mirrorFileBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starla
 	var urlValues starlark.Iterable
 	var cacheDirectory, cacheKey, digest string
 	var validateValue starlark.Value = starlark.None
+	var background bool
 	size := int64(-1)
 	maximum := int64(64 << 30)
 	timeout := 3600
@@ -25,7 +26,7 @@ func mirrorFileBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starla
 	if err := starlark.UnpackArgs("mirror_file", args, kwargs,
 		"urls", &urlValues, "cache", &cacheDirectory, "key", &cacheKey,
 		"sha256?", &digest, "size?", &size, "maximum?", &maximum, "timeout?", &timeout, "retries?", &retries,
-		"validate?", &validateValue); err != nil {
+		"validate?", &validateValue, "background?", &background); err != nil {
 		return nil, err
 	}
 	if timeout <= 0 || timeout > 24*60*60 {
@@ -77,9 +78,16 @@ func mirrorFileBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starla
 	if resourceErr == nil {
 		ctx = resources.Context()
 	}
-	file, err := cache.Open(ctx, MirrorRequest{
+	request := MirrorRequest{
 		URLs: urls, CacheKey: cacheKey, SHA256: digest, Size: size, MaximumBytes: maximum, Retries: retries, Validate: validate,
-	})
+	}
+	if background {
+		if validate != nil || digest == "" || resourceErr != nil {
+			return nil, fmt.Errorf("mirror_file: background requests require a SHA-256, a runtime, and no validation callback")
+		}
+		return startMirrorRequest(resources, cache, request)
+	}
+	file, err := cache.Open(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("mirror_file: %w", err)
 	}

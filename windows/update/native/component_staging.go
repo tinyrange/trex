@@ -178,6 +178,8 @@ func componentStagingRecordWithCache(stage *uup.CumulativeStage, plan uup.StageE
 		}
 		effect := plan.Files[i]
 		var file storage.Reader
+		size, digest, known := declaredStageContent(effect, declaredSizes, declaredHashes, normalize)
+		cacheOnDisk := known && size >= 4096 && effect.SourceMode == "payload" && effect.ExpectedSHA1 == nil
 		if lazy {
 			// Tokens may borrow a complete manifest string. Lazy readers need
 			// only this effect, not that manifest's backing storage.
@@ -185,7 +187,6 @@ func componentStagingRecordWithCache(stage *uup.CumulativeStage, plan uup.StageE
 			effect = *ownedEffect
 			// Borrow declared lengths without decoding unused payloads. Integrity
 			// is checked on first read and after shared-cache eviction.
-			size, digest, known := declaredStageContent(effect, declaredSizes, declaredHashes, normalize)
 			if !known {
 				var err error
 				file, err = stage.OpenPlannedFile(effect)
@@ -209,7 +210,16 @@ func componentStagingRecordWithCache(stage *uup.CumulativeStage, plan uup.StageE
 				openContent = func() (storage.Reader, error) { return snapshot, nil }
 			}
 			reader := effectStore.newReader(size, contentCache, bytecache.Key{Source: cacheSource, Index: contentKeys[i]}, openContent, digest, known)
+			reader.cacheOnDisk = cacheOnDisk
 			return starvalue.NewReader(effect.StorePath, reader), nil
+		}
+		if cacheOnDisk && contentCache.disk != nil {
+			reader := &reopenedStageReader{
+				size: size, expectedSHA256: &digest, cacheOnDisk: true,
+				key: bytecache.Key{Source: cacheSource, Index: contentKeys[i]}, compressed: contentCache,
+				open: func() (storage.Reader, error) { return stage.OpenPlannedFile(effect) },
+			}
+			return contentCache.get(reader)
 		}
 		var err error
 		file, err = stage.OpenPlannedFile(effect)
@@ -399,6 +409,7 @@ func componentStagingRecordWithCache(stage *uup.CumulativeStage, plan uup.StageE
 // Its opener must return the same verified immutable content on every call.
 type reopenedStageReader struct {
 	expectedSHA256 *[32]byte
+	cacheOnDisk    bool
 	verified       atomic.Bool
 	cache          *bytecache.Cache // Recovery records use the existing raw cache.
 	compressed     *stageContentCache

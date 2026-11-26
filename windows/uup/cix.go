@@ -1,12 +1,14 @@
 package uup
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"github.com/tinyrange/trex/internal/xmltoken"
 	"github.com/tinyrange/trex/storage"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -113,6 +115,10 @@ func ParseContainerIndex(reader io.Reader) (*ContainerIndex, error) {
 // Buffer only modest indexes; large indexes retain the streaming API's bounded
 // memory behavior. This buffer is per parse, never a disk or process-wide cache.
 func parseContainerIndexFile(file storage.Reader) (*ContainerIndex, error) {
+	return parseCachedContainerIndexFile(file, nil)
+}
+
+func parseCachedContainerIndexFile(file storage.Reader, cache *ManifestCache) (*ContainerIndex, error) {
 	size := file.Size()
 	if size < 0 {
 		return nil, fmt.Errorf("uup CIX: invalid source size")
@@ -124,7 +130,32 @@ func parseContainerIndexFile(file storage.Reader) (*ContainerIndex, error) {
 	if _, err := io.ReadFull(io.NewSectionReader(file, 0, size), data); err != nil {
 		return nil, err
 	}
-	return parseContainerIndex(xml.NewTokenDecoder(xmltoken.New(data, false)))
+	parse := func() (*ContainerIndex, error) {
+		return parseContainerIndex(xml.NewTokenDecoder(xmltoken.New(data, false)))
+	}
+	if cache == nil {
+		return parse()
+	}
+	key := storage.DerivedKey("windows.uup.cix/v1", sha256.Sum256(data))
+	var parsed *ContainerIndex
+	var parseErr error
+	record, err := cache.records.GetOrBuild(cache.ctx, key, maximumAssemblyRecord, func() ([]byte, error) {
+		parsed, parseErr = parse()
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		return packCBSRecord(reflect.ValueOf(*parsed))
+	})
+	if parsed != nil || parseErr != nil {
+		return parsed, parseErr
+	}
+	if err == nil {
+		var cached ContainerIndex
+		if err := unpackCBSRecord(record, reflect.ValueOf(&cached).Elem()); err == nil {
+			return &cached, nil
+		}
+	}
+	return parse()
 }
 
 func parseContainerIndex(decoder *xml.Decoder) (*ContainerIndex, error) {

@@ -16,6 +16,7 @@ import (
 type additionalCabinet struct {
 	feature string
 	file    storage.Reader
+	wim     *wim.Archive
 	msu     bool
 }
 
@@ -23,6 +24,10 @@ type additionalCabinet struct {
 // acquisition and outer-package authentication; CIX source/target hashes remain
 // mandatory in OpenCanonicalStage. This does not create installed CBS state.
 func unpackAdditionalCabinets(value *starlark.Dict, servicingOnly bool) ([]additionalCabinet, error) {
+	return unpackAdditionalPackages(value, servicingOnly, false)
+}
+
+func unpackAdditionalPackages(value *starlark.Dict, servicingOnly, msu bool) ([]additionalCabinet, error) {
 	if value == nil || value.Len() == 0 {
 		return nil, nil
 	}
@@ -36,12 +41,21 @@ func unpackAdditionalCabinets(value *starlark.Dict, servicingOnly bool) ([]addit
 		if !ok || name == "" || len(name) > 256 || strings.TrimSpace(name) != name || strings.ContainsAny(name, "\x00\r\n/\\") || names[strings.ToLower(name)] {
 			return nil, fmt.Errorf("update_media: additional cabinet feature IDs must be unique nonempty names")
 		}
-		file, ok := item[1].(starvalue.File)
-		if !ok || file.Size() <= 0 || file.Size() > maximumReferencePayload {
-			return nil, fmt.Errorf("update_media: additional cabinet %q requires a bounded nonempty file", name)
+		input := additionalCabinet{feature: name, msu: msu}
+		if archive, ok := item[1].(*wim.Archive); msu && ok {
+			if archive.SourceSize() <= 0 || archive.SourceSize() > maximumReferencePayload {
+				return nil, fmt.Errorf("update_media: additional MSU %q requires a bounded WIM source", name)
+			}
+			input.wim = archive
+		} else {
+			file, ok := item[1].(starvalue.File)
+			if !ok || file.Size() <= 0 || file.Size() > maximumReferencePayload {
+				return nil, fmt.Errorf("update_media: additional package %q requires a bounded nonempty file", name)
+			}
+			input.file = file
 		}
 		names[strings.ToLower(name)] = true
-		result = append(result, additionalCabinet{feature: name, file: file})
+		result = append(result, input)
 	}
 	return result, nil
 }
@@ -67,12 +81,9 @@ func appendAdditionalStages(stages []uup.UpdateStagePlan, cabinets []additionalC
 // Only the parser selection differs. Signature/hash verification stays with the
 // caller; native express reconstruction still verifies every content digest.
 func unpackAdditionalMSUs(value *starlark.Dict, servicingOnly bool) ([]additionalCabinet, error) {
-	result, err := unpackAdditionalCabinets(value, servicingOnly)
+	result, err := unpackAdditionalPackages(value, servicingOnly, true)
 	if err != nil {
 		return nil, fmt.Errorf("additional_msus: %w", err)
-	}
-	for i := range result {
-		result[i].msu = true
 	}
 	return result, nil
 }
@@ -84,9 +95,13 @@ func openAdditionalStage(input additionalCabinet, cache *uup.StageMetadataCache)
 	// Catalog MSUs use an outer WIM containing one express metadata WIM and
 	// one PSF. Ignore deployment helpers, but never silently choose between
 	// multiple content graphs. The caller must separately include its SSU.
-	outer, err := wim.OpenWithCache(input.file, bytecache.New(64<<20), 1)
-	if err != nil {
-		return nil, fmt.Errorf("catalog MSU: %w", err)
+	outer := input.wim
+	if outer == nil {
+		var err error
+		outer, err = wim.OpenWithCache(input.file, bytecache.New(64<<20), 1)
+		if err != nil {
+			return nil, fmt.Errorf("catalog MSU: %w", err)
+		}
 	}
 	entries, err := outer.List("/image1")
 	if err != nil {

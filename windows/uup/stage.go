@@ -1,6 +1,7 @@
 package uup
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -74,8 +75,15 @@ type stageMetadataArchive struct {
 // StageMetadataCache is one portable, bounded decompressed-chunk cache shared
 // by all WIM and CAB metadata payloads in a servicing sequence.
 type StageMetadataCache struct {
-	store *bytecache.Cache
-	next  atomic.Uint64
+	store  *bytecache.Cache
+	next   atomic.Uint64
+	inputs *ManifestCache
+}
+
+// WithDerivedCache enables durable parsing records for immutable stage inputs.
+// Set it before opening any stages sharing this cache.
+func (c *StageMetadataCache) WithDerivedCache(ctx context.Context, cache storage.DerivedCache) {
+	c.inputs = NewManifestCache(ctx, cache)
 }
 
 func NewStageMetadataCache(maximumBytes int64) (*StageMetadataCache, error) {
@@ -696,7 +704,7 @@ func OpenCumulativeStage(outer *wim.Archive) (*CumulativeStage, error) {
 		return nil, err
 	}
 	stage := &CumulativeStage{MetadataName: metadataName, PSFName: psfName, Metadata: metadata, PSF: psf}
-	if err := stage.openExpressGraph(); err != nil {
+	if err := stage.openExpressGraph(nil); err != nil {
 		return nil, err
 	}
 	return stage, nil
@@ -751,7 +759,7 @@ func OpenCumulativeStagePayloadsCache(metadataNames []string, metadataReaders []
 			stage.metadataCAB = metadataCAB
 		}
 	}
-	if err := stage.openExpressGraph(); err != nil {
+	if err := stage.openExpressGraph(cache.inputs); err != nil {
 		return nil, err
 	}
 	return stage, nil
@@ -798,7 +806,7 @@ func OpenCanonicalStageCache(name string, reader storage.Reader, cache *StageMet
 	if err != nil {
 		return nil, err
 	}
-	index, err := parseContainerIndexFile(indexFile)
+	index, err := parseCachedContainerIndexFile(indexFile, cache.inputs)
 	if err != nil {
 		return nil, fmt.Errorf("uup servicing: canonical cabinet %q ContainerIndex: %w", name, err)
 	}
@@ -1045,7 +1053,7 @@ func (s *CumulativeStage) materializeCanonical(name string, visiting map[string]
 	return s.retainTarget(key, target, maximumCanonicalRetainedTarget), nil
 }
 
-func (s *CumulativeStage) openExpressGraph() error {
+func (s *CumulativeStage) openExpressGraph(cache *ManifestCache) error {
 	entries, err := s.metadataEntries()
 	if err != nil {
 		return err
@@ -1066,7 +1074,7 @@ func (s *CumulativeStage) openExpressGraph() error {
 	if err != nil {
 		return fmt.Errorf("uup servicing: open PSF index: %w", err)
 	}
-	index, err := parseContainerIndexFile(indexFile)
+	index, err := parseCachedContainerIndexFile(indexFile, cache)
 	if err != nil {
 		return err
 	}
@@ -1121,7 +1129,7 @@ func (s *CumulativeStage) openExpressGraph() error {
 	if err != nil {
 		return err
 	}
-	history, err := parseContainerIndexFile(historyFile)
+	history, err := parseCachedContainerIndexFile(historyFile, cache)
 	if err != nil {
 		return err
 	}

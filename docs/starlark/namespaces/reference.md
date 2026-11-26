@@ -4492,7 +4492,7 @@ Hashes up to 65536 file, string or bytes inputs in input order using 1..8 parall
 
 `directory() -> directory`
 
-A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. path_names(lower=False, include_empty=True) returns an independent dictionary of all file and directory paths (including root and empty directories), without reading file contents. Values retain exact spelling; lower=True lowercases lookup keys and rejects colliding file names. Directory spelling follows the first sorted descendant file; empty directories fill remaining names in sorted order. include_empty=False returns only files and their ancestors. path_index(lower=False, include_empty=True) provides the same namespace as an immutable native mapping with string keys, get, keys, values and items; enumeration is sorted and returned lists are independent. It avoids dictionary construction for lookup-only callers. Later namespace changes do not alter the snapshot. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
+A mutable in-memory directory tree. write adds file content, mkdir creates directories, find retrieves an entry and remove deletes one. list_dir(path) returns sorted absolute paths of immediate files and directories (including empty directories); missing paths return an empty list. Paths are normalized but case-sensitive. Listings reflect mutations and are independent mutable lists. hardlink_paths(path) returns the sorted file paths of the same file object, including the input file, using the directory identity index. path_names(lower=False, include_empty=True) returns an independent dictionary of all file and directory paths (including root and empty directories), without reading file contents. Values retain exact spelling; lower=True lowercases lookup keys and rejects colliding file names. Directory spelling follows the first sorted descendant file; empty directories fill remaining names in sorted order. include_empty=False returns only files and their ancestors. path_index(lower=False, include_empty=True) provides the same namespace as an immutable native mapping with string keys, get, keys, values and items; enumeration is sorted and returned lists are independent. It avoids dictionary construction for lookup-only callers. Later namespace changes do not alter the snapshot. Attributes and security descriptors are stored as image-construction metadata; fat_short_path reports the FAT-compatible short-name path.
 
 `get_security(name)` returns the existing path's self-relative Windows security descriptor as immutable bytes, or `None` when no descriptor is assigned. Missing paths are errors. It does not synthesize inherited permissions or modify the tree.
 
@@ -4556,9 +4556,9 @@ Evaluates a module label and its explicit load dependencies in an independent lo
 
 ### `mirror_file`
 
-`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None) -> file`
+`mirror_file(urls, cache, key, sha256='', size=-1, maximum=64GiB, timeout=3600, retries=0, validate=None, background=False) -> file or request`
 
-Opens a cached download or tries the supplied mirror URLs, checking the requested size and SHA-256 when supplied. The cache and key identify persistent native-backend storage; cache='' uses the native user cache directory's trex folder. An optional validate(file) callback runs synchronously before publication and on cache hits: it must return None to accept or raise an error to reject. The borrowed read-only file is usable only during the callback; do not retain it or derived views. Failed validation prevents publication; invalid cached objects are downloaded again. The result is a file, not extracted contents.
+Opens a cached download or tries the supplied mirror URLs, checking the requested size and SHA-256 when supplied. The cache and key identify persistent native-backend storage; cache='' uses the native user cache directory's trex folder. An optional validate(file) callback runs synchronously before publication and on cache hits: it must return None to accept or raise an error to reject. The borrowed read-only file is usable only during the callback; do not retain it or derived views. Failed validation prevents publication; invalid cached objects are downloaded again. With background=True, a SHA-256 and runtime are required and validation callbacks are unavailable. The returned request has result() to obtain the same verified file. Otherwise the result is a file.
 
 ### `open`
 
@@ -4682,9 +4682,9 @@ Decodes a bounded version-0x30 Office UnityDB into frozen literal tables. Checks
 
 ### `archive.cab`
 
-`archive.cab(file, cache=True, lzx_checkpoint_bytes=0) -> cab`
+`archive.cab(file, cache=True, lzx_checkpoint_bytes=0, verified_cache_identity='') -> cab`
 
-Parses a Microsoft Cabinet file and exposes its members as file views. Folder decompression is shared when caching is enabled, so several entries in one compressed folder need not decode it repeatedly. Optional lzx_checkpoint_bytes (2..64 MiB, requires cache=True; zero disables) uses source-backed LZX block-boundary history checkpoints rather than a retained whole folder. First access decodes a complete folder, retaining compressed histories and SHA-256 hashes that bind future decoded frames to those initial bytes. It is not signature/trust verification. Sources must remain stable for member lifetimes. Checkpoint spacing is a target: a 24-bit LZX block can extend it; interleaved random access may cost more decoding than ordinary caching. Each member exposes frozen cab_metadata containing raw DOS date/time, attributes, folder index, set_id and cabinet index; reading metadata does not decompress the member.
+Parses a Microsoft Cabinet file and exposes its members as file views. Folder decompression is shared when caching is enabled, so several entries in one compressed folder need not decode it repeatedly. Optional lzx_checkpoint_bytes (2..64 MiB, requires cache=True; zero disables) uses source-backed LZX block-boundary history checkpoints rather than a retained whole folder. First access decodes a complete folder, retaining compressed histories and SHA-256 hashes that bind future decoded frames to those initial bytes. verified_cache_identity binds optional durable LZ4 member blocks to a separately verified, exact cabinet source and requires indexed LZX. It is not signature/trust verification. Sources must remain stable for member lifetimes. Checkpoint spacing is a target: a 24-bit LZX block can extend it; interleaved random access may cost more decoding than ordinary caching. Each member exposes frozen cab_metadata containing raw DOS date/time, attributes, folder index, set_id and cabinet index; reading metadata does not decompress the member.
 
 ### `archive.cab_set`
 
@@ -4988,9 +4988,9 @@ Reads a complete single-volume VMS BACKUP block stream, validating header CRC-16
 
 ### `archive.wim`
 
-`archive.wim(file, references=[], cache_bytes=384MiB) -> wim`
+`archive.wim(file, references=[], cache_bytes=384MiB, verified_cache_identity='') -> wim`
 
-Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image. Nonnegative cache_bytes bounds retained buffers shared with reference archives; zero disables retention. Large solid LZMS archives split that same budget between decoded chunks, a small decoded hot-file tier and compressed in-memory blobs (whole small files and at most 32MiB per segment of large files), keyed by the complete WIM SHA-1 and segment ordinal. No decoded data is persisted. cache_stats.bytes/entries/peak_bytes aggregate these tiers; blob_bytes counts encoded retained bytes, blob_hits/blob_loads count compressed-tier accesses, and recent_files is a bounded chronological window of the last 64 cold file reads. prefetch(paths) validates at most 200000 explicit file paths before payload reads, deduplicates content, and prepares eligible solid files in physical chunk order with at most four joined workers; returns the unique source byte count. Prefetch does not pin entries or exceed the cache budget, and ordinary non-solid files are not eagerly read. Large multi-chunk reads use bounded parallel decoding and join all workers before returning. Entry and file metadata expose tagged_items as ordered tag/data records, retaining unknown extensions. apply preserves Windows tag-2 extended attributes (names, flags and value bytes) for supporting filesystem builders; it does not synthesize trust verdicts or apply unknown tags.
+Parses a Windows Imaging Format archive and exposes its image contents through file views. The archive reader handles its supported compression internally without mounting an image. Nonnegative cache_bytes bounds retained buffers shared with reference archives; zero disables retention. Large solid LZMS archives split that same budget between decoded chunks, a small decoded hot-file tier and compressed in-memory blobs (whole small files and at most 32MiB per segment of large files), keyed by the complete WIM SHA-1 and segment ordinal. A derived cache may reuse decoded chunks when the caller supplies a verified cache identity covering a single exact archive source. This requires independent verification of the source. cache_stats.bytes/entries/peak_bytes aggregate these tiers; blob_bytes counts encoded retained bytes, blob_hits/blob_loads count compressed-tier accesses, and recent_files is a bounded chronological window of the last 64 cold file reads. prefetch(paths) validates at most 200000 explicit file paths before payload reads, deduplicates content, and prepares eligible solid files in physical chunk order with at most four joined workers; returns the unique source byte count. Prefetch does not pin entries or exceed the cache budget, and ordinary non-solid files are not eagerly read. Large multi-chunk reads use bounded parallel decoding and join all workers before returning. Entry and file metadata expose tagged_items as ordered tag/data records, retaining unknown extensions. apply preserves Windows tag-2 extended attributes (names, flags and value bytes) for supporting filesystem builders; it does not synthesize trust verdicts or apply unknown tags.
 
 ### `archive.xar`
 
@@ -5432,15 +5432,15 @@ Frames one RFC1055 SLIP packet with leading/trailing END and escaped END/ESC byt
 
 ### `binary.snapshot`
 
-`binary.snapshot(file, maximum=512MiB, cache_bytes=64KiB) -> file`
+`binary.snapshot(file, maximum=512MiB, cache_bytes=64KiB, fast=False) -> file`
 
-Copies a stable source file into an independent immutable in-memory snapshot, using 64KiB compressed chunks (raw when compression would expand them). Reads the complete source sequentially within maximum; no host intermediates or source references remain. cache_bytes bounds the per-snapshot decoded read cache, not encoded storage or transient decoder memory. Source must not change during copying. This preserves bytes, not authenticity: retain source hash and format validation. Returned file supports ordinary random access, not a serialized archive format.
+Copies a stable source file into an independent immutable in-memory snapshot using 64KiB chunks. fast=True uses LZ4 for random reads. Stores raw bytes when compression would expand the chunk. Reads the complete source sequentially within maximum; no host intermediates or source references remain. cache_bytes bounds the per-snapshot decoded read cache, not encoded storage or transient decoder memory. Source must not change during copying. This preserves bytes, not authenticity: retain source hash and format validation. Returned file supports ordinary random access, not a serialized archive format.
 
 ### `binary.snapshot_many`
 
-`binary.snapshot_many(files, maximum=512MiB, cache_bytes=1MiB) -> list`
+`binary.snapshot_many(files, maximum=512MiB, cache_bytes=1MiB, fast=False) -> list`
 
-Copies at most 65536 stable files into independent immutable in-memory snapshots in input order. maximum bounds their aggregate size, checked before reading; cache_bytes is one shared decoded-byte budget for the whole batch. Uses compressed 64KiB chunks with deduplication within the batch; returned files retain neither sources nor encoder. Encoded bytes and transient memory are outside the decoded cache budget. Sources must remain unchanged during copying. Preserves bytes, not authenticity; retain source and format validation.
+Copies at most 65536 stable files into independent immutable in-memory snapshots in input order. maximum bounds their aggregate size, checked before reading; cache_bytes is one shared decoded-byte budget for the whole batch. Uses compressed 64KiB chunks with deduplication within the batch. fast=True uses LZ4 to reduce random-read latency. Returned files retain neither sources nor encoder. Encoded bytes and transient memory are outside the decoded cache budget. Sources must remain unchanged during copying. Preserves bytes, not authenticity; retain source and format validation.
 
 ### `binary.software_update_catalog`
 
@@ -5609,6 +5609,12 @@ Directly boots an original amd64 OpenBSD, FreeBSD or NetBSD kernel in Linux/amd6
 `cc.kernel_symbol(kernel, address) -> symbol or None`
 
 Read-only nearest original executable-section ELF symbol lookup for a stopped kernel address. Returns name, address, size and offset, or None when no preceding symbol exists. A nonzero offset is a nearest-symbol observation, not an exact call-site assertion. Input is bounded to 256 MiB and symbol/string sections to 32 MiB. Does not relocate, execute or patch bytes.
+
+### `cc.prepare_ram`
+
+`cc.prepare_ram(ram, shared_workers=False) -> cc.prepared_ram`
+
+Seals a portable RAM image in anonymous Linux x86-64 memory for a private copy-on-write AMD64 handoff. shared_workers=True selects single-vCPU direct handoffs with fixed shared workers and no legacy PIT. Their cc.v1 extension can prepare_rewind on a fresh paused guest without channels, rewind from a paused breakpoint before device activity, and read private_resident_ram in bytes. Rewind restores CPU state and the cumulative written-page set. rewind_run(address, data) restores, patches RAM and runs synchronously to the installed execution breakpoint without resume and pause events. sample_physical observes live RAM with relaxed consistency. write_physical patches paused RAM and records writes for an armed rewind.
 
 ### `channel.expose_tcp`
 
@@ -6608,6 +6614,12 @@ Lists the VMM backends registered in this runtime and their advertised capabilit
 
 Describes a named VM byte channel of the requested kind. required determines whether lack of backend support is a validation failure.
 
+### `vmm.close_many`
+
+`vmm.close_many(sessions)`
+
+Closes distinct VM sessions concurrently and joins every close before returning. Reports operation errors after joining.
+
 ### `vmm.darwin_arm64_boot`
 
 `vmm.darwin_arm64_boot(kernel, device_tree, memory, memory_base, virtual_base, command_line='-v', entropy=None, payloads=None, nvram=None) -> vmm_arm64_boot`
@@ -6661,6 +6673,12 @@ Creates a guest MMIO region with explicit address/size, optional read(offset,siz
 `vmm.network(kind, name='net0', required=True, switch=None, mac='')`
 
 Describes a named guest network connection and whether its requested kind is required. The selected backend implements the transport.
+
+### `vmm.resume_many`
+
+`vmm.resume_many(sessions)`
+
+Resumes distinct VM sessions concurrently and joins every request before returning. Reports operation errors after joining.
 
 ### `vmm.start`
 
@@ -6896,6 +6914,12 @@ Builds a native RSA/SHA-256 signed CTL catalog from a dictionary of simple filen
 
 Verifies single-signer RSA/SHA-256 Windows catalog SignedData integrity and recognized Microsoft RFC3161 timestamps. Supports directly carried PKCS#7 CTLs and CMS OCTET STRING encapsulation with distinct signed hash domains. Returns the same signer, certificates, signature, unsigned_attributes, timestamp and digest_algorithm fields as pe_signature. Requires a parseable catalog membership index, bounds input to 64 MiB and certificate count to 32. Does not establish certificate-chain, revocation, publisher or Windows trust-provider policy. No host roots, clock or network are consulted.
 
+### `windows.cbs_cached_phases`
+
+`windows.cbs_cached_phases(software, components, files, inputs, work_limit, build) -> tuple`
+
+Reuses compiled CBS stage and install declarations for immutable SOFTWARE CBS declarations, exact COMPONENTS and package bytes, ordered caller inputs and the work limit. The caller inputs must bind planning semantics, roots, editions and ordered source identities. The build callback returns stage package names and a captured deployment plan. Catalog membership and effect publication run independently.
+
 ### `windows.cbs_component_owners`
 
 `windows.cbs_component_owners(installed, pinned, changes) -> record`
@@ -6943,6 +6967,12 @@ Evaluates CBS parent states without modifying an image. packages is a list of di
 `windows.cbs_parent_update_scopes(packages, candidates) -> list`
 
 Selects available parent packages for CBS update-name queries without modifying an image. packages is a list of dicts with manifest (file or bytes) and comparisons (one explicit runtime descriptor per parent block in preorder). Descriptors require major_minor, build, revision (EQ/NE/GE/GT/LE/LT) and ignore_revision. candidates is a list of canonical package identity strings. Returns one sorted, deduplicated list of matching package identities per input. Exact top-level references use exact lookup even when revision is ignored; ranged top-level references seed related families, then any root or nested rule can accept a candidate. Nested-only families do not seed candidates. Missing packages are skipped. This is not parent-state reduction: no state filter, disposition, standalone bypass or staged-Baseline revision relaxation applies. It does not enumerate updates, reproduce native release-type ordering, populate runtime descriptors, or perform a servicing transaction. Lists are bounded to 131072 inputs and 1048576 total results; manifests to 32 MiB each and 256 MiB total. Errors return no partial results. No host tools, registry writes or network access.
+
+### `windows.cbs_resident_inventory`
+
+`windows.cbs_resident_inventory(components) -> immutable resident CBS inventory`
+
+Reads canonical deployments and component owner elevations from an immutable COMPONENTS hive snapshot. Returns source declarations for cbs_update_index.with_components and initial_component_states. Read-only parsing may reuse the execution's content-addressed derived cache.
 
 ### `windows.cbs_update_index`
 
@@ -7120,6 +7150,12 @@ Hashes bounded full COMPONENTS identity/appid bytes using the native non-cryptog
 `windows.csi_mof_equivalent(left, right) -> bool`
 
 Compares ordered CSI MOF declarations and referenced primary-file hashes using the observed WCP MofDiffer predicate. Inputs are XML file/string/bytes, at most 16 MiB each. Supports ASCII file lookup, SHA1/SHA256 nested hashes with zero or one Identity transform and legacy SHA1; unsupported policy and ambiguous file names fail closed. Declaration strings are case-sensitive, file lookup is case-insensitive, and either comparable hash mismatch vetoes equality. The native uninstallmof branch compares its declaration string but rechecks the primary file hash. True is only predicate equivalence: it does not derive installer queue/inspection policy, execute MOF registration, verify payload authenticity or apply state.
+
+### `windows.csi_resident_sources`
+
+`windows.csi_resident_sources(components, selected) -> list`
+
+Reads and validates native p!, i! and s! source declarations from an immutable COMPONENTS hive. Returns selected (folded identity, exact identity, source rows) in hive order. May reuse parsed declarations bound to the exact snapshot digest.
 
 ### `windows.csi_source_plan`
 

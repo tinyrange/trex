@@ -20,6 +20,12 @@ const (
 // The host supplies magic; the driver publishes active last. Pixels are normal
 // guest RAM. Capture must run while the guest CPU is stopped.
 func Capture(memory []byte) (*image.RGBA, error) {
+	return CaptureInto(memory, nil)
+}
+
+// CaptureInto reuses an exclusively owned destination when it has room.
+// Like Capture, it requires the guest to remain stopped while reading pixels.
+func CaptureInto(memory []byte, dst *image.RGBA) (*image.RGBA, error) {
 	if len(memory) < Pixels || binary.LittleEndian.Uint32(memory) != Magic || binary.LittleEndian.Uint32(memory[4:]) == 0 {
 		return nil, nil
 	}
@@ -30,7 +36,15 @@ func Capture(memory []byte) (*image.RGBA, error) {
 	if !validPixelLayout(w, h, stride, format, len(memory)-Pixels) {
 		return nil, fmt.Errorf("invalid shared framebuffer layout")
 	}
-	out := image.NewRGBA(image.Rect(0, 0, int(w), int(h)))
+	rect := image.Rect(0, 0, int(w), int(h))
+	out := dst
+	if out == nil || cap(out.Pix) < int(w*h*4) {
+		out = image.NewRGBA(rect)
+	} else {
+		out.Rect = rect
+		out.Stride = rect.Dx() * 4
+		out.Pix = out.Pix[:int(w*h*4)]
+	}
 	for y := uint64(0); y < h; y++ {
 		if format == 2 {
 			src := memory[Pixels+y*stride : Pixels+y*stride+(w+7)/8]

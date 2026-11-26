@@ -20,11 +20,12 @@ import (
 	"go.starlark.net/starlark"
 )
 
-func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func Builtin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	cache := true
 	checkpointBytes := 0
-	if err := starlark.UnpackArgs("cab", args, kwargs, "file", &value, "cache?", &cache, "lzx_checkpoint_bytes?", &checkpointBytes); err != nil {
+	var identity string
+	if err := starlark.UnpackArgs("cab", args, kwargs, "file", &value, "cache?", &cache, "lzx_checkpoint_bytes?", &checkpointBytes, "verified_cache_identity?", &identity); err != nil {
 		return nil, err
 	}
 	file, ok := value.(starfile.File)
@@ -39,10 +40,16 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 		return nil, err
 	}
 	archive.lzxCheckpointBytes = checkpointBytes
+	if identity != "" {
+		if err := archive.bindDerivedLZX(thread, identity); err != nil {
+			return nil, err
+		}
+	}
 	return archive, nil
 }
 
 type Archive struct {
+	derivedLZX         *derivedLZXCache
 	file               storage.Reader
 	files              []fileRecord
 	fileIndex          map[string]int
@@ -486,6 +493,9 @@ func (f *Entry) ReadAt(p []byte, off int64) (int, error) {
 		return f.readMSZIPAt(p, off)
 	}
 	if f.indexedLZX() {
+		if f.archive.derivedLZX != nil && f.Size() >= 4096 {
+			return f.readDerivedLZXAt(p, off)
+		}
 		return f.readIndexedLZXAt(p, off)
 	}
 	if f.packedFolder() {

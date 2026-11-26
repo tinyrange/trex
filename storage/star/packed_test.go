@@ -10,6 +10,27 @@ import (
 	bytecache "github.com/tinyrange/trex/storage/cache"
 )
 
+func TestFastPackedFileCrossChunkRead(t *testing.T) {
+	store, err := NewFastPackedFileStore(PackedChunkBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := bytes.Repeat([]byte("catalog index"), PackedChunkBytes)
+	file, err := store.Pack("catalog", plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := file.(*PackedFile).chunks[0]
+	if !chunk.lz4 || chunk.raw {
+		t.Fatal("expected an LZ4 block")
+	}
+	offset := PackedChunkBytes - 17
+	got := make([]byte, 63)
+	if n, err := file.ReadAt(got, int64(offset)); n != len(got) || err != nil || !bytes.Equal(got, plain[offset:offset+len(got)]) {
+		t.Fatalf("cross-chunk read = %d, %v", n, err)
+	}
+}
+
 func TestRetainedFileRandomReadsEvictionAndOwnership(t *testing.T) {
 	store, err := NewPackedFileStore(64<<20, true)
 	if err != nil {

@@ -251,21 +251,7 @@ def project_servicing_sources(base, image, closure, population, analysis, hives=
     Driver references still require their separate operation queue. No writes
     are applied and no composition/status/payload completion is inferred.
     """
-    hive = windows.hive(hives["COMPONENTS"] if hives != None else base[image + "/Windows/System32/config/COMPONENTS"])
     records = {}
-    for key in hive.find("/CanonicalData/Deployments").children:
-        values = key.value_records
-        identity = values["appid"].raw
-        identity_key = str(identity).lower()
-        if identity_key in records:
-            fail("duplicate exact CSI source deployment")
-        before = []
-        for name, value in values.items():
-            if name[:2].lower() in ["p!", "i!", "s!"]:
-                before.append(dict(name = name, type = value.type, data = value.raw))
-        # Validate even unchanged owners; omitting non-CBS sources is unsafe.
-        windows.csi_source_plan(before, [])
-        records[identity_key] = dict(identity = identity, baseline = before, pin = [], stage = [], install = [], driver = False)
     files = {name.lower(): file for name, file in closure["files"].items()}
     payloads = {}
     parsed_packages = {}
@@ -297,10 +283,19 @@ def project_servicing_sources(base, image, closure, population, analysis, hives=
             row["stage"].append(dict(kind = 4, delete = False, data = data))
         if action.action in [3, 4]:
             row["install"].append(dict(kind = 2, delete = action.action == 4, data = data))
+    hive = windows.hive(hives["COMPONENTS"] if hives != None else base[image + "/Windows/System32/config/COMPONENTS"], snapshot=True)
+    seen = {}
+    order = []
+    for identity_key, identity, before in windows.csi_resident_sources(hive, records):
+        row = records[identity_key]
+        row["identity"] = identity
+        row["baseline"] = before
+        seen[identity_key] = True
+        order.append(identity_key)
+    order.extend([key for key in records if key not in seen])
     result = {}
-    for identity_key, row in records.items():
-        if not row["pin"] and not row["stage"] and not row["install"]:
-            continue
+    for identity_key in order:
+        row = records[identity_key]
         state = {v["name"].lower(): v for v in row["baseline"]}
         plans = {}
         for phase in ["pin", "stage", "install"]:

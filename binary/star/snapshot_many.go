@@ -10,8 +10,9 @@ import (
 // every source and the total bound before starting any reads.
 func binarySnapshotManyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var values starlark.Iterable
+	fast := false
 	maximum, cacheBytes := int64(defaultBinaryBuilderLimit), int64(1<<20)
-	if err := starlark.UnpackArgs("binary.snapshot_many", args, kwargs, "files", &values, "maximum?", &maximum, "cache_bytes?", &cacheBytes); err != nil {
+	if err := starlark.UnpackArgs("binary.snapshot_many", args, kwargs, "files", &values, "maximum?", &maximum, "cache_bytes?", &cacheBytes, "fast?", &fast); err != nil {
 		return nil, err
 	}
 	if maximum < 0 || cacheBytes < 0 || cacheBytes > maximum {
@@ -37,7 +38,11 @@ func binarySnapshotManyBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args sta
 		total += size
 		files = append(files, f)
 	}
-	store, err := starfile.NewPackedFileStore(cacheBytes, true)
+	newStore := starfile.NewPackedFileStore
+	if fast {
+		newStore = starfile.NewFastPackedFileStore
+	}
+	store, err := newStore(cacheBytes, true)
 	if err != nil {
 		return nil, err
 	}

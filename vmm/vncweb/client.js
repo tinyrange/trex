@@ -5,6 +5,10 @@ const MAX_BUFFER = 70 * 1024 * 1024;
 const DESKTOP_SIZE = -223;
 const EXTENDED_DESKTOP_SIZE = -308;
 const POINTER_TYPE = -257;
+const EMPTY_BUFFER = new Uint8Array();
+const IDLE_FRAME_DELAY = 50;
+const INTERACTIVE_FRAME_DELAY = 16;
+const INTERACTION_WINDOW = 500;
 
 // The current shared Windows framebuffer reserves 8 MiB. Keep viewport-driven
 // requests within its 1080p limit; wire-level requests remain exact dimensions.
@@ -23,20 +27,28 @@ export function viewportSize(width, height) {
 export class RFB {
   constructor(send, frame, resize, ready, pointerMode = () => {}) {
     Object.assign(this, {send, frame, resize, ready, pointerMode});
-    this.buffer = new Uint8Array();
+    this.buffer = EMPTY_BUFFER;
     this.state = 'version';
     this.rectangles = 0;
+    this.interactiveUntil = 0;
   }
 
   feed(data) {
     if (this.buffer.length + data.length > MAX_BUFFER) {
       throw Error('RFB receive limit exceeded');
     }
-    const joined = new Uint8Array(this.buffer.length + data.length);
-    joined.set(this.buffer);
-    joined.set(data, this.buffer.length);
-    this.buffer = joined;
+    const borrowed = this.buffer.length === 0;
+    if (borrowed) {
+      this.buffer = data;
+    } else {
+      const joined = new Uint8Array(this.buffer.length + data.length);
+      joined.set(this.buffer);
+      joined.set(data, this.buffer.length);
+      this.buffer = joined;
+    }
     while (this.parse()) {}
+    if (this.buffer.length === 0) this.buffer = EMPTY_BUFFER;
+    else if (borrowed) this.buffer = this.buffer.slice();
   }
 
   take(n) {
@@ -177,9 +189,22 @@ export class RFB {
     this.resize(width, height);
   }
 
-  next() {
+  next(delay = performance.now() < this.interactiveUntil ? INTERACTIVE_FRAME_DELAY : IDLE_FRAME_DELAY) {
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.request(true), 50);
+    if (this.closed) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.request(true);
+    }, delay);
+  }
+
+  prioritiseInput() {
+    const now = performance.now();
+    const wasIdle = now >= this.interactiveUntil;
+    this.interactiveUntil = now + INTERACTION_WINDOW;
+    // Advance a scheduled poll when input first arrives. While a request is
+    // in flight, its response will schedule the next update at the faster rate.
+    if (wasIdle && this.timer !== undefined) this.next(0);
   }
 
   close() {
@@ -232,6 +257,7 @@ export class RFB {
     bytes[1] = +down;
     new DataView(bytes.buffer).setUint32(4, key);
     this.send(bytes);
+    this.prioritiseInput();
   }
 
   pointer(x, y, buttons) {
@@ -249,6 +275,7 @@ export class RFB {
     view.setUint16(2, x);
     view.setUint16(4, y);
     this.send(bytes);
+    this.prioritiseInput();
   }
 }
 

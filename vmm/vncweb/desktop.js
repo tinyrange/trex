@@ -2,8 +2,10 @@ import {RFB, keySym} from './client.js';
 
 const canvas = document.querySelector('#screen');
 const context = canvas.getContext('2d');
+const displayStatus = document.querySelector('#display-status');
 let socket, rfb, active = false, absolute = false, buttons = 0;
 let x = 32768, y = 32768, retry, closed = false;
+let receivedFrame = false;
 const held = new Set();
 const buttonMask = button => [1, 2, 4][button] || 0;
 function fit() {
@@ -41,6 +43,8 @@ function connect() {
     bytes => { if (ws.readyState === WebSocket.OPEN) ws.send(bytes); },
     (x, y, width, height, pixels) => {
       context.putImageData(new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.length), width, height), x, y);
+      receivedFrame = true;
+      displayStatus.hidden = true;
     },
     (width, height) => { canvas.width = width; canvas.height = height; fit(); },
     () => { active = true; canvas.focus(); client.pointer(x, y, 0); },
@@ -67,8 +71,11 @@ function connect() {
     x = y = 32768;
     canvas.style.cursor = '';
     if (document.pointerLockElement === canvas) document.exitPointerLock();
-    // Also covers the interval while the VM is being constructed. No UI chrome.
-    if (!closed) retry = setTimeout(connect, 1500);
+    if (!closed) {
+      displayStatus.textContent = receivedFrame ? 'Reconnecting to the display. Your session may still be running.' : 'Waiting for the display. This can take a moment during startup.';
+      displayStatus.hidden = false;
+      retry = setTimeout(connect, 1500);
+    }
   };
 }
 function position(event) {

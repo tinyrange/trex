@@ -64,11 +64,13 @@ type session struct {
 	extendedResize, resizeAdvertised        bool
 	screenID, screenFlags                   uint32
 	previous                                *image.RGBA
+	spare                                   *image.RGBA
 	px, py                                  int
 	pointer                                 bool
 	pointerTypes, pointerTypeSent, absolute bool
 	zlibEncoding                            bool
 	compressed                              bytes.Buffer
+	raw                                     bytes.Buffer
 	compressor                              *zlib.Writer
 	pixelRow                                []byte
 }
@@ -79,6 +81,18 @@ func (s *session) read(n int) ([]byte, error) {
 	return b, err
 }
 func (s *session) write(b []byte) error { return channel.WriteAll(s.ch, b) }
+
+func (s *session) captureFrame() (*image.RGBA, error) {
+	if source, ok := s.display.(vmm.ReusableDisplaySource); ok {
+		frame, err := source.CaptureInto(s.ctx, s.spare)
+		if err == nil {
+			s.spare = frame
+		}
+		return frame, err
+	}
+	return s.display.Capture(s.ctx)
+}
+
 func (s *session) handshake() error {
 	if err := s.write([]byte("RFB 003.008\n")); err != nil {
 		return err
@@ -106,7 +120,7 @@ func (s *session) handshake() error {
 	if _, err = s.read(1); err != nil {
 		return err
 	}
-	f, err := s.display.Capture(s.ctx)
+	f, err := s.captureFrame()
 	if err != nil {
 		return err
 	}
@@ -264,7 +278,7 @@ func (s *session) setDesktopSize() error {
 		if err != nil {
 			status = 3
 		} else {
-			f, err := s.display.Capture(s.ctx)
+			f, err := s.captureFrame()
 			if err != nil {
 				return err
 			}
@@ -402,7 +416,7 @@ func validFormat(p []byte) error {
 	return nil
 }
 func (s *session) update(req []byte) error {
-	f, err := s.display.Capture(s.ctx)
+	f, err := s.captureFrame()
 	if err != nil {
 		return err
 	}
@@ -410,11 +424,14 @@ func (s *session) update(req []byte) error {
 		return err
 	}
 	if s.extendedResize {
-		ready, err := s.resizeReady()
-		if err != nil {
-			return err
+		ready := s.resizeAdvertised
+		if !ready {
+			ready, err = s.resizeReady()
+			if err != nil {
+				return err
+			}
 		}
-		if (ready && !s.resizeAdvertised) || (s.resizeAdvertised && (req[0] == 0 || f.Rect.Dx() != s.width || f.Rect.Dy() != s.height)) {
+		if ready && (!s.resizeAdvertised || req[0] == 0 || f.Rect.Dx() != s.width || f.Rect.Dy() != s.height) {
 			s.resizeAdvertised = true
 			s.width, s.height = f.Rect.Dx(), f.Rect.Dy()
 			s.previous = nil
@@ -504,6 +521,9 @@ func (s *session) update(req []byte) error {
 	be.PutUint16(b[8:], uint16(r.Dx()))
 	be.PutUint16(b[10:], uint16(r.Dy()))
 	if full {
+		if s.spare == f {
+			s.spare = s.previous
+		}
 		s.previous = f
 	} else {
 		s.previous = nil
@@ -533,13 +553,13 @@ func (s *session) update(req []byte) error {
 	}
 	// Preserve one complete update per transport write for raw clients.
 	// Native clients negotiate zlib and avoid this full-frame buffer.
-	var raw bytes.Buffer
-	raw.Grow(16 + r.Dx()*r.Dy()*4)
-	raw.Write(b[:16])
-	if err = s.writePixelRows(&raw, f, r); err != nil {
+	s.raw.Reset()
+	s.raw.Grow(16 + r.Dx()*r.Dy()*4)
+	s.raw.Write(b[:16])
+	if err = s.writePixelRows(&s.raw, f, r); err != nil {
 		return err
 	}
-	return s.write(raw.Bytes())
+	return s.write(s.raw.Bytes())
 }
 
 func (s *session) writePixelRows(out io.Writer, f *image.RGBA, r image.Rectangle) error {

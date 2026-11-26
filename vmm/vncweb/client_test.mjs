@@ -143,3 +143,31 @@ test('automatic viewport limits preserve aspect ratio', () => {
   assert.deepEqual(viewportSize(1, 1e9), [1, 1080]);
   assert.deepEqual(viewportSize(1e9, 1), [1920, 1]);
 });
+
+test('input advances an idle update and switches to the interactive cadence', t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
+  const f = fixture(); init(f.client);
+  const requests = () => f.sent.filter(bytes => bytes[0] === 3).length;
+  const idle = Uint8Array.of(0, 0, 0, 0);
+  f.client.feed(idle);
+  t.mock.timers.tick(49);
+  assert.equal(requests(), 1);
+  f.client.key(keySym('KeyA'), true);
+  t.mock.timers.tick(0);
+  assert.equal(requests(), 2);
+  f.client.pointer(1, 1, 0);
+  t.mock.timers.tick(30);
+  assert.equal(requests(), 2);
+  f.client.feed(idle);
+  t.mock.timers.tick(15);
+  assert.equal(requests(), 2);
+  t.mock.timers.tick(1);
+  assert.equal(requests(), 3);
+  f.client.interactiveUntil = 0;
+  f.client.feed(idle);
+  t.mock.timers.tick(49);
+  assert.equal(requests(), 3);
+  t.mock.timers.tick(1);
+  assert.equal(requests(), 4);
+  f.client.close();
+});

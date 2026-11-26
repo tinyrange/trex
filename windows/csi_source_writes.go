@@ -1,13 +1,61 @@
 package windows
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
+	"github.com/tinyrange/trex/lifecycle"
+	"github.com/tinyrange/trex/storage"
 	starvalue "github.com/tinyrange/trex/storage/star"
 	"github.com/tinyrange/trex/windows/registry"
 	"github.com/tinyrange/trex/windows/uup"
 	"go.starlark.net/starlark"
 )
+
+func csiResidentSourcesBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var value starlark.Value
+	var selected *starlark.Dict
+	if err := starlark.UnpackArgs("csi_resident_sources", args, kwargs, "components", &value, "selected", &selected); err != nil {
+		return nil, err
+	}
+	hive, ok := value.(*registryHive)
+	if !ok {
+		return nil, fmt.Errorf("csi_resident_sources requires a COMPONENTS hive snapshot")
+	}
+	reader, err := hive.portableReader()
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	var cache storage.DerivedCache
+	if resources, err := lifecycle.ForThread(thread); err == nil {
+		ctx, cache = resources.Context(), resources.Derived
+	}
+	rows, err := uup.ReadCBSResidentSources(ctx, reader, cache)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]starlark.Value, 0, selected.Len())
+	for _, row := range rows {
+		key := starlark.String(strings.ToLower(string(row.Identity)))
+		if _, found, err := selected.Get(key); err != nil {
+			return nil, err
+		} else if !found {
+			continue
+		}
+		values := make([]starlark.Value, len(row.Values))
+		for i, value := range row.Values {
+			dict := starlark.NewDict(3)
+			dict.SetKey(starlark.String("name"), starlark.String(value.Name))
+			dict.SetKey(starlark.String("type"), starlark.MakeUint64(uint64(value.Type)))
+			dict.SetKey(starlark.String("data"), starlark.Bytes(value.Data))
+			values[i] = dict
+		}
+		result = append(result, starlark.Tuple{key, starlark.Bytes(row.Identity), starlark.NewList(values)})
+	}
+	return starlark.NewList(result), nil
+}
 
 func csiSourcePlanBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var before, changes *starlark.List

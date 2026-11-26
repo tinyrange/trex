@@ -3,6 +3,7 @@ package windows
 import (
 	"fmt"
 
+	"github.com/tinyrange/trex/lifecycle"
 	starvalue "github.com/tinyrange/trex/storage/star"
 	"github.com/tinyrange/trex/windows/uup"
 	"go.starlark.net/starlark"
@@ -22,6 +23,10 @@ func (m *cbsManifestValue) Truth() starlark.Bool  { return starlark.True }
 func (m *cbsManifestValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: cbs_manifest") }
 
 func cbsManifestForValue(value starlark.Value, limit int) (*uup.AssemblyManifest, int, error) {
+	return cachedCBSManifestForValue(value, limit, nil)
+}
+
+func cachedCBSManifestForValue(value starlark.Value, limit int, cache *uup.ManifestCache) (*uup.AssemblyManifest, int, error) {
 	if parsed, ok := value.(*cbsManifestValue); ok {
 		if parsed.size > limit {
 			return nil, 0, fmt.Errorf("CBS manifest bytes exceed bound")
@@ -42,16 +47,24 @@ func cbsManifestForValue(value starlark.Value, limit int) (*uup.AssemblyManifest
 	if err != nil {
 		return nil, 0, err
 	}
-	manifest, err := uup.ParseAssemblyManifestBytes(data)
+	if cache == nil {
+		manifest, err := uup.ParseAssemblyManifestBytes(data)
+		return manifest, len(data), err
+	}
+	manifest, err := cache.Parse(string(data))
 	return manifest, len(data), err
 }
 
-func cbsManifestBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func cbsManifestBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value
 	if err := starlark.UnpackArgs("cbs_manifest", args, kwargs, "manifest", &value); err != nil {
 		return nil, err
 	}
-	manifest, size, err := cbsManifestForValue(value, 32<<20)
+	var cache *uup.ManifestCache
+	if resources, err := lifecycle.ForThread(thread); err == nil {
+		cache = uup.NewManifestCache(resources.Context(), resources.Derived)
+	}
+	manifest, size, err := cachedCBSManifestForValue(value, 32<<20, cache)
 	if err != nil {
 		return nil, err
 	}

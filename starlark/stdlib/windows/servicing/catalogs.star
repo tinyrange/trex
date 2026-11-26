@@ -148,7 +148,7 @@ def apply_package_catalogs(root, source, features, population, prepared=None):
     # All planning and admission checks have finished. Publish independently
     # owned bytes, not parsed catalogs and their membership/signature indexes.
     # A batch shares one bounded decoded cache across the entire metadata set.
-    packed = binary.snapshot_many([file for _, manifest, catalog in prepared["files"] for file in [manifest, catalog]], maximum=512<<20, cache_bytes=1<<20)
+    packed = binary.snapshot_many([file for _, manifest, catalog in prepared["files"] for file in [manifest, catalog]], maximum=512<<20, cache_bytes=1<<20, fast=True)
     for i, (package, _, _) in enumerate(prepared["files"]):
         manifest, catalog = packed[2*i], packed[2*i+1]
         _replace(root, "/Windows/servicing/Packages/" + package + ".mum", manifest, names, new_security=manifest_security)

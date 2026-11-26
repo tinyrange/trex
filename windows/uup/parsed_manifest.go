@@ -1,9 +1,7 @@
 package uup
 
 import (
-	"encoding/xml"
 	"fmt"
-	"github.com/tinyrange/trex/internal/xmltoken"
 	"io"
 	"strings"
 
@@ -32,6 +30,10 @@ func (f *ParsedAssemblyFile) Size() int64                 { return int64(len(f.d
 func (f *ParsedAssemblyFile) Manifest() *AssemblyManifest { return f.manifest }
 
 func parseAssemblyFile(file storage.Reader) (*ParsedAssemblyFile, error) {
+	return parseCachedAssemblyFile(file, nil)
+}
+
+func parseCachedAssemblyFile(file storage.Reader, cache *ManifestCache) (*ParsedAssemblyFile, error) {
 	size := file.Size()
 	if size < 0 || size > maximumAssemblyManifestSize {
 		return nil, fmt.Errorf("assembly manifest size exceeds bound")
@@ -44,7 +46,7 @@ func parseAssemblyFile(file storage.Reader) (*ParsedAssemblyFile, error) {
 	// token strings. Keeping data plus ParseAssemblyManifestBytes would pin two
 	// complete copies for the lifetime of every prepared manifest.
 	owned := string(data)
-	manifest, err := parseAssemblyManifest(xml.NewTokenDecoder(xmltoken.NewString(owned, false)))
+	manifest, err := cache.Parse(owned)
 	if err != nil {
 		return nil, err
 	}

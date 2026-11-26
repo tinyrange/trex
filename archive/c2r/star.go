@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tinyrange/trex/lifecycle"
 	"github.com/tinyrange/trex/storage"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
@@ -52,7 +53,7 @@ func DatabaseBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 	return result, nil
 }
 
-func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func Builtin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var dv, sv starlark.Value
 	if err := starlark.UnpackArgs("c2r", args, kwargs, "database", &dv, "stream", &sv); err != nil {
 		return nil, err
@@ -68,6 +69,9 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 	a, err := Open(d, s)
 	if err != nil {
 		return nil, err
+	}
+	if resources, err := lifecycle.ForThread(thread); err == nil {
+		a.cache, a.cacheSource = resources.NewCacheSource()
 	}
 	var entries []starlark.Value
 	index := map[string]starlark.Value{}

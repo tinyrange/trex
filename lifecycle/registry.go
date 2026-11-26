@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/tinyrange/trex/storage"
 	bytecache "github.com/tinyrange/trex/storage/cache"
 	"go.starlark.net/starlark"
 )
@@ -30,6 +31,9 @@ type Resource interface {
 // Resources owns long-lived protocol and VM sessions created by one
 // Starlark execution. Resources are closed in reverse registration order.
 type Resources struct {
+	// Derived is configured before evaluation and may be used concurrently.
+	Derived storage.DerivedCache
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -60,6 +64,9 @@ func New() *Resources {
 
 func (r *Resources) Context() context.Context { return r.ctx }
 func (r *Resources) Metrics() *Metrics        { return r.metrics }
+
+// Cancel interrupts native work before its resources are closed in order.
+func (r *Resources) Cancel() { r.cancel() }
 
 func MetricsFromContext(ctx context.Context) *Metrics {
 	metrics, _ := ctx.Value(metricsContextKey{}).(*Metrics)

@@ -241,22 +241,11 @@ def prepare_servicing_population(base, image, closure, work_limit=2097152, hives
     relationshipmap={n:{p:True for p in relationships[i]} for i,n in enumerate(names)}
 
     ch = windows.hive(hives["COMPONENTS"] if hives != None else base[image + "/Windows/System32/config/COMPONENTS"], snapshot=True)
-
-    def ci_elevation(value):
-        secondary = value.secondary
-        return int(str(secondary)) if secondary else 128
-
-    deployments={k.name:k.values for k in ch.find('/CanonicalData/Deployments').children}
-
-    source_records={key:{name:windows.cbs_deployment_source(value) for name,value in values.items() if name[:2] in ['p!','s!','i!']} for key,values in deployments.items()}
-    component_entries = []
-    for key in ch.find('/DerivedData/Components').children:
-        values = key.values
-        component_entries.append(dict(identity=values['identity'], owners=[ci_elevation(v) for link in values if link.startswith('c!') for name,v in source_records[link[2:]].items() if name.startswith('i!')]))
+    inventory = windows.cbs_resident_inventory(ch)
 
     contexts=[dict(manifest=parsed[n],intended_state=states[n],parents=scopes[i]) for i,n in enumerate(names)]
 
-    index=windows.cbs_update_index(contexts,editions=editions).with_components(component_entries)
+    index=windows.cbs_update_index(contexts,editions=editions).with_components(inventory)
 
     baselines={n:package_values[n].get('Baseline',0) if n in package_values else 0 for n in names}
 
@@ -339,7 +328,7 @@ def prepare_servicing_population(base, image, closure, work_limit=2097152, hives
     update_nodes={n:{attrs(u)['name'].lower():u for u in packages[n].children_named('update',namespace=ns)} for n in names}
 
 
-    component_initial_states = index.initial_component_states(deployments, names)
+    component_initial_states = index.initial_component_states(inventory, names)
 
     selection_values={n:{un.lower():value for child in pkeys[n.lower()].children if child.name.lower()=='updates' for un,value in child.values.items()} if n.lower() in pkeys else {} for n in names}
 

@@ -38,5 +38,8 @@ func cbsCapturedDeploymentPlan(actions []uup.CBSDeploymentAction, executions []u
 		}),
 		nativeExecutions: executions,
 		names:            names,
+		captured: &uup.CBSPhasePlan{
+			Actions: actions, Executions: executions, Admissions: admissions, PackageNames: names,
+		},
 	}
 }
