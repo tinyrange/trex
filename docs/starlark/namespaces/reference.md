@@ -5610,6 +5610,12 @@ Directly boots an original amd64 OpenBSD, FreeBSD or NetBSD kernel in Linux/amd6
 
 Read-only nearest original executable-section ELF symbol lookup for a stopped kernel address. Returns name, address, size and offset, or None when no preceding symbol exists. A nonzero offset is a nearest-symbol observation, not an exact call-site assertion. Input is bounded to 256 MiB and symbol/string sections to 32 MiB. Does not relocate, execute or patch bytes.
 
+### `cc.prepare_ram`
+
+`cc.prepare_ram(ram, shared_workers=False) -> cc.prepared_ram`
+
+Seals a portable RAM image in anonymous Linux x86-64 memory for a private copy-on-write AMD64 handoff. shared_workers=True selects single-vCPU direct handoffs with fixed shared workers and no legacy PIT. Their cc.v1 extension can prepare_rewind on a fresh paused guest without channels, rewind from a paused breakpoint before device activity, and read private_resident_ram in bytes. Rewind restores CPU state and the cumulative written-page set. rewind_run(address, data) restores, patches RAM and runs synchronously to the installed execution breakpoint without resume and pause events. sample_physical observes live RAM with relaxed consistency. write_physical patches paused RAM and records writes for an armed rewind.
+
 ### `channel.expose_tcp`
 
 `channel.expose_tcp(channel, port=0) -> tcp_bridge`
@@ -6608,6 +6614,12 @@ Lists the VMM backends registered in this runtime and their advertised capabilit
 
 Describes a named VM byte channel of the requested kind. required determines whether lack of backend support is a validation failure.
 
+### `vmm.close_many`
+
+`vmm.close_many(sessions)`
+
+Closes distinct VM sessions concurrently and joins every close before returning. Reports operation errors after joining.
+
 ### `vmm.darwin_arm64_boot`
 
 `vmm.darwin_arm64_boot(kernel, device_tree, memory, memory_base, virtual_base, command_line='-v', entropy=None, payloads=None, nvram=None) -> vmm_arm64_boot`
@@ -6661,6 +6673,12 @@ Creates a guest MMIO region with explicit address/size, optional read(offset,siz
 `vmm.network(kind, name='net0', required=True, switch=None, mac='')`
 
 Describes a named guest network connection and whether its requested kind is required. The selected backend implements the transport.
+
+### `vmm.resume_many`
+
+`vmm.resume_many(sessions)`
+
+Resumes distinct VM sessions concurrently and joins every request before returning. Reports operation errors after joining.
 
 ### `vmm.start`
 
