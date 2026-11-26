@@ -2,7 +2,16 @@ package s390
 
 import "fmt"
 
-const bytesPer9020SE = 512 << 10
+const (
+	bytesPer9020SE          = 512 << 10
+	max9020StorageElements  = 10
+	bytesPer9020ASE         = 128 << 10
+	max9020AStorageElements = 12
+	max9020EStorageElements = 5
+	bytesPer9020DE          = 256 << 10
+	displayBase9020E        = max9020EStorageElements * bytesPer9020SE
+	max9020EDisplayElements = max9020StorageElements - max9020EStorageElements
+)
 
 type maintenance9020 struct {
 	dar, darMask, checks uint32
@@ -10,9 +19,19 @@ type maintenance9020 struct {
 	atr                  uint64
 	atrSet               bool
 	psb                  uint32
+	psbAlternate         bool
 	local                [4][16]uint32
 	delayUntil           uint64
 	diagnosticSE1        bool
+	interleave           interleave9020
+	timerInhibitSince    uint64
+	countLogoutAt        uint64
+	reverseSumParity     bool
+	reverseMarkParity    bool
+	reverseAddressParity storageCycleFlags9020
+	scanPrefetch         scanPrefetch9020
+	displayWrap          byte
+	machineCheck         machineCheck9020
 }
 
 // Restart9020 performs a subsystem PSW restart from the selected storage
@@ -24,16 +43,18 @@ func (m *Machine) Restart9020(storageID int) error {
 		return fmt.Errorf("9020 subsystem restart: invalid CE storage element %d", storageID)
 	}
 	atr := c.atr9020()
+	slots := m.storageSlots9020()
 	slot := 0
-	for ; slot < 10; slot++ {
-		if int(atr>>(36-4*slot)&0xf) == storageID {
+	for ; slot < slots; slot++ {
+		if int(atr>>(4*(slots-1-slot))&0xf) == storageID {
 			break
 		}
 	}
-	if slot == 10 {
+	if slot == slots {
 		return fmt.Errorf("9020 subsystem restart: storage element %d is absent from the ATR", storageID)
 	}
-	physical := uint32(storageID-1) * bytesPer9020SE
+	size := m.storageElementSize9020()
+	physical := uint32(storageID-1) * size
 	if !m.S.valid(physical, 4096) {
 		return fmt.Errorf("9020 subsystem restart: storage element %d has no complete preferential storage area", storageID)
 	}
@@ -43,7 +64,7 @@ func (m *Machine) Restart9020(storageID int) error {
 	savedATR, atrSet := c.maintenance9020.atr, c.maintenance9020.atrSet
 	c.Reset(false)
 	c.maintenance9020.atr, c.maintenance9020.atrSet = savedATR, atrSet
-	c.maintenance9020.psb, c.Prefix = uint32(slot)*bytesPer9020SE, physical
+	c.maintenance9020.psb, c.Prefix = uint32(slot)*size, physical
 	if !c.loadPSW(be.Uint64(m.S.Mem[physical:])) {
 		return fmt.Errorf("9020 subsystem restart: invalid PSW in storage element %d", storageID)
 	}
@@ -54,7 +75,28 @@ func (m *Machine) Restart9020(storageID int) error {
 }
 
 func (c *CPU) storageElements9020() int {
-	return min((len(c.S.Mem)+bytesPer9020SE-1)/bytesPer9020SE, 10)
+	size := int(c.M.storageElementSize9020())
+	slots := c.M.storageSlots9020()
+	main := len(c.S.Mem)
+	if c.M.cfg.Model9020E {
+		main = c.M.cfg.Memory
+		slots = max9020EStorageElements
+	}
+	return min((main+size-1)/size, slots)
+}
+
+func (m *Machine) storageElementSize9020() uint32 {
+	if m.cfg.Model9020A {
+		return bytesPer9020ASE
+	}
+	return bytesPer9020SE
+}
+
+func (m *Machine) storageSlots9020() int {
+	if m.cfg.Model9020A {
+		return max9020AStorageElements
+	}
+	return max9020StorageElements
 }
 
 func (c *CPU) atr9020() uint64 {
@@ -62,26 +104,92 @@ func (c *CPU) atr9020() uint64 {
 		return c.maintenance9020.atr
 	}
 	var atr uint64
+	slots := c.M.storageSlots9020()
 	for i := range c.storageElements9020() {
-		atr |= uint64(i+1) << (36 - 4*i)
+		atr |= uint64(i+1) << (4 * (slots - 1 - i))
+	}
+	if c.M.cfg.Model9020E {
+		for i := range c.M.cfg.DisplayElements9020E {
+			slot := max9020EStorageElements + i
+			atr |= uint64(slot+1) << (4 * (slots - 1 - slot))
+		}
 	}
 	return atr
 }
 
 func (c *CPU) translate9020(address uint32) uint32 {
-	return translateATR9020(c.atr9020(), address)
+	return c.M.translateATR9020(c.atr9020(), address)
 }
 
-func translateATR9020(atr uint64, address uint32) uint32 {
-	slot := address / bytesPer9020SE
-	if slot >= 10 {
+func (m *Machine) isDisplayAddress9020(address uint32) bool {
+	return m.cfg.Model9020E && address >= displayBase9020E
+}
+
+func (c *CPU) storageModuleInstalled9020(id int) bool {
+	return id > 0 && (id <= c.storageElements9020() || c.M.cfg.Model9020E &&
+		id > max9020EStorageElements && id <= max9020EStorageElements+c.M.cfg.DisplayElements9020E)
+}
+
+func (c *CPU) validPSA9020(physical uint32) bool {
+	return !c.M.isDisplayAddress9020(physical) && c.S.valid(physical, 4096)
+}
+
+func (c *CPU) setPSBase9020(logical, physical uint32, alternate bool) {
+	c.maintenance9020.psb, c.maintenance9020.psbAlternate = logical, alternate
+	c.Prefix = physical
+	c.purgeTLB()
+	c.ipageValid = false
+}
+
+// preparePSA9020 selects the alternate when a CE needs an unavailable PSA
+// to deliver an interruption (A27-2734-2, PSBA programming note 4, and
+// the 9020D System FETOM, figure 8-3).
+func (c *CPU) preparePSA9020() bool {
+	if !c.M.Model9020 || c.storageConfigured9020(c.Prefix) && !c.M.storageStopped9020(c.Prefix) {
+		return true
+	}
+	state := &c.maintenance9020
+	if !state.psbAlternate && !c.logoutStopInhibited9020() {
+		size, slots := c.M.storageElementSize9020(), uint32(c.M.storageSlots9020())
+		logicalSize := size * slots
+		oldPhysical := c.Prefix / size
+		atr := c.atr9020()
+		for i := uint32(1); i < slots; i++ {
+			logical := (state.psb + i*size) % logicalSize
+			physical := c.M.translateATR9020(atr, logical)
+			if !c.validPSA9020(physical) || physical/size == oldPhysical || !c.storageConfigured9020(physical) {
+				continue
+			}
+			c.setPSBase9020(logical, physical, true)
+			if !c.M.storageStopped9020(physical) {
+				return true
+			}
+			break
+		}
+	}
+	if state.psbAlternate {
+		state.checks |= 1 << (31 - 22) // PSBAR alternate check.
+		c.checkReason = "9020 alternate PSA is unavailable"
+	} else {
+		state.checks |= 1 << (31 - 21) // PSBAR not configured.
+		c.checkReason = "9020 primary PSA is unavailable and cannot be stepped to an alternate"
+	}
+	c.Check = true
+	c.M.event("check-stop", c, c.checkReason)
+	return false
+}
+
+func (m *Machine) translateATR9020(atr uint64, address uint32) uint32 {
+	size, slots := m.storageElementSize9020(), uint32(m.storageSlots9020())
+	slot := address / size
+	if slot >= slots {
 		return ^uint32(0)
 	}
-	id := uint32(atr >> (36 - 4*slot) & 0xf)
+	id := uint32(atr >> (4 * (slots - 1 - slot)) & 0xf)
 	if id == 0 {
 		return ^uint32(0)
 	}
-	return (id-1)*bytesPer9020SE | address&(bytesPer9020SE-1)
+	return (id-1)*size | address&(size-1)
 }
 
 // setATR9020 implements SATR for the CEs available on the system.
@@ -93,8 +201,22 @@ func (c *CPU) setATR9020(r1, r2 int) {
 		return
 	}
 	atr := uint64(c.GR[r1])<<8 | uint64(c.GR[r2]>>24)
-	for fields := atr; fields != 0; fields >>= 4 {
-		if int(fields&0xf) > c.storageElements9020() {
+	if c.M.cfg.Model9020A {
+		// The 7201-01 carries another two translator slots in ATR 2
+		// (CBB9A0 figs. 2-1 and 2-2).
+		atr = uint64(c.GR[r1])<<16 | uint64(c.GR[r2]>>16)
+	}
+	main, displays := c.storageElements9020(), c.M.cfg.DisplayElements9020E
+	for slot, fields := c.M.storageSlots9020()-1, atr; fields != 0; slot, fields = slot-1, fields>>4 {
+		id := int(fields & 0xf)
+		if id == 0 {
+			continue
+		}
+		if !c.M.cfg.Model9020E || slot < max9020EStorageElements {
+			if id > main {
+				c.program(pgmSpecification)
+			}
+		} else if id <= max9020EStorageElements || id > max9020EStorageElements+displays {
 			c.program(pgmSpecification)
 		}
 	}
@@ -129,11 +251,12 @@ func (c *CPU) writeDirect9020(immediate byte, address uint32) {
 	if selected == 0 || selected&(selected-1) != 0 || function > 7 {
 		c.program(pgmSpecification)
 	}
+	// IOCE logout and processor requests have no fourth element.
+	if selected == 1 && (function == 3 || function >= 5) {
+		c.program(pgmSpecification)
+	}
 	switch function {
 	case 5, 6, 7:
-		if selected == 1 {
-			c.program(pgmSpecification)
-		}
 		c.realAbs(address, accFetch)
 		c.PSW.CC = 3 // processor did not respond
 	default:

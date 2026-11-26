@@ -67,9 +67,205 @@ D000 listing (`local/d000.lst` in the outer workspace, not redistributed)
 documents its loaders. The tape's copy of D00104 is a later revision than the
 listing: it loads the next section whatever processor it runs on.
 
+Run the full catalog smoke from the `trex` directory:
+
+```sh
+go run ./cmd/trex scripts/smoke/s370_diag_all.star [raw-card-deck]
+```
+
+The optional argument supplies Cornwell's raw 2540 valid-card test input.
+The runner verifies all 215 diagnostic and utility sections across the
+original IPL and the FAA-restored IOCE, SDM and MDM profiles. It also
+checks the IPL loaders and resident tables, the 2415 write-protected
+and repeated creep jobs, the 2401 Model 3/6 velocity and early-Go
+measurements, the late-drive EOT status and ring checks,
+the 128 KiB Model 50 CPU suite, the disk workload and Sense retry
+under both monitors, printer dualing and switch resets, both D41560
+reel IDs, the console and panel-interrupt D0CF00 storage dumps, and
+short and long machine-check reports for CE 1 and
+IOCEs 1–3. The formatter checks correct the SDM dispatch in guest storage.
+The native 9020A check triggers an IOCE storage parity fault and verifies
+the seven-word capture, printed report and release of the stopped SE.
+Separate controls verify the six-doubleword
+9020D/E logout from recorded CE cycles, IOCE stores and CCW fetches, and
+the timeout for an absent SE.
+The pinned tape is read-only.
+
+`replay_storage_logout(storage_element, logout)` queues a stopped storage
+element's capture. The storage ID is one-based. DIAG kernel FD0 releases
+the SE after storing 48 bytes on the 9020D/E. Kernel F15 stores 28 bytes
+on the 9020A. CE access to the stopped SE raises program interruption
+`0080`. The IOCE reports program and chaining checks
+on CCW or data accesses to stopped storage. An active 2401 or 2314 write
+checks for a stopped SE at the next timed output request. A CE or IOCE
+machine-check interruption can be queued separately with
+`replay_machine_check(cpu, element, logout)`.
+[IBM 9020D System FETOM, pp. 8-4, 8-7–8-8 and 8-16–8-17](https://bitsavers.org/pdf/ibm/9020/SFN-0104-2_9020D_System_FETOM_197106.pdf)
+
+On the 9020 CE profile, `set_storage_data_parity(address, bad)` changes
+the parity of a physical storage byte. An ordinary CE fetch checks the
+whole storage doubleword. An enabled machine check terminates the fetch,
+stops its storage element, and records the failing SE and data check in
+the CE logout. FD0 returns the data and incorrect parity, then releases
+the SE. Rewriting the bad byte regenerates its parity. Both the byte's
+parity and a pending check survive a checkpoint. [IBM 9020D System FETOM,
+figs. 8-2 and 8-8](https://bitsavers.org/pdf/ibm/9020/SFN-0104-2_9020D_System_FETOM_197106.pdf)
+
+An IOCE fetch of the initial or command-chained CCW also checks the
+doubleword. The IOCE stops the SE and queues its machine check for the
+issuing CE. A check during SIO ends the instruction with condition code 3.
+The CE can collect the SE logout using FD0 and repair and retry the
+command. [IBM 9020D System FETOM, fig. 8-6](https://bitsavers.org/pdf/ibm/9020/SFN-0104-2_9020D_System_FETOM_197106.pdf)
+
+On the 9020D storage profile, set `tcu=1`, `2` or `3` when attaching
+a `2401`, `2415` or `2420` to declare its physical tape control unit.
+Addresses on different IOCEs can refer to the same control unit. Guest
+SCON selects the TCU with bits 3–5 and sets its accepted IOCEs with
+configuration bits 29–31. The machine returns CC3 for TIO or SIO on a
+disconnected port. The test `scripts/inspect/s370_diag.star tape-configuration`
+runs the DD8A0 connected and disconnected checks on both paths.
+Use `scu=1`, `2` or `3` when attaching a 2314 to declare a storage
+control unit. SCON selects SCUs with bits 24–26 and uses the same
+IOCE communication bits. The `disk-configuration` test switches a
+2314 SCU and reads the track's home address on the connected path.
+[IBM 9020D/E Principles of Operation, §8.4.5.4 and fig. 8-2](https://bitsavers.trailing-edge.com/pdf/ibm/9020/A27-9020-01_9020_D_and_9020_E_Principles_of_Operation_19710601.pdf)
+
+On the 9020E profile, `architecture="s360", model="9020e"`, attach
+a 7265-03 Reconfiguration Control Unit with
+`m.rcu(0x20, unit=1, peer=0x420, consoles=60)`. The address is the
+base before the first interface. The 60-console configuration has
+19 interfaces and the 90-console configuration has 27. `peer` adds
+the second IOCE path. SCON bits 0 and 1 select RCU 1 and RCU 2.
+If a guest assigns both IOCEs to one RCU, the RCU latches the mask,
+returns a negative SCON response and connects to the lower-numbered
+IOCE. The connected path reports the CCR Program Check in Sense.
+The State Zero diagnostic mode provides CI wrap, the DAU test
+register, sense and attention. The operative RCU routes commands
+according to both controllers' states. Configuration, status and
+pending reports belong to the addressed endpoint and survive a
+handoff. On the standard 60- and 90-console wiring, a configured
+DG requests data on its DE tails and reports wire parity faults
+to the RCU. The RCU commands can stop, resume or disable normal DG
+transfers. Run `scripts/inspect/s370_diag.star rcu-configuration`
+and `rcu-outboard` for the State Zero and operative checks.
+Use `m.dau(0x80, peer=0x480, unit=1)` to connect a 2701 to the RCU's
+DAU 1 configuration interface. The first address supplies interface A
+and `peer` supplies interface B. The guest enables a path through the
+RCU's Write Configuration order. A handoff waits for outstanding I/O
+status to be accepted. Run `scripts/inspect/s370_diag.star dau-configuration`
+to check both paths, an in-flight handoff and DAU Reset.
+An operative DAU exchanges status and memory data with the RKM selected
+by its port and the RCU's RKM configuration. Run
+`scripts/inspect/s370_diag.star rkm` to verify status and error latches,
+DAU routing, 32 KiB memory wrap, modified read and write orders, bit
+modify, and queue addressing on the two console profiles.
+The probe also checks Keyboard Write and the Clear, Blink and Move
+data operators, including busy status, Stop/Resume and overflow attention.
+Special Move emits two 15-byte runs separated by 20 display blanks,
+then emits 25 blanks before repeating. The probe reproduces the
+DB8B1100 comparison against zeroed RKM memory. The model consumes
+source bytes during the copy runs, as inferred from the compact rows
+in DB8B3100.
+With both 2701s connected to one RKM, a control Disconnect from either
+DAU releases the shared transfer. The probe checks the accepted bytes,
+I/O address and CSW residual after Disconnect and Halt, and verifies that
+an independent data operator continues to completion.
+Use `m.rkm_console(rkm, position, constants)` to connect a console at
+position 0 through 31 with its eight raw display constants bytes. Use
+`m.rkm_input(rkm, position, operation, data)` to supply a queue entry on
+the next poll. The operation is the three-bit code and data is the
+second byte of the record. The guest probe checks Fetch Display
+Constants, both DAU attention types, queue contents, timeout and overflow.
+For a switched console, use its active RKM number in both calls.
+The guest can send individual positions from groups 1 and 2 to
+RKM 3, and from expansion group 4 to RKM 5, by clearing their bits
+in the corresponding RCON mask. Pending keyboard input follows the
+console when the mask changes. Each RKM keeps its own memory and
+queue address.
+[IBM 9020D/E System Design Data, chapter 10](https://bitsavers.org/pdf/ibm/9020/9020_D_and_9020_E_System_Design_Data_19710701.pdf)
+
+On the same 9020E profile, `display_elements=2` adds physical display
+modules 6 and 7. The option accepts zero to five modules. Each fills
+the first 256 KiB of a 512 KiB address slot beginning at `0x280000`.
+The CE can reorder them in the last five ATR slots and apply normal
+storage keys. DIAG Define Storage reports the installed SE and DE counts.
+An IOCE can accept the same ATR but cannot use a display
+module for a channel transfer. Preferential storage areas remain in
+main storage. Run `scripts/inspect/s370_diag.star display-storage` for
+the guest checks. `display-logout` injects a CE data parity fault in
+each bank in turn, verifies that other loads receive interruption
+`0080`, and uses DIAG `FD0` to collect the 48-byte DE logout and release
+the element.
+[IBM 9020D/E Principles of Operation, §§2.2.2, 8.4.5.7 and 12.8.4 and fig. 12-6](https://bitsavers.trailing-edge.com/pdf/ibm/9020/A27-9020-01_9020_D_and_9020_E_Principles_of_Operation_19710601.pdf)
+
+SCON uses the high half of the odd register to connect DG interfaces
+to the four DE buffers. DIAG in CE State Zero can force CVG requests
+and receive the selected DG's data through the AD3 wrap kernel. The
+virtual refresh scan reads the DE's control words and data, updates
+the Start-of-Display test-and-set bytes, and applies Transfer,
+End-of-Display and wire parity. `display-wrap` checks the three FAA
+D24A0100 buffer sizes, a checkpoint during capture, timeout on a
+disconnected DG, and the FD0 configuration word.
+[IBM 9020D/E System Design Data, §§4-4–4-22 and 13-51–13-53](https://bitsavers.trailing-edge.com/pdf/ibm/9020/9020_D_and_9020_E_System_Design_Data_19710701.pdf)
+
+For 7201-02 maintenance programs, DIAG I2 `80` selects defeat interleave
+and `40` also reverses the even and odd bank selection. Fetches, stores,
+PSA accesses, and both storage-key cycles follow the CE's selection.
+An SE applies the corresponding mapping to its IOCE traffic while it
+accepts the control signal from the CE. The `defeat-interleave` check
+exercises both modes, SE connection changes, SATR, checkpoint and
+restart, the DIAG interval-timer inhibit, and real tape transfers in
+both directions.
+[IBM 7201-02 CE FETOM, figs. 2-65 and 3-27](https://bitsavers.trailing-edge.com/pdf/ibm/9020/SFN-0201-1_7201-02_CE_FETOM_upd197205.pdf)
+
+`m.interleave_switch("PROC")`, `"NO REV"`, or `"REV"` sets the physical
+CE interleave switch. The switch takes effect in State Zero, survives a
+restart, and can be saved in a checkpoint. An End Op DIAG with LOG ON
+COUNT runs the maintenance cycle counter on the virtual clock and
+delivers a machine check at an instruction boundary. The native logout
+contains the CE fields read by the D22A4500 startup. Run
+`scripts/inspect/s370_diag.star count-logout` to check the fields, the
+machine-check PSW, and count expiration during execution and wait.
+[IBM 7201-02 CE FETOM, pp. 4-9, 4-19–4-20 and 4-33](https://bitsavers.trailing-edge.com/pdf/ibm/9020/SFN-0201-1_7201-02_CE_FETOM_upd197205.pdf)
+
+An End Op DIAG with MCW bit 3 reverses the SCI's mark parity on stores.
+The SE or DE cancels the write and captures the marks for FD0. The
+`mark-parity` check uses the FAA EX/MVC sequence to verify the untouched
+word, the CE check, both storage logout formats, and the retry after
+restoring normal parity.
+[IBM 7201-02 CE FETOM, p. 4-20](https://bitsavers.trailing-edge.com/pdf/ibm/9020/SFN-0201-1_7201-02_CE_FETOM_upd197205.pdf)
+
+A Partial Scan DIAG (ROS 6B0) accepts the 64-byte PSA frame used by
+D22A4500 routine 2. The B13 continuation loads End Op controls and
+resumes the RX instruction in R with its remaining bytes in Q.
+MCW bits 4 and 5 reverse PA and PB. An invalid address on the SCI
+cancels the storage write and leaves the failed address bus in the SE
+or DE logout. Run `scripts/inspect/s370_diag.star scan-address-parity`
+to check clean execution and cancellation for each parity selection.
+[IBM 7201-02 CE FEMDM, figs. 5-609 and 6-116](https://bitsavers.trailing-edge.com/pdf/ibm/9020/SFN-0202-1_7201-02_CE_FEMDM_197007.pdf)
+
+An End Op DIAG with MCW bit 2 reverses full-sum parity. A data store
+records the wrong parity for the lanes that it writes. SSK stores a key
+with the wrong SP parity and signals an address check. Clearing the
+maintenance control restores outgoing parity. The written faults remain
+until a clean store or SSK repairs them. Run
+`scripts/inspect/s370_diag.star sum-parity` to verify the D22A4500-style
+CE and FD0 reports and subsequent recovery on 9020D main storage and
+9020E main and display storage.
+[IBM 7201-02 CE FETOM, p. 4-20](https://bitsavers.trailing-edge.com/pdf/ibm/9020/SFN-0201-1_7201-02_CE_FETOM_upd197205.pdf)
+
+`architecture="s360", model="9020a"` selects the 128 KiB 7251-03 SE
+geometry for 9020A storage diagnostics. Configure one to twelve SEs
+by setting `memory` in 128 KiB increments. A fetch checks a four-byte
+storage word. DIAG `83001F15` takes the physical SE number in GR1 bits
+8–15 and writes the captured words inline after the instruction.
+The test `scripts/inspect/s370_diag.star storage-9020a-formatter` executes
+the original DIAG in SDM and prints the report with D0D107.
+[IBM 9020A System Processing and Control, §3-15 and fig. 3-25](https://bitsavers.trailing-edge.com/pdf/ibm/9020/faa/IBM_9020A_System_Processing_and_Control_197106.pdf#page=287)
+
 [scripts/smoke/s370_diag.star](../../scripts/smoke/s370_diag.star) runs the
 142 verified 9020E sections from fresh IPLs on the unchanged reel.
-Thirteen jobs reach SDM's `EOJ  SDM JOB COMPLETED`. The pack scan ends
+Sixteen jobs reach SDM's `EOJ  SDM JOB COMPLETED`. The pack scan ends
 through the documented `F/` command.
 
 1. IPL D00104 (GO/NO-GO), D00201 (machine test) and D00402 (hardcore CE
@@ -107,7 +303,10 @@ through the documented `F/` command.
    IBM's [2314 maintenance diagnostics, F6BA/F6BB](https://bitsavers.trailing-edge.com/pdf/ibm/dasd/2314/2314_S01_MDP.pdf)
    describe the drive-busy check during recalibration and the seek timeout.
 6. The printer and console job uses the 1052 as the SDM list device and
-   checks the D66542 keyboard echo.
+   checks the D66542 keyboard echo. The full runner also exercises
+   Cancel, keyboard parity and Not Ready using the restored D66542
+   interrupt branches. To supply input with a keyboard parity fault
+   during a waiting 1052 inquiry, use `m.type(device, text, parity_error=True)`.
 7. The 2316 integrity test D806A5 watches for device end when the operator
    replaces the 2314's identifier plug. It scans all 4,060 tracks of a
    read-only pack and reports zero bad tracks. After the scan, the operator
@@ -139,6 +338,13 @@ reader at 00C and a 1403 printer at 00E. The punch job adds a 2540 punch at
 00D. The tape jobs use nine-track 2401 Model 2 drives at 3F0 and 3F1, and
 the disk job uses a 203-cylinder 2314 at 340.
 
+The smoke also boots the original D0CF00 payload through a 2540 from a
+reconstructed in-memory deck. It compares the complete loaded record with
+the tape before execution. It then checks malformed 1052 input, a requested
+range dump, and a repeat dump triggered by the operator interrupt key.
+Both printer addresses, 005 and 00B, are exercised. The machine uses
+`interval_timer=False`, the timer-off setting specified by the FAA listing.
+
 In the load messages, `E/` selects the 9020E. `A,cuu` adds a device from
 SDM's address table, while `APPOO0CUU/` specifies the unit type PP and
 options OO explicitly. The smoke uses `A6B00000D/` for the punch,
@@ -158,7 +364,17 @@ over the System/370 basic-control machinery ([s360.go](s360.go)): only
 System/360 operation codes are defined; PSW bit 12 selects USASCII-8 decimal
 results (signs 1010/1011, zone 0101) rather than EC mode; there are no
 control registers, so the timer and interrupt key are masked by the PSW
-alone; and CCW flag bits 37-39 must be zero. `model="9020"` adds behaviors the
+alone; and CCW flag bits 37-39 must be zero.
+
+On System/360 or System/370, `byte_mux_subchannels=32` configures
+the small byte-multiplexor layout for channel zero. Independent
+addresses end at 01F. The 16-address groups from 080 to 0FF share
+the first eight slots in place of independent addresses 000–007.
+The option accepts 8 to 128 slots, including the 96-slot layout
+of larger Model 30 configurations. See
+[GA24-3231-7, pages 21–23](https://www.bitsavers.org/pdf/ibm/360/functional_characteristics/GA24-3231-7_360-30_funcChar.pdf).
+
+`model="9020"` adds behaviors the
 9020 diagnostics demonstrate where the 9020 departs from both architecture
 manuals:
 
@@ -173,6 +389,11 @@ manuals:
 D117E0 exercises PSW bit 12. D11020's decimal results follow the Model 65
 serial adder and product-store sequences in [2065 Processing Unit
 FEMI, 226-2037-0, §§3.8.1 and 3.8.3](https://bitsavers.trailing-edge.com/pdf/ibm/360/fe/2065/226-2037-0_2065_Processing_Unit_FEMI_Vol_2_Nov65.pdf).
+With `model="50"`, packed multiply on an otherwise valid operand stores
+through the aligned word containing its rightmost nonzero workspace byte
+before taking the data interruption. The boundary is verified against
+the 2050G ROS and the original D11020 diagnostic, including partially
+overwritten multiword operands.
 
 ## FAA-corrected validation
 

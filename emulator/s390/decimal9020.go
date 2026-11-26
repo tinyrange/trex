@@ -3,10 +3,10 @@ package s390
 // The Model 65 stores partial decimal results before reporting some data
 // exceptions. See 2065 Processing Unit FEMI, 226-2037-0, §§3.8.1 and 3.8.3.
 
-// addInvalid9020 handles an invalid digit in AP or SP. The serial adder
+// addInvalidSerialDecimal handles an invalid digit in AP or SP. The serial adder
 // forces its entire sum byte to ones when either input digit is invalid.
 // The marked result bytes reach main storage before the data interruption.
-func (c *CPU) addInvalid9020(a1 uint32, b1 int, l1 uint32, a2 uint32, b2 int, l2 uint32, subtract bool) {
+func (c *CPU) addInvalidSerialDecimal(a1 uint32, b1 int, l1 uint32, a2 uint32, b2 int, l2 uint32, subtract bool) {
 	last1 := c.fetchByte(a1+l1-1, b1)
 	last2 := c.fetchByte(a2+l2-1, b2)
 	if last1&0xf < 0xa || last2&0xf < 0xa {
@@ -73,7 +73,7 @@ func serialDecimalDigit(x, y byte, carry int, subtract bool) (byte, int) {
 	return byte(sum-6) & 15, 0
 }
 
-func (c *CPU) multiply9020(a1 uint32, b1 int, l1 uint32, a2 uint32, b2 int, l2 uint32) {
+func (c *CPU) multiplyDecimalWorkspace(a1 uint32, b1 int, l1 uint32, a2 uint32, b2 int, l2 uint32) {
 	x := c.packed(a1+l2, b1, l1-l2)
 	y := c.packed(a2, b2, l2)
 	neg := packedNegative(c.fetchByte(a1+l1-1, b1)) != packedNegative(c.fetchByte(a2+l2-1, b2))
@@ -81,12 +81,16 @@ func (c *CPU) multiply9020(a1 uint32, b1 int, l1 uint32, a2 uint32, b2 int, l2 u
 	result, _ := packedBytes(l1, x, c.decimalSign(neg))
 	// The effective multiplicand excludes the leading workspace bytes.
 	// The low product is written first, then the rest replaces the
-	// workspace from right to left through the first nonzero byte.
+	// workspace from right to left. The 2065 stops at the first nonzero
+	// workspace byte (226-2037-0, §3.8.3). The 2050 finishes storing the
+	// aligned word containing that byte before taking the interruption
+	// (2050G ROS execution including unaligned and multiword operands).
+	badWorkspace := false
 	for i := l1; i > 0; {
 		i--
-		nonzero := i < l2 && c.fetchByte(a1+i, b1) != 0
+		badWorkspace = badWorkspace || (i < l2 && c.fetchByte(a1+i, b1) != 0)
 		c.storeByte(a1+i, b1, result[i])
-		if nonzero {
+		if badWorkspace && (!c.M.cfg.Model50 || (a1+i)&3 == 0 || i == 0) {
 			c.program(pgmData)
 		}
 	}

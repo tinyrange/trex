@@ -64,9 +64,14 @@ func (u *UnitRecord) diagnosticWrite(data []byte) ([]byte, int, byte) {
 	if !reader.diagReady {
 		clear(reader.diagColumns[:])
 		if len(reader.cards) > 0 {
-			for i, c := range reader.cards[0] {
-				rows := ebcdicPunch[c]
-				reader.diagColumns[2*i], reader.diagColumns[2*i+1] = byte(rows>>6), byte(rows&0x3f)
+			card := reader.cards[0]
+			if len(card) == 160 {
+				copy(reader.diagColumns[:], card)
+			} else {
+				for i, c := range card {
+					rows := ebcdicPunch[c]
+					reader.diagColumns[2*i], reader.diagColumns[2*i+1] = byte(rows>>6), byte(rows&0x3f)
+				}
 			}
 		}
 	}
@@ -80,14 +85,14 @@ func (u *UnitRecord) diagnosticWrite(data []byte) ([]byte, int, byte) {
 	return nil, n, usCE | usDE
 }
 
-func (u *UnitRecord) readDiagnosticCard(binaryMode bool) ([]byte, byte) {
+func readCardColumns(columns []byte, binaryMode bool) ([]byte, byte) {
 	if binaryMode {
-		return append([]byte(nil), u.diagColumns[:]...), 0
+		return append([]byte(nil), columns...), 0
 	}
 	card := make([]byte, 80)
 	var sense byte
 	for i := range card {
-		rows := uint16(u.diagColumns[2*i])<<6 | uint16(u.diagColumns[2*i+1])
+		rows := uint16(columns[2*i])<<6 | uint16(columns[2*i+1])
 		code := punchEBCDIC[rows]
 		if code == 0 {
 			sense = 0x08 // data check in the read translator

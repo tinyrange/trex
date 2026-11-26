@@ -96,8 +96,9 @@ func (d *DASD3390) readOverflow2314(out []byte) ([]byte, byte) {
 // diskWrite2314 describes the fields selected by a write. The channel
 // supplies the actual byte count when the transfer ends.
 type diskWrite2314 struct {
-	Data   []byte
-	Fields []diskWriteField2314
+	Data     []byte
+	Fields   []diskWriteField2314
+	Capacity int
 }
 
 type diskWriteField2314 struct {
@@ -145,6 +146,7 @@ func (d *DASD3390) writeData2314(data []byte, key bool, deferred *diskWrite2314)
 	}
 	used := min(size, len(data))
 	if deferred != nil {
+		write.Capacity = size
 		*deferred = write
 	} else if err := d.commitWrite2314(&write, used, false); err != nil {
 		return d.ioErr(err)
@@ -178,6 +180,30 @@ func (d *DASD3390) commitWrite2314(write *diskWrite2314, used int, halted bool) 
 		}
 	}
 	return nil
+}
+
+// A26-3599-4, Sense Byte 0 bit 5: after overrun the 2314 writes zeros to
+// the end of the selected record area. Later overflow records stay intact.
+func (d *DASD3390) limitOverrun2314(write *diskWrite2314, used int) (int, error) {
+	for i, field := range write.Fields {
+		r, err := d.track(field.Track)
+		if err != nil {
+			return 0, err
+		}
+		record := r[field.Record]
+		n := len(record.Data)
+		if field.Key {
+			n += len(record.Key)
+		}
+		if used < n {
+			write.Fields = write.Fields[:i+1]
+			d.cyl, d.head = field.Track/d.heads, field.Track%d.heads
+			d.rec, d.afterData, d.afterKey = field.Record, true, false
+			return n - used, nil
+		}
+		used -= n
+	}
+	return 0, nil
 }
 
 func (d *DASD3390) recalibrate() {

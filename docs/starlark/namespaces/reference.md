@@ -4758,6 +4758,12 @@ Reads one non-overlaid Amiga HUNK_HEADER load module without loading or executin
 
 Reads concatenated classic Amiga and EHF HUNK_UNIT object libraries, preserving unit names and complete raw unit views in units. The entries list exposes code, data and debug payloads under unique unit/record paths for nested inspection. Each unit's records expose tag, flags, absolute offset, raw bytes, optional payload, memory_size, symbols and relocations. Names retain longword padding. Code, data, debug bytes and big-endian relocation offset arrays remain borrowed files; BSS has a declared memory_size and no payload. Checks record boundaries, section ordering and END markers. maximum_records bounds blocks, symbols and relocation groups together. Does not link, apply relocations, resolve symbols or allocate BSS; reference targets and offsets are metadata, not a validated linked program. Supports EHF PPC_CODE, RELRELOC26 and EXT_RELREF26 framing without applying relocations. Load modules require hunk_load; indexed libraries and overlays remain rejected rather than silently skipped.
 
+### `archive.ibm9020_rld`
+
+`archive.ibm9020_rld(file) -> record`
+
+Reads one IBM 9020 diagnostic library relocation dictionary record. Returns its raw id and ordered entries with an address, a width in bytes, and whether the relocation factor is subtracted.
+
 ### `archive.ibmi_save`
 
 `archive.ibmi_save(file, maximum_entries=100000, profile="catalog") -> record`

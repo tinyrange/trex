@@ -20,14 +20,15 @@ const (
 
 // Subchannel status bits.
 const (
-	scsPCI          = 0x80
-	scsIncorrectLen = 0x40
-	scsProgramCheck = 0x20
-	scsProtection   = 0x10
-	scsDataCheck    = 0x08
-	scsControlCheck = 0x04
-	scsIFCC         = 0x02
-	scsChainCheck   = 0x01
+	scsPCI           = 0x80
+	scsIncorrectLen  = 0x40
+	scsProgramCheck  = 0x20
+	scsProtection    = 0x10
+	scsDataCheck     = 0x08
+	scsControlCheck  = 0x04
+	scsIFCC          = 0x02
+	scsChainCheck    = 0x01
+	scsStoppedSE9020 = scsProgramCheck | scsChainCheck
 )
 
 // Device is a channel-attached I/O device.
@@ -69,18 +70,20 @@ type ChainEnd interface {
 
 // Subchannel holds the path-management control word and status.
 type Subchannel struct {
-	num     uint16
-	devno   uint16
-	dev     Device
-	intparm uint32
-	isc     byte
-	enabled bool
-	lpm     byte
-	mbi     uint16
-	mm      byte
-	limit   byte
-	multip  bool
-	timing  bool
+	num            uint16
+	devno          uint16
+	dev            Device
+	ce9020         uint16 // CE that started the current channel program
+	controller9020 uint8  // One plus the control unit's selection-mask bit.
+	intparm        uint32
+	isc            byte
+	enabled        bool
+	lpm            byte
+	mbi            uint16
+	mm             byte
+	limit          byte
+	multip         bool
+	timing         bool
 
 	// SCSW
 	key, ccwfmt byte
@@ -94,8 +97,8 @@ type Subchannel struct {
 	irq         bool // interruption request not yet accepted
 	ccDeferred  byte
 
-	sense    []byte
-	attnHold bool
+	sense      []byte
+	heldStatus byte
 
 	// A channel program waiting at a CCW for its device (see Blocking).
 	blocked   bool
@@ -166,16 +169,20 @@ func (s *ChannelSubsystem) traceString() string {
 
 // ChannelSubsystem holds every subchannel.
 type ChannelSubsystem struct {
-	trace   []ioTrace
-	m       *Machine
-	subs    []*Subchannel
-	bydev   map[uint16]*Subchannel
-	crw     []uint32
-	crwPend bool
-	ipl     bool   // running the IPL channel program, which is not timed
-	next    uint64 // earliest System/370 timed transition, or zero
-	mach    []byte // 9020 IOCE MACH storage, separate from CE main storage
-	ioceATR [3]channelATR9020
+	rcus9020         [2]*rcu9020
+	dauUnits9020     [2]*dau2701
+	rcuEndpoints9020 [28]rcuEndpoint9020
+	trace            []ioTrace
+	m                *Machine
+	subs             []*Subchannel
+	bydev            map[uint16]*Subchannel
+	crw              []uint32
+	crwPend          bool
+	ipl              bool   // running the IPL channel program, which is not timed
+	next             uint64 // earliest System/370 timed transition, or zero
+	mach             []byte // 9020 IOCE MACH storage, separate from CE main storage
+	ioceATR          [3]channelATR9020
+	ioceChecks9020   [3]ioceMachineCheck9020
 }
 
 type channelATR9020 struct {
@@ -192,18 +199,19 @@ func (s *ChannelSubsystem) ioceAddresses(devno uint16) channelATR9020 {
 
 func (s *ChannelSubsystem) channelAddress(atr channelATR9020, addr uint32) uint32 {
 	if atr.Active && !s.machAddress(addr) {
-		return translateATR9020(atr.Mask, addr)
+		addr = s.m.translateATR9020(atr.Mask, addr)
 	}
-	return addr
+	return s.ioceInterleave9020(addr).physical(addr)
 }
 
 // Map the data addresses when the CCW is accepted. Split a transfer that
 // straddles an SE boundary, since adjacent ATR slots need not be adjacent
 // in physical storage. Keep transfer order for READ BACKWARD.
 func (s *ChannelSubsystem) channelSegments(atr channelATR9020, sg []segment, backward bool) []segment {
-	if !atr.Active {
+	if !atr.Active && !s.m.interleavingDefeated9020() {
 		return sg
 	}
+	size := s.m.storageElementSize9020()
 	var out []segment
 	for _, g := range sg {
 		if s.machAddress(g.addr) {
@@ -211,13 +219,22 @@ func (s *ChannelSubsystem) channelSegments(atr channelATR9020, sg []segment, bac
 			continue
 		}
 		for g.n > 0 {
+			physical := g.addr
+			if atr.Active {
+				physical = s.m.translateATR9020(atr.Mask, g.addr)
+			}
+			mode := s.ioceInterleave9020(physical)
+			span := size
+			if mode != 0 {
+				span = oddBank9020
+			}
 			var n uint32
 			if backward {
-				n = min(g.n, g.addr&(bytesPer9020SE-1)+1)
+				n = min(g.n, g.addr&(span-1)+1)
 			} else {
-				n = min(g.n, bytesPer9020SE-g.addr&(bytesPer9020SE-1))
+				n = min(g.n, span-g.addr&(span-1))
 			}
-			out = append(out, segment{addr: translateATR9020(atr.Mask, g.addr), n: n})
+			out = append(out, segment{addr: mode.physical(physical), n: n, skip: g.skip})
 			g.n -= n
 			if backward {
 				g.addr -= n
@@ -254,16 +271,72 @@ func (s *ChannelSubsystem) channelStorage(addr, size uint32) []byte {
 		}
 		return nil
 	}
-	if !s.m.S.valid(addr, size) {
+	if s.m.cfg.Model9020E && uint64(addr)+uint64(size) > displayBase9020E || !s.m.S.valid(addr, size) {
 		return nil
 	}
 	return s.m.S.Mem[addr : addr+size]
 }
 
+// channelAvailable9020 reports the reachable prefix and the check at its
+// boundary (9020D System FETOM, figure 8-7).
+func (s *ChannelSubsystem) channelAvailable9020(devno uint16, addr, count uint32, backward bool) (uint32, byte) {
+	if !s.m.Model9020 || s.machAddress(addr) {
+		return count, 0
+	}
+	size := s.m.storageElementSize9020()
+	var available uint32
+	for available < count {
+		if !s.ioceStorageConfigured9020(devno, addr) {
+			return available, scsProgramCheck
+		}
+		if s.m.storageStopped9020(addr) {
+			return available, scsStoppedSE9020
+		}
+		offset := addr % size
+		if backward {
+			n := min(count-available, offset+1)
+			available += n
+			addr -= n
+		} else {
+			n := min(count-available, size-offset)
+			available += n
+			addr += n
+		}
+	}
+	return available, 0
+}
+
+func (s *ChannelSubsystem) checkAttachment(devno uint16) error {
+	if _, ok := s.bydev[devno]; ok {
+		return fmt.Errorf("device %04X already attached", devno)
+	}
+	if s.m.S370 && s.m.cfg.ByteMuxSubchannels != 0 && devno < 0x100 {
+		switch {
+		case devno < 8:
+			first := 0x80 + devno*16
+			for address := first; address < first+16; address++ {
+				if s.bydev[address] != nil {
+					return fmt.Errorf("device %04X conflicts with byte multiplexor address %04X", devno, address)
+				}
+			}
+		case devno < 0x80:
+			if int(devno) >= s.m.cfg.ByteMuxSubchannels {
+				return fmt.Errorf("device %04X has no configured byte multiplexor subchannel", devno)
+			}
+		default:
+			shared := (devno >> 4) & 7
+			if s.bydev[shared] != nil {
+				return fmt.Errorf("device %04X conflicts with byte multiplexor address %04X", devno, shared)
+			}
+		}
+	}
+	return nil
+}
+
 // Attach adds a device at a device number and returns its subchannel number.
 func (s *ChannelSubsystem) Attach(devno uint16, d Device) (uint16, error) {
-	if _, ok := s.bydev[devno]; ok {
-		return 0, fmt.Errorf("device %04X already attached", devno)
+	if err := s.checkAttachment(devno); err != nil {
+		return 0, err
 	}
 	if a, ok := d.(Addressed); ok {
 		a.SetDeviceNumber(devno)
@@ -284,14 +357,17 @@ func (s *ChannelSubsystem) byDevice(devno uint16) *Subchannel { return s.bydev[d
 
 func (s *ChannelSubsystem) reset() {
 	s.ioceATR = [3]channelATR9020{}
+	s.ioceChecks9020 = [3]ioceMachineCheck9020{}
 	for _, x := range s.subs {
 		x.intparm, x.isc, x.enabled, x.mbi, x.mm, x.limit, x.multip, x.timing = 0, 0, s.m.S370, 0, 0, 0, false, false
 		x.lpm = 0x80
 		x.clearStatus()
+		x.heldStatus = 0
 		x.blocked, x.pciWait, x.pciIRQ = false, false, false
 		x.resumeAt, x.finishAt, x.deAt, x.deStatus, x.devPending, x.endAtDE = 0, 0, 0, 0, false, false
 		x.cuBusyUntil, x.cuEndWanted = 0, false
 		x.op = nil
+		x.ce9020 = 0
 		x.dev.Reset()
 	}
 	s.crw = nil
@@ -333,7 +409,7 @@ func (s *ChannelSubsystem) Unsolicited(devno uint16, status byte) bool {
 		return false
 	}
 	if x.pending || x.ac != 0 || x.blocked || x.finishAt != 0 {
-		x.attnHold = true
+		x.heldStatus |= status
 		return false
 	}
 	x.devPending = true
@@ -510,9 +586,9 @@ func (c *CPU) tsch(a uint32, b int) {
 		x.pending = false
 		x.irq = false
 		x.ccDeferred = 0
-		if x.attnHold {
-			x.attnHold = false
-			c.M.CSS.Unsolicited(x.devno, usAttention)
+		if status := x.heldStatus; status != 0 {
+			x.heldStatus = 0
+			c.M.CSS.Unsolicited(x.devno, status)
 		}
 	} else {
 		c.PSW.CC = 1
@@ -714,15 +790,21 @@ const (
 	ccwS    = 0x02
 )
 
-func (s *ChannelSubsystem) fetchCCW(addr uint32, fmt1 bool) (ccw, bool) {
+func (s *ChannelSubsystem) fetchCCW(devno uint16, addr uint32, fmt1 bool) (ccw, byte) {
 	b := s.channelStorage(addr, 8)
-	if addr&7 != 0 || b == nil {
-		return ccw{}, false
+	if addr&7 != 0 || b == nil || !s.ioceStorageConfigured9020(devno, addr) {
+		return ccw{}, scsProgramCheck
+	}
+	if s.m.storageStopped9020(addr) {
+		return ccw{}, scsStoppedSE9020
 	}
 	if fmt1 {
-		return ccw{cmd: b[0], flags: b[1], count: be.Uint16(b[2:]), addr: be.Uint32(b[4:]) & 0x7fffffff}, b[4]&0x80 == 0
+		if b[4]&0x80 != 0 {
+			return ccw{}, scsProgramCheck
+		}
+		return ccw{cmd: b[0], flags: b[1], count: be.Uint16(b[2:]), addr: be.Uint32(b[4:]) & 0x7fffffff}, 0
 	}
-	return ccw{cmd: b[0], flags: b[4], count: be.Uint16(b[6:]), addr: be.Uint32(b[0:]) & 0x00ffffff}, true
+	return ccw{cmd: b[0], flags: b[4], count: be.Uint16(b[6:]), addr: be.Uint32(b[0:]) & 0x00ffffff}, 0
 }
 
 type segment struct {
@@ -865,7 +947,9 @@ func (s *ChannelSubsystem) resume(x *Subchannel) {
 		return
 	}
 	s.trace = s.trace[:0]
-	s.run(x, x.blockAddr, x.blockFmt1, 0, x.key)
+	if s.run(x, x.blockAddr, x.blockFmt1, 0, x.key) {
+		return
+	}
 	if x.blocked || x.finishAt != 0 {
 		return
 	}
@@ -921,7 +1005,7 @@ func (s *ChannelSubsystem) tickPCI(idle bool) bool {
 }
 
 // run executes CCWs and fills the subchannel's status fields.
-func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32, key byte) {
+func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32, key byte) (ioceCheck bool) {
 	x.endCE, x.endDE = 0, 0
 	atr := s.ioceAddresses(x.devno)
 	// System/370 CCW rules (GA22-7000, chapter 12): a TIC may be neither
@@ -946,12 +1030,20 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			return
 		}
 		physical := s.channelAddress(atr, addr)
-		w, ok := s.fetchCCW(physical, fmt1)
-		if !ok {
+		w, fetchStatus := s.fetchCCW(x.devno, physical, fmt1)
+		if fetchStatus != 0 {
 			x.ccwaddr = addr + 8
-			x.schStatus = scsProgramCheck
+			x.schStatus = fetchStatus
 			x.devStatus = 0
 			return
+		}
+		if s.m.Model9020 && !s.ipl && int(x.ce9020) < len(s.m.CPUs) &&
+			s.checkIOCECCW9020(s.m.CPUs[x.ce9020], x.devno, physical, key) {
+			if ce, ok := x.dev.(ChainEnd); ok {
+				ce.EndChain()
+			}
+			x.ac = 0
+			return true
 		}
 		if s370 && !s.fetchAllowed(physical, 8, key) {
 			// The 9020 multiplexor reports program check for a
@@ -968,6 +1060,7 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			x.devStatus = 0
 			return
 		}
+		s.latchIOCEStorage9020(x.devno, physical, 8, accFetch, key)
 		if w.cmd&0xf == 8 { // TIC
 			if w.addr&7 != 0 || s370 && (prevTIC || steps == 0 && x.ccws == 0) {
 				x.ccwaddr = addr + 8
@@ -999,18 +1092,33 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 		cur := addr
 		chain := []ccw{w}
 		addrs := []uint32{addr}
+		// The 9020 selector resolves these data chains on the device's
+		// byte clock, so each CCW sees storage at its fetch point.
+		liveDataChain := w.flags&ccwCD != 0 && (s.liveReadChain9020(x, w.cmd) || s.liveWriteChain9020(x, w.cmd))
 		chainErr := uint32(0) // address of an invalid data-chained CCW, plus 8
+		var chainStatus byte
 		chainTIC := false
-		for chain[len(chain)-1].flags&ccwCD != 0 {
+		for !liveDataChain && chain[len(chain)-1].flags&ccwCD != 0 {
 			cur += 8
 			physical = s.channelAddress(atr, cur)
-			nw, ok := s.fetchCCW(physical, fmt1)
-			if ok && s370 && !s.fetchAllowed(physical, 8, key) {
-				ok = false
+			nw, fetchStatus := s.fetchCCW(x.devno, physical, fmt1)
+			if fetchStatus == 0 && s.m.Model9020 && !s.ipl && int(x.ce9020) < len(s.m.CPUs) &&
+				s.checkIOCECCW9020(s.m.CPUs[x.ce9020], x.devno, physical, key) {
+				if ce, ok := x.dev.(ChainEnd); ok {
+					ce.EndChain()
+				}
+				x.ac = 0
+				return true
 			}
-			if ok && nw.cmd&0xf == 8 {
+			if fetchStatus == 0 && s370 && !s.fetchAllowed(physical, 8, key) {
+				fetchStatus = scsProgramCheck
+			}
+			if fetchStatus == 0 {
+				s.latchIOCEStorage9020(x.devno, physical, 8, accFetch, key)
+			}
+			if fetchStatus == 0 && nw.cmd&0xf == 8 {
 				if nw.addr&7 != 0 || s370 && chainTIC {
-					ok = false
+					fetchStatus = scsProgramCheck
 				} else {
 					chainTIC = true
 					cur = nw.addr - 8
@@ -1018,16 +1126,16 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 				}
 			}
 			chainTIC = false
-			if ok && s370 && nw.flags&zeroFlags != 0 {
-				ok = false
+			if fetchStatus == 0 && s370 && nw.flags&zeroFlags != 0 {
+				fetchStatus = scsProgramCheck
 			}
-			if !ok {
+			if fetchStatus != 0 {
 				if transferChecks {
-					chainErr = cur + 8
+					chainErr, chainStatus = cur+8, fetchStatus
 					break
 				}
 				x.ccwaddr = cur + 8
-				x.schStatus = scsProgramCheck
+				x.schStatus = fetchStatus
 				return
 			}
 			nw.cmd = w.cmd
@@ -1043,6 +1151,9 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 		// program or protection check. Otherwise they are checked first.
 		// An invalid first IDAW is always found before the device starts.
 		var dataErr byte
+		var inputLimit uint32
+		read := cmdIsRead(w.cmd)
+		backward := w.cmd&0xf == 0xc
 		for _, cw := range chain {
 			// With skip set on an input command, the data address (including
 			// an IDAW list) is not used or checked.
@@ -1062,10 +1173,9 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 				return
 			}
 			valid := true
-			sg = s.channelSegments(atr, sg, w.cmd&0xf == 0xc)
+			sg = s.channelSegments(atr, sg, backward)
 			for _, g := range sg {
 				start := g.addr
-				backward := w.cmd&0xf == 0xc
 				if backward {
 					start -= g.n - 1
 				}
@@ -1075,6 +1185,26 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 				}
 			}
 			if !valid {
+				disk, _ := x.dev.(*DASD3390)
+				timedInput := transferChecks || disk != nil && disk.devType == 0x2314 && !s.ipl
+				if timedInput && s.m.S360 && read && !atr.Active && len(sg) == 1 {
+					g := sg[0]
+					size := s.m.S.Size()
+					if size < 1<<24 && g.addr < size && !s.machAddress(g.addr) {
+						available := size - g.addr
+						if backward {
+							available = g.addr + 1
+						}
+						if g.n > available {
+							// Use the installed storage up to the
+							// first invalid address in transfer order.
+							g.n = available
+							inputLimit = total + available
+							segs = append(segs, g)
+							break
+						}
+					}
+				}
 				if transferChecks {
 					dataErr = scsProgramCheck
 					break
@@ -1092,23 +1222,56 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			segs = append(segs, sg...)
 			total += uint32(cw.count)
 		}
-		if dataErr != 0 {
+		if dataErr != 0 || inputLimit != 0 {
 			total = 0
 			for _, cw := range chain {
 				total += uint32(cw.count)
 			}
-			segs = nil
+			if inputLimit == 0 {
+				segs = nil
+			}
 		}
-		read := cmdIsRead(w.cmd)
 		var in []byte
+		var storageCheck byte
+		tape, isTape := x.dev.(*Tape2401)
+		disk, isDisk := x.dev.(*DASD3390)
+		timedOutput9020 := s.m.Model9020 && !s.ipl &&
+			(isTape && w.cmd == 0x01 || isDisk && disk.devType == 0x2314 && (w.cmd == 0x05 || w.cmd == 0x0d))
+		_, isDAU := x.dev.(*dau2701Port)
+		timedRKMWrite := transferChecks && isDAU && (w.cmd == 0xc1 || w.cmd == 0xe1)
 		if !read && total > 0 && dataErr == 0 {
-			in = make([]byte, 0, total)
-			for _, g := range segs {
-				if transferChecks && !g.skip && !s.fetchAllowed(g.addr, g.n, key) {
-					dataErr = scsProtection
-					break
+			if timedOutput9020 || timedRKMWrite {
+				// These commands select the destination and set timing from
+				// the count. The device reads the payload on its byte clock.
+				in = make([]byte, total)
+			} else {
+				in = make([]byte, 0, total)
+				for _, g := range segs {
+					available, check := s.channelAvailable9020(x.devno, g.addr, g.n, false)
+					if !s.ipl && len(s.m.storageBadKey9020) != 0 {
+						block := uint32(1) << s.m.S.KeyShift
+						for addr, end := g.addr, g.addr+available; addr < end; {
+							n := min(end-addr, block-addr%block)
+							if s.checkIOCEKey9020(x.ce9020, x.devno, addr, n, accFetch, key) {
+								if ce, ok := x.dev.(ChainEnd); ok {
+									ce.EndChain()
+								}
+								x.ac = 0
+								return true
+							}
+							addr += n
+						}
+					}
+					if transferChecks && !g.skip && available != 0 && !s.fetchAllowed(g.addr, available, key) {
+						dataErr = scsProtection
+						break
+					}
+					in = append(in, s.channelStorage(g.addr, available)...)
+					if check != 0 {
+						storageCheck, dataErr = check, check
+						break
+					}
 				}
-				in = append(in, s.channelStorage(g.addr, g.n)...)
 			}
 		}
 		chained := last.flags&ccwCC != 0
@@ -1122,9 +1285,11 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 		var diskWrite *diskWrite2314
 		var diskCyl uint32
 		op := &ccwOp{Cmd: w.cmd, Last: last, Chain: chain, Addrs: addrs, Segs: segs, Total: total, Cur: cur,
-			Read: read, Chained: chained, Key: key, Fmt1: fmt1, Err: dataErr,
-			ChainErr: chainErr, Checked: transferChecks}
-		if d, ok := x.dev.(*ctc9020Side); ok && !s.ipl {
+			Read: read, Chained: chained, Key: key, Fmt1: fmt1, Err: dataErr, InputLimit: inputLimit,
+			ChainErr: chainErr, ChainStatus: chainStatus, Checked: transferChecks || inputLimit != 0}
+		if storageCheck != 0 && len(in) == 0 {
+			// The first fetch failed. No data was delivered to the device.
+		} else if d, ok := x.dev.(*ctc9020Side); ok && !s.ipl {
 			if d.selectCCW(x, op, in) {
 				if s.m.TraceIO && !s.m.TraceIOSkip[x.devno] {
 					s.m.event("io", nil, fmt.Sprintf("CTC %04X waiting for %04X cmd %02X ccw %06X", x.devno, d.peer.addr, op.Cmd, op.Cur))
@@ -1133,7 +1298,15 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			}
 			out, used, status = op.Out, op.Used, op.Status
 		} else if d, ok := x.dev.(*dau2701Port); ok {
-			out, used, status = d.exec(w.cmd, in, int(total))
+			out, used, status = d.exec(w.cmd, in, op, transferChecks)
+		} else if p, ok := x.dev.(*rcu9020Port); ok {
+			out, used, status = p.Exec(w.cmd, in, chained)
+			op.LengthOnException = w.cmd == 0x31 && p.rcu.state.Sense == 1
+			if w.cmd == 0x67 && p.attentionPending() {
+				// An attention generated by Control Test terminates the
+				// chain after the initial CE/DE (D9051200 routine 06).
+				op.Chained = false
+			}
 		} else if d, ok := x.dev.(*UnitRecord); ok && d.port != nil {
 			out, used, status = d.exec2821(x, w.cmd, in, chained)
 		} else if d, ok := x.dev.(*DASD3390); ok && d.devType == 0x2314 && s.m.S360 && !s.ipl {
@@ -1143,7 +1316,29 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			}
 			out, used, status = d.exec(w.cmd, in, chained, diskWrite, s.m.Model9020)
 		} else {
+			if tape, ok := x.dev.(*Tape2401); ok && !tape.unloaded && !tape.manual {
+				switch w.cmd {
+				case 0x07:
+					if tape.pos != 0 || tape.pastLoadPoint {
+						tape.rewindDisconnect = s.m.tod + durationTOD(tape.rewindDisconnectTime())
+					}
+				case 0x0f:
+					if tape.model2415 || tape.transportModel != 0 {
+						travel := tape.rewindTravelTime(true)
+						tape.unloadUntil = s.m.tod + durationTOD(travel)
+						if s.m.TraceIO && !s.m.TraceIOSkip[x.devno] {
+							s.m.event("io", nil, fmt.Sprintf("rewind unload %04X estimated travel %d us", x.devno, travel.Microseconds()))
+						}
+					}
+				}
+			}
 			out, used, status = x.dev.Exec(w.cmd, in, chained)
+		}
+		if tape, ok := x.dev.(*Tape2401); ok && !s.ipl {
+			s.setTapeMode(x, tape, w.cmd, status)
+			if s.m.S360 {
+				tape.scheduleMotion(s.m.tod, w.cmd)
+			}
 		}
 		x.ccws++
 		x.endCE, x.endDE = s.timing(x, w.cmd, min(len(out)+used, int(total)), status, diskCyl)
@@ -1152,7 +1347,7 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			if status&usCE == 0 || status&usUnitExcept != 0 {
 				x.endCE = 0 // initial unit status
 			}
-		case *dau2701Port:
+		case *dau2701Port, *rcu9020Port:
 			if status == usUnitCheck {
 				x.endCE = 0 // command rejected at selection
 			}
@@ -1183,10 +1378,38 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 			x.op = op
 			x.ac = acSubchActive | acDeviceActive
 			x.finishAt = s.m.tod + x.endCE
+			op.TimedOutput = timedOutput9020 && (len(op.TapeWrite) > 0 || op.DiskWrite != nil && len(op.DiskWrite.Fields) != 0)
+			if op.TimedOutput && isTape && !tape.model2415 && op.Used > 0 {
+				// The 2803 takes the first byte at selection, before motion.
+				// A fault on this first fetch still reports channel status
+				// asynchronously, as it would for an already stopped SE.
+				check, machineCheck := s.fetchCCWOutput9020(x, 1)
+				if check == 0 && !machineCheck && s.writeChainBoundary9020(x) == 1 {
+					check, machineCheck = s.advanceOutput9020(x, s.m.tod)
+				}
+				if machineCheck {
+					s.interruptOutput9020(x)
+					return true
+				}
+				if check != 0 {
+					op.Used, op.Err = 0, check
+					if check == scsStoppedSE9020 {
+						op.Status = 0
+					}
+					x.endCE = durationTOD(10 * time.Microsecond)
+					x.finishAt = s.m.tod + x.endCE
+				}
+			}
 			s.reschedule()
 			return
 		}
-		next, cont, pci := s.endCCW(x, op)
+		next, cont, pci, machineCheck := s.endCCW(x, op)
+		if machineCheck {
+			x.op = op
+			s.interruptRead9020(x)
+			s.reschedule()
+			return true
+		}
 		if !cont {
 			s.holdChannelEnd(x, op)
 			return
@@ -1221,7 +1444,7 @@ func (s *ChannelSubsystem) run(x *Subchannel, addr uint32, fmt1 bool, orb uint32
 }
 
 // storeKeyed writes channel data to absolute storage with key protection.
-func (s *ChannelSubsystem) storeKeyed(a uint32, data []byte, key byte) bool {
+func (s *ChannelSubsystem) storeKeyed(devno uint16, a uint32, data []byte, key byte) bool {
 	if s.machAddress(a) {
 		dst := s.channelStorage(a, uint32(len(data)))
 		if dst == nil {
@@ -1234,8 +1457,7 @@ func (s *ChannelSubsystem) storeKeyed(a uint32, data []byte, key byte) bool {
 	block := uint32(1) << m.KeyShift
 	for off := uint32(0); off < uint32(len(data)); {
 		k := m.key(a + off)
-		// On the 9020 a channel may store into blocks whose key is zero.
-		if key != 0 && *k>>4 != key && !(s.m.Model9020 && *k>>4 == 0) {
+		if !s.m.storageKeyMatches(key, *k) {
 			return false
 		}
 		n := block - (a+off)&(block-1)
@@ -1244,6 +1466,7 @@ func (s *ChannelSubsystem) storeKeyed(a uint32, data []byte, key byte) bool {
 		}
 		copy(m.Mem[a+off:], data[off:off+n])
 		*k |= keyRef | keyChg
+		s.latchIOCEStorage9020(devno, a+off, n, accStore, key)
 		for _, c := range s.m.CPUs {
 			c.icache.invalidatePage(a + off)
 		}
@@ -1279,9 +1502,16 @@ type ccwOp struct {
 	Segs                []segment
 	Total, Cur          uint32
 	ReadStored          uint32 // input bytes already delivered to storage or skipped
+	OutputFetched       uint32 // output bytes already accepted by the device
+	InputLimit          uint32 // first invalid input offset, zero if none after a valid prefix
 	Out                 []byte
-	TapeWrite           []byte         // tape output is recorded only as bytes are transferred
-	DiskWrite           *diskWrite2314 // fields selected for a pending 2314 write
+	TapeWrite           []byte           // tape output is recorded only as bytes are transferred
+	DiskWrite           *diskWrite2314   // fields selected for a pending 2314 write
+	RKMOrder            byte             // formatted order on the live RKM bus
+	RKMOutput           []byte           // bytes fetched on the RKM bus clock
+	RKMOperator         rkmOperator9020E // a deferred RKM order waiting for operand transfer
+	TimedOutput         bool             // fetch output bytes on the device clock
+	OutputOverrun       bool             // device finishing after the IOCE lost byte service
 	Used                int
 	Status              byte
 	Read, Chained, Fmt1 bool
@@ -1290,12 +1520,16 @@ type ccwOp struct {
 	Key                 byte
 	Err                 byte   // channel status of a check found during the transfer
 	ChainErr            uint32 // an invalid data-chained CCW follows (its address plus 8)
+	ChainStatus         byte   // channel status when a transfer reaches ChainErr
 	Checked             bool   // checks are made during the transfer (see run)
 }
 
 // storeCCWInput delivers the newly arrived prefix of input. Data chaining
 // and skip apply to the logical byte offset even across timed updates.
-func (s *ChannelSubsystem) storeCCWInput(op *ccwOp, moved uint32) bool {
+func (s *ChannelSubsystem) storeCCWInput(x *Subchannel, op *ccwOp, moved uint32) (channelCheck byte, machineCheck bool) {
+	if op.InputLimit != 0 {
+		moved = min(moved, op.InputLimit)
+	}
 	var off uint32
 	for _, g := range op.Segs {
 		if off >= moved {
@@ -1305,41 +1539,67 @@ func (s *ChannelSubsystem) storeCCWInput(op *ccwOp, moved uint32) bool {
 		lo, hi := max(off, op.ReadStored), min(end, moved)
 		if lo < hi {
 			if !g.skip {
-				if op.Cmd&0xf == 0xc {
-					for i := lo; i < hi; i++ {
-						if !s.storeKeyed(g.addr-(i-off), op.Out[i:i+1], op.Key) {
-							return false
-						}
+				backward := op.Cmd&0xf == 0xc
+				addr := g.addr + (lo - off)
+				if backward {
+					addr = g.addr - (lo - off)
+				}
+				available, check := s.channelAvailable9020(x.devno, addr, hi-lo, backward)
+				limit := lo + available
+				block := uint32(1) << s.m.S.KeyShift
+				for i := lo; i < limit; {
+					n := min(limit-i, block-addr%block)
+					if backward {
+						n = 1
 					}
-				} else if !s.storeKeyed(g.addr+(lo-off), op.Out[lo:hi], op.Key) {
-					return false
+					if !s.ipl && s.checkIOCEKey9020(x.ce9020, x.devno, addr, n, accStore, op.Key) {
+						return 0, true
+					}
+					if !s.storeKeyed(x.devno, addr, op.Out[i:i+n], op.Key) {
+						return scsProtection, false
+					}
+					i += n
+					op.ReadStored = i
+					if backward {
+						addr--
+					} else {
+						addr += n
+					}
+				}
+				if check != 0 {
+					return check, false
 				}
 			}
 			op.ReadStored = hi
 		}
 		off = end
 	}
-	return true
+	return 0, false
 }
 
 // endCCW stores a CCW's input data and sets the subchannel status. It
 // returns the address of the next CCW and whether command chaining
 // continues, and whether the CCW had the PCI flag.
-func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, pci bool) {
+func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, pci, machineCheck bool) {
 	last, chain, total, cur, out, used, status := op.Last, op.Chain, op.Total, op.Cur, op.Out, op.Used, op.Status
+	if op.TimedOutput || rkmWriteOrder(op.RKMOrder) {
+		used = min(used, int(op.OutputFetched))
+	}
 	// A PCI flag takes effect when its CCW takes control, so the
 	// condition is part of the final status however the CCW ends.
 	for _, cw := range chain {
 		pci = pci || cw.flags&ccwPCI != 0
 	}
-	if op.Err != 0 {
-		// No data reached storage; the device ends with its status.
+	acceptedOutput := op.TimedOutput && used > 0 && (op.Err == scsProtection || op.Err == scsProgramCheck)
+	acceptedRKM := op.RKMOrder >= 0x80 && (op.ReadStored != 0 || op.OutputFetched != 0)
+	if op.Err != 0 && op.Err != scsStoppedSE9020 && !acceptedOutput && !acceptedRKM {
+		// The device ends with its status when the check preceded transfer.
 		x.ccwaddr, x.residual = op.Addrs[0]+8, uint16(chain[0].count)
 		x.devStatus, x.schStatus = status, op.Err
 		if pci {
 			x.schStatus |= scsPCI
 		}
-		return 0, false, pci
+		return 0, false, pci, false
 	}
 	if len(op.TapeWrite) > 0 && used > 0 {
 		tape := x.dev.(*Tape2401)
@@ -1351,7 +1611,7 @@ func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, 
 			_, _, status = d.ioErr(err)
 		}
 	}
-	if !op.Read && used == 0 && op.Cmd&3 == 3 && len(chain) > 1 {
+	if op.Err == 0 && !op.Read && used == 0 && op.Cmd&3 == 3 && len(chain) > 1 {
 		// An immediate control command ends at initiation: no data is
 		// transferred, so data chaining does not occur, and the CC flag is
 		// ignored when CD is on (A22-6821-7 p. 104).
@@ -1360,12 +1620,23 @@ func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, 
 		if pci {
 			x.schStatus |= scsPCI
 		}
-		return 0, false, pci
+		return 0, false, pci, false
 	}
 	var moved uint32
+	dataStatus := op.Err
 	if op.Read {
 		moved = min(uint32(len(out)), total)
-		if !s.storeCCWInput(op, moved) {
+		if op.InputLimit != 0 && moved > op.InputLimit {
+			moved, dataStatus = op.InputLimit, scsProgramCheck
+		}
+		check, machineCheck := s.storeCCWInput(x, op, moved)
+		if machineCheck {
+			return 0, false, false, true
+		}
+		switch check {
+		case scsStoppedSE9020, scsProgramCheck:
+			moved, dataStatus = op.ReadStored, check
+		case scsProtection:
 			// With checks made during the transfer, the device has
 			// started and ends with its own status.
 			x.ccwaddr = cur + 8
@@ -1374,7 +1645,7 @@ func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, 
 			if op.Checked {
 				x.devStatus = status
 			}
-			return 0, false, pci
+			return 0, false, pci, false
 		}
 	} else {
 		// A device may report using more than the count: it wanted more
@@ -1398,14 +1669,21 @@ func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, 
 		}
 	}
 	x.devStatus = status
-	if op.ChainErr != 0 && moved == total {
-		// The count ran out and the next data-chained CCW is invalid.
-		x.ccwaddr, x.residual = op.ChainErr, 0
-		x.schStatus = scsProgramCheck
+	if dataStatus != 0 {
+		x.schStatus = dataStatus
 		if pci {
 			x.schStatus |= scsPCI
 		}
-		return 0, false, pci
+		return 0, false, pci, false
+	}
+	if op.ChainErr != 0 && moved == total {
+		// The count ran out and the next data-chained CCW is invalid.
+		x.ccwaddr, x.residual = op.ChainErr, 0
+		x.schStatus = scsProgramCheck | op.ChainStatus
+		if pci {
+			x.schStatus |= scsPCI
+		}
+		return 0, false, pci, false
 	}
 	incorrect := false
 	checkLength := status&(usUnitCheck|usUnitExcept) == 0 || op.LengthOnException
@@ -1432,7 +1710,7 @@ func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, 
 	if _, ok := x.dev.(*Tape2401); ok && op.Cmd == 0x01 && status == usCE|usDE {
 		incorrect = true
 	}
-	end := func() (uint32, bool, bool) {
+	end := func() (uint32, bool, bool, bool) {
 		if pci {
 			x.schStatus |= scsPCI
 		}
@@ -1443,7 +1721,7 @@ func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, 
 			x.cuBusyUntil = s.m.tod + durationTOD(25*time.Millisecond)
 			s.reschedule()
 		}
-		return 0, false, pci
+		return 0, false, pci, false
 	}
 	suppressLength := last.flags&ccwSLI != 0 && (!s.m.S360 || last.flags&ccwCD == 0)
 	if incorrect && !suppressLength {
@@ -1458,7 +1736,7 @@ func (s *ChannelSubsystem) endCCW(x *Subchannel, op *ccwOp) (next uint32, cont, 
 	if status&usSM != 0 {
 		next += 8
 	}
-	return next, true, pci
+	return next, true, pci, false
 }
 
 // pauseChain suspends command chaining at addr for d TOD units.
@@ -1499,7 +1777,7 @@ func (s *ChannelSubsystem) fetchAllowed(a, n uint32, key byte) bool {
 	block := uint32(1) << m.KeyShift
 	for b := a &^ (block - 1); b < a+n; b += block {
 		k := *m.key(b)
-		if k>>4 != key && k&keyFetch != 0 {
+		if k&keyFetch != 0 && !s.m.storageKeyMatches(key, k) {
 			return false
 		}
 	}

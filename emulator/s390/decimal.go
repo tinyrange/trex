@@ -235,12 +235,13 @@ func (c *CPU) ssDecimal() {
 	case 0xfa, 0xfb: // AP, SP
 		x := c.readPacked(a1, b1, l1)
 		var y *big.Int
-		if x != nil || c.M.Model9020 {
+		serialAdder := c.M.Model9020 || c.M.cfg.Model65
+		if x != nil || serialAdder {
 			y = c.readPacked(a2, b2, l2)
 		}
 		if x == nil || y == nil {
-			if c.M.Model9020 {
-				c.addInvalid9020(a1, b1, l1, a2, b2, l2, op[0] == 0xfb)
+			if serialAdder {
+				c.addInvalidSerialDecimal(a1, b1, l1, a2, b2, l2, op[0] == 0xfb)
 			}
 			c.program(pgmData)
 		}
@@ -255,8 +256,8 @@ func (c *CPU) ssDecimal() {
 		if l2 > 8 || l2 >= l1 {
 			c.program(pgmSpecification)
 		}
-		if c.M.Model9020 {
-			c.multiply9020(a1, b1, l1, a2, b2, l2)
+		if c.M.Model9020 || c.M.cfg.Model50 || c.M.cfg.Model65 {
+			c.multiplyDecimalWorkspace(a1, b1, l1, a2, b2, l2)
 			return
 		}
 		x := c.packed(a1, b1, l1)

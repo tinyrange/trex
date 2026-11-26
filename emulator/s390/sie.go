@@ -473,6 +473,10 @@ func (c *CPU) guestProgram(code uint16, nullify bool) {
 // handleCheck dispatches a recovered panic from instruction execution.
 func (c *CPU) handleCheck(r any) {
 	switch x := r.(type) {
+	case storageDataAbort9020:
+		c.PSW.IA = c.next
+		c.exAddr = false
+		c.takeMachineCheck9020(&c.maintenance9020.machineCheck)
 	case programCheck:
 		if c.sie != nil {
 			c.guestProgram(x.code, x.nullify)

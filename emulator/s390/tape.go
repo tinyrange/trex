@@ -16,18 +16,43 @@ import (
 // image is indexed when mounted; written blocks replace the tape from the
 // current position in memory, and the image is never modified.
 type Tape3420 struct {
-	blocks        []tapeBlock
-	pos           int // index of the next block
-	unloaded      bool
-	sense         [24]byte
-	pastLoadPoint bool  // the 2401 can move past the load point before block 0
-	lastCommand   byte  // used by the 2803 while tape motion holds the control unit
-	sevenTrack    bool  // a 2401 with a seven-track head
-	sevenMode     byte  // 2803 density, redundancy and conversion mode
-	noConverter   bool  // the optional seven-track data converter is absent
-	reelEOT       int64 // 2401 reflective marker measured in 800-bpi frames; 0 means unspecified
-	reelPosition  int64
-	tapeIndicate  bool
+	blocks           []tapeBlock
+	pos              int // index of the next block
+	unloaded         bool
+	sense            [24]byte
+	pastLoadPoint    bool // the 2401 can move past the load point before block 0
+	lastCommand      byte // used by the 2803 while tape motion holds the control unit
+	sevenTrack       bool // a 2401 with a seven-track head
+	sevenMode        byte // 2803 density, redundancy and conversion mode
+	dualDensity      bool
+	peOnly           bool
+	transportModel   uint8 // 0 uses the original Model 2 transport speed
+	modeCompatible   bool  // Model 1–3 attached to a Model 2 tape control
+	goInhibitUntil   uint64
+	readMotionEnd    uint64
+	goDelay          time.Duration
+	writePE          bool
+	transferPE       bool
+	eraseDensity     int   // load-point erase establishes density before the first block
+	noConverter      bool  // the optional seven-track data converter is absent
+	reelEOT          int64 // 2401 reflective marker measured in 800-bpi frames; 0 means unspecified
+	reelPosition     int64
+	blankTravel      int64 // head offset within the gap before the next block
+	tapeIndicate     bool
+	fileProtected    bool
+	writeCheckRecord int // zero-based record slot on the mounted reel
+	writeChecks      int // remaining injected write data checks
+
+	manual           bool // operator RESET with a threaded reel
+	readyArmed       bool // selected by the channel while in manual control
+	backward         bool
+	writeMode        bool
+	turnaround       time.Duration
+	loadPointDelay   time.Duration
+	unloadUntil      uint64
+	reload           byte // zero: no request, one: no ring, two: ring inserted
+	readyEnd         bool
+	rewindDisconnect uint64
 
 	chanT, devT time.Duration // timing of the last command (CommandTiming)
 }
@@ -66,12 +91,14 @@ type tapeBlock struct {
 	off          int64
 	n            int
 	data         []byte // written blocks
-	density      int    // recorded frames per inch on a seven-track write
+	density      int    // recorded frames per inch, zero for untagged images
 	mark         bool
 	bad          bool // recovered SIMH record with a recorded data error
 	framingError string
 	fragmented   []tapeFragment
 	reelEnd      int64 // physical position following this block and its gap
+	leadIn       int64 // extra erased tape before this block, in 800-bpi frames
+	lrcDelta     byte  // seven-track frames missing from the recorded check character
 }
 
 type tapeFragment struct {
@@ -279,6 +306,7 @@ func (t *Tape3420) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 		}
 		return nil, 0, ok
 	case 0x3f: // forward space file
+		start := t.pos
 		n := 0
 		for t.pos < len(t.blocks) {
 			t.pos++
@@ -287,6 +315,9 @@ func (t *Tape3420) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 				t.motion(n)
 				return nil, 0, ok
 			}
+		}
+		if t.pos != start {
+			t.motion(n)
 		}
 		return t.check(0, 0x20)
 	case 0x2f: // backspace file

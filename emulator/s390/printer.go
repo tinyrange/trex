@@ -1,6 +1,7 @@
 package s390
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -34,13 +35,17 @@ type printer struct {
 	// Carriage: the carriage tape holds, for each line from line 1, the
 	// channels punched in it (bit n-1 for channel n), and line is the
 	// current line (0-based).
-	tape []uint16
-	line int
+	tape          []uint16
+	line          int
+	linesAdvanced uint64
 	// skipMoves reports whether a skip-immediate moves the carriage when
 	// it is already at the channel (only after a write without spacing or a
 	// UCS load).
-	skipMoves bool
+	skipMoves             bool
+	dualing               bool // translate 48HN duals to the 48AN codes
+	notReady, unavailable bool
 
+	noUCS      bool
 	ucs        [240]byte // the 240-character storage
 	ucsLoaded  bool      // loaded since power on (otherwise every code prints)
 	ucsGated   bool      // a UCS gate in this chain allows a UCS load
@@ -92,6 +97,7 @@ func (u *UnitRecord) space(n int) byte {
 	var st byte
 	for i := 0; i < n; i++ {
 		u.pr.line = (u.pr.line + 1) % len(t)
+		u.pr.linesAdvanced++
 		if t[u.pr.line]&(1<<8) != 0 {
 			u.sense |= sensePrtChannel9
 			st |= usUnitCheck
@@ -114,6 +120,7 @@ func (u *UnitRecord) skip(c int) {
 		l := (u.pr.line + i) % len(t)
 		if t[l]&bit != 0 {
 			u.pr.line = l
+			u.pr.linesAdvanced += uint64(i)
 			return
 		}
 	}
@@ -141,7 +148,29 @@ func (u *UnitRecord) carriageAfter(mod byte) byte {
 func (u *UnitRecord) load(data []byte) (int, int) {
 	n := min(len(data), printBuffer)
 	u.buffer = append(u.buffer[:0], data[:n]...)
+	if u.pr.dualing {
+		for i, c := range u.buffer {
+			u.buffer[i] = dual1403(c)
+		}
+	}
 	return n, printBuffer
+}
+
+// dual1403 canonicalizes the four 48HN/48AN character pairs
+// (IBM 2821 Component Description, GA24-3312, figure 11).
+func dual1403(c byte) byte {
+	switch c {
+	case 0x4d:
+		return 0x6c
+	case 0x5d:
+		return 0x4c
+	case 0x7e:
+		return 0x7b
+	case 0x7d:
+		return 0x7c
+	default:
+		return c
+	}
 }
 
 // printScan compares the print buffer with the UCS storage as the chain
@@ -163,6 +192,9 @@ func (u *UnitRecord) printScan(print, gated bool) byte {
 		return 0
 	}
 	key := func(b byte) byte {
+		if u.pr.dualing {
+			b = dual1403(b)
+		}
 		if u.pr.fold {
 			return b | 0xc0
 		}
@@ -196,6 +228,49 @@ func (u *UnitRecord) printScan(print, gated bool) byte {
 	return st
 }
 
+// exec1443 executes the print-bar printer's write and carriage controls.
+func (u *UnitRecord) exec1443(cmd byte, data []byte) ([]byte, int, byte) {
+	mod := cmd >> 3
+	if (cmd&7 != 1 && cmd&7 != 3) || (mod > 3 && (mod < 17 || mod > 28)) {
+		u.sense = senseCmdRej
+		return nil, 0, usCE | usDE | usUnitCheck
+	}
+	u.sense = 0
+	var want int
+	write := cmd&7 == 1
+	if write {
+		columns := 120
+		if u.wide1443 {
+			columns = 144
+		}
+		n := min(len(data), columns)
+		u.recordPrintLine(data[:n])
+		u.chanT = urControlXfr + time.Duration(n)*urByte
+		// The 1443 N1's standard 52-character bar is rated at 240
+		// lines per minute (IBM GA32-0039-1). Include buffer loading
+		// in the nominal line cycle.
+		u.devT = time.Minute/240 - u.chanT
+		want = columns
+	}
+	before := u.pr.linesAdvanced
+	status := u.carriageAfter(mod)
+	if !write {
+		u.sense = 0
+		status = 0
+		u.devT = time.Duration(u.pr.linesAdvanced-before) * spaceTime
+	}
+	return nil, want, usCE | usDE | status
+}
+
+func (u *UnitRecord) recordPrintLine(data []byte) {
+	u.Output = append(u.Output, strings.TrimRight(EBCDICString(data), " "))
+	if len(u.Output) > 20000 {
+		u.dropped += 10000
+		u.Output = append(u.Output[:0], u.Output[10000:]...)
+	}
+	u.version++
+}
+
 // printerExec executes a 1403 command. first reports whether the command is
 // the first of its chain and prev is the command before it in the chain.
 func (u *UnitRecord) printerExec(cmd byte, data []byte, first bool, prev byte) ([]byte, int, byte) {
@@ -208,6 +283,8 @@ func (u *UnitRecord) printerExec(cmd byte, data []byte, first bool, prev byte) (
 		u.pr.ucsGated = false
 	}
 	switch {
+	case u.pr.noUCS && (cmd == 0xeb || cmd == 0x73 || cmd == 0x7b || cmd == 0xfb || cmd == 0xf3):
+		return u.reject()
 	case cmd == 0xeb: // UCS gate: first in a chain, or reissued while gated
 		if !first && !gated {
 			return u.reject()
@@ -235,13 +312,14 @@ func (u *UnitRecord) printerExec(cmd byte, data []byte, first bool, prev byte) (
 		return nil, len(u.pr.ucs), usCE | usDE
 	case cmd&7 == 1 && validMod: // write, with spacing or skipping after
 		n, want := u.load(data)
-		u.Output = append(u.Output, strings.TrimRight(EBCDICString(data[:n]), " "))
-		if len(u.Output) > 20000 {
-			u.dropped += 10000
-			u.Output = append(u.Output[:0], u.Output[10000:]...)
+		u.recordPrintLine(u.buffer)
+		st := u.printScan(true, gated)
+		line, advance := u.pr.line+1, u.pr.linesAdvanced
+		st |= u.carriageAfter(mod)
+		if u.css != nil && u.css.m.TraceIO && !u.css.m.TraceIOSkip[u.devno] {
+			u.css.m.event("io", nil, fmt.Sprintf("printer %04X impression %d cmd %02X line %d advance %d feed %d",
+				u.devno, u.dropped+len(u.Output), cmd, line, advance, u.pr.linesAdvanced-advance))
 		}
-		u.version++
-		st := u.printScan(true, gated) | u.carriageAfter(mod)
 		u.chanT, u.devT = urControlXfr+time.Duration(n)*urByte, printCycle
 		return nil, want, usCE | usDE | st
 	case cmd&7 == 5 && validMod: // diagnostic write: load the buffer, one print scan
