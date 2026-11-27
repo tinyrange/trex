@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual Lab Editor</title>
+<link rel="stylesheet" href="vendor/xterm.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3l7 9-7 9h4l5-6.4L18 21h3l-7-9 7-9h-3l-5 6.4L8 3z"/></svg>
+    <span class="brand-name">Virtual Lab Editor</span>
+  </div>
+  <div class="sep"></div>
+  <div class="lab-picker">
+    <input id="lab-name" class="lab-name" spellcheck="false" aria-label="Lab name" value="Untitled lab">
+    <span id="dirty-dot" class="dirty-dot" title="Unsaved changes" hidden></span>
+  </div>
+  <div class="tools" role="toolbar" aria-label="Canvas tools">
+    <button class="tool active" data-tool="select" title="Select / move (V)"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 2-2 6z"/></svg></button>
+    <button class="tool" data-tool="pan" title="Pan (H or hold Space)"><svg viewBox="0 0 24 24"><path d="M8 13V5.5a1.5 1.5 0 013 0V12m0-1V4.5a1.5 1.5 0 013 0V12m0-1V6.5a1.5 1.5 0 013 0V15a6 6 0 01-6 6h-1a6 6 0 01-5-2.7L3.5 14a1.5 1.5 0 012.5-1.7L8 15"/></svg></button>
+    <button class="tool" data-tool="connect" title="Connect ports (C)"><svg viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8 16L16 8"/></svg></button>
+    <button class="tool" id="fit-btn" title="Fit to view (F)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+  </div>
+  <button class="btn ghost" id="library-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="library-back" title="Software library — search titles and the systems they run on (L)"><svg viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 015.5 4H9v16H5.5A1.5 1.5 0 014 18.5z"/><path d="M9 4h4v16H9z"/><path d="M15.2 5.4l3.1-.8 2.6 14-3.1.8z"/></svg><span>Software</span></button>
+  <div class="spacer"></div>
+  <div class="run-state" id="run-state" title="Running vs draft">
+    <span class="pill" id="run-pill">Stopped</span>
+    <span class="pill drift" id="drift-pill" hidden>Draft differs</span>
+  </div>
+  <button class="btn primary" id="apply-btn"><svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg><span>Run Lab</span></button>
+  <button class="btn" id="stop-btn" hidden>Stop</button>
+  <button class="btn" id="save-btn">Save</button>
+  <span class="pill" id="saved-pill" hidden>Saved</span>
+  <div class="menu-wrap">
+    <button class="icon-btn" id="menu-btn" aria-haspopup="true" title="More"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></button>
+    <div class="menu" id="main-menu" hidden>
+      <button data-act="new">New blank lab</button>
+      <button data-act="reload">Reset draft to saved lab</button>
+      <button data-act="import">Import definition…</button>
+      <button data-act="export">Export definition</button>
+      <hr>
+      <button data-act="revert">Revert draft to running</button>
+    </div>
+  </div>
+  <input type="file" id="import-file" accept=".json,application/json" hidden>
+</header>
+
+<div class="main">
+  <aside class="sidebar" id="sidebar">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-pane="nodes" role="tab" aria-selected="true" aria-controls="pane-nodes" id="tab-nodes">Nodes</button>
+      <button class="tab" data-pane="templates" role="tab" aria-selected="false" aria-controls="pane-templates" id="tab-templates">Templates</button>
+    </div>
+    <div class="pane" id="pane-nodes" role="tabpanel" aria-labelledby="tab-nodes">
+      <label class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg><input id="palette-search" placeholder="Search nodes…" spellcheck="false"></label>
+      <div class="palette" id="palette"><div class="empty-note">Loading catalog…</div></div>
+    </div>
+    <div class="pane" id="pane-templates" role="tabpanel" aria-labelledby="tab-templates" hidden>
+      <div class="palette" id="templates"><div class="empty-note">Loading templates…</div></div>
+    </div>
+  </aside>
+
+  <section class="stage" id="stage" tabindex="0">
+    <div class="world" id="world">
+      <svg class="edges" id="edges"><g id="edge-layer"></g><path id="ghost-edge" class="edge ghost" d=""/></svg>
+      <div class="nodes" id="nodes"></div>
+    </div>
+    <div class="blank-hint" id="blank-hint">
+      <div class="blank-title">Blank canvas</div>
+      <div>Drag a node from the palette, double-click one, or start from a template.</div>
+    </div>
+    <div class="windows" id="windows"></div>
+    <div class="toasts" id="toasts"></div>
+  </section>
+</div>
+
+<footer class="bottombar">
+  <div class="zoom">
+    <button class="icon-btn small" id="zoom-out" title="Zoom out">−</button>
+    <button class="zoom-val" id="zoom-val" title="Reset zoom">100%</button>
+    <button class="icon-btn small" id="zoom-in" title="Zoom in">+</button>
+  </div>
+  <div class="hist">
+    <button class="icon-btn small" id="undo-btn" title="Undo (Ctrl+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-3"/></svg></button>
+    <button class="icon-btn small" id="redo-btn" title="Redo (Ctrl+Shift+Z)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 000 12h3"/></svg></button>
+  </div>
+  <div class="status" id="status"></div>
+  <button class="btn small danger" id="failure-btn" hidden>Inspect failure</button>
+  <div class="spacer"></div>
+  <div class="conn" id="conn"><span class="dot"></span><span id="conn-text">Connecting…</span></div>
+</footer>
+
+<template id="tpl-window">
+  <div class="win">
+    <div class="win-head">
+      <span class="win-icon"></span>
+      <span class="win-title"></span>
+      <span class="win-actions">
+        <button class="icon-btn small win-min" title="Minimise">—</button>
+        <button class="icon-btn small win-max" title="Maximise">▢</button>
+        <button class="icon-btn small win-close" title="Close">✕</button>
+      </span>
+    </div>
+    <div class="win-body"></div>
+    <div class="win-resize"></div>
+  </div>
+</template>
+
+<div class="modal-back" id="modal-back" hidden><div class="modal" id="modal"></div></div>
+
+<div class="lib-back" id="library-back" hidden>
+  <div class="lib" id="library" role="dialog" aria-modal="true" aria-labelledby="lib-title" aria-describedby="lib-sub">
+    <div class="lib-head">
+      <div class="lib-heading">
+        <h2 id="lib-title">Software library</h2>
+        <div class="lib-sub" id="lib-sub">Choose an application for a guest in this lab.</div>
+      </div>
+      <button class="icon-btn small" id="lib-close" title="Close (Esc)" aria-label="Close software library">✕</button>
+    </div>
+    <div class="lib-controls">
+      <label class="search lib-search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg><input id="lib-q" type="search" placeholder="Search titles or systems, e.g. “Office” or “Windows 95”" spellcheck="false" autocomplete="off" aria-label="Search software titles or operating systems" aria-controls="lib-results"></label>
+      <div class="seg" role="radiogroup" aria-label="Show targets">
+        <button class="seg-btn active" role="radio" aria-checked="true" data-filter="lab">Add software</button>
+        <button class="seg-btn" role="radio" aria-checked="false" tabindex="-1" data-filter="all">Compatibility</button>
+      </div>
+    </div>
+    <div class="lib-meta"><span id="lib-count" aria-live="polite"></span></div>
+    <div class="lib-results" id="lib-results" role="list" aria-label="Software titles"></div>
+  </div>
+</div>
+
+<script src="vendor/xterm.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

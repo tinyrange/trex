@@ -14,6 +14,7 @@ require (
 	go.starlark.net v0.0.0-20260630144053-529d8e869a14
 	golang.org/x/arch v0.29.0
 	golang.org/x/image v0.27.0
+	golang.org/x/net v0.56.0
 	golang.org/x/sys v0.46.0
 	golang.org/x/text v0.39.0
 	j5.nz/cc v0.0.0
@@ -37,7 +38,6 @@ require (
 	github.com/vbatts/tar-split v0.12.2 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
