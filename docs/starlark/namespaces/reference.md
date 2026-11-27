@@ -254,6 +254,34 @@ Builds an SSDT that assigns _CID on an absolute ACPI device path.
 
 Builds a checksummed ACPI table around a caller-supplied binary body.
 
+## `images/msdos_622.star`
+
+Builds a fully installed MS-DOS 6.22 disk from its three setup floppies.
+
+### `main`
+
+Write a complete installed MS-DOS 6.22 disk from the supplied setup floppies.
+
+### `msdos_622_directory`
+
+Returns the complete installed MS-DOS 6.22 directory tree.
+
+### `msdos_622_disk`
+
+Returns a lazy installed MS-DOS 6.22 FAT16 hard-disk image.
+
+## `images/windows_101.star`
+
+Builds a fully installed Microsoft Windows 1.01 disk on MS-DOS 6.22.
+
+### `main`
+
+Write a complete installed Windows 1.01 disk from the supplied setup floppies.
+
+### `windows_101_disk`
+
+Returns a fully installed Windows 1.01 FAT16 hard-disk image.
+
 ## `inspect/memory.star`
 
 Declarative, bounded structure readers over a memory image or address space.
