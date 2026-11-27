@@ -199,11 +199,23 @@ func (m *IP24) updateInterrupts() {
 	m.cpu.cp0[cause] = m.cpu.cp0[cause]&^0x3c00 | uint64(unsigned)
 }
 
+func (m *IP24) pollInterrupts() {
+	port := &m.scc.ports[ip24SerialPort]
+	if m.cycles < m.irqDeadline &&
+		(m.scc.ports[0].wr[9]&8 == 0 || port.rxReady || port.wr[3]&1 == 0 || !port.stream.HasInput()) {
+		return
+	}
+	m.updateInterrupts()
+	m.irqDeadline = m.nextDeviceEvent()
+}
+
 func (m *IP24) io(address uint64, size, data uint32, write bool) (uint64, bool) {
 	if address > 0x1fffffff {
 		return 0, false
 	}
 	a := uint32(address)
+	m.irqDeadline = 0
+	m.int3.updatePIT(m.cycles / (ip24Clock / 1_000_000))
 	switch {
 	case a >= 0x1f000000 && a < 0x1fa00000:
 		// The empty GIO slots have no read responder. Writes are posted

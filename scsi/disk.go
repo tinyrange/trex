@@ -23,6 +23,22 @@ type Disk struct {
 	owner             uint64
 }
 
+func (d *Disk) Media() block.Device { return d.media }
+
+// CopyWithMedia preserves target protocol state while replacing its backing.
+func (d *Disk) CopyWithMedia(media block.Device) (*Disk, error) {
+	if media == nil {
+		return nil, fmt.Errorf("scsi: replacement disk requires block storage")
+	}
+	got, want := media.Geometry(), d.media.Geometry()
+	if got.Size != want.Size || got.LogicalBlockSize != want.LogicalBlockSize || got.PhysicalBlockSize != want.PhysicalBlockSize {
+		return nil, fmt.Errorf("scsi: replacement disk geometry differs from the original")
+	}
+	copy := *d
+	copy.media = media
+	return &copy, nil
+}
+
 func NewDisk(media block.Device, identity DiskIdentity) (Disk, error) {
 	if media == nil {
 		return Disk{}, fmt.Errorf("scsi: disk requires block storage")

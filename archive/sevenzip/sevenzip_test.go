@@ -9,6 +9,7 @@ import (
 	"testing"
 	"unicode/utf16"
 
+	"github.com/tinyrange/trex/lifecycle"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
@@ -117,5 +118,44 @@ func TestSevenZipRejectsCorruptEntry(t *testing.T) {
 	value, _, _ := archive.Get(starlark.String("hello.txt"))
 	if _, err := starfile.ReadAll(value.(starfile.File)); err == nil {
 		t.Fatal("corrupt entry unexpectedly passed CRC validation")
+	}
+}
+
+func TestSevenZipUnpackMembers(t *testing.T) {
+	entry := func(name, payload string, corrupt bool) starlark.Value {
+		t.Helper()
+		fixture := sevenZipTestCopyArchive(name, []byte(payload))
+		if corrupt {
+			fixture[32] ^= 0x80
+		}
+		archive, err := Open(&starfile.Bytes{Data: fixture}, 16, 1<<20, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return archive.entries[0]
+	}
+	thread := &starlark.Thread{}
+	resources := lifecycle.Install(thread)
+	t.Cleanup(func() { _ = resources.Close() })
+	first, second := entry("first.iso", "first", false), entry("second.iso", "second", false)
+	unpack := func(limit int, entries ...starlark.Value) (starlark.Value, error) {
+		return MaterializeBuiltin(thread, nil, starlark.Tuple{starlark.NewList(entries), starlark.MakeInt(limit), starlark.MakeInt(2)}, nil)
+	}
+	result, err := unpack(11, second, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"second", "first"} {
+		file := result.(*starlark.List).Index(i).(starfile.File)
+		got, err := starfile.ReadAll(file)
+		if err != nil || string(got) != want {
+			t.Fatalf("member %d: got %q, %v, want %q", i, got, err, want)
+		}
+	}
+	if _, err := unpack(10, first, second); err == nil {
+		t.Fatal("combined member size exceeded the byte limit")
+	}
+	if _, err := unpack(12, first, entry("corrupt.iso", "corrupt", true)); err == nil {
+		t.Fatal("corrupt member unexpectedly passed CRC validation")
 	}
 }

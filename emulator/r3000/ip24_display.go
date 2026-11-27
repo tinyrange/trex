@@ -80,7 +80,7 @@ func (d *ip24Display) CaptureInto(ctx context.Context, dst *image.RGBA) (*image.
 }
 
 var ip24DisplayKeys = map[string]string{
-	"esc": "escape", "ctrl": "control", "space": " ", "minus": "-", "equal": "=",
+	"esc": "escape", "ret": "enter", "ctrl": "control", "space": " ", "minus": "-", "equal": "=",
 	"bracket_left": "[", "bracket_right": "]", "semicolon": ";", "apostrophe": "'",
 	"grave_accent": "`", "backslash": "\\", "comma": ",", "dot": ".", "slash": "/",
 }

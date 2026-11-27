@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/netip"
 	"slices"
 	"sync"
 
@@ -17,6 +19,14 @@ type Surface struct {
 	Kind     string            `json:"kind"`
 	Display  vmm.DisplaySource `json:"-"`
 	Terminal Terminal          `json:"-"`
+	Web      *WebSurface       `json:"-"`
+}
+
+// WebSurface grants HTTP only to the selected running guest.
+type WebSurface struct {
+	Key       string
+	Host      string
+	Transport http.RoundTripper
 }
 
 type Terminal interface {
@@ -49,12 +59,13 @@ type Guest interface {
 }
 
 type StartRequest struct {
-	Node   Node
-	Recipe Recipe
-	Switch *ethernet.Switch
-	Domain Guest
-	Phase  func(string, string)
-	Log    func(string)
+	Node    Node
+	Recipe  Recipe
+	Switch  *ethernet.Switch
+	Domain  Guest
+	Phase   func(string, string)
+	Log     func(string)
+	Address func(string)
 }
 
 type Factory interface {
@@ -103,6 +114,22 @@ func (m *Manager) View() View {
 	return m.view()
 }
 
+func (m *Manager) NodeAddress(id string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.nodeAddress(id, m.switches[m.active.Network(id)]).Address
+}
+
+func (m *Manager) nodeAddress(id string, segment *networkSegment) NodeView {
+	info := m.nodeViews[id]
+	if segment != nil && info.Phase == "running" && m.guests[id] != nil {
+		if address := segment.address(id); address.IsValid() {
+			info.Address, info.Observed = address.String(), true
+		}
+	}
+	return info
+}
+
 func (m *Manager) view() View {
 	v := View{Definition: m.draft.Clone(), State: m.state, Error: m.err, Nodes: make(map[string]NodeView),
 		Operation: append([]Change{}, m.changes...)}
@@ -110,16 +137,46 @@ func (m *Manager) view() View {
 		active := m.active.Clone()
 		v.Applied = &active
 	}
-	for id, info := range m.nodeViews {
+	for id := range m.nodeViews {
+		info := m.nodeAddress(id, m.switches[m.active.Network(id)])
 		info.Log = append([]string(nil), info.Log...)
-		if segment := m.switches[m.active.Network(id)]; segment != nil && info.Phase == "running" && m.guests[id] != nil {
-			if address := segment.address(id); address.IsValid() {
-				info.Address, info.Observed = address.String(), true
-			}
-		}
 		v.Nodes[id] = info
 	}
 	return v
+}
+
+func (m *Manager) lanAddress(network string, segment *networkSegment, label string) netip.Addr {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.switches[network] != segment {
+		return netip.Addr{}
+	}
+	var idMatch, nameMatch string
+	var idCount, nameCount int
+	for _, node := range m.active.Nodes {
+		if node.ID == network || m.active.Network(node.ID) != network || m.nodeViews[node.ID].Phase != "running" {
+			continue
+		}
+		if dnsLabel(node.ID) == label {
+			idMatch = node.ID
+			idCount++
+		}
+		if dnsLabel(node.Name) == label {
+			nameMatch = node.ID
+			nameCount++
+		}
+	}
+	if idCount != 0 {
+		if idCount != 1 {
+			return netip.Addr{}
+		}
+		nameMatch, nameCount = idMatch, 1
+	}
+	if nameCount != 1 {
+		return netip.Addr{}
+	}
+	ip, _ := netip.ParseAddr(m.nodeAddress(nameMatch, segment).Address)
+	return ip
 }
 
 func (m *Manager) Plan(d Definition) Plan {
@@ -298,7 +355,12 @@ func (m *Manager) stopNodes(nodes []Node) error {
 		segment := m.switches[m.active.Network(n.ID)]
 		delete(m.guests, n.ID)
 		delete(m.switches, n.ID)
-		delete(m.nodeViews, n.ID)
+		if view, exists := m.nodeViews[n.ID]; exists {
+			view.Phase, view.Message, view.Address, view.Observed = "stopped", "Node stopped", "", false
+			view.Surfaces = []Surface{}
+			m.nodeViews[n.ID] = view
+			m.appendLog(n.ID, "stopped — Node stopped")
+		}
 		m.active.Nodes = slices.DeleteFunc(m.active.Nodes, func(node Node) bool { return node.ID == n.ID })
 		m.active.Links = slices.DeleteFunc(m.active.Links, func(link Link) bool { return link.A.Node == n.ID || link.B.Node == n.ID })
 		m.mu.Unlock()
@@ -348,7 +410,8 @@ func (m *Manager) apply(ctx context.Context, draft Definition, plan Plan) error 
 		m.mu.RLock()
 		_, alreadyRunning := m.active.Node(n.ID)
 		var switcher *ethernet.Switch
-		segment := m.switches[draft.Network(n.ID)]
+		network := draft.Network(n.ID)
+		segment := m.switches[network]
 		if segment != nil {
 			switcher = segment.switcher
 		}
@@ -365,15 +428,34 @@ func (m *Manager) apply(ctx context.Context, draft Definition, plan Plan) error 
 				var guest Guest
 				var err error
 				if isRouter(r) {
-					guest, err = startDHCPRouter(m.ctx, n, r, segment)
+					guest, err = startDHCPRouter(m.ctx, n, r, segment, func(label string) netip.Addr {
+						return m.lanAddress(network, segment, label)
+					})
 				} else {
-					m.setNode(n.ID, "preparing", "Preparing original media", nil)
+					message := "Preparing original media"
+					if isWebServer(r) {
+						message = "Preparing HTTP service"
+					}
+					m.setNode(n.ID, "preparing", message, nil)
 					guest, err = m.factory.Start(ctx, StartRequest{Node: n, Recipe: r, Switch: switcher, Domain: domain,
 						Phase: func(phase, message string) { m.setNode(n.ID, phase, message, nil) },
 						Log: func(entry string) {
 							m.mu.Lock()
 							defer m.mu.Unlock()
-							m.appendLog(n.ID, entry)
+							if info, ok := m.nodeViews[n.ID]; ok && info.Phase != "stopped" {
+								m.appendLog(n.ID, entry)
+							}
+						},
+						Address: func(address string) {
+							m.mu.Lock()
+							defer m.mu.Unlock()
+							if info, ok := m.nodeViews[n.ID]; ok && info.Phase != "stopped" {
+								if address == "" && segment != nil {
+									segment.forget(n.ID)
+								}
+								info.Address = address
+								m.nodeViews[n.ID] = info
+							}
 						},
 					})
 				}
@@ -390,7 +472,7 @@ func (m *Manager) apply(ctx context.Context, draft Definition, plan Plan) error 
 					message = status.Message()
 				}
 				m.setNode(n.ID, "running", message, guest.Surfaces())
-				if source, ok := guest.(interface{ Address() string }); ok && switcher != nil {
+				if source, ok := guest.(interface{ Address() string }); ok && switcher != nil && source.Address() != "" {
 					m.mu.Lock()
 					info := m.nodeViews[n.ID]
 					info.Address = source.Address()

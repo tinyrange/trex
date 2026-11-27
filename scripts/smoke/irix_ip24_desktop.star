@@ -1,6 +1,6 @@
 """Exercise the archived IRIX 6.5.22 desktop on the native SGI Indy."""
 
-load("//scripts/smoke:irix_ip24.star", "prepare")
+load(":irix_ip24.star", "prepare")
 
 def _advance(machine, console, cycles):
     stop = machine.run(cycles)

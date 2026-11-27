@@ -30,6 +30,8 @@ type StarFactory struct {
 	Recipes      fs.FS
 	Media        MediaSource
 	QEMUEthernet func(context.Context, *ethernet.Switch) (string, func() error, error)
+	Alpine       *AlpineRepository
+	Indy         *IndyTemplates
 }
 
 type labCommand struct {
@@ -140,12 +142,19 @@ func (g *starGuest) reserve(ctx context.Context, trust *machineTrust) error {
 }
 
 func (f StarFactory) Start(ctx context.Context, request StartRequest) (Guest, error) {
+	return f.start(ctx, request, false)
+}
+
+func (f StarFactory) start(ctx context.Context, request StartRequest, prepareIndy bool) (Guest, error) {
+	if isWebServer(request.Recipe) {
+		return f.startWebServer(ctx, request)
+	}
 	life, cancel := context.WithCancel(f.Context)
 	g := &starGuest{cancel: cancel, done: make(chan struct{}), commands: make(chan labCommand), accounts: make(map[string]*machineTrust)}
 	ready := make(chan struct{})
 	go func() {
 		defer close(g.done)
-		g.err = f.run(life, ctx, request, g, ready)
+		g.err = f.run(life, ctx, request, g, ready, prepareIndy)
 	}()
 	select {
 	case <-ready:
@@ -212,7 +221,7 @@ func value(d *starlark.Dict, key string) starlark.Value {
 	return out
 }
 
-func (f StarFactory) run(life, apply context.Context, req StartRequest, guest *starGuest, ready chan struct{}) error {
+func (f StarFactory) run(life, apply context.Context, req StartRequest, guest *starGuest, ready chan struct{}, prepareIndy bool) error {
 	cfg := make(map[string]starlark.Value)
 	for _, field := range req.Recipe.Fields {
 		cfg[field.Key] = configValue(req.Node.Value(req.Recipe, field.Key))
@@ -284,6 +293,39 @@ func (f StarFactory) run(life, apply context.Context, req StartRequest, guest *s
 	}
 
 	builtins := starlark.StringDict{}
+	if req.Recipe.Function == "indy" {
+		builtins["lab_indy_checkpoint"] = starlark.NewBuiltin("lab_indy_checkpoint", func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var build starlark.Callable
+			if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "build", &build); err != nil {
+				return nil, err
+			}
+			var prepare func() (starlark.Value, error)
+			if prepareIndy {
+				prepare = func() (starlark.Value, error) { return starlark.Call(thread, build, nil, nil) }
+			}
+			return f.Indy.checkpoint(life, media, prepare)
+		})
+	}
+	builtins["lab_alpine_packages"] = starlark.NewBuiltin("lab_alpine_packages", func(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var base starlark.Tuple
+		if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "base", &base); err != nil {
+			return nil, err
+		}
+		ids, _ := alpineChoices(req.Node.Value(req.Recipe, "packages"))
+		if len(ids) == 0 {
+			return starlark.Tuple{}, nil
+		}
+		repository := f.Alpine
+		if repository == nil {
+			var err error
+			repository, err = NewAlpineRepository()
+			if err != nil {
+				return nil, err
+			}
+		}
+		memoryMiB, _ := starlark.AsInt32(cfg["memoryMiB"])
+		return repository.materialize(life, base, ids, memoryMiB)
+	})
 	builtins["lab_phase"] = starlark.NewBuiltin("lab_phase", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var phase, message string
 		if err := starlark.UnpackArgs("lab_phase", args, kwargs, "phase", &phase, "message", &message); err != nil {
@@ -321,18 +363,18 @@ func (f StarFactory) run(life, apply context.Context, req StartRequest, guest *s
 		if !ok {
 			return nil, errors.New("recipe did not return a display-capable machine")
 		}
-		display, err := vm.VMMDisplay()
-		if err != nil {
-			if !req.Recipe.UsesQEMU() {
-				return nil, err
-			}
-			attrs, ok := vm.(starlark.HasAttrs)
-			if !ok {
-				return nil, err
-			}
-			display = qemuDisplay{machine: attrs, absolute: req.Recipe.AbsolutePointer}
-		}
 		if value(info, "display") != starlark.False {
+			display, err := vm.VMMDisplay()
+			if err != nil {
+				if !req.Recipe.UsesQEMU() {
+					return nil, err
+				}
+				attrs, ok := vm.(starlark.HasAttrs)
+				if !ok {
+					return nil, err
+				}
+				display = qemuDisplay{machine: attrs, absolute: req.Recipe.AbsolutePointer}
+			}
 			guest.surfaces = []Surface{{ID: "desktop", Name: "Display", Kind: "display", Display: display}}
 		}
 		if console, ok := value(info, "console").(channel.ByteChannel); ok {
@@ -412,6 +454,10 @@ func (s *serialConsole) read() {
 	}()
 	buf := make([]byte, 8192)
 	for {
+		var ready <-chan struct{}
+		if notifier, ok := s.link.(channel.ReadNotifier); ok {
+			ready = notifier.ReadReady()
+		}
 		n, err := s.link.Read(buf)
 		if n != 0 {
 			s.mu.Lock()
@@ -424,11 +470,15 @@ func (s *serialConsole) read() {
 			s.changed = make(chan struct{})
 			s.mu.Unlock()
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, channel.ErrWouldBlock) {
 			return
 		}
 		if n == 0 {
-			time.Sleep(10 * time.Millisecond)
+			if ready != nil {
+				<-ready
+			} else {
+				time.Sleep(10 * time.Millisecond)
+			}
 		}
 	}
 }

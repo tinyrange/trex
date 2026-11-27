@@ -3,7 +3,9 @@ package channel
 import (
 	"errors"
 	"io"
+	"slices"
 	"sync"
+	"sync/atomic"
 )
 
 // ErrWouldBlock means a cooperative channel has no bytes or capacity available.
@@ -12,6 +14,23 @@ var ErrWouldBlock = errors.New("channel would block")
 // AvailableReader supports polling without a host clock or blocking a scheduler.
 type AvailableReader interface {
 	ReadAvailable([]byte) (int, error)
+}
+
+// Fork copies both ends of the in-memory connection into an independent pair.
+// The first result corresponds to the receiver.
+func (m *Memory) Fork() (*Memory, *Memory) {
+	m.pair.mu.Lock()
+	defer m.pair.mu.Unlock()
+	a, b, _ := NewMemoryPair(m.pair.maximum)
+	a.pair.state.closed = m.pair.state.closed
+	for side, data := range m.pair.state.data {
+		a.pair.state.data[side] = slices.Clone(data)
+		a.pair.queued[side].Store(int64(len(data)))
+	}
+	if m.side == 0 {
+		return a, b
+	}
+	return b, a
 }
 
 // AvailableWriter never waits for capacity or a host event.
@@ -29,6 +48,7 @@ type memoryPair struct {
 	maximum int
 	state   memoryState
 	changed [2]chan struct{}
+	queued  [2]atomic.Int64
 }
 
 var memoryReady = func() <-chan struct{} {
@@ -60,6 +80,9 @@ func NewMemoryPair(maximum int) (*Memory, *Memory, error) {
 
 func (m *Memory) ReadAvailable(p []byte) (int, error)  { return m.Read(p) }
 func (m *Memory) WriteAvailable(p []byte) (int, error) { return m.Write(p) }
+
+// HasInput reports whether bytes are queued, independently of closure.
+func (m *Memory) HasInput() bool { return m.pair.queued[m.side].Load() != 0 }
 
 // ReadReady does not change the cooperative behavior of Read or ReadAvailable.
 // Closing either endpoint makes reads ready to return data or a terminal error.
@@ -100,6 +123,7 @@ func (m *Memory) Read(p []byte) (int, error) {
 	}
 	n := copy(p, data)
 	m.pair.state.data[m.side] = data[n:]
+	m.pair.queued[m.side].Store(int64(len(data) - n))
 	if n == len(data) {
 		m.pair.state.data[m.side] = nil
 	}
@@ -119,6 +143,7 @@ func (m *Memory) Write(p []byte) (int, error) {
 	}
 	m.pair.state.data[peer] = append(m.pair.state.data[peer], p...)
 	if len(p) != 0 {
+		m.pair.queued[peer].Store(int64(len(m.pair.state.data[peer])))
 		m.pair.notifyLocked(peer)
 	}
 	return len(p), nil
@@ -150,6 +175,7 @@ func (m *Memory) CaptureCheckpoint() (func() error, error) {
 		m.pair.state = saved
 		for i := range saved.data {
 			m.pair.state.data[i] = append([]byte(nil), saved.data[i]...)
+			m.pair.queued[i].Store(int64(len(saved.data[i])))
 			// Observers belong to the live stream, not the captured state.
 			// Wake them even when restoration makes the stream empty again.
 			m.pair.notifyLocked(i)

@@ -121,8 +121,12 @@ def read_package(source, sha256, expected = None, maximum_bytes = 512 << 20, max
     if binary.hex(digest(data_member)) != _one(metadata, "datahash"):
         fail("alpine: datahash mismatch")
     if expected != None:
-        if [name, version, arch] != [expected["name"], expected["version"], expected["arch"]] or source.size != expected["size"]:
-            fail("alpine: package identity differs from pinned index")
+        if [name, version] != [expected["name"], expected["version"]] or source.size != expected["size"]:
+            fail("alpine: package identity differs from pinned index: expected {}={} ({} bytes), got {}={} ({} bytes)".format(expected["name"], expected["version"], expected["size"], name, version, source.size))
+        # An architecture-specific APKINDEX can list a noarch payload under the
+        # repository architecture. An architecture-specific payload must match.
+        if arch != "noarch" and arch != expected["arch"]:
+            fail("alpine: package architecture differs from pinned index: {}={} expected {}, got {}".format(name, version, expected["arch"], arch))
         checksum = "Q1" + binary.base64(crypto.hash("sha1", control_member))
         if checksum != expected["checksum"]:
             fail("alpine: control checksum differs from index")

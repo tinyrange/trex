@@ -78,6 +78,7 @@ func ipv4Number(address netip.Addr) uint32 {
 type dhcpLease struct {
 	address netip.Addr
 	expires time.Time
+	bound   bool
 }
 
 type dhcpRouter struct {
@@ -89,9 +90,11 @@ type dhcpRouter struct {
 	done     chan struct{}
 	leases   map[[6]byte]dhcpLease
 	declined map[netip.Addr]time.Time
+	dns      lanDNS
+	tcp      lanTCP
 }
 
-func startDHCPRouter(ctx context.Context, node Node, recipe Recipe, segment *networkSegment) (*dhcpRouter, error) {
+func startDHCPRouter(ctx context.Context, node Node, recipe Recipe, segment *networkSegment, lookup func(string) netip.Addr) (*dhcpRouter, error) {
 	cfg, _, err := routerSettings(node, recipe)
 	if err != nil {
 		return nil, err
@@ -101,7 +104,9 @@ func startDHCPRouter(ctx context.Context, node Node, recipe Recipe, segment *net
 	}
 	life, cancel := context.WithCancel(ctx)
 	router := &dhcpRouter{config: cfg, mac: hardwareAddress(node.ID), port: segment.switcher.Connect(), segment: segment, cancel: cancel, done: make(chan struct{}),
-		leases: make(map[[6]byte]dhcpLease), declined: make(map[netip.Addr]time.Time)}
+		leases: make(map[[6]byte]dhcpLease), declined: make(map[netip.Addr]time.Time),
+		dns: lanDNS{lookup: lookup, tcpClients: make(chan struct{}, 64)}}
+	router.tcp = newLANTCP(router.port, router.mac, 53, router.dns.accept)
 	go router.run(life)
 	return router, nil
 }
@@ -109,6 +114,7 @@ func startDHCPRouter(ctx context.Context, node Node, recipe Recipe, segment *net
 func (r *dhcpRouter) run(ctx context.Context) {
 	defer close(r.done)
 	defer r.port.Close()
+	defer r.tcp.close()
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -116,15 +122,17 @@ func (r *dhcpRouter) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-tick.C:
+			r.expire(now)
 			for i := 0; i < 64; i++ {
 				frame := r.port.Receive()
 				if frame == nil {
 					break
 				}
-				if reply := r.receive(frame, now); reply != nil {
+				if reply := r.receive(ctx, frame, now); reply != nil {
 					_ = r.port.Send(reply)
 				}
 			}
+			r.tcp.poll(now)
 		}
 	}
 }
@@ -134,15 +142,15 @@ func (r *dhcpRouter) Surfaces() []Surface { return nil }
 func (r *dhcpRouter) Address() string     { return r.config.address.String() }
 func (r *dhcpRouter) Message() string {
 	if !r.config.enabled {
-		return "LAN interface up. DHCP disabled."
+		return "LAN DNS serving " + labDNSDomain + ". DHCP disabled."
 	}
-	return fmt.Sprintf("DHCP serving %s through %s", r.config.first, r.config.last)
+	return fmt.Sprintf("DHCP serving %s through %s. LAN DNS serving %s", r.config.first, r.config.last, labDNSDomain)
 }
 
 var ethernetBroadcast = [6]byte{255, 255, 255, 255, 255, 255}
 var ipv4Broadcast = [4]byte{255, 255, 255, 255}
 
-func (r *dhcpRouter) receive(frame []byte, now time.Time) []byte {
+func (r *dhcpRouter) receive(ctx context.Context, frame []byte, now time.Time) []byte {
 	if len(frame) < 14 {
 		return nil
 	}
@@ -153,19 +161,7 @@ func (r *dhcpRouter) receive(frame []byte, now time.Time) []byte {
 	address := r.config.address.As4()
 	switch binary.BigEndian.Uint16(frame[12:]) {
 	case 0x0806:
-		arp := frame[14:]
-		if len(arp) < 28 || binary.BigEndian.Uint32(arp[:4]) != 0x00010800 ||
-			binary.BigEndian.Uint32(arp[4:8]) != 0x06040001 ||
-			[6]byte(arp[8:14]) != from || [4]byte(arp[24:28]) != address {
-			return nil
-		}
-		reply := ethernetHeader(from, r.mac, 0x0806, 28)
-		copy(reply[14:20], arp[:6])
-		reply[21] = 2
-		copy(reply[22:28], r.mac[:])
-		copy(reply[28:32], address[:])
-		copy(reply[32:42], arp[8:18])
-		return reply
+		return arpReply(frame[14:], from, r.mac, address)
 	case 0x0800:
 		ip := frame[14:]
 		if len(ip) < 20 || ip[0]>>4 != 4 {
@@ -178,8 +174,16 @@ func (r *dhcpRouter) receive(frame []byte, now time.Time) []byte {
 		target := [4]byte(ip[16:20])
 		payload := ip[header:size]
 		source := [4]byte(ip[12:16])
-		if r.config.enabled && ip[9] == 17 && (target == address || target == ipv4Broadcast) {
-			return r.dhcp(from, payload, now)
+		if ip[9] == 17 {
+			if target == address && to == r.mac && len(payload) >= 8 && binary.BigEndian.Uint16(payload[2:4]) == 53 {
+				return r.dnsUDP(from, source, payload)
+			}
+			if r.config.enabled && (target == address || target == ipv4Broadcast) {
+				return r.dhcp(from, payload, now)
+			}
+		}
+		if ip[9] == 6 && target == address && to == r.mac && usableLANIP(netip.AddrFrom4(source)) && source != address {
+			r.tcp.receive(ctx, frame[:14+size], payload, lanTCPPeerKey{from, netip.AddrFrom4(source)}, r.config.address, now)
 		}
 		if ip[9] == 1 && target == address && len(payload) >= 8 && payload[0] == 8 && payload[1] == 0 && packetChecksum(payload) == 0 {
 			reply := ipv4Packet(from, r.mac, address, source, 1, len(payload))
@@ -190,6 +194,21 @@ func (r *dhcpRouter) receive(frame []byte, now time.Time) []byte {
 		}
 	}
 	return nil
+}
+
+func arpReply(arp []byte, peer, local [6]byte, address [4]byte) []byte {
+	if len(arp) < 28 || binary.BigEndian.Uint32(arp[:4]) != 0x00010800 ||
+		binary.BigEndian.Uint32(arp[4:8]) != 0x06040001 ||
+		[6]byte(arp[8:14]) != peer || [4]byte(arp[24:28]) != address {
+		return nil
+	}
+	reply := ethernetHeader(peer, local, 0x0806, 28)
+	copy(reply[14:20], arp[:6])
+	reply[21] = 2
+	copy(reply[22:28], local[:])
+	copy(reply[28:32], address[:])
+	copy(reply[32:42], arp[8:18])
+	return reply
 }
 
 const (
@@ -233,16 +252,7 @@ func (r *dhcpRouter) dhcp(mac [6]byte, udp []byte, now time.Time) []byte {
 		}
 		want = netip.AddrFrom4([4]byte(requested))
 	}
-	for owner, lease := range r.leases {
-		if !lease.expires.After(now) {
-			delete(r.leases, owner)
-		}
-	}
-	for ip, until := range r.declined {
-		if !until.After(now) {
-			delete(r.declined, ip)
-		}
-	}
+	r.expire(now)
 	current := r.leases[mac]
 	var reply byte
 	var assigned netip.Addr
@@ -254,25 +264,25 @@ func (r *dhcpRouter) dhcp(mac [6]byte, udp []byte, now time.Time) []byte {
 			if !assigned.IsValid() {
 				return nil
 			}
-			r.leases[mac] = dhcpLease{assigned, now.Add(30 * time.Second)}
+			r.leases[mac] = dhcpLease{address: assigned, expires: now.Add(30 * time.Second)}
 		}
 		reply = offer
 	case request:
 		reply = nak
 		if r.available(mac, want) {
 			assigned, reply = want, ack
-			r.leases[mac] = dhcpLease{assigned, now.Add(r.config.lease)}
+			r.leases[mac] = dhcpLease{address: assigned, expires: now.Add(r.config.lease), bound: true}
 			r.segment.recordLease(mac, assigned)
 		}
 	case decline:
 		if current.address == want && want.IsValid() && len(r.declined) < 256 {
-			delete(r.leases, mac)
+			r.removeLease(mac, current)
 			r.declined[want] = now.Add(5 * time.Minute)
 		}
 		return nil
 	case release:
 		if current.address == client {
-			delete(r.leases, mac)
+			r.removeLease(mac, current)
 		}
 		return nil
 	case inform:
@@ -301,10 +311,15 @@ func (r *dhcpRouter) dhcp(mac [6]byte, udp []byte, now time.Time) []byte {
 			out = append(out, 51, 4)
 			out = binary.BigEndian.AppendUint32(out, uint32(r.config.lease/time.Second))
 		}
+		dns := server
 		if r.config.dns.IsValid() {
-			dns := r.config.dns.As4()
-			out = append(out, 6, 4)
-			out = append(out, dns[:]...)
+			dns = r.config.dns.As4()
+		}
+		out = append(out, 6, 4)
+		out = append(out, dns[:]...)
+		if dns == server {
+			out = append(out, 15, byte(len(labDNSDomain)))
+			out = append(out, labDNSDomain...)
 		}
 	}
 	out = append(out, 255)
@@ -320,6 +335,26 @@ func (r *dhcpRouter) dhcp(mac [6]byte, udp []byte, now time.Time) []byte {
 	binary.BigEndian.PutUint16(frame[38:], uint16(8+len(out)))
 	copy(frame[42:], out)
 	return frame
+}
+
+func (r *dhcpRouter) expire(now time.Time) {
+	for mac, lease := range r.leases {
+		if !lease.expires.After(now) {
+			r.removeLease(mac, lease)
+		}
+	}
+	for ip, until := range r.declined {
+		if !until.After(now) {
+			delete(r.declined, ip)
+		}
+	}
+}
+
+func (r *dhcpRouter) removeLease(mac [6]byte, lease dhcpLease) {
+	delete(r.leases, mac)
+	if lease.bound {
+		r.segment.forgetHardware(mac)
+	}
 }
 
 func dhcpOptions(data []byte) ([256][]byte, bool) {

@@ -5,6 +5,8 @@ import (
 	"go.starlark.net/starlark"
 	"io"
 	"sync"
+
+	starfile "github.com/tinyrange/trex/storage/star"
 )
 
 // observedDevice measures the guest-facing boundary without adding storage or
@@ -34,6 +36,13 @@ func blockObserveBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.
 }
 func (d *observedDevice) Geometry() BlockGeometry         { return d.base.Geometry() }
 func (d *observedDevice) Capabilities() BlockCapabilities { return d.base.Capabilities() }
+
+func (d *observedDevice) Snapshot() (starfile.File, error) {
+	if backing, ok := d.base.(blockDeviceSnapshotter); ok {
+		return backing.Snapshot()
+	}
+	return nil, ErrBlockUnsupported
+}
 func (d *observedDevice) record(write bool, off int64, n int, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -25,6 +25,7 @@
     <button class="tool" id="fit-btn" title="Fit to view (F)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
   </div>
   <button class="btn ghost" id="library-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="library-back" title="Software library — search titles and the systems they run on (L)"><svg viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 015.5 4H9v16H5.5A1.5 1.5 0 014 18.5z"/><path d="M9 4h4v16H9z"/><path d="M15.2 5.4l3.1-.8 2.6 14-3.1.8z"/></svg><span>Software</span></button>
+  <button class="btn ghost" id="logs-btn" title="Runtime logs — startup diagnostics reported by each node"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4M9 11h7M9 14h7M9 17h5"/></svg><span>Logs</span><span class="logs-count" id="logs-count" hidden></span></button>
   <div class="spacer"></div>
   <div class="run-state" id="run-state" title="Running vs draft">
     <span class="pill" id="run-pill">Stopped</span>
@@ -109,6 +110,7 @@
   </div>
 </template>
 
+<div class="menu ctx-menu" id="node-menu" role="menu" hidden></div>
 <div class="modal-back" id="modal-back" hidden><div class="modal" id="modal"></div></div>
 
 <div class="lib-back" id="library-back" hidden>
