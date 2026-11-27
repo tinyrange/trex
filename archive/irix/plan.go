@@ -1,12 +1,15 @@
 package irix
 
 import (
+	"bytes"
 	"fmt"
-	starfile "github.com/tinyrange/trex/storage/star"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+
+	starfile "github.com/tinyrange/trex/storage/star"
 )
 
 // Planning never interprets shell commands or silently chooses a machine.
@@ -79,6 +82,13 @@ func machineMatches(attributes []string, facts map[string]string) (bool, error) 
 	for _, a := range attributes {
 		body, ok := attributeBody(a, "mach")
 		if !ok {
+			continue
+		}
+		if strings.ContainsAny(body, "!&|()") || strings.Contains(body, "==") {
+			match, err := machineExpression(body, facts)
+			if err != nil || !match {
+				return match, err
+			}
 			continue
 		}
 		tokens, err := words(body)
@@ -154,6 +164,30 @@ func safePath(name string) (string, error) {
 }
 func metadataKey(item Item) string {
 	return item.Path + "\x00" + item.Source + "\x00" + strings.Join(item.Attributes, "\x00")
+}
+
+func identicalIRIXPayloads(members []*Entry) (bool, error) {
+	base := members[0]
+	var first, next [32768]byte
+	for _, other := range members[1:] {
+		if base.Size() != other.Size() || base.Mode != other.Mode || base.Owner != other.Owner || base.Group != other.Group || !slices.Equal(base.RawAttributes, other.RawAttributes) {
+			return false, nil
+		}
+		for off := int64(0); off < base.Size(); {
+			n := min(int64(len(first)), base.Size()-off)
+			if _, err := starfile.ReadFullAt(base, first[:n], off); err != nil {
+				return false, err
+			}
+			if _, err := starfile.ReadFullAt(other, next[:n], off); err != nil {
+				return false, err
+			}
+			if !bytes.Equal(first[:n], next[:n]) {
+				return false, nil
+			}
+			off += n
+		}
+	}
+	return true, nil
 }
 
 func Plan(products []Product, options PlanOptions) (*InstallPlan, error) {
@@ -315,10 +349,11 @@ func Plan(products []Product, options PlanOptions) (*InstallPlan, error) {
 			payload, hasPayload = options.Images[s.Image]
 		}
 		decoded := map[string][]*Entry{}
+		duplicates := map[string]bool{}
 		if hasPayload {
 			entries, err := OpenImage(payload, items, s.Image)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("irix plan: %s: %w", key, err)
 			}
 			for _, entry := range entries {
 				item := Item{Path: entry.Path, Source: entry.Source, Attributes: entry.Attributes}
@@ -337,6 +372,9 @@ func Plan(products []Product, options PlanOptions) (*InstallPlan, error) {
 			if !wanted {
 				continue
 			}
+			if slices.Contains(item.Attributes, "delhist") {
+				continue
+			}
 			match, err := machineMatches(item.Attributes, options.Machine)
 			if err != nil {
 				plan.Issues = append(plan.Issues, PlanIssue{Kind: "machine", Subject: item.Path, Detail: err.Error()})
@@ -353,6 +391,9 @@ func Plan(products []Product, options PlanOptions) (*InstallPlan, error) {
 				return nil, fmt.Errorf("irix plan: root destination must be a directory")
 			}
 			if previous, exists := seenDest[dest]; exists && !(item.Kind == "d" && previous.Kind == "d" && item.Mode == previous.Mode && item.Owner == previous.Owner && item.Group == previous.Group) {
+				if item.Kind == "f" && previous.Kind == "f" && duplicates[metadataKey(item)] && metadataKey(item) == metadataKey(previous) && item.Mode == previous.Mode && item.Owner == previous.Owner && item.Group == previous.Group && slices.Equal(item.RawAttributes, previous.RawAttributes) {
+					continue
+				}
 				plan.Issues = append(plan.Issues, PlanIssue{Kind: "destination_conflict", Subject: dest, Detail: "multiple selected file occurrences"})
 				continue
 			}
@@ -377,8 +418,16 @@ func Plan(products []Product, options PlanOptions) (*InstallPlan, error) {
 				plan.Issues = append(plan.Issues, PlanIssue{Kind: "entry_type", Subject: dest, Detail: item.Kind})
 			}
 			if item.Kind == "f" {
-				members := decoded[metadataKey(item)]
-				if len(members) == 1 {
+				mk := metadataKey(item)
+				members := decoded[mk]
+				if len(members) > 1 {
+					same, err := identicalIRIXPayloads(members)
+					if err != nil {
+						return nil, fmt.Errorf("irix plan: verifying repeated records for %s: %w", dest, err)
+					}
+					duplicates[mk] = same
+				}
+				if len(members) == 1 || duplicates[mk] {
 					op.Data = members[0]
 				} else {
 					plan.Issues = append(plan.Issues, PlanIssue{Kind: "missing_payload", Subject: dest, Detail: "exact indexed file occurrence is unavailable or ambiguous"})
@@ -400,7 +449,7 @@ func Plan(products []Product, options PlanOptions) (*InstallPlan, error) {
 				keyword := strings.SplitN(a, "(", 2)[0]
 				if _, known := catalog[a]; !known && !(strings.Count(a, ".") >= 2 && !strings.ContainsAny(a, "()")) {
 					switch keyword {
-					case "sum", "size", "off", "cmpsize", "f", "mach", "config", "symval", "links", "maj", "min", "preop", "postop", "exitop", "noshare", "nohist", "nostrip", "strip":
+					case "sum", "size", "off", "cmpsize", "f", "mach", "config", "symval", "links", "maj", "min", "preop", "postop", "exitop", "removeop", "noshare", "nohist", "nostrip", "strip", "norqs":
 					default:
 						plan.Issues = append(plan.Issues, PlanIssue{Kind: "unsupported_attribute", Subject: dest, Detail: a})
 					}

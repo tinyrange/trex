@@ -5838,6 +5838,18 @@ Reads IBM/Microsoft MAPSYM .SYM bytes or a file into unrelocated symbol records 
 
 Waits until one of the supplied selectable values is ready, returning that value, or None on timeout. Read the event from the returned source separately; selection itself does not consume the event. For byte channels, readiness includes data, stream closure, or a spurious change notification (such as checkpoint restoration): retry the read to distinguish them. A closed debugger/event session still reports EOF.
 
+### `emulator.ip12`
+
+`emulator.ip12(memory=32MiB, rom=None) -> ip12_machine`
+
+Creates an in-process Personal IRIS 4D/35 with a big-endian R3000A, PIC1 memory controller, INT2 timers, one serial console and HPC1 SCSI. Supply a PROM in CPU byte order for reset-vector execution or load a standalone MIPS executable directly. The IRIX 3.3.2 miniroot kernel is verified through its serial banner.
+
+### `emulator.ip24`
+
+`emulator.ip24(rom=None, newport=False) -> ip24_machine`
+
+Creates an in-process SGI Indy with an R4400, 64 MiB RAM, IOC2 serial and PS/2 input and HPC3 SCSI. newport=True enables the XL24 display and 1280x1024 PNG capture. load_executable enters a static MIPS ELF kernel through the built-in ARCS32 interface. An optional 512 KiB ROM supplies the physical PROM aperture.
+
 ### `emulator.linux`
 
 `emulator.linux(max_instructions=10000000) -> shell_command`
@@ -5915,6 +5927,12 @@ Constructs a packed headerless APFS filesystem metadata B-tree in memory from (k
 `filesystem.apm(file, block_size=512, maximum_entries=1M) -> record`
 
 Reads an Apple Partition Map as portable partition file views. block_size explicitly selects the 512-, 1024- or 2048-byte logical map; device_block_size and device_blocks retain independent driver-descriptor geometry. This distinction matters for CDs containing overlapping maps. Each partition exposes its effective block_size: a CDvr-tagged Apple_Driver43_CD record with a matching block-zero driver descriptor uses 2048-byte device units even in a 512-byte map; other records use the selected map units. Validates ER/PM signatures, consistent entry counts, allocated-partition bounds and nonoverlap. Returns partitions with index, raw name/type/processor bytes, start_block, blocks, logical data-range fields, status and boot metadata. data is the complete physical partition view; no inner filesystem is inferred. An out-of-image Apple_Free descriptor retains its declared geometry with data=None and complete=False; allocated partitions must fit fully. Boot metadata is not executed and boot checksums are not verified.
+
+### `filesystem.chd`
+
+`filesystem.chd(file) -> file`
+
+Exposes the logical disk bytes of an uncompressed standalone CHD version-5 image. Validates the hunk map and maps unallocated hunks to zeros. Reads borrow the original file.
 
 ### `filesystem.ckd_attribute_page`
 
@@ -6022,7 +6040,13 @@ Decodes version 1 The Duplicator images, including explicit cylinder filler. Cyl
 
 `filesystem.efs(file, maximum_entries=1M) -> record`
 
-Reads an IRIX EFS volume into entries and case-sensitive paths, resolving direct and indirect extents without mounting. find(path) returns an entry or None; entries expose data, entry_type, size, inode, mode, uid, gid and modified. Accepts a trimmed free tail only when the allocation bitmap proves the omitted region is free and all referenced extents fit the original input. Symlink data remains the link target and is never followed; device entries have no data.
+Reads an IRIX EFS volume into entries and case-sensitive paths, resolving direct and indirect extents without mounting. find(path) returns an entry or None; entries expose data, entry_type, size, inode, mode, uid, gid and modified. The data file spans the declared volume, with a zero-filled tail only when the allocation bitmap proves the omitted region is free and all referenced extents fit the original input. Symlink data remains the link target and is never followed; device entries expose major and minor numbers.
+
+### `filesystem.efs_build`
+
+`filesystem.efs_build(entries, size, label='', modified=0) -> file`
+
+Builds a big-endian IRIX EFS volume from Unix entry dictionaries with a declared byte capacity, optional six-byte label, and modification time. Supports direct and indirect extents, directories, symbolic and hard links, and special inodes. The image borrows payloads and supplies unused disk ranges as zeros.
 
 ### `filesystem.ext4`
 
@@ -6194,6 +6218,12 @@ Decodes IBM SaveDskF AA58/AA59 and compressed AA5A floppy images. Validates reco
 
 Validates an SGI volume-header checksum and returns partition and boot-directory file views. Partitions expose index, partition_type, start_block, blocks, data and complete; addresses are 512-byte basic blocks. A whole-volume descriptor may exceed a CD image: its declared blocks are retained, data covers only available bytes, and complete is false. Filesystem partitions and boot files must fit in full. Does not infer an inner filesystem from a filename.
 
+### `filesystem.sgi_build`
+
+`filesystem.sgi_build(partitions, root=0, swap=1, bootfile='', header_blocks=64, volume_files={}) -> file`
+
+Builds a checksummed SGI disk from ordered (index, type, file) partition tuples. Partition sizes must be multiples of 512 bytes. The header and whole-volume partitions are inserted at indexes 8 and 10. Optional volume_files maps boot-directory names to files placed inside partition 8. The disk borrows all supplied payloads.
+
 ### `filesystem.udf`
 
 `filesystem.udf(file) -> UDF filesystem`
@@ -6220,9 +6250,21 @@ Parses a VHDX container and exposes its logical disk contents. This unwraps the 
 
 ### `filesystem.xfs`
 
-`filesystem.xfs(file, maximum_entries=1M, realtime_file=None) -> record`
+`filesystem.xfs(file, maximum_entries=1M, realtime_file=None, path="/") -> record`
 
-Reads version-4 and checksum-protected version-5 XFS directory trees using borrowed local, extent-list and multi-level bmap-btree views. Checks levels, key ranges, sibling links, cycles and extent counts; sparse and unwritten data reads as zeros. Version-5 superblocks, v3 inodes, BMA3 trees and directory blocks validate CRC32C, metadata UUID, owner and physical address. Supports directory formats 1/2/3 and file-type extensions. realtime_file explicitly supplies the separate realtime device. Returns entries, paths and find(path); symlinks are never followed. Does not mount, replay logs, repair or build filesystems, decode attribute forks, or accept unsupported incompatible features such as bigtime and large-extent-count layouts.
+Reads version-4 and checksum-protected version-5 XFS directory trees using borrowed local, extent-list and multi-level bmap-btree views. Checks levels, key ranges, sibling links, cycles and extent counts; sparse and unwritten data reads as zeros. Version-5 superblocks, v3 inodes, BMA3 trees and directory blocks validate CRC32C, metadata UUID, owner and physical address. Supports directory formats 1/2/3 and file-type extensions. realtime_file explicitly supplies the separate realtime device. The optional path enumerates a selected subtree. Returns entries, paths and find(path); symlinks are never followed. Does not mount, replay logs, repair or build filesystems, decode attribute forks, or accept unsupported incompatible features such as bigtime and large-extent-count layouts.
+
+### `filesystem.xfs_build`
+
+`filesystem.xfs_build(entries, size, uuid, label='') -> file`
+
+Builds an IRIX-compatible XFS v4 volume from Unix entry dictionaries and a 16-byte UUID. The generated image uses one allocation group and a clean internal log. Regular file contents remain borrowed views.
+
+### `filesystem.xfs_lookup`
+
+`filesystem.xfs_lookup(file, path, maximum_entries=1M, realtime_file=None) -> record or None`
+
+Reads the XFS directories along the requested path and returns the selected inode and its borrowed data. An absent entry returns None. Symlinks are exposed as data, and unrelated directory trees are left unread.
 
 ### `firmware.acpi_compatible_id`
 
@@ -8280,6 +8322,18 @@ Methods and attributes: `blocks`, `callbacks`, `calls`, `effects`, `evaluate(ent
 An InstallShield cabinet view. Files, groups, components and shortcuts preserve package organization; find selects a member path. version identifies the parsed package generation.
 
 Methods and attributes: `components`, `entries`, `files`, `find(path)`, `groups`, `shortcuts`, `version`.
+
+### `ip12_machine` value
+
+A Personal IRIS machine with bounded execution, CPU and exception state, and physical RAM and ROM inspection. graphics() reports GE5 and RE2 state. screenshot() returns a PNG file of the GR1 scanout. key_code uses the SGI keyboard down code. mouse sends signed relative motion with positive deltas to the right and up. Bits 2, 1 and 0 indicate left, middle and right buttons. load_executable accepts a static big-endian MIPS I ECOFF or ELF32 file and sets the pre-ARCS argc, argv and envp registers. The serial console is a duplex byte channel. attach_disk accepts a 512-byte-sector block device.
+
+Methods and attributes: `attach_disk(target, device)`, `break_at(address)`, `clear_breaks()`, `close()`, `graphics()`, `key_code(code, down=True)`, `load_executable(file, args=[], env=[])`, `mouse(dx, dy, buttons=0)`, `read(address, size)`, `read_effective(address, size)`, `registers()`, `run(budget, stop_on_exception=False)`, `screenshot()`, `serial()`.
+
+### `ip24_machine` value
+
+An SGI Indy with bounded execution, CPU and last-fault state, RAM inspection, a duplex serial console, and 512-byte-sector SCSI block devices. The optional Newport model supplies PS/2 events, display state, raw RGB/auxiliary pixels, and PNG screenshots. Register a Newport machine in vmm.workspace to advance it continuously and expose its display and input to the browser console. load_executable accepts static big-endian MIPS I–III ELF32 and provides ARCS32 arguments and environment.
+
+Methods and attributes: `attach_disk(target, device)`, `break_at(address)`, `clear_breaks()`, `close()`, `graphics()`, `key(key, down=True)`, `load_executable(file, args=[], env=[])`, `mouse(dx, dy, buttons=0)`, `read(address, size)`, `read_effective(address, size)`, `read_pixel(x, y)`, `registers()`, `run(budget, stop_on_exception=False, exception_codes=[])`, `screenshot()`, `serial()`.
 
 ### `nbd_server` value
 

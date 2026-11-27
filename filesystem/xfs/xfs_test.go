@@ -97,3 +97,26 @@ func TestBlockDirectory(t *testing.T) {
 		t.Fatal("invalid tag accepted")
 	}
 }
+
+func TestLookupSkipsUnrelatedInodes(t *testing.T) {
+	b := fixture()
+	root := b[8*256 : 9*256]
+	root[100] = 2
+	copy(root[114:], []byte{1, 0, 64, 'b', 0, 0, 0, 11})
+	be.PutUint64(root[56:], 22)
+	f := &starfile.Bytes{Data: b}
+	if _, err := Open(f, 100); err == nil {
+		t.Fatal("full walk should encounter the invalid second inode")
+	}
+	entry, err := Lookup(f, nil, "/a", 100)
+	if err != nil || entry == nil || entry.Inode != 9 || entry.Data.Size() != 515 {
+		t.Fatalf("lookup: %+v, %v", entry, err)
+	}
+	if entry, err := Lookup(f, nil, "/missing", 100); entry != nil || err != nil {
+		t.Fatalf("missing entry: %+v, %v", entry, err)
+	}
+	tree, err := OpenTree(f, nil, "/a", 1)
+	if err != nil || len(tree.Entries) != 1 || tree.Entries[0].Path != "/a" {
+		t.Fatalf("subtree: %+v, %v", tree, err)
+	}
+}

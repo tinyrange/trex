@@ -1,5 +1,7 @@
-// Package r3000 emulates the little-endian MIPS R3000 Jazz workstation.
+// Package r3000 emulates MIPS R3000 Jazz and SGI IP12 workstations.
 package r3000
+
+import "fmt"
 
 const (
 	resetPC   = 0xbfc00000
@@ -23,7 +25,14 @@ type delayedLoad struct {
 	value uint32
 }
 
+type cpuBus interface {
+	readBus(address, size uint32) (uint32, bool)
+	writeBus(address, size, value uint32) bool
+}
+
 type cpu struct {
+	bigEndian        bool
+	fpuRevision      uint32
 	pc, next, hi, lo uint32
 	gpr, cp0, fpr    [32]uint32
 	fcsr             uint32
@@ -121,8 +130,7 @@ func (c *cpu) trap(x instruction) {
 	c.next, c.delaySlot, c.irqDelay = c.pc+4, false, 0
 }
 
-func (m *Machine) access(address uint32, size uint32, store, fetch bool, value uint32, x *instruction) uint32 {
-	c := &m.cpu
+func (c *cpu) access(bus cpuBus, address, size uint32, store, fetch bool, value uint32, x *instruction) uint32 {
 	if address&(size-1) != 0 {
 		c.badAddress(address)
 		x.badAddress, x.exception = address, 4
@@ -137,6 +145,9 @@ func (m *Machine) access(address uint32, size uint32, store, fetch bool, value u
 		return 0
 	}
 	shift := (physical & 3) * 8
+	if c.bigEndian {
+		shift = (4 - size - (physical & 3)) * 8
+	}
 	mask := uint32(0xffffffff) >> (32 - size*8)
 	bank := truth(c.cp0[status]&swapCache != 0)
 	if !fetch && c.cp0[status]&isolate != 0 {
@@ -161,7 +172,7 @@ func (m *Machine) access(address uint32, size uint32, store, fetch bool, value u
 		line := &c.cache[bank][index]
 		tag := physical >> 16
 		if store {
-			if m.writeBus(physical, size, value) {
+			if bus.writeBus(physical, size, value) {
 				if size == 4 {
 					*line = cacheLine{tag, value, true}
 				} else if line.valid && line.tag == tag {
@@ -178,7 +189,7 @@ func (m *Machine) access(address uint32, size uint32, store, fetch bool, value u
 				first := index &^ (words - 1)
 				base := physical &^ (words*4 - 1)
 				for i := uint32(0); i < words; i++ {
-					word, ok := m.readBus(base+i*4, 4)
+					word, ok := bus.readBus(base+i*4, 4)
 					if !ok {
 						x.exception, x.busAddress = 7, base+i*4
 						if fetch {
@@ -192,10 +203,10 @@ func (m *Machine) access(address uint32, size uint32, store, fetch bool, value u
 			return line.word >> shift & mask
 		}
 	} else if store {
-		if m.writeBus(physical, size, value) {
+		if bus.writeBus(physical, size, value) {
 			return 0
 		}
-	} else if word, ok := m.readBus(physical, size); ok {
+	} else if word, ok := bus.readBus(physical, size); ok {
 		return word
 	}
 	x.exception, x.busAddress, x.busStore = 7, physical, store
@@ -362,8 +373,7 @@ func (c *cpu) cop0(word uint32, rs, rt, rd uint8, x *instruction) {
 	}
 }
 
-func (m *Machine) execute(word uint32, x *instruction) {
-	c := &m.cpu
+func (c *cpu) execute(bus cpuBus, word uint32, x *instruction) {
 	rs, rt, rd := uint8(word>>21&31), uint8(word>>16&31), uint8(word>>11&31)
 	a, b := c.gpr[rs], c.gpr[rt]
 	imm, signed := word&0xffff, uint32(int32(int16(word)))
@@ -418,23 +428,27 @@ func (m *Machine) execute(word uint32, x *instruction) {
 	case 18, 19:
 		x.exception, x.coprocessor = 11, op-16
 	case 32, 36:
-		data := m.access(address, 1, false, false, 0, x)
+		data := c.access(bus, address, 1, false, false, 0, x)
 		if op == 32 {
 			data = uint32(int32(int8(data)))
 		}
 		x.load = delayedLoad{rt, data}
 	case 33, 37:
-		data := m.access(address, 2, false, false, 0, x)
+		data := c.access(bus, address, 2, false, false, 0, x)
 		if op == 33 {
 			data = uint32(int32(int16(data)))
 		}
 		x.load = delayedLoad{rt, data}
 	case 34, 38:
-		data := m.access(address&^3, 4, false, false, 0, x)
+		data := c.access(bus, address&^3, 4, false, false, 0, x)
 		if c.load.reg == rt && rt != 0 {
 			b = c.load.value
 		}
-		shift := (address & 3) * 8
+		offset := address & 3
+		if c.bigEndian {
+			offset ^= 3
+		}
+		shift := offset * 8
 		if op == 34 {
 			data = b&(0x00ffffff>>shift) | data<<(24-shift)
 		} else {
@@ -442,48 +456,54 @@ func (m *Machine) execute(word uint32, x *instruction) {
 		}
 		x.load = delayedLoad{rt, data}
 	case 35:
-		x.load = delayedLoad{rt, m.access(address, 4, false, false, 0, x)}
+		x.load = delayedLoad{rt, c.access(bus, address, 4, false, false, 0, x)}
 	case 40, 41, 43:
 		size := uint32(1) << (op - 40)
 		if op == 43 {
 			size = 4
 		}
-		m.access(address, size, true, false, b, x)
+		c.access(bus, address, size, true, false, b, x)
 	case 42, 46:
-		first, end, shift := uint32(0), (address&3)+1, 3-(address&3)
+		offset := address & 3
+		if c.bigEndian {
+			offset ^= 3
+		}
+		first, end, shift := uint32(0), offset+1, 3-offset
 		if op == 46 {
-			first, end, shift = address&3, 4, 0
+			first, end, shift = offset, 4, 0
 		}
 		for i := first; i < end && x.exception < 0; i++ {
-			m.access(address&^3+i, 1, true, false, b>>((shift+i-first)*8), x)
+			lane := i
+			if c.bigEndian {
+				lane ^= 3
+			}
+			c.access(bus, address&^3+lane, 1, true, false, b>>((shift+i-first)*8), x)
 		}
 	case 49, 57:
 		if c.cp0[status]&(1<<29) == 0 {
 			x.exception, x.coprocessor = 11, 1
 		} else if op == 49 {
-			x.fpLoad = delayedLoad{rt, m.access(address, 4, false, false, 0, x)}
+			x.fpLoad = delayedLoad{rt, c.access(bus, address, 4, false, false, 0, x)}
 		} else {
-			m.access(address, 4, true, false, c.fpr[rt], x)
+			c.access(bus, address, 4, true, false, c.fpr[rt], x)
 		}
 	default:
 		x.exception = 10
 	}
 }
 
-func (m *Machine) step() Stop {
-	c := &m.cpu
+func (c *cpu) step(bus cpuBus) Stop {
 	x := instruction{exception: -1, fpWrite: delayedLoad{reg: 32}, fpLoad: delayedLoad{reg: 32}, fpHigh: delayedLoad{reg: 32}}
 	result := Stop{PC: c.pc}
-	m.updateInterrupts()
 	if c.irqDelay == 0 && c.cp0[status]&1 != 0 && c.cp0[status]&c.cp0[cause]&0xff00 != 0 {
 		x.exception = 0
 	} else {
 		if c.irqDelay != 0 {
 			c.irqDelay--
 		}
-		result.Instruction = m.access(c.pc, 4, false, true, 0, &x)
+		result.Instruction = c.access(bus, c.pc, 4, false, true, 0, &x)
 		if x.exception < 0 {
-			m.execute(result.Instruction, &x)
+			c.execute(bus, result.Instruction, &x)
 		}
 	}
 	if c.load.reg != 0 {
@@ -518,6 +538,25 @@ func (m *Machine) step() Stop {
 	} else {
 		c.cp0[1] -= 1 << 8
 	}
-	m.cycles++
 	return result
+}
+
+func (c *cpu) readEffective(address uint32, out []byte, read func(uint32, []byte) error) error {
+	if uint64(address)+uint64(len(out)) > 1<<32 {
+		return fmt.Errorf("r3000: virtual read wraps address space")
+	}
+	for len(out) > 0 {
+		x := instruction{exception: -1}
+		p, _ := c.translate(address, false, &x)
+		if x.exception >= 0 {
+			return fmt.Errorf("r3000: virtual address %#x is not readable", address)
+		}
+		n := min(len(out), 4096-int(address&4095))
+		if err := read(p, out[:n]); err != nil {
+			return err
+		}
+		out = out[n:]
+		address += uint32(n)
+	}
+	return nil
 }

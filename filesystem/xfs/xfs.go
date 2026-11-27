@@ -21,6 +21,7 @@ type Entry struct {
 	Inode              uint64
 	Mode               uint16
 	UID, GID, Modified uint32
+	Major, Minor       uint32
 	Data               starfile.File
 	local              bool
 	extents            []extent
@@ -93,6 +94,18 @@ func (r *reader) inode(id uint64) (Entry, error) {
 	default:
 		return e, fmt.Errorf("xfs: invalid inode mode %o", e.Mode)
 	}
+	core := 100
+	if r.v5 {
+		core = 176
+	}
+	if e.Kind == "character_device" || e.Kind == "block_device" {
+		if b[5] != 0 || len(b) < core+4 {
+			return e, fmt.Errorf("xfs: invalid device fork in inode %d", id)
+		}
+		device := be.Uint32(b[core:])
+		e.Major, e.Minor = device>>18, device&((1<<18)-1)
+		return e, nil
+	}
 	if e.Kind != "file" && e.Kind != "directory" && e.Kind != "symlink" {
 		return e, nil
 	}
@@ -103,10 +116,6 @@ func (r *reader) inode(id uint64) (Entry, error) {
 	size := be.Uint64(b[56:])
 	if size > math.MaxInt64 {
 		return e, fmt.Errorf("xfs: inode size exceeds address range")
-	}
-	core := 100
-	if r.v5 {
-		core = 176
 	}
 	end := len(b)
 	if b[82] != 0 {
@@ -269,112 +278,38 @@ func Open(file starfile.File, maximumEntries int) (*Volume, error) {
 
 // OpenRealtime accepts the separate realtime device explicitly; no device is inferred.
 func OpenRealtime(file, realtime starfile.File, maximumEntries int) (*Volume, error) {
+	return OpenTree(file, realtime, "/", maximumEntries)
+}
+
+// OpenTree enumerates just the selected XFS subtree. Returned paths are
+// absolute within the original volume.
+func OpenTree(file, realtime starfile.File, name string, maximumEntries int) (*Volume, error) {
 	if maximumEntries <= 0 {
 		return nil, fmt.Errorf("xfs: maximum_entries must be positive")
 	}
-	var b [264]byte
-	if _, err := starfile.ReadFullAt(file, b[:], 0); err != nil {
-		return nil, err
-	}
-	version := be.Uint16(b[100:]) & 15
-	if be.Uint32(b[:]) != 0x58465342 || (version != 4 && version != 5) {
-		return nil, fmt.Errorf("xfs: expected version 4 or 5 superblock")
-	}
-
-	r := reader{file: file, block: uint64(be.Uint32(b[4:])), blocks: be.Uint64(b[8:]), agBlocks: uint64(be.Uint32(b[84:])), agCount: uint64(be.Uint32(b[88:])), inodeSize: uint64(be.Uint16(b[104:])), agLog: b[124], inoLog: b[123], dirLog: b[192]}
-	if b[120] > 16 || b[120] < 9 || r.block != uint64(1)<<b[120] || r.inodeSize < 256 || r.inodeSize > r.block || b[122] > 16 || r.inodeSize != uint64(1)<<b[122] || r.inoLog > 8 || r.inodeSize<<r.inoLog != r.block || r.agLog > 32 || r.agBlocks == 0 || r.agBlocks > uint64(1)<<r.agLog || r.agCount == 0 || r.blocks == 0 || r.blocks > math.MaxInt64/r.block || r.blocks*r.block > uint64(file.Size()) || (r.agCount-1)*r.agBlocks >= r.blocks || r.agCount*r.agBlocks < r.blocks || r.dirLog > 7 || r.block<<r.dirLog > 65536 {
-		return nil, fmt.Errorf("xfs: invalid or truncated geometry")
-	}
-	r.v5 = version == 5
-	r.realtime = realtime
-	r.rtBlocks = be.Uint64(b[16:])
-	copy(r.uuid[:], b[32:48])
-	r.ftype = be.Uint32(b[200:])&0x200 != 0
-	if r.v5 {
-		incompat := be.Uint32(b[216:])
-		if incompat&^uint32(7) != 0 || be.Uint32(b[220:]) != 0 {
-			return nil, fmt.Errorf("xfs: unsupported incompatible feature bits")
-		}
-		r.ftype = incompat&1 != 0
-		if incompat&4 != 0 {
-			copy(r.uuid[:], b[248:264])
-		}
-		sector := uint64(be.Uint16(b[102:]))
-		if sector < 512 || sector > r.block || sector&(sector-1) != 0 {
-			return nil, fmt.Errorf("xfs: invalid superblock sector size")
-		}
-		full := make([]byte, sector)
-		if _, err := starfile.ReadFullAt(file, full, 0); err != nil {
-			return nil, err
-		}
-		if err := checkCRC(full, 224); err != nil {
-			return nil, err
-		}
-	}
-	if realtime != nil && (r.rtBlocks == 0 || r.rtBlocks > math.MaxInt64/r.block || r.rtBlocks*r.block > uint64(realtime.Size())) {
-		return nil, fmt.Errorf("xfs: invalid realtime geometry")
-	}
-	r.dirV1 = !r.v5 && be.Uint16(b[100:])&0x2000 == 0
-	root, err := r.inode(be.Uint64(b[56:]))
+	r, root, err := readRoot(file, realtime)
 	if err != nil {
 		return nil, err
 	}
-	if root.Kind != "directory" {
-		return nil, fmt.Errorf("xfs: root is not a directory")
+	selected, err := r.lookup(root, name, maximumEntries)
+	if err != nil {
+		return nil, err
 	}
-	root.Path = "/"
+	if selected == nil {
+		return nil, fmt.Errorf("xfs: subtree %s does not exist", name)
+	}
+	root = *selected
 	v := &Volume{Entries: []Entry{root}}
 	seenDirs := map[uint64]bool{root.Inode: true}
-	seenPaths := map[string]bool{"/": true}
+	seenPaths := map[string]bool{root.Path: true}
 	for index := 0; index < len(v.Entries); index++ {
 		dir := v.Entries[index]
 		if dir.Kind != "directory" {
 			continue
 		}
-		var children []dirent
-		if r.dirV1 {
-			children, err = r.directoryV1(dir, maximumEntries)
-			if err != nil {
-				return nil, fmt.Errorf("xfs: directory %s: %w", dir.Path, err)
-			}
-		} else if dir.local {
-			data, err := starfile.ReadAll(dir.Data)
-			if err != nil {
-				return nil, err
-			}
-			children, err = shortDirectoryType(data, r.ftype)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			size := int64(r.block << r.dirLog)
-			if dir.Data.Size()%size != 0 || dir.Data.Size()/size > int64(maximumEntries) {
-				return nil, fmt.Errorf("xfs: invalid directory size")
-			}
-			block := make([]byte, size)
-			for off := int64(0); off < dir.Data.Size(); off += size {
-				if _, err := starfile.ReadFullAt(dir.Data, block, off); err != nil {
-					return nil, err
-				}
-				if r.v5 {
-					physical, err := r.directoryPhysical(dir, uint64(off))
-					if err != nil {
-						return nil, err
-					}
-					if err = r.metadata(block, 4, 24, 40, 8, dir.Inode, physical); err != nil {
-						return nil, err
-					}
-					magic := be.Uint32(block)
-					if magic != 0x58444233 && magic != 0x58444433 {
-						return nil, fmt.Errorf("xfs: expected version 3 directory data")
-					}
-				}
-				entries, err := blockDirectoryType(block, r.ftype)
-				if err != nil {
-					return nil, fmt.Errorf("xfs: directory %s: %w", dir.Path, err)
-				}
-				children = append(children, entries...)
-			}
+		children, err := r.children(dir, maximumEntries)
+		if err != nil {
+			return nil, fmt.Errorf("xfs: directory %s: %w", dir.Path, err)
 		}
 		for _, child := range children {
 			if child.name == "." || child.name == ".." {
@@ -406,4 +341,165 @@ func OpenRealtime(file, realtime starfile.File, maximumEntries int) (*Volume, er
 		}
 	}
 	return v, nil
+}
+
+// Lookup reads just the directories along name and the selected inode. It
+// returns nil when an entry is absent and leaves symlink targets as data.
+func Lookup(file, realtime starfile.File, name string, maximumEntries int) (*Entry, error) {
+	if maximumEntries <= 0 {
+		return nil, fmt.Errorf("xfs: maximum_entries must be positive")
+	}
+	r, entry, err := readRoot(file, realtime)
+	if err != nil {
+		return nil, err
+	}
+	return r.lookup(entry, name, maximumEntries)
+}
+
+func (r *reader) lookup(entry Entry, name string, maximumEntries int) (*Entry, error) {
+	if strings.ContainsRune(name, 0) {
+		return nil, fmt.Errorf("xfs: invalid path")
+	}
+	clean := path.Clean("/" + name)
+	if clean == "/" {
+		return &entry, nil
+	}
+	seen := map[uint64]bool{entry.Inode: true}
+	for _, component := range strings.Split(clean[1:], "/") {
+		if entry.Kind != "directory" {
+			return nil, fmt.Errorf("xfs: %s is not a directory", entry.Path)
+		}
+		children, err := r.children(entry, maximumEntries)
+		if err != nil {
+			return nil, fmt.Errorf("xfs: directory %s: %w", entry.Path, err)
+		}
+		var id uint64
+		found := false
+		for _, child := range children {
+			if child.name != component {
+				continue
+			}
+			if found {
+				return nil, fmt.Errorf("xfs: duplicate entry %s in %s", component, entry.Path)
+			}
+			id, found = child.inode, true
+		}
+		if !found {
+			return nil, nil
+		}
+		full := path.Join(entry.Path, component)
+		entry, err = r.inode(id)
+		if err != nil {
+			return nil, fmt.Errorf("xfs: %s: %w", full, err)
+		}
+		entry.Path = full
+		if entry.Kind == "directory" {
+			if seen[id] {
+				return nil, fmt.Errorf("xfs: directory cycle at %s", full)
+			}
+			seen[id] = true
+		}
+	}
+	return &entry, nil
+}
+
+func readRoot(file, realtime starfile.File) (*reader, Entry, error) {
+	var b [264]byte
+	if _, err := starfile.ReadFullAt(file, b[:], 0); err != nil {
+		return nil, Entry{}, err
+	}
+	version := be.Uint16(b[100:]) & 15
+	if be.Uint32(b[:]) != 0x58465342 || (version != 4 && version != 5) {
+		return nil, Entry{}, fmt.Errorf("xfs: expected version 4 or 5 superblock")
+	}
+
+	r := &reader{file: file, block: uint64(be.Uint32(b[4:])), blocks: be.Uint64(b[8:]), agBlocks: uint64(be.Uint32(b[84:])), agCount: uint64(be.Uint32(b[88:])), inodeSize: uint64(be.Uint16(b[104:])), agLog: b[124], inoLog: b[123], dirLog: b[192]}
+	if b[120] > 16 || b[120] < 9 || r.block != uint64(1)<<b[120] || r.inodeSize < 256 || r.inodeSize > r.block || b[122] > 16 || r.inodeSize != uint64(1)<<b[122] || r.inoLog > 8 || r.inodeSize<<r.inoLog != r.block || r.agLog > 32 || r.agBlocks == 0 || r.agBlocks > uint64(1)<<r.agLog || r.agCount == 0 || r.blocks == 0 || r.blocks > math.MaxInt64/r.block || r.blocks*r.block > uint64(file.Size()) || (r.agCount-1)*r.agBlocks >= r.blocks || r.agCount*r.agBlocks < r.blocks || r.dirLog > 7 || r.block<<r.dirLog > 65536 {
+		return nil, Entry{}, fmt.Errorf("xfs: invalid or truncated geometry")
+	}
+	r.v5 = version == 5
+	r.realtime = realtime
+	r.rtBlocks = be.Uint64(b[16:])
+	copy(r.uuid[:], b[32:48])
+	r.ftype = be.Uint32(b[200:])&0x200 != 0
+	if r.v5 {
+		incompat := be.Uint32(b[216:])
+		if incompat&^uint32(7) != 0 || be.Uint32(b[220:]) != 0 {
+			return nil, Entry{}, fmt.Errorf("xfs: unsupported incompatible feature bits")
+		}
+		r.ftype = incompat&1 != 0
+		if incompat&4 != 0 {
+			copy(r.uuid[:], b[248:264])
+		}
+		sector := uint64(be.Uint16(b[102:]))
+		if sector < 512 || sector > r.block || sector&(sector-1) != 0 {
+			return nil, Entry{}, fmt.Errorf("xfs: invalid superblock sector size")
+		}
+		full := make([]byte, sector)
+		if _, err := starfile.ReadFullAt(file, full, 0); err != nil {
+			return nil, Entry{}, err
+		}
+		if err := checkCRC(full, 224); err != nil {
+			return nil, Entry{}, err
+		}
+	}
+	if realtime != nil && (r.rtBlocks == 0 || r.rtBlocks > math.MaxInt64/r.block || r.rtBlocks*r.block > uint64(realtime.Size())) {
+		return nil, Entry{}, fmt.Errorf("xfs: invalid realtime geometry")
+	}
+	r.dirV1 = !r.v5 && be.Uint16(b[100:])&0x2000 == 0
+	root, err := r.inode(be.Uint64(b[56:]))
+	if err != nil {
+		return nil, Entry{}, err
+	}
+	if root.Kind != "directory" {
+		return nil, Entry{}, fmt.Errorf("xfs: root is not a directory")
+	}
+	root.Path = "/"
+	return r, root, nil
+}
+
+func (r *reader) children(dir Entry, maximum int) ([]dirent, error) {
+	if r.dirV1 {
+		return r.directoryV1(dir, maximum)
+	}
+	if dir.local {
+		data, err := starfile.ReadAll(dir.Data)
+		if err != nil {
+			return nil, err
+		}
+		return shortDirectoryType(data, r.ftype)
+	}
+	size := int64(r.block << r.dirLog)
+	if dir.Data.Size()%size != 0 || dir.Data.Size()/size > int64(maximum) {
+		return nil, fmt.Errorf("invalid directory size")
+	}
+	var children []dirent
+	block := make([]byte, size)
+	for off := int64(0); off < dir.Data.Size(); off += size {
+		if _, err := starfile.ReadFullAt(dir.Data, block, off); err != nil {
+			return nil, err
+		}
+		if r.v5 {
+			physical, err := r.directoryPhysical(dir, uint64(off))
+			if err != nil {
+				return nil, err
+			}
+			if err = r.metadata(block, 4, 24, 40, 8, dir.Inode, physical); err != nil {
+				return nil, err
+			}
+			magic := be.Uint32(block)
+			if magic != 0x58444233 && magic != 0x58444433 {
+				return nil, fmt.Errorf("expected version 3 directory data")
+			}
+		}
+		entries, err := blockDirectoryType(block, r.ftype)
+		if err != nil {
+			return nil, err
+		}
+		if len(entries) > maximum-len(children) {
+			return nil, fmt.Errorf("directory entry limit exceeded")
+		}
+		children = append(children, entries...)
+	}
+	return children, nil
 }
