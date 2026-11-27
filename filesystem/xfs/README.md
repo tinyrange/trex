@@ -1,4 +1,4 @@
-# Read-only XFS views
+# XFS views and image construction
 
 `filesystem.xfs(file, maximum_entries=1000000, realtime_file=None)` reads
 version-4 and checksum-protected version-5 filesystem trees without mounting or
@@ -18,7 +18,7 @@ also checked. META_UUID volumes use their metadata UUID. Directory formats 1,
 2 and 3 and file-type extensions are supported. Version-1 directory btrees and
 bmap data-fork trees are distinct structures.
 
-This is not filesystem repair, a builder or journal recovery. Unsupported
+The readers leave filesystem repair and journal recovery to the OS. Unsupported
 incompatible feature bits (including bigtime and large-extent-count inode
 layouts) fail explicitly. External log contents and attribute-fork payloads
 are not interpreted. Passing a realtime file is not automatic device discovery.
@@ -30,3 +30,15 @@ copied. Multi-level btrees, realtime sparse/unwritten reads, v5 CRCs and identit
 checks have generated corruption tests; original IRIX v4 miniroots are also
 read and validated. Modern v5/realtime coverage is synthetic, not a claim that
 IRIX distributions contain those generations.
+
+`filesystem.xfs_build(entries, size, uuid, label='')` generates a v4 volume
+with 4 KiB filesystem blocks, 512-byte sectors, v2 directory records and
+256-byte inodes. It writes the inode and free-space indexes for a single
+allocation group and initializes a clean internal v1 log. The result is an
+immutable sparse view of the volume. Attach it through a writable block
+overlay to preserve the source while the guest makes changes.
+
+Entry dictionaries use the shared Unix metadata fields, including modes,
+UIDs, GIDs, timestamps, regular file data, symbolic links, regular-file
+hard links and device identifiers. The builder takes a 16-byte volume UUID.
+The caller can wrap its result in an SGI disk with `filesystem.sgi_build`.

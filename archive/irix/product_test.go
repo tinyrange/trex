@@ -126,3 +126,21 @@ func TestProductInvalidFields(t *testing.T) {
 		t.Fatal("accepted corrupt wrapper")
 	}
 }
+
+func TestProductEmptyVersionInterval(t *testing.T) {
+	b := descriptorFixture(9)
+	bounds := append(binary.BigEndian.AppendUint32(nil, 10), binary.BigEndian.AppendUint32(nil, 20)...)
+	off := bytes.Index(b, bounds)
+	if off < 0 {
+		t.Fatal("fixture prerequisite not found")
+	}
+	binary.BigEndian.PutUint32(b[off+4:], 9)
+	products, err := ReadProducts(&starfile.Bytes{Data: b}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mark := products[0].Images[0].Subsystems[0].Prerequisites[0][0]
+	if mark.Low != 10 || mark.High != 9 || markMatches(mark, "runtime.sw.base", 9) || markMatches(mark, "runtime.sw.base", 10) {
+		t.Fatalf("expected an empty interval, got %+v", mark)
+	}
+}

@@ -121,6 +121,11 @@ func TestTrimmedFreeTail(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	full, err := starfile.ReadAll(v.Data)
+	if err != nil || len(full) != 64*512 || !bytes.Equal(full[:len(b)], b) ||
+		!bytes.Equal(full[len(b):], make([]byte, 24*512)) {
+		t.Fatalf("restored volume = %d bytes, %v", len(full), err)
+	}
 	b[10*512+6] = 0xfe
 	if _, err := Open(&starfile.Bytes{Data: b}, 100); err == nil {
 		t.Fatal("accepted omitted allocated blocks")

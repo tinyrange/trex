@@ -33,6 +33,8 @@ func Builtins() starlark.StringDict {
 	values["s390"] = starlark.NewBuiltin("s390", s390.Builtin)
 	values["power"] = starlark.NewBuiltin("power", power.Builtin)
 	values["r3000"] = starlark.NewBuiltin("r3000", r3000.Builtin)
+	values["ip24"] = starlark.NewBuiltin("ip24", r3000.IP24Builtin)
+	values["ip12"] = starlark.NewBuiltin("ip12", r3000.IP12Builtin)
 	return values
 }
 

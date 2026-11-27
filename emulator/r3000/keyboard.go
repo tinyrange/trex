@@ -3,6 +3,8 @@ package r3000
 import (
 	"fmt"
 	"strings"
+
+	"github.com/tinyrange/trex/channel"
 )
 
 var scanKeys = map[string][2]byte{
@@ -16,36 +18,57 @@ var scanKeys = map[string][2]byte{
 	";": {0x4c, 0x27}, "'": {0x52, 0x28}, ",": {0x41, 0x33}, ".": {0x49, 0x34}, "/": {0x4a, 0x35}, "\x60": {0x0e, 0x29},
 	" ": {0x29, 0x39}, "enter": {0x5a, 0x1c}, "tab": {0x0d, 0x0f}, "escape": {0x76, 0x01}, "backspace": {0x66, 0x0e},
 	"shift": {0x12, 0x2a}, "control": {0x14, 0x1d}, "alt": {0x11, 0x38},
+	"shift_r": {0x59, 0x36}, "caps_lock": {0x58, 0x3a},
+	"f1": {0x05, 0x3b}, "f2": {0x06, 0x3c}, "f3": {0x04, 0x3d}, "f4": {0x0c, 0x3e},
+	"f5": {0x03, 0x3f}, "f6": {0x0b, 0x40}, "f7": {0x83, 0x41}, "f8": {0x0a, 0x42},
+	"f9": {0x01, 0x43}, "f10": {0x09, 0x44}, "f11": {0x78, 0x57}, "f12": {0x07, 0x58},
+}
+
+var extendedScanKeys = map[string][2]byte{
+	"left": {0x6b, 0x4b}, "right": {0x74, 0x4d}, "up": {0x75, 0x48}, "down": {0x72, 0x50},
+	"home": {0x6c, 0x47}, "end": {0x69, 0x4f}, "pgup": {0x7d, 0x49}, "pgdn": {0x7a, 0x51},
+	"insert": {0x70, 0x52}, "delete": {0x71, 0x53}, "ctrl_r": {0x14, 0x1d}, "alt_r": {0x11, 0x38},
+	"meta_l": {0x1f, 0x5b}, "meta_r": {0x27, 0x5c},
 }
 
 func (m *Machine) Key(key string, down bool) error {
-	code, ok := scanKeys[strings.ToLower(key)]
-	if !ok {
+	return m.keyboard.key(m.cycles, key, down)
+}
+
+func (k *keyboard) key(cycles uint64, key string, down bool) error {
+	key = strings.ToLower(key)
+	code, normal := scanKeys[key]
+	extended := !normal
+	if extended {
+		code, normal = extendedScanKeys[key]
+	}
+	if !normal {
 		return fmt.Errorf("r3000: unknown key %q", key)
 	}
-	k := &m.keyboard
 	if k.command&0x10 != 0 {
 		return fmt.Errorf("r3000: keyboard interface disabled")
 	}
-	length := 1
+	var packet [3]byte
+	sequence := packet[:0]
+	if extended {
+		sequence = append(sequence, 0xe0)
+	}
 	setOne := k.scanSet == 1 || k.command&0x40 != 0
-	if !down && !setOne {
-		length++
-	}
-	if k.length+length > len(k.queue) {
-		return fmt.Errorf("r3000: keyboard queue full")
-	}
 	if setOne {
 		if !down {
 			code[1] |= 0x80
 		}
-		k.queueBytes(m.cycles, false, true, code[1])
+		sequence = append(sequence, code[1])
 	} else {
 		if !down {
-			k.queueBytes(m.cycles, false, true, 0xf0)
+			sequence = append(sequence, 0xf0)
 		}
-		k.queueBytes(m.cycles, false, true, code[0])
+		sequence = append(sequence, code[0])
 	}
+	if k.length+len(sequence) > len(k.queue) {
+		return fmt.Errorf("r3000: keyboard queue full: %w", channel.ErrWouldBlock)
+	}
+	k.queueBytes(cycles, false, true, sequence...)
 	return nil
 }
 
@@ -110,15 +133,16 @@ type keyboard struct {
 	output                                                              ps2Byte
 	full                                                                bool
 	deadline                                                            uint64
+	frameCycles                                                         uint64
 }
 
 func (k *keyboard) init() {
-	*k = keyboard{port: 1, scanSet: 2, reporting: true, mouseResolution: 2, mouseRate: 100}
+	*k = keyboard{port: 1, scanSet: 2, reporting: true, mouseResolution: 2, mouseRate: 100, frameCycles: ps2FrameCycles}
 }
 
 func (k *keyboard) schedule(cycles uint64) {
 	if !k.full && k.length > 0 && k.deadline == 0 {
-		k.deadline = cycles + ps2FrameCycles
+		k.deadline = cycles + k.frameCycles
 	}
 }
 

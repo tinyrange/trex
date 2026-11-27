@@ -79,11 +79,9 @@ func (c *pdReader) count() int {
 	return n
 }
 func (c *pdReader) mark() Mark {
-	m := Mark{Product: c.str(), Image: c.str(), Subsystem: c.str(), Low: int64(int32(c.u32())), High: int64(int32(c.u32()))}
-	if m.High < m.Low && c.err == nil {
-		c.err = fmt.Errorf("irix product: invalid version range at %d", c.off)
-	}
-	return m
+	// Some 6.5 products record an empty interval in an alternative group.
+	// Preserve both bounds. No installed version can satisfy that alternative.
+	return Mark{Product: c.str(), Image: c.str(), Subsystem: c.str(), Low: int64(int32(c.u32())), High: int64(int32(c.u32()))}
 }
 func (c *pdReader) marks() []Mark {
 	n := c.count()

@@ -12,7 +12,10 @@ func (c *cpu) cop1(word uint32, format, ft, fs uint8, x *instruction) {
 		x.load = delayedLoad{ft, c.fpr[fs]}
 	case 2:
 		x.load.reg = ft
-		if fs == 31 {
+		switch fs {
+		case 0:
+			x.load.value = c.fpuRevision
+		case 31:
 			x.load.value = c.fcsr
 		}
 	case 4:
@@ -41,6 +44,8 @@ func (c *cpu) floatOperation(word uint32, format, ft, fs uint8, x *instruction) 
 		x.exception = 10
 		return
 	}
+	// R3010 register pairs always put the low word in the even register.
+	// Endianness only changes the order of those words in memory.
 	read := func(reg uint8) float64 {
 		switch format {
 		case 17:

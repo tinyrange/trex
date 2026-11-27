@@ -29,15 +29,18 @@ remove covered installed subsystem names from the effective dependency set.
 Image order is retained independently of dependency satisfaction.
 
 `machine` supplies explicit facts such as `CPUBOARD`, `SUBGR` and `GFXBOARD`.
-Different keys are conjunctive, repeated values of one key are alternatives,
-and an empty value is significant. Historical bare names use the `MACHINE`
-fact. An omitted fact is unresolved, not a guessed architecture or a wildcard.
+In whitespace-delimited selectors, different keys are conjunctive and repeated
+values of one key are alternatives. Explicit selectors support `=`, `!=`,
+`&&`, `||`, `!` and parentheses. An empty value is significant. Historical
+bare names use the `MACHINE` fact. An omitted fact is unresolved.
 
 `indexes` is keyed by `product@version`; `images` is keyed by
 `product.image@version`. Unqualified inputs are accepted for simple inspection,
 but qualified inputs should be used when combining foundation and overlays.
 The IDB attributes, not physical `_6522m` filenames, identify membership.
 Operations retain the source image and IDB ordinal, including machine variants.
+Repeated identical IDB rows can share a single operation when their decoded
+payloads and metadata match. The reader preserves each physical occurrence.
 
 `existing` is the caller's complete current regular-file map. `previous` gives
 BSD checksums recorded at the prior installation. `config(update)` can preserve

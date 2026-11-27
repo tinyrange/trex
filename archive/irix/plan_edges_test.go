@@ -2,7 +2,33 @@ package irix
 
 import (
 	"testing"
+
+	starfile "github.com/tinyrange/trex/storage/star"
 )
+
+func TestPlanMachineExpressions(t *testing.T) {
+	facts := map[string]string{"CPUBOARD": "IP22", "GFXBOARD": "NEWPORT", "SUBGR": ""}
+	for _, tc := range []struct {
+		attr string
+		want bool
+	}{
+		{"mach(GFXBOARD!=SERVER && GFXBOARD!=VOYAGER)", true},
+		{"mach(CPUBOARD=IP32 || (CPUBOARD=IP22 && SUBGR=))", true},
+		{"mach(CPUBOARD=IP22 && (GFXBOARD=SERVER || GFXBOARD=VOYAGER))", false},
+		{"mach(GFXBOARD!=NEWPORT)", false},
+		{"mach(CPUBOARD=IP22 && !CPUBOARD=IP19)", true},
+	} {
+		got, err := machineMatches([]string{tc.attr}, facts)
+		if err != nil || got != tc.want {
+			t.Errorf("%s = %v, %v", tc.attr, got, err)
+		}
+	}
+	for _, attr := range []string{"mach(CPUBOARD=IP22 || UNKNOWN=anything)", "mach(CPUBOARD=IP22 &&)", "mach((CPUBOARD=IP22) && (GFXBOARD=NEWPORT) bad)"} {
+		if _, err := machineMatches([]string{attr}, facts); err == nil {
+			t.Errorf("accepted %s", attr)
+		}
+	}
+}
 
 func TestPlanLatestVersionAfterOlderDuplicates(t *testing.T) {
 	p := append(append(planProducts(1), planProducts(1)...), planProducts(2)...)
@@ -68,5 +94,43 @@ func TestPlanUnknownPolicyContainingDots(t *testing.T) {
 	result, err := Plan(planProducts(2), options)
 	if err != nil || len(result.Issues) != 1 || result.Issues[0].Kind != "unsupported_attribute" {
 		t.Fatal(result, err)
+	}
+}
+
+func TestPlanRepeatedIDBRows(t *testing.T) {
+	for _, tc := range []struct {
+		second byte
+		match  bool
+	}{{'A', true}, {'B', false}} {
+		options := basicOptions(t)
+		index := &starfile.Bytes{Data: []byte("f 0644 bin bin a src/a main.sw.bin size(1)\nf 0644 bin bin a src/a main.sw.bin size(1)\n")}
+		items, err := ReadIDB(index, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		options.Indexes["main@2"] = items
+		options.Images["main.sw@2"] = &starfile.Bytes{Data: []byte{0, 1, 'a', 'A', 0, 1, 'a', tc.second}}
+		plan, err := Plan(planProducts(2), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plan.Operations) != 1 || (len(plan.Issues) == 0) != tc.match || (plan.Operations[0].Data != nil) != tc.match {
+			t.Fatalf("repeat %q was resolved incorrectly: %+v", tc.second, plan)
+		}
+	}
+}
+
+func TestPlanIgnoresDelhistEntry(t *testing.T) {
+	options := basicOptions(t)
+	options.Indexes["main@2"] = append(options.Indexes["main@2"], Item{
+		Kind: "l", Path: "var/tmp", Source: "var/tmp", Owner: "root", Group: "sys", Mode: 0755,
+		Attributes: []string{"main.sw.bin", "symval(/XYZ)", "delhist"},
+	})
+	plan, err := Plan(planProducts(2), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Operations) != 1 || len(plan.Issues) != 0 {
+		t.Fatalf("retired entry affected the install plan: %+v", plan)
 	}
 }

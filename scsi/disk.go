@@ -138,19 +138,67 @@ func (d *Disk) Execute(cdb, dataOut []byte) (Result, error) {
 	return p.Result(), nil
 }
 
+func diskCDBLength(opcode byte) int {
+	switch opcode >> 5 {
+	case 1, 2:
+		return 10
+	case 4:
+		return 16
+	case 5:
+		return 12
+	}
+	return 6
+}
+
+func diskBlockCount(cdb []byte, length int) uint64 {
+	switch length {
+	case 6:
+		if cdb[4] == 0 {
+			return 256
+		}
+		return uint64(cdb[4])
+	case 10:
+		return uint64(binary.BigEndian.Uint16(cdb[7:9]))
+	case 12:
+		return uint64(binary.BigEndian.Uint32(cdb[6:10]))
+	default:
+		return uint64(binary.BigEndian.Uint32(cdb[10:14]))
+	}
+}
+
+func diskWriteBlocks(opcode byte) bool {
+	switch opcode {
+	case 0x0a, 0x2a, 0x2e, 0xaa, 0x8a:
+		return true
+	}
+	return false
+}
+
+// DataOutSize returns the payload size a supported disk command expects.
+// It lets transports assemble one command from multiple DMA or PIO bursts.
+func (d *Disk) DataOutSize(cdb []byte) (uint32, error) {
+	if len(cdb) == 0 || len(cdb) < diskCDBLength(cdb[0]) {
+		return 0, fmt.Errorf("scsi: truncated disk CDB")
+	}
+	sector := d.media.Geometry().LogicalBlockSize
+	if cdb[0] == 0x93 && cdb[1]&1 == 0 {
+		return sector, nil
+	}
+	if !diskWriteBlocks(cdb[0]) {
+		return 0, nil
+	}
+	n := diskBlockCount(cdb, diskCDBLength(cdb[0])) * uint64(sector)
+	if n > 8<<20 {
+		return 0, fmt.Errorf("scsi: disk transfer exceeds 8 MiB")
+	}
+	return uint32(n), nil
+}
+
 func (d *Disk) Prepare(initiator uint64, cdb, dataOut []byte) (*DiskCommand, error) {
 	if len(cdb) < 6 {
 		return nil, fmt.Errorf("scsi: truncated disk CDB")
 	}
-	need := 6
-	switch cdb[0] >> 5 {
-	case 1, 2:
-		need = 10
-	case 4:
-		need = 16
-	case 5:
-		need = 12
-	}
+	need := diskCDBLength(cdb[0])
 	if len(cdb) < need {
 		return nil, fmt.Errorf("scsi: truncated disk CDB%02x", cdb[0])
 	}
@@ -164,7 +212,7 @@ func (d *Disk) Prepare(initiator uint64, cdb, dataOut []byte) (*DiskCommand, err
 		p.result.Status = 0x18
 		return p, nil
 	}
-	if len(dataOut) > 0 && cdb[0] != 0x0a && cdb[0] != 0x2a && cdb[0] != 0x2e && cdb[0] != 0xaa && cdb[0] != 0x8a && cdb[0] != 0x93 {
+	if len(dataOut) > 0 && !diskWriteBlocks(cdb[0]) && cdb[0] != 0x93 {
 		return nil, fmt.Errorf("scsi: unexpected disk data-out for CDB%02x", cdb[0])
 	}
 	g := d.media.Geometry()
@@ -262,15 +310,12 @@ func (d *Disk) Prepare(initiator uint64, cdb, dataOut []byte) (*DiskCommand, err
 		if d.stopped {
 			return check(2, 4)
 		}
-		var lba, count uint64
+		var lba uint64
+		count := diskBlockCount(cdb, need)
 		fua := false
 		switch need {
 		case 6:
 			lba = uint64(cdb[1]&31)<<16 | uint64(binary.BigEndian.Uint16(cdb[2:4]))
-			count = uint64(cdb[4])
-			if count == 0 {
-				count = 256
-			}
 		case 10, 12:
 			allowed := byte(0x18)
 			if cdb[0] == 0x2e {
@@ -282,18 +327,12 @@ func (d *Disk) Prepare(initiator uint64, cdb, dataOut []byte) (*DiskCommand, err
 			}
 			fua = cdb[0] != 0x2e && cdb[1]&8 != 0
 			lba = uint64(binary.BigEndian.Uint32(cdb[2:6]))
-			if need == 10 {
-				count = uint64(binary.BigEndian.Uint16(cdb[7:9]))
-			} else {
-				count = uint64(binary.BigEndian.Uint32(cdb[6:10]))
-			}
 		case 16:
 			if cdb[1]&^byte(0x18) != 0 {
 				return check(5, 0x24)
 			}
 			fua = cdb[1]&8 != 0
 			lba = binary.BigEndian.Uint64(cdb[2:10])
-			count = uint64(binary.BigEndian.Uint32(cdb[10:14]))
 		}
 		if lba > blocks || count > blocks-lba {
 			return check(5, 0x21)
@@ -302,7 +341,7 @@ func (d *Disk) Prepare(initiator uint64, cdb, dataOut []byte) (*DiskCommand, err
 		if n > 8<<20 {
 			return nil, fmt.Errorf("scsi: disk transfer exceeds8MiB")
 		}
-		writing := cdb[0] == 0x0a || cdb[0] == 0x2a || cdb[0] == 0x2e || cdb[0] == 0xaa || cdb[0] == 0x8a
+		writing := diskWriteBlocks(cdb[0])
 		if writing {
 			if !gWritable(d.media) {
 				return check(7, 0x27)

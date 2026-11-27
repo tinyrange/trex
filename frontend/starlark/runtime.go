@@ -67,6 +67,7 @@ import (
 	"github.com/tinyrange/trex/filesystem/androidlp"
 	filesystemapfs "github.com/tinyrange/trex/filesystem/apfs"
 	filesystemapm "github.com/tinyrange/trex/filesystem/apm"
+	filesystemchd "github.com/tinyrange/trex/filesystem/chd"
 	filesystemckd "github.com/tinyrange/trex/filesystem/ckd"
 	filesystemefs "github.com/tinyrange/trex/filesystem/efs"
 	filesystemext4 "github.com/tinyrange/trex/filesystem/ext4"
@@ -235,6 +236,7 @@ func predeclared() starlark.StringDict {
 			attrs: starlark.StringDict{
 				"fat":                  starlark.NewBuiltin("fat", filesystemfat.FATBuiltin),
 				"efs":                  starlark.NewBuiltin("efs", filesystemefs.Builtin),
+				"efs_build":            starlark.NewBuiltin("efs_build", filesystemefs.BuildBuiltin),
 				"ext4":                 starlark.NewBuiltin("ext4", filesystemext4.Builtin),
 				"ext4_build":           starlark.NewBuiltin("ext4_build", filesystemext4.BuildBuiltin),
 				"ffs_build":            starlark.NewBuiltin("ffs_build", filesystemufs.BuildBuiltin),
@@ -265,7 +267,10 @@ func predeclared() starlark.StringDict {
 				"ckd_attribute_page":   starlark.NewBuiltin("ckd_attribute_page", filesystemckd.AttributePageBuiltin),
 				"openbsd_label":        starlark.NewBuiltin("openbsd_label", filesystemopenbsd.Builtin),
 				"xfs":                  starlark.NewBuiltin("xfs", filesystemxfs.Builtin),
+				"xfs_lookup":           starlark.NewBuiltin("xfs_lookup", filesystemxfs.LookupBuiltin),
+				"xfs_build":            starlark.NewBuiltin("xfs_build", filesystemxfs.BuildBuiltin),
 				"sgi":                  starlark.NewBuiltin("sgi", filesystemsgi.Builtin),
+				"sgi_build":            starlark.NewBuiltin("sgi_build", filesystemsgi.BuildBuiltin),
 				"apm":                  starlark.NewBuiltin("apm", filesystemapm.Builtin),
 				"fat12":                starlark.NewBuiltin("fat12", filesystemfat.FAT12Builtin),
 				"fat16":                starlark.NewBuiltin("fat16", filesystemfat.FAT16Builtin),
@@ -283,6 +288,7 @@ func predeclared() starlark.StringDict {
 				"ntfs":                 starlark.NewBuiltin("ntfs", filesystemntfs.NTFSBuiltin),
 				"ntfs_record":          starlark.NewBuiltin("ntfs_record", filesystemntfs.RecordBuiltin),
 				"udf":                  starlark.NewBuiltin("udf", filesystemudf.UDFBuiltin),
+				"chd":                  starlark.NewBuiltin("chd", filesystemchd.Builtin),
 				"vhdx":                 starlark.NewBuiltin("vhdx", filesystemvhdx.VHDXBuiltin),
 				"android_super":        starlark.NewBuiltin("android_super", androidlp.Builtin),
 			},

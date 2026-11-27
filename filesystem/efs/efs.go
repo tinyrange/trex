@@ -18,11 +18,15 @@ const sectorSize = 512
 type Entry struct {
 	Path, Kind     string
 	Inode          uint32
+	Major, Minor   uint32
 	Mode, UID, GID uint16
 	Modified       uint32
 	Data           starfile.File
 }
-type Volume struct{ Entries []Entry }
+type Volume struct {
+	Entries []Entry
+	Data    starfile.File
+}
 type reader struct {
 	file                       starfile.File
 	blocks, firstCG, groupSize uint32
@@ -61,6 +65,15 @@ func (r *reader) inode(id uint32) (Entry, error) {
 		e.Kind = "socket"
 	default:
 		return e, fmt.Errorf("efs: invalid inode mode %o for %d", e.Mode, id)
+	}
+	if e.Kind == "character_device" || e.Kind == "block_device" {
+		dev := be.Uint16(b[32:])
+		if dev == 0xffff {
+			number := be.Uint32(b[36:])
+			e.Major, e.Minor = number>>18&0x1ff, number&0x3ffff
+		} else {
+			e.Major, e.Minor = uint32(dev>>8&0x7f), uint32(dev&0xff)
+		}
 	}
 	size := int64(be.Uint32(b[8:]))
 	count := int(be.Uint16(b[28:]))
@@ -260,6 +273,10 @@ func Open(file starfile.File, maximumEntries int) (*Volume, error) {
 			}
 		}
 	}
+	size := int64(r.blocks) * sectorSize
+	v.Data = filesystem.NewGeneratedImage("EFS volume", size, []filesystem.ExtentSpec{
+		{Start: 0, Size: min(size, file.Size()), File: file},
+	})
 	return v, nil
 }
 
@@ -287,7 +304,7 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 			data = e.Data
 			size = e.Data.Size()
 		}
-		record := starfile.NewRecord(starlark.StringDict{"path": starlark.String(e.Path), "entry_type": starlark.String(e.Kind), "size": starlark.MakeInt64(size), "data": data, "inode": starlark.MakeUint(uint(e.Inode)), "mode": starlark.MakeUint(uint(e.Mode)), "uid": starlark.MakeUint(uint(e.UID)), "gid": starlark.MakeUint(uint(e.GID)), "modified": starlark.MakeUint(uint(e.Modified))})
+		record := starfile.NewRecord(starlark.StringDict{"path": starlark.String(e.Path), "entry_type": starlark.String(e.Kind), "size": starlark.MakeInt64(size), "data": data, "inode": starlark.MakeUint(uint(e.Inode)), "mode": starlark.MakeUint(uint(e.Mode)), "uid": starlark.MakeUint(uint(e.UID)), "gid": starlark.MakeUint(uint(e.GID)), "modified": starlark.MakeUint(uint(e.Modified)), "major": starlark.MakeUint(uint(e.Major)), "minor": starlark.MakeUint(uint(e.Minor))})
 		entries[i] = record
 		paths[i] = starlark.String(e.Path)
 		index[e.Path] = record
@@ -303,5 +320,5 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 		}
 		return value, nil
 	})
-	return starfile.NewRecord(starlark.StringDict{"entries": starlark.NewList(entries), "files": starlark.NewList(paths), "find": find}), nil
+	return starfile.NewRecord(starlark.StringDict{"entries": starlark.NewList(entries), "files": starlark.NewList(paths), "find": find, "data": v.Data}), nil
 }

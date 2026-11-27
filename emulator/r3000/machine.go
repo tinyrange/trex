@@ -251,23 +251,7 @@ func (m *Machine) Read(address uint32, out []byte) error {
 // ReadEffective copies mapped memory through the current CPU translation without
 // changing exception registers or invoking device read side effects.
 func (m *Machine) ReadEffective(address uint32, out []byte) error {
-	if uint64(address)+uint64(len(out)) > 1<<32 {
-		return fmt.Errorf("r3000: virtual read wraps address space")
-	}
-	for len(out) > 0 {
-		x := instruction{exception: -1}
-		p, _ := m.cpu.translate(address, false, &x)
-		if x.exception >= 0 {
-			return fmt.Errorf("r3000: virtual address %#x is not readable", address)
-		}
-		n := min(len(out), 4096-int(address&4095))
-		if err := m.Read(p, out[:n]); err != nil {
-			return err
-		}
-		out = out[n:]
-		address += uint32(n)
-	}
-	return nil
+	return m.cpu.readEffective(address, out, m.Read)
 }
 
 func loadLE(p []byte, size uint32) uint32 {
@@ -325,6 +309,13 @@ func (m *Machine) writeBus(address, size, value uint32) bool {
 		m.recordWrite(address, size, value)
 	}
 	return ok
+}
+
+func (m *Machine) step() Stop {
+	m.updateInterrupts()
+	result := m.cpu.step(m)
+	m.cycles++
+	return result
 }
 
 func (m *Machine) updateInterrupts() {
