@@ -23,6 +23,8 @@ func TestIP24DisplayInput(t *testing.T) {
 		{Kind: "pointer"},
 		{Kind: "key", Key: "minus", Down: true},
 		{Kind: "key", Key: "up"},
+		{Kind: "key", Key: "ret", Down: true},
+		{Kind: "key", Key: "kp_enter", Down: true},
 	} {
 		if err := d.Input(ctx, input); err != nil {
 			t.Fatal(err)
@@ -32,7 +34,7 @@ func TestIP24DisplayInput(t *testing.T) {
 	for _, b := range m.keyboard.queue[:m.keyboard.length] {
 		bytes = append(bytes, b.value)
 	}
-	want := []byte{14, 127, 7, 14, 3, 0, 8, 0, 0, 0x4e, 0xe0, 0xf0, 0x75}
+	want := []byte{14, 127, 7, 14, 3, 0, 8, 0, 0, 0x4e, 0xe0, 0xf0, 0x75, 0x5a, 0xe0, 0x5a}
 	if !slices.Equal(bytes, want) {
 		t.Fatalf("PS/2 packets = % x, want % x", bytes, want)
 	}

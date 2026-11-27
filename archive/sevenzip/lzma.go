@@ -188,16 +188,18 @@ func (r *lzmaReader) bit(probability *uint16) (uint32, error) {
 			return 0, err
 		}
 	}
-	bound := (r.rangeValue >> lzmaProbabilityBits) * uint32(*probability)
-	if r.code < bound {
-		r.rangeValue = bound
-		*probability += (lzmaProbabilityTotal - *probability) >> lzmaProbabilityMove
-		return 0, nil
-	}
-	r.rangeValue -= bound
-	r.code -= bound
-	*probability -= *probability >> lzmaProbabilityMove
-	return 1, nil
+	p := uint32(*probability)
+	bound := (r.rangeValue >> lzmaProbabilityBits) * p
+	// The range split is close to unpredictable for literal bits. Select
+	// the upper half by borrowing from the widened subtraction.
+	upper := uint32(1) ^ uint32((uint64(r.code)-uint64(bound))>>63)
+	mask := uint32(0) - upper
+	r.code -= bound & mask
+	r.rangeValue = bound ^ ((bound ^ (r.rangeValue - bound)) & mask)
+	increase := (uint32(lzmaProbabilityTotal) - p) >> lzmaProbabilityMove
+	decrease := p >> lzmaProbabilityMove
+	*probability = uint16(p + increase - ((increase + decrease) & mask))
+	return upper, nil
 }
 
 func (r *lzmaReader) bitTree(probabilities []uint16, bits uint32) (uint32, error) {

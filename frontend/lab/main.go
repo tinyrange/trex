@@ -66,6 +66,7 @@ func Run(args []string, extension Extension) error {
 	user := flags.String("tailnet-user", "", "Tailscale login allowed to use this workspace")
 	stateFile := flags.String("state", "local/virtual-lab.json", "Saved editable lab definition")
 	mediaConfig := flags.String("media-config", "", "Media configuration file (default local/lab-media.json)")
+	prepareIndy := flags.Bool("prepare-irix", false, "Prepare an in-memory login template from the default six IRIX discs")
 	flags.Func("media-root", "Original media library as name=directory (repeatable)", func(value string) error { return media.add(value) })
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -101,7 +102,7 @@ func Run(args []string, extension Extension) error {
 	}
 	missing := backendCheck()
 	for i := range guestRec {
-		if guestRec[i].ID != "switch" && guestRec[i].ID != "router" {
+		if guestRec[i].Backend == "cc" || guestRec[i].UsesQEMU() {
 			guestRec[i].Blocked = missing
 			if guestRec[i].UsesQEMU() && missing == "" {
 				if _, err := exec.LookPath("qemu-system-x86_64"); err != nil {
@@ -128,10 +129,35 @@ func Run(args []string, extension Extension) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	factory := lab.StarFactory{Context: ctx, Recipes: workspace.FS(), Media: media.open, QEMUEthernet: qemuEthernet}
+	alpine, err := lab.NewAlpineRepository()
+	if err != nil {
+		return err
+	}
+	factory := lab.StarFactory{Context: ctx, Recipes: workspace.FS(), Media: media.open, QEMUEthernet: qemuEthernet, Alpine: alpine}
+	prepared := make(chan struct{})
+	if *prepareIndy {
+		i := slices.IndexFunc(guestRec, func(recipe lab.Recipe) bool { return recipe.ID == "irix-indy" })
+		if i < 0 {
+			return fmt.Errorf("the Lab catalog has no IRIX Indy recipe")
+		}
+		factory.Indy = &lab.IndyTemplates{}
+		go func() {
+			defer close(prepared)
+			log := func(message string) { fmt.Println("IRIX template —", message) }
+			if err := factory.PrepareIndy(ctx, guestRec[i], log); err != nil {
+				if ctx.Err() == nil {
+					log(err.Error())
+				}
+				return
+			}
+			log("Ready")
+		}()
+	} else {
+		close(prepared)
+	}
 	manager := lab.NewManager(ctx, draft, guestRec, factory, store, media.check)
 	server := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: httpApp{
-		ctx: ctx, manager: manager, media: media, catalog: guestRec,
+		ctx: ctx, manager: manager, media: media, catalog: guestRec, alpine: alpine,
 		templates: append([]lab.Template{}, extension.Templates...),
 		software:  lab.SoftwareLibrary(guestRec, extension.SoftwareAliases, extension.SoftwareReferences),
 		localHost: listener.Addr().String(), tailnetHost: externalHost, tailnetUser: *user,
@@ -148,6 +174,7 @@ func Run(args []string, extension Extension) error {
 	err = server.Serve(listener)
 	stop()
 	<-clean
+	<-prepared
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

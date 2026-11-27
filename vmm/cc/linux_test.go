@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/tinyrange/trex/vmm"
+	"github.com/tinyrange/trex/vmm/ramfb"
 )
 
 func TestLinuxHandoff(t *testing.T) {
@@ -32,8 +33,8 @@ func TestLinuxHandoff(t *testing.T) {
 	initrd := []byte("original initrd")
 	boot := &vmm.LinuxBoot{Kernel: bytes.NewReader(kernel), Initramfs: bytes.NewReader(initrd), CommandLine: commandLine}
 	cpu := &darwinTestCPU{}
-	p := &pc{cpu: cpu, ram: make([]byte, memorySize), acpi: &acpiPM{}, ports: make(map[uint16]byte)}
-	if err := p.installLinux(boot); err != nil {
+	p := &pc{cpu: cpu, ram: make([]byte, memorySize), framebuffer: make([]byte, ramfb.Size), acpi: &acpiPM{}, ports: make(map[uint16]byte)}
+	if err := p.installLinux(boot, true); err != nil {
 		t.Fatal(err)
 	}
 	r, s := cpu.regs, cpu.sys
@@ -51,13 +52,23 @@ func TestLinuxHandoff(t *testing.T) {
 	if le.Uint64(params[0x70:]) != acpiRootPointer || params[0x1e8] != 3 || le.Uint64(params[0x2d0+2*20:]) != 1<<20 {
 		t.Fatal("missing boot-time firmware addresses")
 	}
+	frame, err := ramfb.Capture(p.framebuffer)
+	if err != nil || frame == nil {
+		t.Fatalf("capture Linux framebuffer: %v", err)
+	}
+	size := frame.Bounds().Size()
+	if params[0x0f] != 0x23 || le.Uint32(params[0x18:]) != ramfb.Address+ramfb.Pixels ||
+		int(le.Uint16(params[0x12:])) != size.X || int(le.Uint16(params[0x14:])) != size.Y ||
+		int(le.Uint16(params[0x24:])) != frame.Stride {
+		t.Fatal("Linux screen info disagrees with the mapped framebuffer")
+	}
 	seedAt := le.Uint64(params[0x250:])
 	if seedAt != linuxSetupData || le.Uint64(p.ram[seedAt:]) != 0 || le.Uint32(p.ram[seedAt+8:]) != 9 || le.Uint32(p.ram[seedAt+12:]) != 32 {
 		t.Fatal("wrong bootloader RNG setup_data record")
 	}
 
 	boot.Initramfs = bytes.NewReader(make([]byte, 3<<20))
-	if err := p.installLinux(boot); err == nil || !strings.Contains(err.Error(), "overlaps") {
+	if err := p.installLinux(boot, false); err == nil || !strings.Contains(err.Error(), "overlaps") {
 		t.Fatalf("accepted initramfs overlapping decompressor workspace: %v", err)
 	}
 }

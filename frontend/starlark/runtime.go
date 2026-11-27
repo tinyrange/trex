@@ -157,6 +157,7 @@ func predeclared() starlark.StringDict {
 				"kwaj_info":        starlark.NewBuiltin("kwaj_info", kwaj.InfoBuiltin),
 				"szdd_info":        starlark.NewBuiltin("szdd_info", szdd.InfoBuiltin),
 				"sevenzip":         starlark.NewBuiltin("sevenzip", sevenzip.Builtin),
+				"sevenzip_unpack":  starlark.NewBuiltin("sevenzip_unpack", sevenzip.MaterializeBuiltin),
 				"sfp":              starlark.NewBuiltin("sfp", sfp.Builtin),
 				"szdd":             starlark.NewBuiltin("szdd", szdd.Builtin),
 				"tar":              starlark.NewBuiltin("tar", filesystemapi.TarBuiltin),

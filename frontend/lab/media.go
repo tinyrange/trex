@@ -159,19 +159,23 @@ func (m mediaLibrary) open(ref string) (starfile.File, func() error, error) {
 		f.Close()
 		return nil, nil, errors.New("the selected original-media file changed")
 	}
-	return &originalMedia{f, info.Size()}, f.Close, nil
+	return &originalMedia{file: f, info: info}, f.Close, nil
 }
 
 type originalMedia struct {
 	file *os.File
-	size int64
+	info os.FileInfo
 }
 
 func (m *originalMedia) ReadAt(p []byte, off int64) (int, error) { return m.file.ReadAt(p, off) }
 func (*originalMedia) WriteAt([]byte, int64) (int, error) {
 	return 0, errors.New("original media is read-only")
 }
-func (m *originalMedia) Size() int64                             { return m.size }
+func (m *originalMedia) Size() int64 { return m.info.Size() }
+func (m *originalMedia) SameMediaVersion(other starfile.File) bool {
+	current, ok := other.(*originalMedia)
+	return ok && os.SameFile(m.info, current.info) && m.Size() == current.Size() && m.info.ModTime().Equal(current.info.ModTime())
+}
 func (*originalMedia) Type() string                              { return "file" }
 func (*originalMedia) String() string                            { return "<original media>" }
 func (*originalMedia) Freeze()                                   {}

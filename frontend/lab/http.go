@@ -22,6 +22,7 @@ type httpApp struct {
 	catalog                             []lab.Recipe
 	templates                           []lab.Template
 	software                            []lab.SoftwareTitle
+	alpine                              *lab.AlpineRepository
 	localHost, tailnetHost, tailnetUser string
 }
 
@@ -38,6 +39,25 @@ func (a httpApp) handler(ui fs.FS) http.Handler {
 		reply(w, struct {
 			Software []lab.SoftwareTitle `json:"software"`
 		}{a.software})
+	})
+	mux.HandleFunc("GET /api/alpine/packages", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("q")
+		if len(query) > 128 {
+			http.Error(w, "Use a package query of up to 128 bytes.", http.StatusBadRequest)
+			return
+		}
+		if a.alpine == nil {
+			http.Error(w, "The Alpine repository is unavailable.", http.StatusServiceUnavailable)
+			return
+		}
+		packages, err := a.alpine.Search(r.Context(), query)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		reply(w, struct {
+			Packages []lab.AlpinePackage `json:"packages"`
+		}{packages})
 	})
 	mux.HandleFunc("GET /api/lab", func(w http.ResponseWriter, r *http.Request) { reply(w, a.manager.View()) })
 	mux.HandleFunc("PUT /api/lab", a.definition(func(w http.ResponseWriter, d lab.Definition) {
@@ -63,6 +83,10 @@ func (a httpApp) handler(ui fs.FS) http.Handler {
 	mux.HandleFunc("GET /api/nodes/{id}/surfaces/{surface}/terminal", a.surface(a.terminal))
 	mux.HandleFunc("GET /api/nodes/{id}/surfaces/{surface}/serial", a.surface(a.serial))
 	mux.HandleFunc("POST /api/nodes/{id}/surfaces/{surface}/input", a.surface(a.input))
+	mux.HandleFunc("GET /api/nodes/{id}/surfaces/{surface}/browse-session", a.surface(a.webSession))
+	mux.HandleFunc("GET /api/nodes/{id}/surfaces/{surface}/browse/{$}", a.surface(a.openWeb))
+	web := http.NewServeMux()
+	web.HandleFunc("/api/nodes/{id}/surfaces/{surface}/browse/{key}/{path...}", a.surface(a.browseWeb))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := "http://" + a.localHost
 		switch r.Host {
@@ -75,6 +99,10 @@ func (a httpApp) handler(ui fs.FS) http.Handler {
 			}
 		default:
 			http.Error(w, "Unknown lab host.", http.StatusForbidden)
+			return
+		}
+		if _, pattern := web.Handler(r); pattern != "" {
+			web.ServeHTTP(w, r)
 			return
 		}
 		if given := r.Header.Get("Origin"); given != "" && given != origin || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
@@ -91,7 +119,7 @@ func (a httpApp) handler(ui fs.FS) http.Handler {
 		if r.Host == a.tailnetHost {
 			wsOrigin = "wss://" + r.Host
 		}
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self' "+wsOrigin+"; form-action 'none'; frame-ancestors 'none'; base-uri 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self' "+wsOrigin+"; frame-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'")
 		mux.ServeHTTP(w, r)
 	})
 }

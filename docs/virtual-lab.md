@@ -13,6 +13,8 @@ the draft. Choose your own media before applying.
 
 Open a running node's display or serial console from its card. The Runtime
 tab shows the guest's current phase and the login hints for domain nodes.
+Open **Logs** from the toolbar to view recent diagnostics across the lab.
+The Runtime tab can open the same panel filtered to the current node.
 The display fits the guest picture to the window and offers a **Full screen**
 control. Press Escape to release a captured relative pointer.
 Select **Inspect failure** in the status bar to open the affected node's
@@ -83,9 +85,74 @@ older graphs with a single shared port receive distinct numbers on load.
 
 Linux profiles include an Alpine serial shell built from pinned upstream
 packages, Debian and Ubuntu live media, and Fedora Server rescue media. The
-original-media Linux profiles use QEMU on the lab host for its PC chipset and
-display. They can connect to the same isolated switches as native guests.
-Install `qemu-system-x86_64` to use those profiles.
+original-media profiles boot the kernel and initramfs from the supplied ISO
+on CC. The live system reads the same ISO through a read-only disk. These
+guests can connect to the Lab's isolated switches.
+
+The Nodes palette shows the year for fixed OS releases and orders them from
+oldest to newest within each group. Live-media recipes that accept different
+releases leave the year open.
+
+### Alpine package selection
+
+In **Alpine Linux 3.22 → Software**, search the upstream x86-64 main and
+community repositories and select packages to include. Apply the lab to
+resolve dependencies, verify the signed repository and package identities,
+and build a fresh initramfs in memory. The serial console opens in the
+resulting guest. The lab definition records the exact versions selected in
+the picker. If an upstream mirror retires a selected version, select its
+replacement. Packages that require an unimplemented install hook report the
+package and hook during apply.
+
+### Web Server and embedded browser
+
+Add a **Web Server** node and apply the lab. Open its **Browser** surface to
+visit the example site. To serve a different page, choose **HTML file** under
+**HTTP** and bind a self-contained HTML file in **Media**. Connect the
+node to an isolated switch and set a static IPv4 address or add a DHCP router
+to make its HTTP service available to other guests on that segment.
+
+The Go HTTP service runs directly on the isolated lab network and starts
+without a guest OS. Set **HTTP port** under **Network** and use **HTTP
+routes (JSON)** in the **HTTP** tab to add or override responses. Route
+paths match exactly. A missing method defaults to GET, and a missing
+status defaults to 200. Choose **Routes only** to serve just those routes.
+
+```json
+[
+  {
+    "method": "GET",
+    "path": "/health",
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "body": "{\"ready\":true}"
+  }
+]
+```
+
+The sandboxed browser reaches the same service through a private in-memory
+connection. Use the toolbar to go back, go forward, reload, or open another
+path on the same server. Rebuilding or stopping the node closes its browser
+session. The node's log records request methods, paths, and response statuses.
+
+### IRIX on the SGI Indy
+
+Add **IRIX 6.5.22 (SGI Indy)**. Bind the two Foundation archives, three
+6.5.22 Overlay archives, and November 2003 Applications archive. The node
+decodes the discs in parallel and builds an XFS disk in memory. The generated
+image boots the distribution kernel directly and skips the automatic kernel
+rebuild during startup. You can also select **Installed CHD disk** as the boot
+media and bind an installed 6.5.22 Indy disk. Construction and startup can take
+several minutes. Open **Display** and wait for the visual login, then choose a
+guest account.
+
+Start the Lab with `-prepare-irix` to boot the default six-disc image in the
+background. Once the service prints `IRIX template — Ready`, applying a node
+with the same media starts from the login screen. Each guest gets private RAM,
+devices, and disk writes. The prepared template lives in memory and is rebuilt
+when this service restarts with the flag enabled.
+The native Indy backend does not depend on KVM. See the [Indy recipe and
+guest controls](ip24.md#interactive-browser-desktop).
 
 V1 Ethernet domains are isolated. A switch can connect multiple guests. Guest
 networking is offered on profiles that have Ethernet configuration. Running
@@ -93,10 +160,16 @@ nodes show their configured IPv4 address or one observed on the isolated
 switch. Guests using NetBEUI alone have no IPv4 address to show.
 
 Add a **Router** and connect its **LAN** port to a switch to serve IPv4 DHCP
-on that segment. Set the LAN IPv4 address and prefix, the lease range and
-duration, and an optional DNS server under **Network**. Alpine uses DHCP
-when its static address is blank. The router serves addresses on its
-connected LAN, and leaves packet forwarding for a future version.
+and DNS on that segment. DHCP clients automatically get the router's DNS
+address and the `lab.test` search domain. Alpine uses DHCP when its static
+address is blank. Static clients can use the router's LAN address for DNS.
+
+DNS resolves running nodes on the same switch by node ID or a unique node
+name. Labels use lowercase letters and numbers, with hyphens between words.
+For example, a node named **Web Server** is reachable at `web-server.lab.test`.
+Under **Network**, you can change the LAN address and prefix, the lease range
+and duration, or specify a **DHCP DNS override**. The router serves the local
+domain over UDP and TCP port 53.
 
 Guest disk writes and Linux live sessions are temporary. A rebuild can discard
 guest changes. The apply plan says when this will happen. Reusing a saved lab

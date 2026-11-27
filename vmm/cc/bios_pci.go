@@ -13,9 +13,16 @@ const (
 	pciBIOSEntry    = 0xf6200
 )
 
+func (p *pc) hasPCI() bool {
+	return p.pciIDE != nil || p.nvme != nil || p.pciDisplay != nil || p.uhci != nil || p.pciNIC != nil
+}
+
 // Both entry points use the BIOS32 far-call ABI. They remain callable through
 // a guest's own virtual mapping of ROM, as used by Windows 9x's PCI enumerator.
 func (p *pc) installPCIFirmware() {
+	if !p.hasPCI() {
+		return
+	}
 	header := p.ram[bios32Directory : bios32Directory+16]
 	copy(header, "_32_")
 	binary.LittleEndian.PutUint32(header[4:], bios32Entry)
@@ -56,7 +63,7 @@ func (p *pc) pciBIOSConfig(bdf, offset uint16, size uint8, write bool, value uin
 // Status is returned in AH and CF by the real-mode and protected-mode callers.
 // There is one PCI bus; devices with fixed IRQs do not expose a routing table.
 func (p *pc) pciBIOS(r *x86state.Registers) (byte, error) {
-	if byte(r.Rax>>8) != 0xb1 {
+	if !p.hasPCI() || byte(r.Rax>>8) != 0xb1 {
 		return 0x81, nil
 	}
 	switch function := byte(r.Rax); function {

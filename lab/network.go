@@ -14,6 +14,10 @@ func hardwareAddress(id string) [6]byte {
 	return [6]byte{2, 0x54, hash[0], hash[1], hash[2], hash[3]}
 }
 
+func usableLANIP(ip netip.Addr) bool {
+	return ip.Is4() && (ip.IsGlobalUnicast() || ip.IsLinkLocalUnicast())
+}
+
 type networkSegment struct {
 	switcher *ethernet.Switch
 	observer *ethernet.Port
@@ -59,10 +63,14 @@ func (s *networkSegment) recordLease(mac [6]byte, ip netip.Addr) {
 }
 
 func (s *networkSegment) forget(id string) {
+	s.forgetHardware(hardwareAddress(id))
+}
+
+func (s *networkSegment) forgetHardware(mac [6]byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.collect()
-	delete(s.seen, hardwareAddress(id))
+	delete(s.seen, mac)
 }
 
 // Learn from broadcasts and other traffic visible to this switch port.

@@ -81,6 +81,7 @@ type Port struct {
 type Recipe struct {
 	ID                string  `json:"id"`
 	Title             string  `json:"title"`
+	ReleaseYear       int     `json:"releaseYear,omitempty"`
 	Family            string  `json:"family"`
 	Group             string  `json:"group"`
 	Description       string  `json:"description"`
@@ -141,6 +142,11 @@ func (n Node) Value(r Recipe, key string) any {
 				return choices
 			}
 		}
+		if key == "packages" {
+			if choices, valid := alpineChoices(value); valid {
+				return choices
+			}
+		}
 		return value
 	}
 	for _, f := range r.Fields {
@@ -193,11 +199,21 @@ func (d Definition) normalized(catalog map[string]Recipe) Definition {
 	switches := make(map[string]map[string]bool)
 	for i := range out.Nodes {
 		n := &out.Nodes[i]
+		if isWebServer(catalog[n.Recipe]) {
+			delete(n.Config, "memoryMiB") // Definitions saved by the earlier VM recipe.
+		}
 		if choices, valid := softwareChoices(n.Config["software"]); valid {
 			if len(choices) == 0 {
 				delete(n.Config, "software")
 			} else {
 				n.Config["software"] = choices
+			}
+		}
+		if choices, valid := alpineChoices(n.Config["packages"]); valid {
+			if len(choices) == 0 {
+				delete(n.Config, "packages")
+			} else {
+				n.Config["packages"] = choices
 			}
 		}
 		if n.Recipe == "switch" {
@@ -245,8 +261,9 @@ func isController(n Node, r Recipe) bool {
 	return r.ProvidesDomain && n.String(r, "role") == "domain-controller"
 }
 
-func isSwitch(r Recipe) bool { return r.Function == "switch" }
-func isRouter(r Recipe) bool { return r.Function == "router" }
+func isSwitch(r Recipe) bool    { return r.Function == "switch" }
+func isRouter(r Recipe) bool    { return r.Function == "router" }
+func isWebServer(r Recipe) bool { return r.Function == "web_server" }
 
 func (d Definition) Network(id string) string {
 	return d.networkEnd(id).Node
@@ -287,9 +304,15 @@ func validValue(field Field, value any) bool {
 		return valid && len(selected) <= len(field.Options) && !slices.ContainsFunc(selected, func(id string) bool {
 			return !slices.ContainsFunc(field.Options, func(o Option) bool { return o.Value == id })
 		})
+	case "alpine-packages":
+		_, valid := alpineChoices(value)
+		return valid
 	case "string":
 		s, ok := value.(string)
 		return ok && len(s) <= 128
+	case "multiline":
+		s, ok := value.(string)
+		return ok && len(s) <= field.Max
 	}
 	return false
 }
@@ -380,6 +403,13 @@ func Validate(d Definition, catalog map[string]Recipe, check MediaCheck) []Issue
 			prefix, err := netip.ParsePrefix(value)
 			if err != nil || !prefix.Addr().Is4() {
 				add(n.ID, "address", "Enter a valid IPv4 address and prefix, such as 10.20.0.40/24.")
+			} else if isWebServer(r) && !usableLANIP(prefix.Addr()) {
+				add(n.ID, "address", "Use a unicast IPv4 address for the Web Server.")
+			}
+		}
+		if isWebServer(r) {
+			if _, err := parseWebRoutes(n.String(r, "routes")); err != nil {
+				add(n.ID, "routes", err.Error())
 			}
 		}
 		for _, slot := range r.Media {
@@ -507,14 +537,22 @@ func Diff(d Definition, actual Definition, recipes map[string]Recipe, check Medi
 			}
 			p.Changes = append(p.Changes, Change{n.ID, "start", detail})
 		case old.Recipe != n.Recipe:
-			p.Changes = append(p.Changes, Change{n.ID, "rebuild", "Change system recipe. Replace the guest’s temporary disk."})
+			detail := "Change system recipe. Replace the guest’s temporary disk."
+			if isWebServer(r) || isWebServer(recipes[old.Recipe]) {
+				detail = "Change the node recipe and restart it."
+			}
+			p.Changes = append(p.Changes, Change{n.ID, "rebuild", detail})
 		default:
 			if old.Name != n.Name || old.X != n.X || old.Y != n.Y {
 				p.Changes = append(p.Changes, Change{n.ID, "layout", "Update the editor layout and label."})
 			}
 			for _, m := range r.Media {
 				if (m.Active(n, r) || m.Active(old, r)) && m.Reference(old) != m.Reference(n) {
-					p.Changes = append(p.Changes, Change{n.ID, "rebuild", "Change " + m.Label + ". Replace the guest’s temporary disk."})
+					detail := "Change " + m.Label + ". Replace the guest’s temporary disk."
+					if isWebServer(r) {
+						detail = "Reload the Web Server with the selected HTML file."
+					}
+					p.Changes = append(p.Changes, Change{n.ID, "rebuild", detail})
 				}
 			}
 			for _, f := range r.Fields {
@@ -529,6 +567,8 @@ func Diff(d Definition, actual Definition, recipes map[string]Recipe, check Medi
 					detail := "Move the guest’s Ethernet adapter. Replace the guest’s temporary disk."
 					if isRouter(r) {
 						detail = "Move the router to a different switch."
+					} else if isWebServer(r) {
+						detail = "Restart the Web Server on the selected lab network."
 					}
 					p.Changes = append(p.Changes, Change{n.ID, "rebuild", detail})
 				case before.Port != after.Port:

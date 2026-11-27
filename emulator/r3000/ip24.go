@@ -29,34 +29,35 @@ const (
 // IP24 models the 64 MiB R4400 configuration of the SGI Indy. Its
 // serial boot path uses the 32-bit ARCS calling convention.
 type IP24 struct {
-	cpu        r4kCPU
-	ram        []byte
-	rom        []byte
-	console    *channel.Memory
-	scc        ip12SCC
-	int3       ip12INT
-	scsi       wd33c93
-	targets    [8]*scsi.Disk
-	dma        hpc3SCSI
-	mc         [64]uint32
-	vdma       mcVDMA
-	ioc        [32]byte
-	rtc        [8192]byte
-	rtcBase    time.Time
-	rtcCycles  uint64
-	pioConfig  [16]uint32
-	pbusConfig [8]uint32
-	pbusDMA    [8]hpc3PBUS
-	gioMisc    uint32
-	ethernet   ip24Ethernet
-	keyboard   keyboard
-	newport    *newport
-	eeprom     ip12EEPROM
-	arcs       ip24ARCS
-	breaks     map[uint64]bool
-	cycles     uint64
-	closed     bool
-	lastFault  r4kStep
+	cpu         r4kCPU
+	ram         []byte
+	rom         []byte
+	console     *channel.Memory
+	scc         ip12SCC
+	int3        ip12INT
+	scsi        wd33c93
+	targets     [8]*scsi.Disk
+	dma         hpc3SCSI
+	mc          [64]uint32
+	vdma        mcVDMA
+	ioc         [32]byte
+	rtc         [8192]byte
+	rtcBase     time.Time
+	rtcCycles   uint64
+	pioConfig   [16]uint32
+	pbusConfig  [8]uint32
+	pbusDMA     [8]hpc3PBUS
+	gioMisc     uint32
+	ethernet    ip24Ethernet
+	keyboard    keyboard
+	newport     *newport
+	eeprom      ip12EEPROM
+	arcs        ip24ARCS
+	breaks      map[uint64]bool
+	cycles      uint64
+	irqDeadline uint64
+	closed      bool
+	lastFault   r4kStep
 }
 
 type IP24Stop struct {
@@ -109,7 +110,7 @@ func (m *IP24) reset() {
 	clear(m.pioConfig[:])
 	clear(m.pbusConfig[:])
 	clear(m.pbusDMA[:])
-	m.cycles, m.rtcCycles, m.gioMisc = 0, 0, 0
+	m.cycles, m.irqDeadline, m.rtcCycles, m.gioMisc = 0, 0, 0, 0
 	m.lastFault = r4kStep{exception: -1}
 	m.ethernet = ip24Ethernet{}
 	m.eeprom = ip12EEPROM{}
@@ -155,6 +156,7 @@ func (m *IP24) Key(key string, down bool) error {
 	if m.closed {
 		return fmt.Errorf("ip24: machine closed")
 	}
+	m.irqDeadline = 0
 	return m.keyboard.key(m.cycles, key, down)
 }
 
@@ -173,6 +175,7 @@ func (m *IP24) Mouse(dx, dy int, buttons byte) error {
 	}
 	flags := byte(8|truth(dx < 0)<<4|truth(dy < 0)<<5) | buttons
 	k.queueBytes(m.cycles, true, true, flags, byte(dx), byte(dy))
+	m.irqDeadline = 0
 	return nil
 }
 
@@ -235,6 +238,7 @@ func (m *IP24) ReadEffective(address uint64, out []byte) error {
 
 func (m *IP24) read64(address uint64, size uint32) (uint64, bool) {
 	if m.newport != nil && address >= newportBase && address < newportBase+0x2000 {
+		m.irqDeadline = 0
 		return m.newport.access(uint32(address-newportBase), size, 0, false, m.cycles)
 	}
 	b := m.memory(address, uint64(size))
@@ -262,6 +266,7 @@ func (m *IP24) read64(address uint64, size uint32) (uint64, bool) {
 
 func (m *IP24) write64(address uint64, size uint32, data uint64) bool {
 	if m.newport != nil && address >= newportBase && address < newportBase+0x2000 {
+		m.irqDeadline = 0
 		_, ok := m.newport.access(uint32(address-newportBase), size, data, true, m.cycles)
 		return ok
 	}
@@ -363,9 +368,24 @@ func (m *IP24) Run(ctx context.Context, budget uint64, stopOnException bool) (IP
 }
 
 func (m *IP24) run(ctx context.Context, budget uint64, exceptions uint32) (IP24Stop, error) {
+	return m.runWithLoopAcceleration(ctx, budget, exceptions, true)
+}
+
+func (m *IP24) runWithLoopAcceleration(ctx context.Context, budget uint64, exceptions uint32, accelerate bool) (IP24Stop, error) {
 	if m.closed {
 		return IP24Stop{}, fmt.Errorf("ip24: machine closed")
 	}
+	start := m.cycles
+	if !accelerate {
+		m.irqDeadline = 0
+	}
+	defer func() {
+		if m.cycles != start {
+			m.int3.updatePIT((m.cycles - 1) / (ip24Clock / 1_000_000))
+		}
+	}()
+	var recent [8]uint64
+	sample := 0
 	for i := uint64(0); i < budget; i++ {
 		if i&4095 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -386,7 +406,23 @@ func (m *IP24) run(ctx context.Context, budget uint64, exceptions uint32) (IP24S
 				return IP24Stop{Kind: "firmware", PC: pc, Service: service, Cycles: i}, nil
 			}
 		} else {
-			m.updateInterrupts()
+			if accelerate {
+				m.pollInterrupts()
+			} else {
+				m.updateInterrupts()
+			}
+			if accelerate && i&4095 == 0 {
+				repeated := false
+				for _, previous := range recent {
+					repeated = repeated || pc == previous
+				}
+				recent[sample%len(recent)] = pc
+				sample++
+				if skipped := m.batchLoop(repeated, budget-i); skipped != 0 {
+					i += skipped - 1
+					continue
+				}
+			}
 			result := m.cpu.step(m)
 			if result.exception >= 0 {
 				m.lastFault = result

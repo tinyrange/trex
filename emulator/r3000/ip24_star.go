@@ -20,12 +20,17 @@ func IP24Builtin(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if err := starlark.UnpackArgs("ip24", args, kwargs, "rom?", &rom, "newport?", &graphics); err != nil {
 		return nil, err
 	}
-	resources, err := lifecycle.ForThread(thread)
+	m, err := newIP24(rom.Reader, graphics)
 	if err != nil {
 		return nil, err
 	}
-	m, err := newIP24(rom.Reader, graphics)
+	return registerIP24(thread, m)
+}
+
+func registerIP24(thread *starlark.Thread, m *IP24) (starlark.Value, error) {
+	resources, err := lifecycle.ForThread(thread)
 	if err != nil {
+		_ = m.Close()
 		return nil, err
 	}
 	v := &ip24Value{m: m, ctx: resources.Context()}
@@ -66,12 +71,22 @@ func (*ip24Value) Freeze()               {}
 func (*ip24Value) Truth() starlark.Bool  { return starlark.True }
 func (*ip24Value) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable: ip24_machine") }
 func (*ip24Value) AttrNames() []string {
-	return []string{"attach_disk", "break_at", "clear_breaks", "close", "graphics", "key", "load_executable", "mouse", "read", "read_effective", "read_pixel", "registers", "run", "screenshot", "serial"}
+	return []string{"attach_disk", "break_at", "checkpoint", "clear_breaks", "close", "graphics", "key", "load_executable", "mouse", "read", "read_effective", "read_pixel", "registers", "run", "screenshot", "serial", "status"}
 }
 
 func (v *ip24Value) Attr(name string) (starlark.Value, error) {
 	switch name {
-	case "attach_disk", "break_at", "clear_breaks", "close", "graphics", "key", "load_executable", "mouse", "read", "read_effective", "read_pixel", "registers", "run", "screenshot", "serial":
+	case "status":
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		if v.m.closed {
+			return starlark.String("stopped"), nil
+		}
+		if v.display != nil && v.display.stop != nil {
+			return nil, v.display.stop
+		}
+		return starlark.String("running"), nil
+	case "attach_disk", "break_at", "checkpoint", "clear_breaks", "close", "graphics", "key", "load_executable", "mouse", "read", "read_effective", "read_pixel", "registers", "run", "screenshot", "serial":
 		return starlark.NewBuiltin(name, v.call), nil
 	}
 	return nil, nil
@@ -107,6 +122,15 @@ func (v *ip24Value) call(_ *starlark.Thread, fn *starlark.Builtin, args starlark
 	}
 	u64 := starlark.MakeUint64
 	switch name {
+	case "checkpoint":
+		if err := starlark.UnpackArgs(name, args, kwargs); err != nil {
+			return nil, err
+		}
+		checkpoint, err := m.Checkpoint()
+		if err != nil {
+			return nil, err
+		}
+		return &ip24CheckpointValue{checkpoint}, nil
 	case "attach_disk":
 		var target int
 		var source starlark.Value
@@ -260,4 +284,31 @@ func (v *ip24Value) call(_ *starlark.Thread, fn *starlark.Builtin, args starlark
 		}), nil
 	}
 	return starlark.None, nil
+}
+
+type ip24CheckpointValue struct{ state *IP24Checkpoint }
+
+func (*ip24CheckpointValue) String() string       { return "<SGI IP24 checkpoint>" }
+func (*ip24CheckpointValue) Type() string         { return "ip24_checkpoint" }
+func (*ip24CheckpointValue) Freeze()              {}
+func (*ip24CheckpointValue) Truth() starlark.Bool { return starlark.True }
+func (*ip24CheckpointValue) Hash() (uint32, error) {
+	return 0, fmt.Errorf("unhashable: ip24_checkpoint")
+}
+func (*ip24CheckpointValue) AttrNames() []string { return []string{"restore"} }
+
+func (v *ip24CheckpointValue) Attr(name string) (starlark.Value, error) {
+	if name != "restore" {
+		return nil, nil
+	}
+	return starlark.NewBuiltin(name, func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		if err := starlark.UnpackArgs(fn.Name(), args, kwargs); err != nil {
+			return nil, err
+		}
+		m, err := v.state.Restore()
+		if err != nil {
+			return nil, err
+		}
+		return registerIP24(thread, m)
+	}), nil
 }

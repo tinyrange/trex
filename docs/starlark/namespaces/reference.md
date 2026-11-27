@@ -4954,6 +4954,12 @@ Decodes sequential RMS variable-length (VAR) and variable-with-fixed-control (VF
 
 Parses a 7-Zip archive into member file views with bounded entry count, metadata and decoder dictionary size. Unsupported compression methods fail explicitly.
 
+### `archive.sevenzip_unpack`
+
+`archive.sevenzip_unpack(members, maximum_bytes, workers=4) -> list[file]`
+
+Reads complete 7-Zip members with 1..8 workers into read-only memory files. Limits the combined uncompressed size to maximum_bytes and returns files in member order. Useful before random access to large disk images from independent archives.
+
 ### `archive.sfp`
 
 `archive.sfp(file, maximum_entries=1M, maximum_metadata=64MiB) -> sfp`
@@ -8357,11 +8363,17 @@ A Personal IRIS machine with bounded execution, CPU and exception state, and phy
 
 Methods and attributes: `attach_disk(target, device)`, `break_at(address)`, `clear_breaks()`, `close()`, `graphics()`, `key_code(code, down=True)`, `load_executable(file, args=[], env=[])`, `mouse(dx, dy, buttons=0)`, `read(address, size)`, `read_effective(address, size)`, `registers()`, `run(budget, stop_on_exception=False)`, `screenshot()`, `serial()`.
 
+### `ip24_checkpoint` value
+
+An immutable in-memory Indy checkpoint. Each restore creates a machine with independent RAM, devices, serial queues, and writable disk overlays. Keep its read-only media available for the checkpoint and its restored machines.
+
+Methods and attributes: `restore() -> ip24_machine`.
+
 ### `ip24_machine` value
 
 An SGI Indy with bounded execution, CPU and last-fault state, RAM inspection, a duplex serial console, and 512-byte-sector SCSI block devices. The optional Newport model supplies PS/2 events, display state, raw RGB/auxiliary pixels, and PNG screenshots. Register a Newport machine in vmm.workspace to advance it continuously and expose its display and input to the browser console. load_executable accepts static big-endian MIPS I–III ELF32 and provides ARCS32 arguments and environment.
 
-Methods and attributes: `attach_disk(target, device)`, `break_at(address)`, `clear_breaks()`, `close()`, `graphics()`, `key(key, down=True)`, `load_executable(file, args=[], env=[])`, `mouse(dx, dy, buttons=0)`, `read(address, size)`, `read_effective(address, size)`, `read_pixel(x, y)`, `registers()`, `run(budget, stop_on_exception=False, exception_codes=[])`, `screenshot()`, `serial()`.
+Methods and attributes: `attach_disk(target, device)`, `break_at(address)`, `checkpoint()`, `clear_breaks()`, `close()`, `graphics()`, `key(key, down=True)`, `load_executable(file, args=[], env=[])`, `mouse(dx, dy, buttons=0)`, `read(address, size)`, `read_effective(address, size)`, `read_pixel(x, y)`, `registers()`, `run(budget, stop_on_exception=False, exception_codes=[])`, `screenshot()`, `serial()`.
 
 ### `nbd_server` value
 

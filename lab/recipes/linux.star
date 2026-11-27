@@ -1,6 +1,6 @@
 """Boot original distro kernels on the isolated lab Ethernet domain."""
 
-load("@stdlib//unix:alpine.star", "install_plan", "read_package")
+load("@stdlib//unix:alpine.star", "install_plan", "merge", "read_package")
 load("@stdlib//unix:kernel.star", "select", "modules")
 load("@stdlib//unix:initramfs.star", initramfs = "build")
 
@@ -12,6 +12,7 @@ _APK_SOURCES = [
     ("musl-1.2.5-r13", 412387, "359890bc7c4dc5fee7a85192de60a471c987e4664767288578beca60a44db2c8"),
     ("linux-virt-6.12.119-r0", 40781462, "e38b6ba4c80d4c99f1130418154d8d4dd02d9adc1fbb9eaeae330e8430de8875"),
 ]
+_NON_INSTALL_EFFECTS = [".pre-upgrade", ".post-upgrade", ".pre-deinstall", ".post-deinstall"]
 
 _DHCP_CLIENT = """#!/bin/sh
 B=/bin/busybox
@@ -25,36 +26,70 @@ case "$1" in
       set -- $router
       $B ip route replace default via "$1" dev "$interface"
     fi
-    if [ -n "$dns" ]; then
-      : > /etc/resolv.conf
-      for server in $dns; do echo "nameserver $server" >> /etc/resolv.conf; done
-    fi
+    {
+      for server in $dns; do echo "nameserver $server"; done
+      if [ -n "$domain" ]; then printf 'search %s\\n' "$domain"; fi
+    } > /etc/resolv.conf
     ;;
 esac
 """
 
-def _packages():
+def _packages(sources):
     return [read_package(http_file([_APK_BASE + name + ".apk"], size = size, cache_bytes = 64 << 20), digest)
-            for name, size, digest in _APK_SOURCES]
+            for name, size, digest in sources]
+
+def _install_links(packages, links):
+    # Alpine supplies the applet paths in the package. Reproduce busybox's
+    # fresh-install symlinks without replacing any package's real files.
+    occupied = {e["path"]: True for package in packages for e in package["entries"]}
+    occupied.update({e["path"]: True for e in links})
+    for package in packages:
+        name = package["name"]
+        if name in ["busybox", "busybox-extras"] and package["version"] == "1.37.0-r20":
+            paths = [e["data"].read() for e in package["entries"] if e["path"] == "etc/busybox-paths.d/" + name]
+            if len(paths) != 1:
+                fail("Alpine package " + name + " is missing its applet paths")
+            for path in paths[0].splitlines():
+                if path and path not in occupied:
+                    links.append({"path": path, "mode": 0o120777, "target": "/bin/" + name})
+                    occupied[path] = True
+    return links
 
 def _start(kernel, initrd, command, cfg, lan, mac, media = None):
     networks = [vmm.network("ethernet", switch = lan, mac = mac)] if lan != None else []
     disks = [] if media == None else [vmm.disk(block.cache(block.device(media)), bus = "ide", unit = 0, read_only = True)]
+    display = "none" if media == None else "capturable"
+    ide_model = "synthetic" if media == None else "ich7-pata"
     vm = vmm.start(vmm.machine(architecture = "x86_64", memory = cfg["memoryMiB"] << 20,
         boot = vmm.linux_boot(kernel = kernel, initramfs = initrd, command_line = command),
-        networks = networks, disks = disks, display = vmm.display("capturable"),
-        channels = [vmm.channel("serial", name = "console")]), cc.backend(acpi = True, pci_ide = True))
+        networks = networks, disks = disks, display = vmm.display(display),
+        channels = [vmm.channel("serial", name = "console")]), cc.backend(acpi = True, pci_ide = True, ide_model = ide_model, hpet = media != None))
     return {"vm": vm, "console": vm.channel("console")}
 
 def alpine(kind, cfg, media, lan, mac, trust):
     lab_phase("preparing", "Reading pinned Alpine packages")
     applets = "sh ash ls cat cp mv rm mkdir rmdir pwd grep find sed awk less head tail sort wc chmod ps dmesg top mount umount hostname uname ip ifconfig ping nslookup sleep date tar gzip vi stty env which df du clear id whoami tty".split()
     links = [{"path": "bin/" + name, "mode": 0o120777, "target": "busybox"} for name in applets]
-    plan = install_plan(_packages(), external = ["initramfs-generator"], modifications = links)
+    base = _packages(_APK_SOURCES)
+    plan = install_plan(base, external = ["initramfs-generator"])
     kernel = select(plan["entries"])
-    entries = [e for e in plan["entries"] if not e["path"].startswith("lib/modules/") and not e["path"].startswith("boot/")]
+    packages = base
+    if cfg.get("packages"):
+        lab_phase("preparing", "Resolving and verifying Alpine packages")
+        additional = []
+        for source in lab_alpine_packages(tuple(base)):
+            package = read_package(source["file"], source["sha256"], expected = source["expected"])
+            effects = [name for name in sorted(package["effects"]) if name not in _NON_INSTALL_EFFECTS]
+            if package["name"] == "busybox-extras" and package["version"] == "1.37.0-r20":
+                effects = [name for name in effects if name != ".post-install"]
+            if effects:
+                fail("Alpine package " + package["name"] + " needs unsupported installation effects: " + ", ".join(effects))
+            additional.append(package)
+        packages = base + additional
+    payload = merge(packages, modifications = _install_links(packages, links), allow_effects = True)
+    entries = [e for e in payload if not e["path"].startswith("lib/modules/") and not e["path"].startswith("boot/")]
     instruct = """#!/bin/sh
-export PATH=/bin:/sbin
+export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 B=/bin/busybox
 $B mount -t proc proc /proc
 $B mount -t sysfs sysfs /sys
@@ -81,7 +116,6 @@ echo 'Alpine Linux lab shell. Guest files are temporary.'
 $B setsid -c /bin/sh -i </dev/ttyS0 >/dev/ttyS0 2>&1
 $B poweroff -f
 """
-    entries += [{"path": name, "mode": 0o040755} for name in ["dev", "proc", "sys"]]
     result = _start(kernel["file"], initramfs(entries, init = instruct), "console=ttyS0,115200 rdinit=/init nokaslr nopti panic=0", cfg, lan, mac)
     result["address"] = cfg.get("address", "").split("/")[0] if lan != None else ""
     result["display"] = False
@@ -99,31 +133,15 @@ def _iso_member(iso, directory, basename):
 def live_linux(kind, cfg, media, lan, mac, trust):
     source = media["system"]
     iso = filesystem.iso9660(source)
-    boot = None
-    disks = [vmm.disk(block.device(source, logical_block_size = 2048), bus = "ide", media = "cdrom", read_only = True, unit = 2)]
-    devices = [qemu.device("VGA"), qemu.device("qemu-xhci"), qemu.device("usb-tablet")]
-    netdevs = []
-    if cfg.get("qemuPeer"):
-        netdevs.append(qemu.netdev("socket", id = "lab", connect = cfg["qemuPeer"]))
-        devices.append(qemu.device("e1000", netdev = "lab", mac = mac))
-    options = [qemu.option("-nodefaults"), qemu.option("-cpu", "host"), qemu.option("-boot", "order=d")]
-    channels = []
     if kind == "debian-live":
-        _iso_member(iso, "/live", "vmlinuz")
-        _iso_member(iso, "/live", "initrd.img")
+        directory, initrd = "/live", "initrd.img"
+        command = "console=ttyS0 console=tty0 boot=live components live-media=/dev/sda"
     elif kind == "ubuntu-live":
-        _iso_member(iso, "/casper", "vmlinuz")
-        _iso_member(iso, "/casper", "initrd")
+        directory, initrd = "/casper", "initrd"
+        command = "console=ttyS0 console=tty0 boot=casper live-media=/dev/sda"
     else:
-        boot = vmm.linux_boot(kernel = _iso_member(iso, "/images/pxeboot", "vmlinuz"),
-            initramfs = _iso_member(iso, "/images/pxeboot", "initrd.img"),
-            command_line = "console=tty0 console=ttyS0,115200 inst.rescue inst.stage2=hd:/dev/sr0 inst.text")
-        channels = [vmm.channel("serial", name = "console")]
-    machine = vmm.machine(architecture = "x86_64", memory = cfg["memoryMiB"] << 20, boot = boot,
-        disks = disks, channels = channels, display = vmm.display("capturable"))
-    vm = vmm.start(machine, qemu.backend(machine = "pc", accelerator = "kvm", display_frontend = "none",
-        block_transport = "nbd", devices = devices, netdevs = netdevs, options = options))
-    result = {"vm": vm}
-    if channels:
-        result["console"] = vm.channel("console")
-    return result
+        directory, initrd = "/images/pxeboot", "initrd.img"
+        command = "console=tty0 console=ttyS0,115200 inst.rescue inst.stage2=hd:/dev/sda inst.text"
+    # Each initramfs locates the live filesystem on the same unmodified ISO
+    # bytes that supplied the kernel. CC presents those bytes on its IDE disk.
+    return _start(_iso_member(iso, directory, "vmlinuz"), _iso_member(iso, directory, initrd), command, cfg, lan, mac, media = source)

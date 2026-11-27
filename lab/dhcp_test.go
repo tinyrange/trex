@@ -31,14 +31,14 @@ func TestRouterDHCPLeaseAndExhaustion(t *testing.T) {
 	}
 	now := time.Unix(0, 0)
 	first, second := hardwareAddress("first"), hardwareAddress("second")
-	if reply := router.receive(packet(first, discover), now); len(reply) < 285 || reply[284] != offer {
+	if reply := router.receive(t.Context(), packet(first, discover), now); len(reply) < 285 || reply[284] != offer {
 		t.Fatalf("expected an offer, got %x", reply)
 	}
-	if reply := router.receive(packet(second, discover), now); reply != nil {
+	if reply := router.receive(t.Context(), packet(second, discover), now); reply != nil {
 		t.Fatal("offered a reserved address twice")
 	}
 	wanted := []byte{50, 4, 10, 8, 0, 40}
-	reply := router.receive(packet(first, request, wanted...), now)
+	reply := router.receive(t.Context(), packet(first, request, wanted...), now)
 	if len(reply) < 285 || reply[284] != ack || [4]byte(reply[58:62]) != settings.first.As4() {
 		t.Fatalf("expected a lease ACK, got %x", reply)
 	}
@@ -46,8 +46,20 @@ func TestRouterDHCPLeaseAndExhaustion(t *testing.T) {
 	if !ok || options[3] != nil || segment.address("first") != settings.first {
 		t.Fatalf("expected a LAN lease without a default gateway, got %#v", options[3])
 	}
-	if reply := router.receive(packet(second, discover), now.Add(settings.lease)); len(reply) < 285 || reply[284] != offer {
+	if len(options[6]) != 4 || [4]byte(options[6]) != settings.address.As4() || string(options[15]) != labDNSDomain {
+		t.Fatalf("expected the router's DNS address and lab domain, got %v %q", options[6], options[15])
+	}
+	if reply := router.receive(t.Context(), packet(second, discover), now.Add(settings.lease)); len(reply) < 285 || reply[284] != offer {
 		t.Fatalf("expected the expired address to be reusable, got %x", reply)
+	}
+	if segment.address("first").IsValid() {
+		t.Fatal("an expired lease still advertises an address")
+	}
+	router.config.dns = netip.MustParseAddr("10.8.0.2")
+	reply = router.receive(t.Context(), packet(second, request, wanted...), now.Add(settings.lease))
+	options, ok = dhcpOptions(reply[282:])
+	if !ok || len(options[6]) != 4 || [4]byte(options[6]) != router.config.dns.As4() || options[15] != nil {
+		t.Fatalf("expected only the DNS override, got %v %q", options[6], options[15])
 	}
 }
 

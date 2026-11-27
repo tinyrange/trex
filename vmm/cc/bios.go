@@ -144,7 +144,6 @@ func newPCBoot(cpu hypervisor.X86, ram []byte, disk vmm.Disk, now func() time.Ti
 	p.installKeyboardFirmware()
 	p.installMouseFirmware()
 	p.installVideoFirmware()
-	p.installPCIFirmware()
 	// POST programs the real interrupt controllers and timer before entering
 	// the original MBR. These instructions execute against KVM's PC devices.
 	// IRQ2 must remain enabled for the slave PIC, including a BIOS PS/2

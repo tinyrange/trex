@@ -8,6 +8,18 @@ import (
 	"j5.nz/cc/hypervisor/x86state"
 )
 
+func TestISAPCDoesNotAdvertisePCIBIOS(t *testing.T) {
+	p := &pc{ram: make([]byte, 1<<20)}
+	p.installPCIFirmware()
+	if signature := string(p.ram[bios32Directory : bios32Directory+4]); signature == "_32_" {
+		t.Fatal("ISA-only PC exposes a BIOS32 directory")
+	}
+	regs := x86state.Registers{Rax: 0xb101}
+	if status, err := p.pciBIOS(&regs); status != 0x81 || err != nil {
+		t.Fatalf("ISA-only PC answers PCI BIOS presence: status %x, err %v", status, err)
+	}
+}
+
 func TestPCIBIOSConfigurationAndEnumeration(t *testing.T) {
 	p := &pc{pciIDE: newPCIIDE(), pciAddress: 0x80001810}
 	call := func(r x86state.Registers, want byte) x86state.Registers {

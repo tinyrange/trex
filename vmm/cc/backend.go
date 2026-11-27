@@ -422,6 +422,7 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 			copy(platform.channelMemory, []byte("TRCH\x01\x00\x00\x00"))
 		}
 	}
+	platform.installPCIFirmware()
 	if b.ACPI || b.PCIIDE || b.HPET || b.UEFI || m.Architecture == "x86_64" {
 		if err = platform.installACPI(); err != nil {
 			cpu.Close()
@@ -442,7 +443,7 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 		}
 	}
 	if m.Boot != nil {
-		if err = platform.installLinux(m.Boot); err != nil {
+		if err = platform.installLinux(m.Boot, m.Display.Mode == "capturable"); err != nil {
 			cpu.Close()
 			return nil, err
 		}

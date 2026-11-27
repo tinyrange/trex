@@ -1,7 +1,7 @@
 """Build an IRIX 6.5.22 maintenance-stream Indy system from its original discs."""
 
-load("//scripts/smoke:irix_ip24.star", "prepare_disk")
-load("//scripts/smoke:irix_ip24_desktop.star", "start_desktop_on", "verify_constructed_desktop")
+load(":irix_ip24.star", "prepare_disk")
+load(":irix_ip24_desktop.star", "start_desktop_on", "verify_constructed_desktop")
 
 _INDY = {
     "MACHINE": "IP22",
@@ -24,16 +24,18 @@ _OBSOLETE_MANPAGES = [
 
 _DESKTOP_PRODUCTS = ["desktop_eoe", "desktop_tools", "sysadmdesktop"]
 
-def _cd(source):
+def _cd_member(source):
     entries = archive.sevenzip(source).entries
     discs = [e for e in entries if e.entry_type == "file" and e.path.lower().endswith(".iso")]
     if len(discs) != 1:
         fail("Expected one SGI CD image in the archive")
-    # EFS seeks throughout the CD. Decode the compressed member once.
-    volume = filesystem.sgi(binary.view(discs[0].bytes()))
+    return discs[0]
+
+def _cd(image):
+    volume = filesystem.sgi(image)
     parts = [p.data for p in volume.partitions if p.index == 7]
     if len(parts) != 1:
-        fail("Expected the SGI CD's distribution partition", discs[0].path)
+        fail("Expected the SGI CD's distribution partition")
     return filesystem.efs(parts[0]), volume
 
 def _add_catalog(dist, descriptors, indexes, images, names = []):
@@ -61,23 +63,34 @@ def _add_catalog(dist, descriptors, indexes, images, names = []):
                 if payload != None:
                     images[product.name + "." + image.name + version] = payload.data
 
-def system_catalog(foundation1, foundation2, overlay1, overlay2, overlay3, applications = None):
+def system_catalog(foundation1, foundation2, overlay1, overlay2, overlay3, applications = None, workers = 4):
     """Open the core media and optionally add the complete desktop products."""
+    # EFS seeks throughout each CD. Decode the independent members concurrently
+    # and keep a single immutable copy of each for the generated disk's payloads.
+    sources = [overlay1, foundation1, foundation2, overlay2, overlay3]
+    if applications != None:
+        sources.append(applications)
+    # Start the larger inputs first so the workers finish at similar times.
+    decode_order = sorted(range(len(sources)), key = lambda i: -sources[i].size)
+    decoded = archive.sevenzip_unpack([_cd_member(sources[i]) for i in decode_order], maximum_bytes = 5 << 30, workers = workers)
+    discs = [None] * len(sources)
+    for i, disc in zip(decode_order, decoded):
+        discs[i] = disc
     foundation, overlays, indexes, images = [], [], {}, {}
-    boot_dist, boot_volume = _cd(overlay1)
+    boot_dist, boot_volume = _cd(discs[0])
     kernel = boot_dist.find("/dist/miniroot/unix.IP22")
     miniroot = [f.data for f in boot_volume.files if f.name == "mr"]
     if kernel == None or len(miniroot) != 1:
         fail("Expected the original 6.5.22 IP22 kernel and miniroot on Overlay 1")
     _add_catalog(boot_dist, overlays, indexes, images)
-    for source in [foundation1, foundation2]:
-        dist, _ = _cd(source)
+    for disc in discs[1:3]:
+        dist, _ = _cd(disc)
         _add_catalog(dist, foundation, indexes, images)
     if applications != None:
-        dist, _ = _cd(applications)
+        dist, _ = _cd(discs[5])
         _add_catalog(dist, foundation, indexes, images, names = _DESKTOP_PRODUCTS)
-    for source in [overlay2, overlay3]:
-        dist, _ = _cd(source)
+    for disc in discs[3:5]:
+        dist, _ = _cd(disc)
         _add_catalog(dist, overlays, indexes, images)
     return {"foundation": foundation, "overlays": overlays, "indexes": indexes, "images": images,
             "kernel": kernel.data, "miniroot": miniroot[0], "interactive_desktop": applications != None}
@@ -198,7 +211,7 @@ def _initial_devices(rows, miniroot):
         rows["/dev/" + name] = {"path": "dev/" + name, "mode": 0o020000 | permissions,
                                 "major": major, "minor": minor}
 
-def build_system(catalog, size = 1870 << 20):
+def build_system(catalog, size = 1870 << 20, autoconfig = True):
     """Materialize the selected 6.5.22m files in a generated SGI disk."""
     foundation, overlay = plan_system(catalog)
     rows = _installed_rows(foundation, overlay)
@@ -215,6 +228,10 @@ def build_system(catalog, size = 1870 << 20):
     rows["/tmp"] = {"path": "tmp", "mode": 0o041777}
     rows["/var/tmp"] = {"path": "var/tmp", "mode": 0o041777, "uid": 4}
     rows["/unix"] = {"path": "unix", "mode": 0o100755, "data": catalog["kernel"]}
+    if not autoconfig:
+        # The lab always enters the distribution kernel on the same virtual
+        # hardware. Skip relinking a kernel that would only run after reboot.
+        rows.pop("/etc/rc2.d/S23autoconfig")
     if catalog.get("interactive_desktop"):
         for path in ["/etc/rc2.d/S98xdm", "/usr/Cadmin/bin/clogin",
                      "/var/X11/xdm/Xsession.dt", "/usr/lib/desktop/makeDotDesktop"]:
