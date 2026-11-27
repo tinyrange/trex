@@ -8,6 +8,7 @@ import (
 
 	"github.com/tinyrange/trex/boot/linux"
 	"github.com/tinyrange/trex/vmm"
+	"github.com/tinyrange/trex/vmm/ramfb"
 	"j5.nz/cc/hypervisor/x86state"
 )
 
@@ -22,7 +23,7 @@ const (
 
 // installLinux builds the x86 protected-mode handoff for the original
 // decompressor. See https://docs.kernel.org/arch/x86/boot.html.
-func (p *pc) installLinux(boot *vmm.LinuxBoot) error {
+func (p *pc) installLinux(boot *vmm.LinuxBoot, display bool) error {
 	image, err := linux.OpenBZImage(boot.Kernel)
 	if err != nil {
 		return err
@@ -67,6 +68,9 @@ func (p *pc) installLinux(boot *vmm.LinuxBoot) error {
 	params[0x210] = 0xff                 // unregistered boot loader
 	params[0x211] &^= 0x80               // no real-mode heap
 	le.PutUint16(params[0x1fa:], 0xffff) // normal video mode
+	if display {
+		p.installLinuxFramebuffer(params[:64])
+	}
 	le.PutUint32(params[0x214:], uint32(entry))
 	le.PutUint32(params[0x218:], uint32(initrdStart))
 	le.PutUint32(params[0x21c:], uint32(initrdSize))
@@ -121,4 +125,26 @@ func (p *pc) installLinux(boot *vmm.LinuxBoot) error {
 		return err
 	}
 	return p.cpu.SetRegisters(x86state.Registers{Rip: entry, Rsi: linuxZeroPage, Rsp: linuxStack, Rflags: 2})
+}
+
+func (p *pc) installLinuxFramebuffer(screen []byte) {
+	const width, height, depth = 1280, 720, 32
+	const stride = width * (depth / 8)
+	const sizeUnits = (stride*height + (1<<16 - 1)) >> 16
+
+	// Report the mapped BGRX display as a VESA linear framebuffer in the
+	// x86 boot protocol's screen_info structure. Linux can use it through sysfb.
+	le := binary.LittleEndian
+	screen[0x0f] = 0x23 // VIDEO_TYPE_VLFB
+	le.PutUint16(screen[0x12:], width)
+	le.PutUint16(screen[0x14:], height)
+	le.PutUint16(screen[0x16:], depth)
+	le.PutUint32(screen[0x18:], ramfb.Address+ramfb.Pixels)
+	le.PutUint32(screen[0x1c:], sizeUnits)
+	le.PutUint16(screen[0x24:], stride)
+	copy(screen[0x26:], []byte{8, 16, 8, 8, 8, 0, 8, 24})
+
+	for i, word := range []uint32{ramfb.Magic, 1, width, height, stride, 1} {
+		le.PutUint32(p.framebuffer[i*4:], word)
+	}
 }

@@ -32,7 +32,7 @@ func TestBIOS32DirectoryNativeFarReturn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			p := &pc{cpu: cpu, ram: ram, now: time.Now}
+			p := &pc{cpu: cpu, ram: ram, pciIDE: newPCIIDE(), now: time.Now}
 			p.installPCIFirmware()
 			// Far return reloads CS from a real GDT, including its 32-bit attribute.
 			binary.LittleEndian.PutUint64(ram[0x7008:], 0x00cf9b000000ffff)
