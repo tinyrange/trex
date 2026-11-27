@@ -129,18 +129,27 @@ type UnitRecord struct {
 	chainPos int
 	prevCmd  byte
 	pr       printer // printer.go
+	wide1443 bool    // optional 24 additional print positions
 
 	// Reader state: the previous command's type and whether a card has been
 	// read since the reader was made ready (initial run-in).
-	last    byte
-	started bool
-	eof     bool // the end-of-file key: unit exception once the hopper empties
+	last         byte
+	started      bool
+	eof          bool      // the end-of-file key: unit exception once the hopper empties
+	readStackers [3]uint64 // R1, R2, RP3
 
-	punchStopped bool
-	punched      [][]byte    // 80-column EBCDIC cards from a 2540 punch
-	cardPeer     *UnitRecord // the other device on a paired 2821
-	diagColumns  [160]byte
-	diagReady    bool
+	punchStopped  bool
+	punchPending  bool
+	punchStacker  byte
+	punchStackers [3]uint64   // P1, P2, RP3
+	punched       [][]byte    // 80-column EBCDIC cards from a 2540 punch
+	cardPeer      *UnitRecord // the other device on a paired 2821
+	burst2821     bool        // CE panel transfer mode
+	readerStopped bool
+	diagColumns   [160]byte
+	diagReady     bool
+	card1442      []byte // card at the integrated punch station, in column form
+	column1442    int
 }
 
 // Reader command types (2821 GA24-3312, 2540 Card Read-Punch).
@@ -158,6 +167,7 @@ const (
 // a buffered 1403 printer (1,100 lines a minute) on a multiplexer channel.
 const (
 	cardCycle    = 60 * time.Millisecond
+	punchCycle   = 200 * time.Millisecond
 	printCycle   = 55 * time.Millisecond
 	printScan    = printCycle            // a diagnostic write's print scan
 	spaceTime    = 10 * time.Millisecond // carriage motion of one line
@@ -173,6 +183,22 @@ const (
 // end at once and device end when the motion completes. No-operation and
 // commands rejected at initiation are immediate.
 func (u *UnitRecord) CommandTiming(cmd byte, n int) (time.Duration, time.Duration) {
+	return u.commandTiming(cmd, n, u.burst2821)
+}
+
+func (u *UnitRecord) commandTiming(cmd byte, n int, burst bool) (time.Duration, time.Duration) {
+	transfer := u.chanT
+	if burst && transfer > urControlXfr {
+		byteTime := 6 * time.Microsecond
+		if u.printer() {
+			byteTime = 5 * time.Microsecond
+		}
+		transfer = urControlXfr + (transfer-urControlXfr)/urByte*byteTime
+		if cmdIsRead(cmd) && !u.printer() {
+			transfer = min(transfer, urControlXfr+time.Duration(n)*byteTime)
+		}
+		return transfer, u.devT
+	}
 	if cmdIsRead(cmd) && !u.printer() && u.chanT > urControlXfr {
 		// The channel stops the buffer transfer when its count runs out.
 		return min(u.chanT, urControlXfr+time.Duration(n)*urByte), u.devT
@@ -201,8 +227,17 @@ func (u *UnitRecord) Queued() int { return len(u.cards) }
 func (u *UnitRecord) Submit(lines []string) {
 	u.Load(lines)
 	if u.css != nil {
-		u.css.Unsolicited(u.devno, usDE)
+		u.signalReady()
 	}
+}
+
+func (u *UnitRecord) signalReady() {
+	if u.port != nil {
+		u.port.state.ReadyPending = true
+		u.port.control.notify()
+		return
+	}
+	u.css.Unsolicited(u.devno, usDE)
 }
 
 func (u *UnitRecord) SenseID() []byte { return nil }
@@ -219,9 +254,11 @@ func (u *UnitRecord) Reset() {
 func (u *UnitRecord) StartChain() { u.chainPos, u.pr.ucsGated = 0, false }
 func (u *UnitRecord) EndChain()   {}
 
-func (u *UnitRecord) reader() bool { return u.Type == 0x2540 || u.Type == 0x3505 || u.Type == 0x2501 }
+func (u *UnitRecord) reader() bool {
+	return u.Type == 0x2540 || u.Type == 0x3505 || u.Type == 0x2501 || u.Type == 0x1442
+}
 
-func (u *UnitRecord) printer() bool { return u.Type == 0x1403 || u.Type == 0x3211 }
+func (u *UnitRecord) printer() bool { return u.Type == 0x1403 || u.Type == 0x1443 || u.Type == 0x3211 }
 
 // SetPunchReady operates the 2540 punch's start and stop keys. Starting it
 // presents device end, which the channel must accept before a new operation.
@@ -232,12 +269,12 @@ func (u *UnitRecord) SetPunchReady(ready bool) {
 	u.punchStopped = !ready
 	u.version++
 	if ready && u.css != nil {
-		u.css.Unsolicited(u.devno, usDE)
+		u.signalReady()
 	}
 }
 
 func (u *UnitRecord) TestIOStatus() byte {
-	if u.punchStopped {
+	if u.readerStopped || u.punchStopped || u.printer() && u.pr.notReady {
 		return usUnitCheck
 	}
 	return 0
@@ -263,6 +300,7 @@ func cardImage(data []byte) []byte {
 }
 
 func (u *UnitRecord) readyReader() {
+	u.readerStopped = false
 	u.diagReady = false
 	if len(u.cards) > 0 {
 		u.eof = true
@@ -286,22 +324,30 @@ func (u *UnitRecord) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byt
 	switch {
 	case cmd == 0x03: // no-operation
 		return nil, 0, usCE | usDE
-	case cmd&0xf == 0x04 && (cmd == 0x04 || !u.printer()): // sense
+	case cmd&0xf == 0x04 && (cmd == 0x04 || !u.printer() && u.Type != 0x1442): // sense
 		// The 2540 does not examine the modifier bits; printers accept
 		// only X'04'.
 		u.chanT = urControlXfr
 		s := u.sense
-		if u.punchStopped {
+		if u.readerStopped || u.punchStopped || u.printer() && u.pr.notReady {
 			s |= senseIntReq
 		}
-		u.sense = 0
+		if !u.on2821() {
+			u.sense = 0
+		}
 		return []byte{s}, 0, usCE | usDE
+	}
+	previousSense := u.sense
+	if u.on2821() {
+		u.sense = 0
+	}
+	switch {
 	case cmd == 0xc6 && (u.Type == 0x2540 || u.Type == 0x2541):
 		// Diagnostic check read transfers one check-plane byte per
 		// card column. The translator check belongs in the first
 		// byte only (2821 GA24-3312).
 		checks := make([]byte, 80)
-		if u.sense&0x08 != 0 {
+		if previousSense&0x08 != 0 {
 			checks[0] = 0x02
 		}
 		u.chanT = urControlXfr + time.Duration(len(checks))*urByte
@@ -317,9 +363,20 @@ func (u *UnitRecord) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byt
 		return u.diagnosticWrite(data)
 	}
 	switch {
+	case u.Type == 0x1442:
+		return u.exec1442(cmd, data)
 	case u.reader():
+		if u.readerStopped {
+			return nil, 0, usUnitCheck
+		}
 		return u.readerExec(cmd)
 	case u.printer():
+		if u.pr.notReady {
+			return nil, 0, usUnitCheck
+		}
+		if u.Type == 0x1443 {
+			return u.exec1443(cmd, data)
+		}
 		return u.printerExec(cmd, data, first, prev)
 	}
 	return u.punchExec(cmd, data)
@@ -363,7 +420,7 @@ func (u *UnitRecord) readerExec(cmd byte) ([]byte, int, byte) {
 	u.started = true
 	u.last = kind
 	if kind == rdStack {
-		u.cards = u.cards[1:]
+		u.stackReadCard(cmd)
 		u.diagReady = false
 		u.version++
 		u.devT = cardCycle
@@ -371,9 +428,13 @@ func (u *UnitRecord) readerExec(cmd byte) ([]byte, int, byte) {
 	}
 	card := u.cards[0]
 	status := byte(usCE | usDE)
-	if u.diagReady {
+	if u.diagReady || len(card) == 160 {
+		columns := card
+		if u.diagReady {
+			columns = u.diagColumns[:]
+		}
 		var sense byte
-		card, sense = u.readDiagnosticCard(cmd&0x20 != 0)
+		card, sense = readCardColumns(columns, cmd&0x20 != 0)
 		u.sense = sense
 		if sense != 0 {
 			status |= usUnitCheck
@@ -388,10 +449,29 @@ func (u *UnitRecord) readerExec(cmd byte) ([]byte, int, byte) {
 		return card, 0, status
 	}
 	u.diagReady = false
-	u.cards = u.cards[1:]
+	u.stackReadCard(cmd)
 	u.version++
 	u.devT = cardCycle
 	return card, 0, status
+}
+
+func (u *UnitRecord) stackReadCard(cmd byte) {
+	u.cards = u.cards[1:]
+	if u.Type == 0x2540 {
+		stacker := cmd >> 6
+		if stacker == 3 { // compatibility read uses the normal stacker
+			stacker = 0
+		}
+		u.readStackers[stacker]++
+	}
+}
+
+// runOutPunch routes any card still in the punch feed to P1.
+func (u *UnitRecord) runOutPunch() {
+	if u.punchPending {
+		u.punchStackers[0]++
+		u.punchPending = false
+	}
 }
 
 // punchExec executes a punch command: write, feed and select stacker.
@@ -405,6 +485,10 @@ func (u *UnitRecord) punchExec(cmd byte, data []byte) ([]byte, int, byte) {
 		if u.punchStopped {
 			return nil, 0, usUnitCheck
 		}
+		if u.punchPending {
+			u.punchStackers[u.punchStacker]++
+		}
+		u.punchPending, u.punchStacker = true, cmd>>6
 		data = data[:min(80, len(data))]
 		u.punched = append(u.punched, cardImage(data))
 		if len(u.punched) > 20000 {
@@ -421,5 +505,8 @@ func (u *UnitRecord) punchExec(cmd byte, data []byte) ([]byte, int, byte) {
 	}
 	u.version++
 	u.chanT, u.devT = urControlXfr+time.Duration(len(data))*urByte, cardCycle
+	if u.Type == 0x2541 {
+		u.devT = punchCycle
+	}
 	return nil, len(data), usCE | usDE
 }

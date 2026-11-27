@@ -25,6 +25,8 @@ type Config struct {
 	CPUSerial uint32
 	// NoIdleSkip disables advancing time across detected spin loops.
 	NoIdleSkip bool
+	// NoIntervalTimer disables the System/360 and System/370 interval timer.
+	NoIntervalTimer bool
 	// S370 selects the System/370 architecture instead of ESA/390.
 	S370 bool
 	// S360 selects the System/360 architecture (IBM System/360 Principles
@@ -32,10 +34,27 @@ type Config struct {
 	// EC mode, control registers or the System/370 instructions, with PSW
 	// bit 12 selecting USASCII-8 decimal results. It implies S370.
 	S360 bool
+	// ByteMuxSubchannels configures the small byte multiplexor address
+	// layout on System/360 or System/370 channel zero. It accepts 8–128
+	// slots. Zero keeps the default device-per-subchannel layout.
+	ByteMuxSubchannels int
 	// Model9020 adds behaviors of the IBM 9020's System/360-based
 	// processors that its diagnostics expect (see README.md). It implies
 	// S360.
 	Model9020 bool
+	// Model9020A selects the 7201-01 CE with 128 KiB 7251-03 storage
+	// elements. It implies Model9020.
+	Model9020A bool
+	// Model9020E selects the 9020E storage and configuration layout.
+	// It implies Model9020.
+	Model9020E bool
+	// DisplayElements9020E is the number of 256 KiB display elements,
+	// numbered consecutively from storage module ID 6. It accepts 0–5 on 9020E.
+	DisplayElements9020E int
+	// Model50 selects Model 50 CPU behavior and implies S360.
+	Model50 bool
+	// Model65 selects documented 2065 CPU behavior and implies S360.
+	Model65 bool
 	// IOCE selects the standalone 9020 IOCE preprocessor. It implies Model9020.
 	IOCE bool
 }
@@ -62,6 +81,15 @@ type Machine struct {
 	// S360 and Model9020 are set for System/360 and 9020 machines.
 	S360, Model9020 bool
 	sclp            *sclp
+
+	storageLogout9020    [max9020StorageElements]storageLogout9020
+	storageLatches9020   [max9020StorageElements][2]storageCycle9020
+	storage9020A         [max9020AStorageElements]storageElement9020A
+	storageBadParity9020 map[uint32]byte
+	storageBadKey9020    map[uint32]bool
+	configuration9020    [32]configRegister9020
+	displayRefresh9020E  [max9020EDisplayElements]displayRefresh9020E
+	nextDisplay9020E     uint64
 
 	Events []Event
 	// BreakProgram stops Run (kind "program") when a program
@@ -101,6 +129,8 @@ type Machine struct {
 	SCPCPUFacilities [12]byte
 	// TraceIO records an event for every START SUBCHANNEL.
 	TraceIO bool
+	// TraceIOQuietPolls omits Test I/O selections that only report Busy.
+	TraceIOQuietPolls bool
 	// TraceIOSkip lists devices TraceIO leaves out.
 	TraceIOSkip      map[uint16]bool
 	watchLo, watchHi uint32
@@ -165,11 +195,17 @@ type Event struct {
 }
 
 func NewMachine(cfg Config) *Machine {
-	if cfg.IOCE {
+	if cfg.IOCE || cfg.Model9020A || cfg.Model9020E {
 		cfg.Model9020 = true
 	}
 	if cfg.Memory == 0 {
 		cfg.Memory = 64 << 20
+		if cfg.Model9020A {
+			cfg.Memory = bytesPer9020ASE
+		}
+		if cfg.Model9020E {
+			cfg.Memory = bytesPer9020SE
+		}
 	}
 	if cfg.CPUs == 0 {
 		cfg.CPUs = 1
@@ -186,13 +222,19 @@ func NewMachine(cfg Config) *Machine {
 	if cfg.CPUSerial == 0 {
 		cfg.CPUSerial = 0x012345
 	}
-	m := &Machine{S: NewStorage(cfg.Memory), cfg: cfg, EventLimit: 4096, pgmCounts: map[uint16]uint64{}, Interrupts: map[string]uint64{}, IdleSkip: !cfg.NoIdleSkip}
+	var storage *Storage
+	if cfg.Model9020E && cfg.DisplayElements9020E > 0 {
+		storage = newStorage9020E(cfg.Memory, cfg.DisplayElements9020E)
+	} else {
+		storage = NewStorage(cfg.Memory)
+	}
+	m := &Machine{S: storage, cfg: cfg, EventLimit: 4096, pgmCounts: map[uint16]uint64{}, Interrupts: map[string]uint64{}, IdleSkip: !cfg.NoIdleSkip}
 	m.tod = todEpoch + uint64(cfg.Start.UnixMicro())*todMicro
 	m.todStep = todMicro / uint64(cfg.MIPS)
 	if m.todStep == 0 {
 		m.todStep = 1
 	}
-	if cfg.Model9020 {
+	if cfg.Model9020 || cfg.Model50 || cfg.Model65 {
 		cfg.S360 = true
 	}
 	if cfg.S360 {
@@ -284,7 +326,15 @@ func (m *Machine) IPL(devno uint16, clear bool) error {
 	for _, c := range m.CPUs {
 		c.Reset(clear)
 	}
+	m.storageLogout9020 = [max9020StorageElements]storageLogout9020{}
+	m.storageLatches9020 = [max9020StorageElements][2]storageCycle9020{}
+	m.storage9020A = [max9020AStorageElements]storageElement9020A{}
+	m.configuration9020 = [32]configRegister9020{}
+	m.displayRefresh9020E = [max9020EDisplayElements]displayRefresh9020E{}
+	m.nextDisplay9020E = 0
 	if clear {
+		m.storageBadParity9020 = nil
+		m.storageBadKey9020 = nil
 		for i := range m.S.Mem {
 			m.S.Mem[i] = 0
 		}
@@ -296,6 +346,7 @@ func (m *Machine) IPL(devno uint16, clear bool) error {
 	c := m.CPUs[0]
 	// Implied CCW: read IPL, 24 bytes to location 0, command chained.
 	be.PutUint64(m.S.Mem[0:], 0x02000000_60000018)
+	m.clearStorageDataParity9020(0, 8)
 	if err := m.CSS.iplChannelProgram(sch); err != nil {
 		return err
 	}
@@ -340,6 +391,8 @@ func (m *Machine) Load(images []Image, clear bool) error {
 	}
 	if clear {
 		clear64(m.S.Mem)
+		m.storageBadParity9020 = nil
+		m.storageBadKey9020 = nil
 		for i := range m.S.Keys {
 			m.S.Keys[i] = 0
 		}
@@ -351,6 +404,7 @@ func (m *Machine) Load(images []Image, clear bool) error {
 			return fmt.Errorf("load: image at %08X (%d bytes) exceeds storage", im.Address, len(im.Data))
 		}
 		copy(m.S.Mem[im.Address:], im.Data)
+		m.clearStorageDataParity9020(im.Address, uint32(len(im.Data)))
 	}
 	c := m.CPUs[0]
 	if !c.loadPSW(be.Uint64(m.S.Mem[0:])) {
@@ -380,6 +434,9 @@ func (m *Machine) ConsoleLines() []string { return m.sclp.Lines }
 func (m *Machine) Run(budget uint64) StopReason {
 	var done uint64
 	for done < budget {
+		if m.nextDisplay9020E != 0 && m.tod >= m.nextDisplay9020E {
+			m.tickDisplay9020E()
+		}
 		active := 0
 		progressed := false
 		for _, c := range m.CPUs {
@@ -400,22 +457,7 @@ func (m *Machine) Run(budget uint64) StopReason {
 				progressed = true
 			}
 			if c.hitBreak {
-				c.hitBreak = false
-				if m.watchHit {
-					m.watchHit = false
-					return StopReason{Kind: "watch", Detail: fmt.Sprintf("store to %08X by instruction at %08X", m.watchAddr, c.ia)}
-				}
-				if m.programHit != "" {
-					d := m.programHit
-					m.programHit = ""
-					return StopReason{Kind: "program", Detail: d}
-				}
-				if m.svcHit != "" {
-					d := m.svcHit
-					m.svcHit = ""
-					return StopReason{Kind: "svc", Detail: d}
-				}
-				return StopReason{Kind: "breakpoint", Detail: fmt.Sprintf("cpu %d at %08X", c.Addr, c.PSW.IA)}
+				return m.takeBreak(c)
 			}
 		}
 		if active == 0 {
@@ -434,10 +476,13 @@ func (m *Machine) Run(budget uint64) StopReason {
 			continue
 		}
 		for _, c := range m.CPUs {
-			if c.Stopped || !c.PSW.Wait {
+			if c.Stopped || c.Check || !c.PSW.Wait {
 				continue
 			}
 			if c.takeInterrupt() {
+				if c.hitBreak {
+					return m.takeBreak(c)
+				}
 				progressed = true
 			}
 		}
@@ -449,7 +494,7 @@ func (m *Machine) Run(budget uint64) StopReason {
 			if c.Stopped {
 				continue
 			}
-			if c.PSW.IO || c.PSW.Ext || c.PSW.MC || c.maintenance9020.delayUntil != 0 {
+			if c.PSW.IO || c.PSW.Ext || c.PSW.MC || c.maintenance9020.delayUntil != 0 || c.maintenance9020.countLogoutAt != 0 || c.maintenance9020.displayWrap != 0 || c.intervalPSAStopped9020() {
 				allDisabled = false
 			}
 		}
@@ -477,6 +522,25 @@ func (m *Machine) Run(budget uint64) StopReason {
 	return StopReason{Kind: "budget"}
 }
 
+func (m *Machine) takeBreak(c *CPU) StopReason {
+	c.hitBreak = false
+	if m.watchHit {
+		m.watchHit = false
+		return StopReason{Kind: "watch", Detail: fmt.Sprintf("store to %08X by instruction at %08X", m.watchAddr, c.ia)}
+	}
+	if m.programHit != "" {
+		detail := m.programHit
+		m.programHit = ""
+		return StopReason{Kind: "program", Detail: detail}
+	}
+	if m.svcHit != "" {
+		detail := m.svcHit
+		m.svcHit = ""
+		return StopReason{Kind: "svc", Detail: detail}
+	}
+	return StopReason{Kind: "breakpoint", Detail: fmt.Sprintf("cpu %d at %08X", c.Addr, c.PSW.IA)}
+}
+
 // skipIdle advances the TOD clock to the next timer deadline, charging the
 // skipped time to the running budget.
 func (m *Machine) skipIdle() {
@@ -490,8 +554,8 @@ func (m *Machine) skipIdle() {
 
 // nextDeadline returns the earliest TOD at which an enabled timer fires.
 func (m *Machine) nextDeadline() (uint64, bool) {
-	var best uint64
-	ok := false
+	best := m.nextDisplay9020E
+	ok := best > m.tod
 	for _, c := range m.CPUs {
 		if c.Stopped || c.Check {
 			continue
@@ -499,17 +563,20 @@ func (m *Machine) nextDeadline() (uint64, bool) {
 		if t := c.maintenance9020.delayUntil; t > m.tod && (!ok || t < best) {
 			best, ok = t, true
 		}
+		if t := c.maintenance9020.countLogoutAt; t > m.tod && (!ok || t < best) {
+			best, ok = t, true
+		}
+		if m.S370 && (c.PSW.Ext && c.extEnabled(extIntervalTimer) || c.intervalPSAStopped9020()) {
+			if t, has := c.intervalDeadline(); has && (!ok || t < best) {
+				best, ok = t, true
+			}
+		}
 		if !c.PSW.Ext {
 			continue
 		}
 		if c.extEnabled(extClockComparator) && c.ClockComparator != ^uint64(0) {
 			t := c.ClockComparator + 1
 			if !ok || t < best {
-				best, ok = t, true
-			}
-		}
-		if m.S370 && c.extEnabled(extIntervalTimer) {
-			if t, has := c.intervalDeadline(); has && (!ok || t < best) {
 				best, ok = t, true
 			}
 		}
@@ -531,6 +598,16 @@ func (m *Machine) nextDeadline() (uint64, bool) {
 // takeInterrupt takes one pending, enabled interruption. It reports whether
 // an interruption was taken.
 func (c *CPU) takeInterrupt() bool {
+	if c.countLogoutDue9020() {
+		c.takeCountLogout9020()
+		return true
+	}
+	if c.M.Model9020 && c.PSW.MC {
+		if check := c.pendingMachineCheck9020(); check != nil {
+			c.takeMachineCheck9020(check)
+			return true
+		}
+	}
 	if c.earlySpec {
 		c.earlySpec = false
 		c.ilc = 0
@@ -542,6 +619,13 @@ func (c *CPU) takeInterrupt() bool {
 			c.checkReason = "program interruption loop: invalid program new PSW"
 			return false
 		}
+		return true
+	}
+	if c.intervalPSAStopped9020() && c.intervalTicks() > c.itDone {
+		// A timer cycle is itself an access to the PSA (A27-2734-2 §9.1.2).
+		c.itDone = c.intervalTicks()
+		c.ia, c.next, c.ilc = c.PSW.IA, c.PSW.IA, 0
+		c.takeProgram(pgmSEStopped9020, false)
 		return true
 	}
 	if c.PSW.Ext {
@@ -579,7 +663,21 @@ func (c *CPU) runBatch(n int) (done int) {
 	check := 0
 	lastStores := c.stores
 	for done < n {
-		if c.pswChanged || check == 0 {
+		if c.M.nextDisplay9020E != 0 && c.M.tod >= c.M.nextDisplay9020E {
+			c.M.tickDisplay9020E()
+		}
+		if c.maintenance9020.displayWrap != 0 {
+			if !c.finishDisplayWrap9020E() {
+				return done
+			}
+			if c.M.watchHit || c.M.Breakpoints[c.PSW.IA] {
+				c.hitBreak = true
+				return done
+			}
+		}
+		// Recognize timed channel transitions on their first eligible
+		// instruction boundary, regardless of the caller's run slice.
+		if c.pswChanged || check == 0 || c.M.CSS.next != 0 && c.M.tod >= c.M.CSS.next || c.countLogoutDue9020() {
 			c.pswChanged = false
 			check = 64
 			// Spin detection: a CPU enabled for interruptions that stores
@@ -615,7 +713,7 @@ func (c *CPU) runBatch(n int) (done int) {
 				}
 			} else if c.takeInterrupt() {
 				c.maintenance9020.delayUntil = 0
-				if c.Check {
+				if c.Check || c.hitBreak {
 					return done
 				}
 				continue
@@ -642,6 +740,9 @@ func (c *CPU) runBatch(n int) (done int) {
 		// The clock advances with each instruction, so a clock read or a
 		// timer stored mid-batch sees the exact time.
 		c.M.tod += c.M.todStep
+		if c.maintenance9020.displayWrap != 0 {
+			return done
+		}
 		if c.M.watchHit || c.hitBreak {
 			c.hitBreak = true
 			return done
@@ -667,27 +768,36 @@ func (c *CPU) step() {
 	if ia&1 != 0 {
 		c.program(pgmSpecification)
 	}
-	var p []byte
-	if c.ipageValid && ia&^c.pgMask == c.ipageV {
-		a := c.ipageA | ia&c.pgMask
-		p = c.S.Mem[a:]
-	} else {
-		a := c.absolute(ia, accInstr, 0)
-		c.ipageV = ia &^ c.pgMask
-		c.ipageA = a &^ c.pgMask
-		c.ipageValid = true
-		p = c.S.Mem[a:]
-	}
-	n := ilen(p[0])
-	if ia&c.pgMask+n > c.pgMask+1 {
-		for i := uint32(0); i < n; i++ {
-			c.op[i] = c.fetchInstrByte(ia + i)
+	n := c.fetchScannedInstruction9020(ia)
+	if n == 0 {
+		var a uint32
+		mask := c.accessMask()
+		if c.ipageValid && ia&^mask == c.ipageV {
+			a = c.ipageA | ia&mask
+			if len(c.M.storageBadKey9020) != 0 {
+				c.storageKeyCheck9020(a, 0, false)
+			}
+		} else {
+			a = c.absolute(ia, accInstr, 0)
+			c.ipageV = ia &^ mask
+			c.ipageA = a &^ mask
+			c.ipageValid = true
 		}
-	} else if len(p) >= 6 {
-		// A fixed-size copy; bytes past a shorter instruction are unused.
-		c.op = [6]byte(p[:6])
-	} else {
-		copy(c.op[:n], p[:n])
+		p := c.S.Mem[a:]
+		n = ilen(p[0])
+		if ia&mask+n > mask+1 {
+			for i := uint32(0); i < n; i++ {
+				c.op[i] = c.fetchInstrByte(ia + i)
+			}
+		} else {
+			c.latchStorage9020(a, n, accInstr)
+			if len(p) >= 6 {
+				// A fixed-size copy; bytes past a shorter instruction are unused.
+				c.op = [6]byte(p[:6])
+			} else {
+				copy(c.op[:n], p[:n])
+			}
+		}
 	}
 	c.ilc = n
 	c.next = (ia + n) & c.amask

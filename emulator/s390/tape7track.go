@@ -14,8 +14,13 @@ const (
 	tapeOddTranslate  = 0x38
 )
 
+func isSevenTrackModeSet(cmd byte) bool {
+	mode := cmd & 0x38
+	return cmd&0x07 == 0x03 && (mode == tapeConvert || mode >= tapeEven)
+}
+
 func (t *Tape2401) frameRate() int64 {
-	return int64(t.density()) * 75 // inches per second, Model 2
+	return int64(t.density()) * t.capstanSpeed() / 4
 }
 
 func (t *Tape2401) density() int {
@@ -27,44 +32,50 @@ func (t *Tape2401) density() int {
 			return 556
 		}
 	}
+	if t.transferPE {
+		return 1600
+	}
 	return 800
 }
 
-func (t *Tape2401) writeRecord(data []byte) {
-	if t.sevenTrack {
-		data = encodeSevenTrack(data, t.sevenMode)
-	}
-	t.Tape3420.writeRecord(data)
-	if t.sevenTrack {
-		t.blocks[t.pos-1].density = t.density()
-	}
-}
-
-// eraseSevenTrackGap overwrites about 3.5 inches starting at the current
-// record boundary. Surviving frames stay readable as the next block.
-func (t *Tape2401) eraseSevenTrackGap() error {
-	const eraseMils = 3500
-	const gapMils = 750
-	t.motion(eraseMils * t.density() / 1000)
-	remaining := eraseMils
-	for remaining > 0 && t.pos < len(t.blocks) {
-		block := &t.blocks[t.pos]
+// eraseSevenTrackGap keeps the readable frames after an erased span.
+func (t *Tape2401) eraseSevenTrackGap(distance int64) error {
+	erased := t.blankTravel + distance
+	remaining := erased
+	end := t.pos
+	for ; end < len(t.blocks); end++ {
+		block := t.blocks[end]
+		if remaining <= block.leadIn {
+			t.blocks[end].leadIn += erased - remaining
+			break
+		}
 		density := block.density
 		if density == 0 {
 			density = t.density()
 		}
-		frames := remaining * density / 1000
-		if frames < block.n {
+		frames := int(((remaining-block.leadIn)*int64(density) + nrziFramesPerInch - 1) / nrziFramesPerInch)
+		if !block.mark && frames < block.n {
 			data, err := block.bytes()
 			if err != nil {
 				return err
 			}
-			*block = tapeBlock{data: slices.Clone(data[frames:]), n: len(data) - frames, bad: block.bad, density: density}
+			suffix := tapeBlock{
+				data: slices.Clone(data[frames:]), n: len(data) - frames,
+				bad: block.bad, density: density, reelEnd: block.reelEnd, lrcDelta: block.lrcDelta,
+			}
+			// Erase Gap leaves the original longitudinal check
+			// character at the end of the record (Y22-2918-0, p. 2-30).
+			for _, frame := range data[:frames] {
+				suffix.lrcDelta ^= frame & 0x7f
+			}
+			suffix.leadIn = max(erased, erased-remaining+t.blockLength(block)-t.blockLength(suffix))
+			t.blocks[end] = suffix
 			break
 		}
-		remaining -= (block.n*1000+density-1)/density + gapMils
-		t.blocks = slices.Delete(t.blocks, t.pos, t.pos+1)
+		remaining -= t.blockLength(block)
 	}
+	t.blocks = slices.Delete(t.blocks, t.pos, end)
+	t.blankTravel = erased
 	return nil
 }
 

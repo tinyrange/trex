@@ -20,15 +20,19 @@ func (c *CPU) ssCharacter() {
 	}
 	switch op[0] {
 	case 0xd2: // MVC
-		if d := c.span(a1, l, accStore, b1); d != nil {
-			if s := c.span(a2, l, accFetch, b2); s != nil {
-				if !overlapsForward(a1, a2, l) {
-					copy(d, s)
+		if d, da := c.span(a1, l, accStore, b1); d != nil {
+			if s, _ := c.span(a2, l, accFetch, b2); s != nil {
+				if c.cancelStorageWrite9020(da, l) {
 					return
 				}
-				for i := range d {
-					d[i] = s[i]
+				if !overlapsForward(a1, a2, l) {
+					copy(d, s)
+				} else {
+					for i := range d {
+						d[i] = s[i]
+					}
 				}
+				c.latchStorage9020(da, l, accStore)
 				return
 			}
 		}
@@ -48,10 +52,14 @@ func (c *CPU) ssCharacter() {
 	case 0xd4, 0xd6, 0xd7: // NC, OC, XC
 		var nz byte
 		if op[0] == 0xd7 && a1 == a2 && b1 == b2 {
-			if d := c.span(a1, l, accStore, b1); d != nil {
+			if d, da := c.span(a1, l, accStore, b1); d != nil {
+				if c.cancelStorageWrite9020(da, l) {
+					return
+				}
 				for i := range d {
 					d[i] = 0
 				}
+				c.latchStorage9020(da, l, accStore)
 				c.PSW.CC = 0
 				return
 			}
@@ -75,8 +83,8 @@ func (c *CPU) ssCharacter() {
 			c.PSW.CC = 1
 		}
 	case 0xd5: // CLC
-		if p := c.span(a1, l, accFetch, b1); p != nil {
-			if q := c.span(a2, l, accFetch, b2); q != nil {
+		if p, _ := c.span(a1, l, accFetch, b1); p != nil {
+			if q, _ := c.span(a2, l, accFetch, b2); q != nil {
 				for i := range p {
 					if p[i] != q[i] {
 						if p[i] < q[i] {
@@ -289,28 +297,35 @@ func (c *CPU) mvcl(r1, r2 int) {
 		}
 	}()
 	for dl > 0 {
-		n := c.pgMask + 1 - d&c.pgMask
+		mask := c.accessMask()
+		n := mask + 1 - d&mask
 		if n > dl {
 			n = dl
 		}
-		dst := c.span(d, n, accStore, r1)
+		dst, da := c.span(d, n, accStore, r1)
 		if sl > 0 {
 			m := n
 			if m > sl {
 				m = sl
 			}
-			if left := c.pgMask + 1 - s&c.pgMask; m > left {
+			if left := mask + 1 - s&mask; m > left {
 				m = left
 			}
-			src := c.span(s, m, accFetch, r2)
-			copy(dst[:m], src)
+			src, _ := c.span(s, m, accFetch, r2)
+			if !c.cancelStorageWrite9020(da, m) {
+				copy(dst[:m], src)
+				c.latchStorage9020(da, m, accStore)
+			}
 			d = (d + m) & c.amask
 			s = (s + m) & c.amask
 			dl -= m
 			sl -= m
 		} else {
-			for i := range dst {
-				dst[i] = pad
+			if !c.cancelStorageWrite9020(da, n) {
+				for i := range dst {
+					dst[i] = pad
+				}
+				c.latchStorage9020(da, n, accStore)
 			}
 			d = (d + n) & c.amask
 			dl -= n
@@ -375,7 +390,8 @@ func (c *CPU) mvcle(r1, r3 int, a2 uint32) {
 		c.PSW.CC = ccCompareU(uint64(dl), uint64(sl))
 		return
 	}
-	n := c.pgMask + 1 - d&c.pgMask
+	mask := c.accessMask()
+	n := mask + 1 - d&mask
 	if n > dl {
 		n = dl
 	}

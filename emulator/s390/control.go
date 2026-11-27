@@ -527,45 +527,52 @@ func (c *CPU) diagnose(a uint32, b int) {
 		c.diagnoseIOCE(a)
 		return
 	}
-	if c.M.Model9020 && !c.M.cfg.IOCE {
+	if c.M.cfg.Model9020A {
+		if be.Uint16(c.op[2:]) == 0x1f15 && c.op[1] == 0 {
+			c.logoutStorage9020A()
+			return
+		}
+		c.program(pgmSpecification)
+	}
+	if c.M.Model9020 {
 		mcw := c.fetchDouble(a, b)
+		mode := c.diagInterleave9020(c.op[1])
 		switch (mcw >> 44) & 0xfff {
-		case 0x010: // Diagnostic SE 1 (MCW bit 48).
-			if mcw&^0x8000 == 0x0001000000000000 {
-				c.maintenance9020.diagnosticSE1 = mcw&0x8000 != 0
-				c.purgeTLB()
-				c.ipageValid = false
-				return
-			}
+		case 0x010: // End Op maintenance kernel.
+			c.endOpMCW9020(mcw)
+		case 0x6b0: // Partial scan-in.
+			c.partialScan9020(mcw)
+			return
+		case 0xad3: // Wrap Display Element.
+			c.startDisplayWrap9020E(a, b, mcw)
+		case 0xfd0: // Logout Main or Display Storage.
+			c.logoutStorage9020(a, b, int(mcw>>28&0xf))
 		case 0xfd1: // Reset Checks, when MCW bit 50 is set.
 			if mcw&0x2000 != 0 {
 				c.maintenance9020.checks = 0
 			}
-			return
 		case 0xfd3: // Set Diagnose Accessible Register mask.
 			c.maintenance9020.darMask = c.fetchWord(a+8, b)
-			return
 		case 0xfd4: // Store Diagnose Accessible Register, then reset it.
 			c.storeWord(a+8, b, c.maintenance9020.dar)
 			c.maintenance9020.dar = 0
-			return
-		case 0xfd5:
-			// Define Storage, A27-2734-2 §8.5.1.9. The current model
-			// connects contiguous storage elements and no display elements.
-			c.storeByte(a+11, b, byte(c.storageElements9020()<<4))
-			return
+		case 0xfd5: // Define Storage, A27-2734-2 §8.5.1.9.
+			definition := byte(c.storageElements9020() << 4)
+			if c.M.cfg.Model9020E {
+				definition |= byte(c.M.cfg.DisplayElements9020E)
+			}
+			c.storeByte(a+11, b, definition)
 		case 0xfd6: // Store Processor Interrupt Register, then reset it.
 			c.storeByte(a+11, b, c.maintenance9020.pir&0x0e)
 			c.maintenance9020.pir = 0
-			return
 		case 0xfd7: // Logout FAA registers, in the order specified by §8.5.1.9.
-			// The single CE starts in state Three with the IPL storage
-			// element in the first ATR slot. Registers for absent
-			// configuration and external interfaces have no active bits.
 			s := &c.maintenance9020
 			atr := c.atr9020()
-			seMask := (uint32(1)<<c.storageElements9020() - 1) << (24 - c.storageElements9020())
-			registers := [...]uint32{0, 3<<30 | seMask, s.darMask, 0, s.checks, uint32(atr >> 8), uint32(atr&0xff) << 24, s.dar}
+			ccr := uint32(stateMask9020)
+			if c.Addr < 4 {
+				ccr = c.M.ccr9020(20 + uint32(c.Addr))
+			}
+			registers := [...]uint32{0, ccr, s.darMask, 0, s.checks, uint32(atr >> 8), uint32(atr&0xff) << 24, s.dar}
 			for i, reg := range registers {
 				var parity uint64
 				for j := 0; j < 4; j++ {
@@ -578,8 +585,11 @@ func (c *CPU) diagnose(a uint32, b int) {
 				c.storeDouble(a+uint32(i+1)*8, b, parity|uint64(reg))
 			}
 			s.pir, s.dar = 0, 0
-			return
+		default:
+			c.program(pgmSpecification)
 		}
+		c.setInterleave9020(mode)
+		return
 	}
 	c.program(pgmSpecification)
 }
@@ -682,9 +692,10 @@ func (c *CPU) mvpg(r1, r2 int) {
 	}
 	dst := c.GR[r1] & c.amask &^ 0xfff
 	src := c.GR[r2] & c.amask &^ 0xfff
-	s := c.span(src, 4096, accFetch, r2)
-	d := c.span(dst, 4096, accStore, r1)
+	s, _ := c.span(src, 4096, accFetch, r2)
+	d, da := c.span(dst, 4096, accStore, r1)
 	copy(d, s)
+	c.latchStorage9020(da, 4096, accStore)
 	c.PSW.CC = 0
 }
 

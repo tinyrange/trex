@@ -20,14 +20,24 @@ type Console1052 struct {
 	// The write in progress, so that HALT I/O can type only what the
 	// channel sent: the transcript before it, its data and whether it
 	// returns the carrier.
-	wLines int
-	wPart  string
-	wData  []byte
-	wCR    bool
+	wLines  int
+	wPart   string
+	wColumn int
+	column  int
+	wData   []byte
+	wCR     bool
+
+	ribbonShift     bool
+	ribbon, wRibbon ribbon1052
 
 	notReady   bool
-	cancelRead bool
+	readStatus byte
 	readyEnd   bool
+}
+
+// ribbon1052 tracks the optional ribbon band and paper feed selection.
+type ribbon1052 struct {
+	Prefix, Up, DoubleFeed bool
 }
 
 // 1052 timing.
@@ -41,7 +51,7 @@ func NewConsole1052() *Console1052 { return &Console1052{Console3215: NewConsole
 
 func (t *Console1052) Reset() {
 	t.Console3215.Reset()
-	t.cancelRead, t.readyEnd = false, false
+	t.readStatus, t.readyEnd = 0, false
 }
 
 // AttachConsole1052 binds a 1052 console to the channel subsystem.
@@ -82,15 +92,22 @@ func (t *Console1052) Exec(cmd byte, data []byte, chained bool) ([]byte, int, by
 	}
 	if c == 0x01 || c == 0x09 {
 		t.version++
-		t.wLines, t.wPart = t.dropped+len(t.Lines), t.Partial
+		t.wLines, t.wPart, t.wColumn = t.dropped+len(t.Lines), t.Partial, t.column
+		t.wRibbon = t.ribbon
 		t.wData, t.wCR = append(t.wData[:0], data...), c == 0x09
 		t.typeOut(data, t.wCR)
 		return nil, len(data), usCE | usDE
 	}
 	out, used, status := t.Console3215.Exec(c, data, chained)
-	if c == 0x0a && t.cancelRead {
-		t.cancelRead = false
-		status |= usUnitExcept
+	if c == 0x0a {
+		t.column = 0
+		if t.readStatus == usUnitCheck {
+			// A keyboard parity error sets Equipment Check
+			// (SY22-2909-2, 1052 Equipment Check and Unit Check).
+			t.sense |= senseEquipCheck
+		}
+		status |= t.readStatus
+		t.readStatus = 0
 	}
 	return out, used, status
 }
@@ -131,10 +148,20 @@ func (t *Console1052) TestIOStatus() byte {
 // Cancel enters the characters typed during the current inquiry and
 // terminates it with the Cancel key instead of End of Block.
 func (t *Console1052) Cancel(text string) error {
+	return t.endInquiry(text, usUnitExcept)
+}
+
+// TypeWithParityError supplies keyboard data carrying an Equipment Check
+// when the operator ends the inquiry.
+func (t *Console1052) TypeWithParityError(text string) error {
+	return t.endInquiry(text, usUnitCheck)
+}
+
+func (t *Console1052) endInquiry(text string, status byte) error {
 	if t.notReady || t.css == nil || !t.css.Waiting(t.devno) {
-		return fmt.Errorf("1052 %04X: there is no inquiry to cancel", t.devno)
+		return fmt.Errorf("1052 %04X: there is no active inquiry", t.devno)
 	}
-	t.cancelRead = true
+	t.readStatus = status
 	t.Type(text)
 	return nil
 }
@@ -145,7 +172,7 @@ func (t *Console1052) Cancel(text string) error {
 // the next character overstrikes). Other codes print nothing.
 func (t *Console1052) typeOut(data []byte, cr bool) {
 	line := []rune(t.Partial)
-	col := len(line)
+	col := t.column
 	put := func(r rune) {
 		for len(line) < col {
 			line = append(line, ' ')
@@ -163,8 +190,34 @@ func (t *Console1052) typeOut(data []byte, cr bool) {
 		t.Partial = string(line)
 		t.newline()
 		line = line[:0]
+		if t.ribbon.DoubleFeed {
+			t.newline()
+		}
 	}
 	for _, b := range data {
+		if t.ribbonShift {
+			if t.ribbon.Prefix {
+				t.ribbon.Prefix = false
+				switch b {
+				case 0xc1:
+					t.ribbon.Up = true
+					continue
+				case 0xc2:
+					t.ribbon.Up = false
+					continue
+				case 0xc3:
+					t.ribbon.DoubleFeed = false
+					continue
+				case 0xc4:
+					t.ribbon.DoubleFeed = true
+					continue
+				}
+			}
+			if b == 0x27 {
+				t.ribbon.Prefix = true
+				continue
+			}
+		}
 		switch b {
 		case 0x15:
 			flush()
@@ -183,8 +236,10 @@ func (t *Console1052) typeOut(data []byte, cr bool) {
 	}
 	t.Partial = string(line)
 	if cr {
-		t.newline()
+		flush()
+		col = 0
 	}
+	t.column = col
 }
 
 // CommandTiming implements Timed.
@@ -213,7 +268,8 @@ func (t *Console1052) Halt(elapsed time.Duration) (int, time.Duration, time.Dura
 	sent := min(int(elapsed/typeCycle)+1, len(t.wData))
 	// Type only what the channel sent.
 	if keep := t.wLines - t.dropped; keep >= 0 && keep <= len(t.Lines) {
-		t.Lines, t.Partial = t.Lines[:keep], t.wPart
+		t.Lines, t.Partial, t.column = t.Lines[:keep], t.wPart, t.wColumn
+		t.ribbon = t.wRibbon
 		t.typeOut(t.wData[:sent], t.wCR)
 	}
 	t.version++

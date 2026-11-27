@@ -19,11 +19,21 @@ type Storage struct {
 	Mem      []byte
 	Keys     []byte
 	KeyShift uint // log2 of the key-block size
+	// On a 9020E with display storage, main storage stops here and
+	// alternate halves of the fixed display-storage slots are unpopulated.
+	mainEnd9020E uint32
 }
 
 func NewStorage(size int) *Storage {
 	size = (size + 4095) &^ 4095
 	return &Storage{Mem: make([]byte, size), Keys: make([]byte, size>>12), KeyShift: 12}
+}
+
+func newStorage9020E(main, displays int) *Storage {
+	end := displayBase9020E + (displays-1)*bytesPer9020SE + bytesPer9020DE
+	s := NewStorage(end)
+	s.mainEnd9020E = uint32(main)
+	return s
 }
 
 // setKeyBlock sets the key-block size to 1<<shift bytes and clears keys.
@@ -35,11 +45,29 @@ func (s *Storage) setKeyBlock(shift uint) {
 // key returns the storage key of the block holding absolute address a.
 func (s *Storage) key(a uint32) *byte { return &s.Keys[a>>s.KeyShift] }
 
+// accessMask bounds each contiguous CPU access and its protection check.
+func (c *CPU) accessMask() uint32 {
+	if c.interleaveMode9020() != 0 {
+		return oddBank9020 - 1
+	}
+	return c.pgMask
+}
+
 func (s *Storage) Size() uint32 { return uint32(len(s.Mem)) }
 
 // valid reports whether [abs, abs+n) lies within installed storage.
 func (s *Storage) valid(abs uint32, n uint32) bool {
-	return uint64(abs)+uint64(n) <= uint64(len(s.Mem))
+	end := uint64(abs) + uint64(n)
+	if end > uint64(len(s.Mem)) {
+		return false
+	}
+	if s.mainEnd9020E == 0 {
+		return true
+	}
+	if abs < displayBase9020E {
+		return end <= uint64(s.mainEnd9020E) || s.mainEnd9020E == displayBase9020E && end <= displayBase9020E+bytesPer9020DE
+	}
+	return uint64(abs%bytesPer9020SE)+uint64(n) <= bytesPer9020DE
 }
 
 // Access kinds.
@@ -133,19 +161,21 @@ const tlbSize = 1024
 
 // real converts a real address to absolute, applying prefixing.
 func (c *CPU) realToAbs(r uint32) uint32 {
+	mode := c.interleaveMode9020()
 	if r < 0x1000 {
-		return r + c.Prefix
+		return mode.physical(r + c.Prefix)
 	}
 	if c.M.Model9020 && !c.M.cfg.IOCE {
 		// Diagnostic SE 1 lets maintenance code write the physical
 		// restart word without going through the selected PSA or ATR.
-		if c.maintenance9020.diagnosticSE1 && r&^uint32(bytesPer9020SE-1) == 0x800000 {
-			return r & (bytesPer9020SE - 1)
+		seMask := c.M.storageElementSize9020() - 1
+		if c.maintenance9020.diagnosticSE1 && r&^seMask == 0x800000 {
+			return mode.physical(r & seMask)
 		}
 		if c.maintenance9020.atrSet {
-			return c.translate9020(r)
+			return mode.physical(c.translate9020(r))
 		}
-		return r
+		return mode.physical(r)
 	}
 	if r&^0xfff == c.Prefix {
 		return r - c.Prefix
@@ -265,15 +295,18 @@ func (c *CPU) realAbs(r uint32, acc access) uint32 {
 	if c.sie != nil {
 		a = c.sieHost(a, acc)
 	}
-	if !c.S.valid(a, 1) {
+	if !c.S.valid(a, 1) || !c.storageConfigured9020(a) {
 		c.program(pgmAddressing)
+	}
+	if c.M.Model9020 && c.M.storageStopped9020(a) {
+		c.program(pgmSEStopped9020)
 	}
 	return a
 }
 
 // lowAbs returns the host absolute address of a PSA location.
 func (c *CPU) lowAbs(off uint32, acc access) uint32 {
-	a := c.Prefix + off
+	a := c.interleaveMode9020().physical(c.Prefix + off)
 	if c.sie != nil {
 		a = c.sieHost(a, acc)
 	}
@@ -349,29 +382,38 @@ func (c *CPU) absoluteSlow(v uint32, acc access, b int) uint32 {
 	if c.sie != nil {
 		a = c.sieHost(a, acc)
 	}
-	if a >= uint32(len(c.S.Mem)) {
+	if !c.S.valid(a, 1) || !c.storageConfigured9020(a) {
 		c.program(pgmAddressing)
+	}
+	if c.M.Model9020 && c.M.storageStopped9020(a) {
+		c.program(pgmSEStopped9020)
 	}
 	c.checkKey(a, acc, c.PSW.Key, v < 2048)
 	return a
+}
+
+func (m *Machine) storageKeyMatches(protection, stored byte) bool {
+	// On the 9020 either zero comparand matches (A27-2734-2 §8.2.1).
+	return protection == 0 || protection == stored>>4 || m.Model9020 && stored>>4 == 0
 }
 
 // checkKey applies key-controlled protection and records reference/change.
 // low reports whether the logical address is in 0-2047, the range fetch-
 // protection override exempts.
 func (c *CPU) checkKey(a uint32, acc access, key byte, low bool) {
+	if len(c.M.storageBadKey9020) != 0 {
+		c.storageKeyCheck9020(a, 0, false)
+	}
 	k := c.S.key(a)
-	if key != 0 {
-		acck := *k >> 4
-		if acck != key {
-			if acc == accStore {
-				if !(acck == 9 && c.CR[0]&0x01000000 != 0) {
-					c.program(pgmProtection)
-				}
-			} else if *k&keyFetch != 0 {
-				if !(low && c.CR[0]&0x02000000 != 0) && !(acck == 9 && c.CR[0]&0x01000000 != 0) {
-					c.program(pgmProtection)
-				}
+	if !c.M.storageKeyMatches(key, *k) {
+		override := *k>>4 == 9 && c.CR[0]&0x01000000 != 0
+		if acc == accStore {
+			if !override {
+				c.program(pgmProtection)
+			}
+		} else if *k&keyFetch != 0 {
+			if !(low && c.CR[0]&0x02000000 != 0) && !override {
+				c.program(pgmProtection)
 			}
 		}
 	}
@@ -388,29 +430,38 @@ func (c *CPU) checkKey(a uint32, acc access, key byte, low bool) {
 	}
 }
 
-// span returns the absolute slice for n bytes at v. Accesses that cross a
+// span returns the slice and absolute address for n bytes at v. Accesses that cross a
 // page boundary return nil; callers then use the byte-wise path.
-func (c *CPU) span(v uint32, n uint32, acc access, b int) []byte {
+func (c *CPU) span(v uint32, n uint32, acc access, b int) ([]byte, uint32) {
 	v &= c.amask
-	if v&c.pgMask+n <= c.pgMask+1 {
+	mask := c.accessMask()
+	if v&mask+n <= mask+1 {
 		a := c.absolute(v, acc, b)
 		if acc == accStore && a < c.M.watchHi && a+n > c.M.watchLo {
 			c.M.watchHit = true
 			c.M.watchAddr = a
 		}
-		return c.S.Mem[a : a+n]
+		if acc != accStore {
+			c.latchStorage9020(a, n, acc)
+		}
+		return c.S.Mem[a : a+n], a
 	}
-	return nil
+	return nil, 0
 }
 
 func (c *CPU) fetchByte(v uint32, b int) byte {
 	a := c.absolute(v, accFetch, b)
+	c.latchStorage9020(a, 1, accFetch)
 	return c.S.Mem[a]
 }
 
 func (c *CPU) storeByte(v uint32, b int, x byte) {
 	a := c.absolute(v, accStore, b)
+	if c.cancelStorageWrite9020(a, 1) {
+		return
+	}
 	c.S.Mem[a] = x
+	c.latchStorage9020(a, 1, accStore)
 }
 
 // System/360 requires fixed-width storage operands to start on an
@@ -423,7 +474,7 @@ func (c *CPU) checkAlignment360(v, width uint32) {
 
 func (c *CPU) fetchHalf(v uint32, b int) uint16 {
 	c.checkAlignment360(v, 2)
-	if p := c.span(v, 2, accFetch, b); p != nil {
+	if p, _ := c.span(v, 2, accFetch, b); p != nil {
 		return be.Uint16(p)
 	}
 	return uint16(c.fetchByte(v, b))<<8 | uint16(c.fetchByte(v+1, b))
@@ -431,7 +482,7 @@ func (c *CPU) fetchHalf(v uint32, b int) uint16 {
 
 func (c *CPU) fetchWord(v uint32, b int) uint32 {
 	c.checkAlignment360(v, 4)
-	if p := c.span(v, 4, accFetch, b); p != nil {
+	if p, _ := c.span(v, 4, accFetch, b); p != nil {
 		return be.Uint32(p)
 	}
 	var x uint32
@@ -443,7 +494,7 @@ func (c *CPU) fetchWord(v uint32, b int) uint32 {
 
 func (c *CPU) fetchDouble(v uint32, b int) uint64 {
 	c.checkAlignment360(v, 8)
-	if p := c.span(v, 8, accFetch, b); p != nil {
+	if p, _ := c.span(v, 8, accFetch, b); p != nil {
 		return be.Uint64(p)
 	}
 	return uint64(c.fetchWord(v, b))<<32 | uint64(c.fetchWord(v+4, b))
@@ -451,8 +502,12 @@ func (c *CPU) fetchDouble(v uint32, b int) uint64 {
 
 func (c *CPU) storeHalf(v uint32, b int, x uint16) {
 	c.checkAlignment360(v, 2)
-	if p := c.span(v, 2, accStore, b); p != nil {
+	if p, a := c.span(v, 2, accStore, b); p != nil {
+		if c.cancelStorageWrite9020(a, 2) {
+			return
+		}
 		be.PutUint16(p, x)
+		c.latchStorage9020(a, 2, accStore)
 		return
 	}
 	c.checkStore(v, 2, b)
@@ -462,8 +517,12 @@ func (c *CPU) storeHalf(v uint32, b int, x uint16) {
 
 func (c *CPU) storeWord(v uint32, b int, x uint32) {
 	c.checkAlignment360(v, 4)
-	if p := c.span(v, 4, accStore, b); p != nil {
+	if p, a := c.span(v, 4, accStore, b); p != nil {
+		if c.cancelStorageWrite9020(a, 4) {
+			return
+		}
 		be.PutUint32(p, x)
+		c.latchStorage9020(a, 4, accStore)
 		return
 	}
 	c.checkStore(v, 4, b)
@@ -474,8 +533,12 @@ func (c *CPU) storeWord(v uint32, b int, x uint32) {
 
 func (c *CPU) storeDouble(v uint32, b int, x uint64) {
 	c.checkAlignment360(v, 8)
-	if p := c.span(v, 8, accStore, b); p != nil {
+	if p, a := c.span(v, 8, accStore, b); p != nil {
+		if c.cancelStorageWrite9020(a, 8) {
+			return
+		}
 		be.PutUint64(p, x)
+		c.latchStorage9020(a, 8, accStore)
 		return
 	}
 	c.checkStore(v, 8, b)
@@ -486,49 +549,56 @@ func (c *CPU) storeDouble(v uint32, b int, x uint64) {
 // checkStore validates that every page of an operand is storable before any
 // byte is changed, so a later page fault does not leave a partial update.
 func (c *CPU) checkStore(v uint32, n uint32, b int) {
-	if n == 0 {
-		return
-	}
-	c.absolute(v, accStore, b)
-	last := (v + n - 1) & c.amask
-	if last&^c.pgMask != v&c.amask&^c.pgMask {
-		c.absolute(last, accStore, b)
-	}
+	c.checkSpan(v, n, accStore, b)
 }
 
 func (c *CPU) checkFetch(v uint32, n uint32, b int) {
-	if n == 0 {
+	c.checkSpan(v, n, accFetch, b)
+}
+
+func (c *CPU) checkSpan(v, n uint32, acc access, b int) {
+	mask := c.accessMask()
+	if mask == c.pgMask {
+		if n != 0 {
+			c.absolute(v, acc, b)
+			last := (v + n - 1) & c.amask
+			if last&^mask != v&c.amask&^mask {
+				c.absolute(last, acc, b)
+			}
+		}
 		return
 	}
-	c.absolute(v, accFetch, b)
-	last := (v + n - 1) & c.amask
-	if last&^c.pgMask != v&c.amask&^c.pgMask {
-		c.absolute(last, accFetch, b)
+	for n > 0 {
+		c.absolute(v, acc, b)
+		step := min(n, mask+1-v&mask)
+		v += step
+		n -= step
 	}
 }
 
 // PSA access helpers used by interruptions.
-func (c *CPU) lowWord(off uint32) uint32 {
-	return be.Uint32(c.S.Mem[c.lowAbs(off, accFetch):])
-}
 func (c *CPU) setLowWord(off uint32, x uint32) {
 	a := c.lowAbs(off, accStore)
 	be.PutUint32(c.S.Mem[a:], x)
 	*c.S.key(a) |= keyRef | keyChg
+	c.M.clearStorageDataParity9020(a, 4)
 }
 func (c *CPU) setLowHalf(off uint32, x uint16) {
 	a := c.lowAbs(off, accStore)
 	be.PutUint16(c.S.Mem[a:], x)
 	*c.S.key(a) |= keyRef | keyChg
+	c.M.clearStorageDataParity9020(a, 2)
 }
 func (c *CPU) setLowByte(off uint32, x byte) {
 	a := c.lowAbs(off, accStore)
 	c.S.Mem[a] = x
 	*c.S.key(a) |= keyRef | keyChg
+	c.M.clearStorageDataParity9020(a, 1)
 }
 func (c *CPU) lowDouble(off uint32) uint64 { return be.Uint64(c.S.Mem[c.lowAbs(off, accFetch):]) }
 func (c *CPU) setLowDouble(off uint32, x uint64) {
 	a := c.lowAbs(off, accStore)
 	be.PutUint64(c.S.Mem[a:], x)
 	*c.S.key(a) |= keyRef | keyChg
+	c.M.clearStorageDataParity9020(a, 8)
 }

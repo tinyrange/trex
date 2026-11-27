@@ -197,6 +197,9 @@ func (c *CPU) execute() {
 	if c.M.S360 && !s360Ops[op[0]] {
 		if c.M.Model9020 && !c.M.cfg.IOCE {
 			switch op[0] {
+			case 0x01: // SCON
+				c.setConfiguration9020(int(op[1]>>4), int(op[1]&0xf))
+				return
 			case 0x0b: // DLY, A27-2734-2 §8.4.5.1
 				if op[1] != 0 {
 					c.maintenance9020.delayUntil = c.M.tod + uint64(op[1])*256*todMicro
@@ -210,27 +213,29 @@ func (c *CPU) execute() {
 				return
 			case 0x0e: // IATR
 				atr := c.atr9020()
-				c.GR[op[1]&0xf] = uint32(atr&0xff) << 24
-				c.GR[op[1]>>4] = uint32(atr >> 8)
+				tail := uint(8)
+				if c.M.cfg.Model9020A {
+					tail = 16
+				}
+				c.GR[op[1]&0xf] = uint32(atr) << (32 - tail)
+				c.GR[op[1]>>4] = uint32(atr >> tail)
 				return
 			case 0x84: // WRD
 				c.writeDirect9020(op[1], c.eaBD(op[2], op[3]))
 				return
 			case 0xa0: // SPSB
 				c.privileged()
-				physical := c.Prefix/bytesPer9020SE + 1
+				physical := c.Prefix/c.M.storageElementSize9020() + 1
 				c.storeWord(c.eaBD(op[2], op[3]), int(op[2]>>4), c.maintenance9020.psb|physical)
 				return
 			case 0xa1: // LPSB
 				c.privileged()
 				logical := c.fetchWord(c.eaBD(op[2], op[3]), int(op[2]>>4)) & 0x00fff000
 				physical := c.translate9020(logical)
-				if !c.S.valid(physical, 4096) {
+				if !c.validPSA9020(physical) {
 					c.program(pgmSpecification)
 				}
-				c.maintenance9020.psb, c.Prefix = logical, physical
-				c.purgeTLB()
-				c.ipageValid = false
+				c.setPSBase9020(logical, physical, false)
 				return
 			}
 		}
@@ -628,8 +633,12 @@ func (c *CPU) execute() {
 		c.storeByte(c.eaBD(op[2], op[3]), int(op[2]>>4), op[1])
 	case 0x93: // TS
 		a := c.absolute(c.eaBD(op[2], op[3]), accStore, int(op[2]>>4))
+		if c.cancelStorageWrite9020(a, 1) {
+			return
+		}
 		c.PSW.CC = c.S.Mem[a] >> 7
 		c.S.Mem[a] = 0xff
+		c.M.clearStorageDataParity9020(a, 1)
 	case 0x94, 0x95, 0x96, 0x97:
 		a := c.eaBD(op[2], op[3])
 		b := int(op[2] >> 4)
@@ -638,6 +647,9 @@ func (c *CPU) execute() {
 			return
 		}
 		p := c.absolute(a, accStore, b)
+		if c.cancelStorageWrite9020(p, 1) {
+			return
+		}
 		x := c.S.Mem[p]
 		switch op[0] {
 		case 0x94:
@@ -648,6 +660,7 @@ func (c *CPU) execute() {
 			x ^= op[1]
 		}
 		c.S.Mem[p] = x
+		c.latchStorage9020(p, 1, accStore)
 		c.PSW.CC = 0
 		if x != 0 {
 			c.PSW.CC = 1
@@ -771,7 +784,11 @@ func (c *CPU) execute() {
 		p := c.absolute(a, accStore, int(op[2]>>4))
 		cur := be.Uint32(c.S.Mem[p:])
 		if cur == c.GR[r1] {
+			if c.cancelStorageWrite9020(p, 4) {
+				return
+			}
 			be.PutUint32(c.S.Mem[p:], c.GR[r3])
+			c.latchStorage9020(p, 4, accStore)
 			c.PSW.CC = 0
 		} else {
 			c.GR[r1] = cur
@@ -788,7 +805,11 @@ func (c *CPU) execute() {
 		p := c.absolute(a, accStore, int(op[2]>>4))
 		cur := be.Uint64(c.S.Mem[p:])
 		if cur == uint64(c.GR[r1])<<32|uint64(c.GR[r1+1]) {
+			if c.cancelStorageWrite9020(p, 8) {
+				return
+			}
 			be.PutUint64(c.S.Mem[p:], uint64(c.GR[r3])<<32|uint64(c.GR[r3+1]))
+			c.latchStorage9020(p, 8, accStore)
 			c.PSW.CC = 0
 		} else {
 			c.GR[r1], c.GR[r1+1] = uint32(cur>>32), uint32(cur)
@@ -916,10 +937,14 @@ func (c *CPU) stm(r1, r3 int, a uint32, b int) {
 	c.checkAlignment360(a, 4)
 	n := uint32((r3-r1)&15) + 1
 	c.checkStore(a, n*4, b)
-	if p := c.span(a, n*4, accStore, b); p != nil {
+	if p, pa := c.span(a, n*4, accStore, b); p != nil {
+		if c.cancelStorageWrite9020(pa, n*4) {
+			return
+		}
 		for i, r := uint32(0), r1; i < n; i, r = i+1, (r+1)&15 {
 			be.PutUint32(p[i*4:], c.GR[r])
 		}
+		c.latchStorage9020(pa, n*4, accStore)
 		return
 	}
 	for r := r1; ; r = (r + 1) & 15 {
@@ -934,7 +959,7 @@ func (c *CPU) stm(r1, r3 int, a uint32, b int) {
 func (c *CPU) lm(r1, r3 int, a uint32, b int) {
 	c.checkAlignment360(a, 4)
 	n := uint32((r3-r1)&15) + 1
-	if p := c.span(a, n*4, accFetch, b); p != nil {
+	if p, _ := c.span(a, n*4, accFetch, b); p != nil {
 		for i, r := uint32(0), r1; i < n; i, r = i+1, (r+1)&15 {
 			c.GR[r] = be.Uint32(p[i*4:])
 		}
@@ -1027,6 +1052,7 @@ func (c *CPU) ex(r1 int, a uint32) {
 
 func (c *CPU) fetchInstrByte(v uint32) byte {
 	a := c.absolute(v, accInstr, 0)
+	c.latchStorage9020(a, 1, accInstr)
 	return c.S.Mem[a]
 }
 

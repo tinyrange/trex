@@ -109,7 +109,8 @@ type CPU struct {
 	PSW    PSW
 	Prefix uint32
 
-	ClockComparator uint64
+	ClockComparator     uint64
+	interleavePanel9020 interleave9020 // physical CE switch, unaffected by reset
 
 	amask  uint32
 	pgMask uint32 // page-crossing granularity: 4K, or 2K for System/370
@@ -185,18 +186,21 @@ func (c *CPU) setAmode() {
 func (c *CPU) loadPSW(x uint64) bool {
 	p, ok := c.decodePSW(x)
 	c.PSW = p
+	c.maintenance9020.scanPrefetch.Active = false
 	c.setAmode()
 	return ok
 }
 
 // Reset performs a CPU reset; clear additionally zeroes registers.
 func (c *CPU) Reset(clear bool) {
+	c.cancelDisplayWrap9020E()
 	c.PSW = PSW{}
 	c.setAmode()
 	c.Stopped = true
 	c.extPending = 0
 	c.emergency = 0
 	c.maintenance9020 = maintenance9020{}
+	c.ipageValid = false
 	c.purgeTLB()
 	if clear {
 		c.GR = [16]uint32{}
@@ -254,6 +258,9 @@ func (c *CPU) takeProgram(code uint16, nullify bool) { c.takeProgramDirect(code,
 // takeProgramDirect stores the interruption in the current PSA (the guest's
 // while interpreting) and loads the program new PSW.
 func (c *CPU) takeProgramDirect(code uint16, nullify bool) {
+	if !c.preparePSA9020() {
+		return
+	}
 	ia := c.next
 	ilc := c.ilc
 	if nullify {
@@ -270,6 +277,9 @@ func (c *CPU) takeProgramDirect(code uint16, nullify bool) {
 	c.PSW.IA = ia & c.amask
 	switch code &^ pgmPER {
 	case pgmSegment, pgmPage:
+		if c.M.S360 {
+			break // On a 9020, code 10 identifies IOCE 3 PSA lockout.
+		}
 		if c.M.S370 {
 			c.setLowWord(0x90, c.excAddr&0x00ffffff)
 			break
@@ -390,6 +400,9 @@ func (c *CPU) pendingExternal() uint32 {
 }
 
 func (c *CPU) takeExternal(bit uint32) {
+	if !c.preparePSA9020() {
+		return
+	}
 	var code uint16
 	// In System/370 BC mode the interruption code is only in the old PSW;
 	// the PSA locations are ordinary storage.
@@ -458,6 +471,9 @@ func (c *CPU) takeSVC(code byte) {
 	if c.sie != nil && c.sieSVCIntercepted(code) {
 		panic(sieExitRequest{code: sieCodeInst})
 	}
+	if !c.preparePSA9020() {
+		return
+	}
 	c.PSW.IA = c.next & c.amask
 	ilc := c.ilc
 	if c.exAddr {
@@ -487,6 +503,7 @@ func (c *CPU) takeSVC(code byte) {
 // setting the reference and change bits and invalidating cached
 // instructions.
 func (m *Machine) Alter(a uint32, data []byte) {
+	m.clearStorageDataParity9020(a, uint32(len(data)))
 	for i, x := range data {
 		m.S.Mem[a+uint32(i)] = x
 		*m.S.key(a + uint32(i)) |= keyRef | keyChg
@@ -505,8 +522,25 @@ func (c *CPU) InterruptKey() { c.extPending |= extInterruptKey }
 
 // Restart performs a restart interruption (the operator RESTART function).
 func (c *CPU) Restart() {
+	c.cancelDisplayWrap9020E()
 	c.Stopped = false
 	c.maintenance9020.delayUntil = 0
+	if c.M.Model9020 && !c.M.cfg.IOCE {
+		if !c.M.cfg.Model9020A {
+			c.setInterleave9020(0)
+			c.setTimerInhibit9020(false)
+			c.maintenance9020.diagnosticSE1 = false
+			c.maintenance9020.countLogoutAt = 0
+			c.maintenance9020.reverseSumParity = false
+			c.maintenance9020.reverseMarkParity = false
+			c.maintenance9020.reverseAddressParity = 0
+		}
+		c.maintenance9020.psbAlternate = false
+		c.Check, c.checkReason = false, ""
+		if !c.preparePSA9020() {
+			return
+		}
+	}
 	c.swap(pswRestartOld, pswRestartNew)
 }
 

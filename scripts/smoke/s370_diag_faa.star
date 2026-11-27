@@ -6,19 +6,8 @@ The corrections below check the original bytes and use guest storage or an
 in-memory copy of the utility's master reel.
 """
 
-load("//scripts/inspect:s370_diag.star", "END_OF_JOB", "SDM_READY", "faa_correction", "faa_ioce", "faa_ioce_sdm", "faa_mdm", "library_reel", "machine", "sdm", "source")
+load("//scripts/inspect:s370_diag.star", "END_OF_JOB", "SDM_READY", "check_1052_operator", "check_job", "faa_correction", "faa_ioce", "faa_ioce_sdm", "faa_mdm", "library_headers", "library_reel", "machine", "sdm", "source", "start_card_to_tape", "start_ctc_restart")
 load("//scripts/smoke:s370_diag.star", "CE_SECTIONS")
-
-def library_headers(records):
-    headers = []
-    for i, record in enumerate(records):
-        if record.tape_mark:
-            break
-        if record.data != None and record.data.size == 12:
-            data = binary.hex(record.data.bytes(0, 12)).upper()
-            if data[1:4] in ["FFF", "FFE"] and data[8] == "D":
-                headers.append((i, data))
-    return headers
 
 def check_ioce(tape):
     m = faa_ioce(tape)
@@ -45,14 +34,6 @@ def check_ioce(tape):
         fail("IOCE storage diagnostics did not reach SDM EOJ with the expected routine counts\n" + "\n".join(res["transcript"][-18:]))
     return [data[8:14] for data in seen] + [section for section, _ in completed]
 
-def check_job(m, section, required):
-    lines = [line.strip() for line in m.screens(0x01f)]
-    if ([line for line in lines if line.startswith("S   ")] != ["S   " + section] or
-        [line for line in lines if line == END_OF_JOB] != [END_OF_JOB] or
-        any([line.startswith("* ") or line.startswith("HLT ") for line in lines]) or
-        any([line not in lines for line in required])):
-        fail("%s did not finish cleanly (%s)\n%s" % (section, m.psw(), "\n".join(lines[-18:])))
-
 def check_tape_end(tape):
     m = machine(tape)
     # A22-6866-4 describes reels with as little as 50 feet of usable tape.
@@ -71,25 +52,10 @@ def check_tape_end(tape):
     faa_correction(m, 0x8690, "D212F31EF251", "078547F0F67C")
     m.clear_breaks()
     m.run(instructions = 60000000)
-    check_job(m, "D40610", ["TAPE REWINDING -- END OF TAPE SENSED.", "T   D40610 79 ROUTINES RUN"])
+    check_job(m, "D40610", ["TAPE REWINDING -- END OF TAPE SENSED.", "T   D40610 EF ROUTINES RUN"])
 
 def check_card_to_tape(tape):
-    m = machine(tape, scratch_tapes = [0x3f0], punch = True)
-    m.ipl(0x130)
-    r = m.run(instructions = 30000000)
-    if r.psw != SDM_READY:
-        fail("D70F12: SDM did not reach the operator prompt (%s %s)" % (r.kind, r.psw))
-    card = "FAA 9020 CARD TO TAPE " + "0123456789" * 5 + "ABCDEFGH"
-    m.cards(0x00c, ["E/A,01F/A,00E/A,00C/A6B00000D/A400003F0/I,01F,01F,00E,130/L70F1/B", card])
-    m.interrupt_key()
-    started = False
-    for _ in range(250):
-        r = m.run(instructions = 100000)
-        started = "CARD TO TAPE ROUTINE" in [line.strip() for line in m.screens(0x01f)]
-        if started:
-            break
-    if not started:
-        fail("D70F12 did not start the card-to-tape routine (%s %s)" % (r.kind, r.psw))
+    m, card = start_card_to_tape(tape)
 
     # Restore D70F1200.SPT's BALL masks after the utility is loaded.
     for addr in [0x84fd, 0x8537, 0x8627, 0x862f, 0x8637]:
@@ -144,14 +110,15 @@ def start_disk_build(tape):
     m.dasd(0x350, type = "2314", cylinders = 203, volser = "FAA902")
     m.ipl(0x130)
     m.break_at(0x80fc)
-    start = sdm(m, message = "E/A,01F/A,00E/A400003F0/A80000350/I,01F,01F,00E,130/L8150/B",
+    start = sdm(m, message = "E/A,01F/A,00E/A400003F0/A80000350/I,01F,01F,00E,130/S8150.E0000000/L8150/B",
                 budget = 30000000, step = 100000, stop = "S   D81504", show = False)
     if start["ended"] != "stop" or start["errors"] or m.run(instructions = 1000000).kind != "breakpoint":
         fail("D81504 did not start disk initialization")
     m.clear_breaks()
     # Request initialization, full-pack read and build together. The
     # manual's single-bit BALL branches select each requested routine.
-    faa_correction(m, 0x8004, "00", "E0")
+    if m.read(0x8004, 4) != b"\xe0\x00\x00\x00":
+        fail("D81504 did not receive the section-specific routine switches")
     for addr in [0x8123, 0x8307, 0x8945]:
         faa_correction(m, addr, "40", "10")
     # The three immediate-status tests and the I/O interruption handler
@@ -265,51 +232,6 @@ def check_dual_2821(tape):
             "A6300002B/A6300042B/A6300002C/A6300042C/L6AA0,028,428,029,429,02A,42A,02B,42B,02C,42C/B/",
             "D6AA00", "023", 120000000)
 
-def wait_1052_read(m):
-    for _ in range(350):
-        if "blocked=true" in m.subchannel(0x01f):
-            return
-        m.run(instructions = 20000)
-    fail("1052 did not request keyboard input (%s)\n%s" % (m.psw(), "\n".join(m.screens(0x01f)[-10:])))
-
-def start_1052(tape, section, prompt):
-    m = machine(tape)
-    m.ipl(0x130)
-    start = sdm(m, message = "E/A,01F/A,00E/I,01F,01F,00E,130/L" + section + "/B",
-                budget = 90000000, step = 20000, stop = prompt, show = False)
-    if start["ended"] != "stop" or start["errors"]:
-        fail("D%s: 1052 diagnostic did not reach its operator prompt" % section)
-    return m
-
-def check_1052_operator(tape):
-    m = start_1052(tape, "6651", "MAKE 1052 NOT RDY")
-    m.key(0x01f, "NOT READY")
-    # Allow the prompt's carrier return and the diagnostic's not-ready probe.
-    m.run(instructions = 2400000)
-    m.key(0x01f, "READY")
-    m.run(instructions = 2110000)
-    if "DEPRESS 1052 REQUEST BUTTON" not in m.screen(0x01f):
-        fail("D66511 did not receive device end from the ready transition")
-    m.key(0x01f, "REQUEST")
-    wait_1052_read(m)
-    m.type(0x01f, "ABC", cancel = True)
-    m.run(instructions = 26000000)
-    check_job(m, "D66511", ["ENTER 3 CHARS.,THEN CANCEL MSG.", "T   D66511 06 ROUTINES RUN"])
-
-    m = start_1052(tape, "6653", "TYPE LOWER CASE TAB THRU LINE FEED")
-    # Enter the eight keyboard rows in D6653100.SPT, including the
-    # control keys. The first inquiry intentionally overfills its count.
-    for row in [
-        "05F1F2F3F4F5F6F7F8F9F060501625C1", "98A68599A3A8A48996977C15",
-        "81A2848687889192935B7B", "A9A783A58295946B4B6140",
-        "7E4C5E7A6C7D6E5C4D5D6D4E", "D8E6C5D9E3E8E4C9D6D74A",
-        "C1E2C4C6C7C8D1D2D35A7F", "E9E7C3E5C2D5D44F5F6F",
-    ]:
-        wait_1052_read(m)
-        m.type(0x01f, binary.text(binary.decode(row, "hex"), encoding = "cp037"))
-    m.run(instructions = 20000000)
-    check_job(m, "D66531", ["T   D66531 08 ROUTINES RUN"])
-
 def check_disk_maintenance(tape):
     m = machine(tape)
     m.dasd(0x340, type = "2314", cylinders = 203, volser = "FAA902")
@@ -325,19 +247,7 @@ def check_disk_maintenance(tape):
         fail("2314 maintenance did not complete with the operator bypass off\n" + "\n".join(lines[-30:]))
 
 def check_ctc_operator(tape):
-    m = machine(tape)
-    m.ctc(0x320, peer = 0x420)
-    m.ipl(0x130)
-    r = m.run(instructions = 30000000)
-    if r.psw != SDM_READY:
-        fail("DA0515: SDM did not reach the operator prompt")
-    # Switch 14 selects wrap mode. Leave the manual bypass off.
-    m.cards(0x00c, ["E/SW.00020000/A,01F/A,00E/AA0000320/AA0000420/I,01F,01F,00E,130/LA051/B"], replace = True)
-    m.break_at(0x97dc)
-    m.interrupt_key()
-    r = m.run(instructions = 95000000)
-    if r.kind != "breakpoint" or m.read(0x8000, 3) != b"\xda\x05\x15":
-        fail("DA0515 did not reach the restart setup")
+    m = start_ctc_restart(tape)
     # DA051500.SPT's SET4 reads the ATR before saving the pair.
     # Replay the displaced STM after the restored IATR.
     faa_correction(m, 0xafc0, "00" * 10, "0E7890789AB447F097E0")
@@ -355,8 +265,7 @@ def check_ctc_operator(tape):
     m.run(instructions = 80000000)
     check_job(m, "DA0515", ["T   DA0515 0A ROUTINES RUN"])
 
-def main(args):
-    tape = library_reel(source())
+def run_faa(tape):
     ioce = check_ioce(tape)
     check_tape_end(tape)
     check_card_to_tape(tape)
@@ -373,6 +282,14 @@ def main(args):
     catalog = [data[8:14] for _, data in library_headers(archive.simh(tape).records)]
     if len(sections) != 215 or sorted(catalog) != sorted(sections + loaders):
         fail("the smoke section lists do not account for the complete pinned tape catalog")
-    print("The two smokes cover the tape catalog's 215 diagnostic and utility sections, alongside 11 loader and monitor entries.")
+    print("The original and FAA jobs account for all 215 diagnostic and utility sections. The catalog also contains 11 loader and monitor entries.")
     print("D81504 printed the pack and catalog listings. The generated disk IPL ran D11011 to SDM EOJ.")
     print("1052, 2314 and channel-adapter jobs completed with the manual bypass off.")
+
+def main(args):
+    tape = library_reel(source())
+    if len(args) == 1 and args[0] == "mdm-decimal":
+        mdm_job(faa_mdm(tape), "A32/L1102/B/", "D11020", "071", 120000000)
+        print("D11020 completed 71 routines under FAA-restored MDM")
+        return
+    run_faa(tape)

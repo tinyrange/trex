@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
+	"time"
 
 	"github.com/tinyrange/trex/filesystem/ckd"
 	"github.com/tinyrange/trex/storage"
@@ -26,6 +27,7 @@ type DASD3390 struct {
 	overlay   map[uint32][]ckd.Record
 	home      map[uint32][5]byte
 	overflow  map[uint32]map[int]bool // 2314 track and record index of continued segments
+	r0Checks  map[uint32]int          // remaining injected record-zero read data checks
 	cache     map[uint32]*trackEntry
 	lru       trackEntry // sentinel of the most-recently-used list
 	cacheSize int        // decoded bytes held in cache
@@ -38,8 +40,11 @@ type DASD3390 struct {
 	afterData      bool // orientation past the data area of rec (false: after count)
 	afterKey       bool // the current record's key has already been searched
 	indexPass      int
-	seekIncomplete bool // the 2314 actuator reached its travel stop
-	plugRemoved    bool // without its identifier plug the 2314 has no address
+	seekIncomplete bool   // the 2314 actuator reached its travel stop
+	plugRemoved    bool   // without its identifier plug the 2314 has no address
+	motorStopped   bool   // the drive is addressable but requires intervention
+	physical2314   uint16 // original module slot plus one, independent of the ID plug
+	seekExtra2314  time.Duration
 
 	// extent / locate record
 	extent     bool
@@ -400,6 +405,7 @@ const (
 	senseIntervReq  = 0x40
 	senseEquipCheck = 0x10
 	senseDataCheck  = 0x08
+	senseOverrun    = 0x04
 	// byte 1
 	senseNoRecord     = 0x08
 	senseFileProtect  = 0x04
@@ -441,12 +447,24 @@ func (d *DASD3390) Exec(cmd byte, data []byte, chained bool) ([]byte, int, byte)
 	return d.exec(cmd, data, chained, nil, false)
 }
 
+func (d *DASD3390) TestIOStatus() byte {
+	if d.motorStopped {
+		d.sense[0] |= senseIntervReq
+		return usUnitCheck
+	}
+	return 0
+}
+
 func (d *DASD3390) exec(cmd byte, data []byte, chained bool, write *diskWrite2314, earlySeek bool) ([]byte, int, byte) {
 	d.Stats.Commands++
 	prev := d.prevCmd
 	match := d.searchMatch
 	d.prevCmd = cmd
 	if d.devType == 0x2314 {
+		if d.motorStopped && cmd != 0x04 {
+			d.check(senseIntervReq, 0, 0, "drive motor stopped")
+			return nil, 0, usUnitCheck
+		}
 		d.searchMatch, d.formatErase = 0, false
 		if !command2314(cmd) {
 			d.check(senseCmdReject, 0, 0, fmt.Sprintf("command %02X", cmd))
@@ -498,7 +516,14 @@ func (d *DASD3390) exec(cmd byte, data []byte, chained bool, write *diskWrite231
 		s := d.sense
 		d.sense = [32]byte{}
 		if d.devType == 0x2314 {
-			s[3] |= 0x40 // the drive is online
+			if d.physical2314 != 0 {
+				s[4] = s[4]&0xf0 | byte(d.physical2314-1)&0x0f
+			}
+			if d.motorStopped {
+				s[3] |= 0x08
+			} else {
+				s[3] |= 0x40 // the drive is online
+			}
 			if d.seekIncomplete {
 				s[3] |= sense2314SeekIncomplete
 			}
@@ -1072,7 +1097,16 @@ func (d *DASD3390) readCount(mt bool) ([]byte, int, byte) {
 }
 
 func (d *DASD3390) readR0() ([]byte, int, byte) {
-	r, err := d.track(d.curTrack())
+	track := d.curTrack()
+	if remaining := d.r0Checks[track]; remaining > 0 {
+		if remaining == 1 {
+			delete(d.r0Checks, track)
+		} else {
+			d.r0Checks[track] = remaining - 1
+		}
+		return d.check(senseDataCheck, 0x80, 0, "read R0: injected count field data check")
+	}
+	r, err := d.track(track)
 	if err != nil {
 		return d.check(senseDataCheck, 0, 0, err.Error())
 	}
@@ -1264,6 +1298,7 @@ func (d *DASD3390) writeR0(data []byte) ([]byte, int, byte) {
 	}
 	nr := ckd.Record{Cylinder: be.Uint16(data[0:]), Head: be.Uint16(data[2:]), Number: data[4],
 		Key: append([]byte(nil), data[8:8+kl]...), Data: append([]byte(nil), data[8+kl:8+kl+dl]...)}
+	markTrack(&d.usedWritten, t)
 	d.overlay[t] = []ckd.Record{nr}
 	delete(d.overflow, t)
 	d.uncache(t)
@@ -1411,7 +1446,12 @@ func (d *DASD3390) rdc() []byte {
 // SetDeviceNumber records the device number reported in configuration
 // data: its low byte is the unit address and its high byte selects the
 // control unit, so each control unit is a separate storage subsystem.
-func (d *DASD3390) SetDeviceNumber(devno uint16) { d.devno = devno }
+func (d *DASD3390) SetDeviceNumber(devno uint16) {
+	d.devno = devno
+	if d.devType == 0x2314 && d.physical2314 == 0 {
+		d.physical2314 = devno + 1
+	}
+}
 
 func (d *DASD3390) rcd() []byte {
 	// Five 32-byte node-element descriptors (device, string, storage

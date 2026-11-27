@@ -15,15 +15,52 @@ type switch2821State struct {
 }
 
 type unit2821State struct {
-	Owner byte
-	Check byte
-	Wait  [2]bool
+	ReadyPending bool
+	ReadyOffered [2]bool
+	Owner        byte
+	Check        byte
+	Wait         [2]bool
 }
 
 type unit2821Port struct {
 	control *switch2821
 	paths   [2]*Subchannel
 	state   unit2821State
+}
+
+func (u *UnitRecord) on2821() bool {
+	return u.Type == 0x2540 || u.Type == 0x2541 || u.Type == 0x1403
+}
+
+// Set2821Burst operates the CE panel mode switch on the attached controller.
+func (s *ChannelSubsystem) Set2821Burst(devno uint16, burst bool) error {
+	x := s.bydev[devno]
+	if x == nil {
+		return fmt.Errorf("no unit at %04X", devno)
+	}
+	u, ok := x.dev.(*UnitRecord)
+	if !ok || !u.on2821() {
+		return fmt.Errorf("unit %04X does not use a 2821", devno)
+	}
+	units := []*UnitRecord{u}
+	if u.port != nil {
+		units = u.port.control.units
+	} else if u.cardPeer != nil {
+		units = append(units, u.cardPeer)
+	}
+	for _, peer := range s.subs {
+		if device, ok := peer.dev.(*UnitRecord); ok && peer.working() {
+			for _, unit := range units {
+				if device == unit {
+					return fmt.Errorf("2821 unit %04X is busy", peer.devno)
+				}
+			}
+		}
+	}
+	for _, unit := range units {
+		unit.burst2821 = burst
+	}
+	return nil
 }
 
 // Attach2821Switch connects existing 2821 devices to a second interface.
@@ -87,7 +124,7 @@ func (c *switch2821) holdsControl(side byte) bool {
 
 func (p *unit2821Port) holdsUnit(side byte) bool {
 	x := p.paths[side-1]
-	return p.state.Owner == side || x.working() || x.deAt != 0 || x.devPending && x.devStatus&usDE != 0
+	return p.state.Owner == side || x.working() || x.deAt != 0 || x.devPending && x.devStatus&usDE != 0 && !p.state.ReadyOffered[side-1]
 }
 
 func (p *unit2821Port) selectStatus(s *ChannelSubsystem, x *Subchannel) byte {
@@ -107,6 +144,22 @@ func (p *unit2821Port) selectStatus(s *ChannelSubsystem, x *Subchannel) byte {
 		return usBusy
 	}
 	return 0
+}
+
+// A ready transition is one device end shared by both interfaces (GA24-3312,
+// p. 69). Accepting it on one path withdraws the offer on the other.
+func (p *unit2821Port) acceptReady(s *ChannelSubsystem, x *Subchannel) {
+	i := p.side(x) - 1
+	if !p.state.ReadyOffered[i] {
+		return
+	}
+	other := 1 - i
+	withdraw := p.state.ReadyOffered[other]
+	p.state.ReadyPending = false
+	p.state.ReadyOffered = [2]bool{}
+	if withdraw {
+		s.accept370(p.paths[other])
+	}
 }
 
 func (c *switch2821) notify() {
@@ -133,7 +186,9 @@ func (c *switch2821) notify() {
 				waiting = nil
 				break
 			}
-			if p.state.Wait[i] && !p.holdsUnit(other) && !x.pending && !x.working() {
+			ready := p.state.ReadyPending && x.enabled && x.deAt == 0
+			if (p.state.Wait[i] || ready) && !p.holdsUnit(other) &&
+				!x.pending && !x.working() {
 				// A 2540 reader has priority over its punch, followed
 				// by the printers in control-unit order.
 				rank := [5]int{2, 0, 1, 3, 4}[x.devno&7]
@@ -143,7 +198,11 @@ func (c *switch2821) notify() {
 			}
 		}
 		if waiting != nil {
-			waiting.state.Wait[i] = false
+			if waiting.state.Wait[i] {
+				waiting.state.Wait[i] = false
+			} else {
+				waiting.state.ReadyOffered[i] = true
+			}
 			waiting.paths[i].presentDeviceStatus(usDE)
 		}
 	}

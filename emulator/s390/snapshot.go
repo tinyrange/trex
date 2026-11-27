@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/tinyrange/trex/filesystem/ckd"
 )
@@ -29,28 +32,42 @@ import (
 var snapshotMagic = []byte("TREXS390\x00\x01")
 
 type machineSnap struct {
-	S370                  bool
-	S360, Model9020, IOCE bool
-	MemSize               int
-	KeyShift              uint
-	TOD, LastStck         uint64
-	TODProgrammable       uint16
-	ServiceSignal         bool
-	ServiceParam          uint32
-	InputWake             bool
-	LoadParm              string
-	SCPConfig             [6]byte
-	Facilities            uint32
-	SCPCPUFacilities      [12]byte
-	SCLP                  sclpSnap
-	CPUs                  []cpuSnap
-	Subchannels           []subSnap
-	CRW                   []uint32
-	CRWPend               bool
-	Devices               []devSnap
-	Mem, Keys             []byte
-	MACH                  []byte
-	IOCEATR               [3]channelATR9020
+	NoIntervalTimer                         bool
+	S370                                    bool
+	S360, Model9020, Model50, Model65, IOCE bool
+	Model9020A                              bool
+	Model9020E                              bool
+	MemSize                                 int
+	MainEnd9020E                            uint32
+	ByteMuxSubchannels                      int
+	KeyShift                                uint
+	TOD, LastStck                           uint64
+	TODProgrammable                         uint16
+	ServiceSignal                           bool
+	ServiceParam                            uint32
+	InputWake                               bool
+	LoadParm                                string
+	SCPConfig                               [6]byte
+	Facilities                              uint32
+	SCPCPUFacilities                        [12]byte
+	SCLP                                    sclpSnap
+	CPUs                                    []cpuSnap
+	Subchannels                             []subSnap
+	CRW                                     []uint32
+	CRWPend                                 bool
+	Devices                                 []devSnap
+	Mem, Keys                               []byte
+	MACH                                    []byte
+	IOCEATR                                 [3]channelATR9020
+	IOCEChecks9020                          [3]ioceMachineCheck9020
+	StorageLogout9020                       [max9020StorageElements]storageLogout9020
+	StorageLatches9020                      [max9020StorageElements][2]storageCycle9020
+	Storage9020A                            [max9020AStorageElements]storageElement9020A
+	StorageBadParity9020                    map[uint32]byte
+	StorageBadKey9020                       map[uint32]bool
+	Configuration9020                       [32]configRegister9020
+	DisplayRefresh9020E                     [max9020EDisplayElements]displayRefresh9020E
+	RCUEndpoints9020                        [28]rcuEndpoint9020
 }
 
 type sclpSnap struct {
@@ -91,13 +108,24 @@ type cpuSnap struct {
 	IODelay                          int
 	ExcAddr, ExcSpace                uint32
 	DAR9020, DARMask9020, Checks9020 uint32
+	MachineCheck9020                 machineCheck9020
 	PIR9020                          byte
 	ATR9020                          uint64
 	ATRSet9020                       bool
 	PSB9020                          uint32
+	PSBAlternate9020                 bool
 	Local9020                        [4][16]uint32
 	Delay9020                        uint64
 	DiagnosticSE1                    bool
+	Interleave9020                   interleave9020
+	InterleavePanel9020              interleave9020
+	TimerInhibitSince9020            uint64
+	CountLogoutAt9020                uint64
+	ReverseSumParity9020             bool
+	ReverseMarkParity9020            bool
+	ReverseAddressParity9020         storageCycleFlags9020
+	ScanPrefetch9020                 scanPrefetch9020
+	DisplayWrap9020E                 byte
 	SIE                              *sieSnap // interpretive execution in progress
 }
 
@@ -139,6 +167,7 @@ func (s *sieSnap) state() *sieState {
 
 type subSnap struct {
 	Num, Devno                       uint16
+	CE9020                           uint16
 	Intparm                          uint32
 	ISC                              byte
 	Enabled                          bool
@@ -155,7 +184,8 @@ type subSnap struct {
 	Pending, IRQ                     bool
 	CCDeferred                       byte
 	Sense                            []byte
-	AttnHold                         bool
+	HeldStatus                       byte
+	AttnHold                         bool // legacy checkpoints stored only attention
 	Blocked                          bool
 	BlockAddr                        uint32
 	BlockFmt1, PCIWait, PCIInterrupt bool
@@ -179,9 +209,16 @@ type opSnap struct {
 	Segs                []segSnap
 	Total, Cur          uint32
 	ReadStored          uint32
+	OutputFetched       uint32
+	InputLimit          uint32
 	Out                 []byte
 	TapeWrite           []byte
 	DiskWrite           *diskWrite2314
+	RKMOrder            byte
+	RKMOutput           []byte
+	RKMOperator         rkmOperator9020E
+	TimedOutput         bool
+	OutputOverrun       bool
 	Used                int
 	Status              byte
 	Read, Chained, Fmt1 bool
@@ -189,6 +226,7 @@ type opSnap struct {
 	LengthOnException   bool
 	Key, Err            byte
 	ChainErr            uint32
+	ChainStatus         byte
 	Checked             bool
 }
 
@@ -207,9 +245,10 @@ func snapOp(op *ccwOp) *opSnap {
 	if op == nil {
 		return nil
 	}
-	o := &opSnap{Cmd: op.Cmd, Addrs: op.Addrs, Total: op.Total, Cur: op.Cur, ReadStored: op.ReadStored, Out: op.Out, TapeWrite: op.TapeWrite, DiskWrite: op.DiskWrite, Used: op.Used, Halted: op.Halted,
-		Status: op.Status, Read: op.Read, Chained: op.Chained, Fmt1: op.Fmt1, Key: op.Key, Err: op.Err, ChainErr: op.ChainErr, Checked: op.Checked,
-		LengthOnException: op.LengthOnException}
+	o := &opSnap{Cmd: op.Cmd, Addrs: op.Addrs, Total: op.Total, Cur: op.Cur, ReadStored: op.ReadStored, OutputFetched: op.OutputFetched, InputLimit: op.InputLimit, Out: op.Out, TapeWrite: op.TapeWrite, DiskWrite: op.DiskWrite, TimedOutput: op.TimedOutput, Used: op.Used, Halted: op.Halted,
+		Status: op.Status, Read: op.Read, Chained: op.Chained, Fmt1: op.Fmt1, Key: op.Key, Err: op.Err, ChainErr: op.ChainErr, ChainStatus: op.ChainStatus, Checked: op.Checked,
+		LengthOnException: op.LengthOnException, OutputOverrun: op.OutputOverrun,
+		RKMOrder: op.RKMOrder, RKMOutput: op.RKMOutput, RKMOperator: op.RKMOperator}
 	for _, w := range append(append([]ccw(nil), op.Chain...), op.Last) {
 		o.Chain = append(o.Chain, ccwSnap{w.cmd, w.flags, w.count, w.addr})
 	}
@@ -223,9 +262,10 @@ func (o *opSnap) op() *ccwOp {
 	if o == nil {
 		return nil
 	}
-	op := &ccwOp{Cmd: o.Cmd, Addrs: o.Addrs, Total: o.Total, Cur: o.Cur, ReadStored: o.ReadStored, Out: o.Out, TapeWrite: o.TapeWrite, DiskWrite: o.DiskWrite, Used: o.Used, Halted: o.Halted,
-		Status: o.Status, Read: o.Read, Chained: o.Chained, Fmt1: o.Fmt1, Key: o.Key, Err: o.Err, ChainErr: o.ChainErr, Checked: o.Checked,
-		LengthOnException: o.LengthOnException}
+	op := &ccwOp{Cmd: o.Cmd, Addrs: o.Addrs, Total: o.Total, Cur: o.Cur, ReadStored: o.ReadStored, OutputFetched: o.OutputFetched, InputLimit: o.InputLimit, Out: o.Out, TapeWrite: o.TapeWrite, DiskWrite: o.DiskWrite, TimedOutput: o.TimedOutput, Used: o.Used, Halted: o.Halted,
+		Status: o.Status, Read: o.Read, Chained: o.Chained, Fmt1: o.Fmt1, Key: o.Key, Err: o.Err, ChainErr: o.ChainErr, ChainStatus: o.ChainStatus, Checked: o.Checked,
+		LengthOnException: o.LengthOnException, OutputOverrun: o.OutputOverrun,
+		RKMOrder: o.RKMOrder, RKMOutput: o.RKMOutput, RKMOperator: o.RKMOperator}
 	for _, w := range o.Chain {
 		op.Chain = append(op.Chain, ccw{w.Cmd, w.Flags, w.Count, w.Addr})
 	}
@@ -238,9 +278,10 @@ func (o *opSnap) op() *ccwOp {
 }
 
 type devSnap struct {
-	Devno uint16
-	Kind  string
-	Data  []byte
+	Devno          uint16
+	Kind           string
+	Data           []byte
+	Controller9020 uint8
 }
 
 // snapshotter is implemented by devices whose state can be checkpointed.
@@ -263,13 +304,27 @@ func decodeGob(data []byte, v any) error {
 // capture copies the machine's mutable state. Storage is copied, so the
 // result stays valid while the machine continues to run.
 func (m *Machine) capture() (*machineSnap, error) {
-	s := &machineSnap{S370: m.S370, S360: m.S360, Model9020: m.Model9020, IOCE: m.cfg.IOCE, MemSize: len(m.S.Mem), KeyShift: m.S.KeyShift,
-		TOD: m.tod, LastStck: m.lastStck, TODProgrammable: m.todProgrammable,
+	s := &machineSnap{NoIntervalTimer: m.cfg.NoIntervalTimer, S370: m.S370, S360: m.S360, Model9020: m.Model9020, Model50: m.cfg.Model50, Model65: m.cfg.Model65, IOCE: m.cfg.IOCE, MemSize: len(m.S.Mem), KeyShift: m.S.KeyShift,
+		ByteMuxSubchannels: m.cfg.ByteMuxSubchannels,
+		MainEnd9020E:       m.S.mainEnd9020E,
+		TOD:                m.tod, LastStck: m.lastStck, TODProgrammable: m.todProgrammable,
 		ServiceSignal: m.serviceSignal, ServiceParam: m.serviceParam, InputWake: m.inputWake,
 		LoadParm: m.LoadParm, SCPConfig: m.SCPConfig, Facilities: m.Facilities, SCPCPUFacilities: m.SCPCPUFacilities,
 		CRW: append([]uint32(nil), m.CSS.crw...), CRWPend: m.CSS.crwPend,
 		Mem: append([]byte(nil), m.S.Mem...), Keys: append([]byte(nil), m.S.Keys...),
-		MACH: append([]byte(nil), m.CSS.mach...), IOCEATR: m.CSS.ioceATR}
+		MACH: append([]byte(nil), m.CSS.mach...), IOCEATR: m.CSS.ioceATR, IOCEChecks9020: m.CSS.ioceChecks9020, StorageLogout9020: m.storageLogout9020,
+		StorageLatches9020: m.storageLatches9020, StorageBadParity9020: maps.Clone(m.storageBadParity9020),
+		StorageBadKey9020: maps.Clone(m.storageBadKey9020),
+		Model9020A:        m.cfg.Model9020A, Model9020E: m.cfg.Model9020E, Storage9020A: m.storage9020A, Configuration9020: m.configuration9020,
+		DisplayRefresh9020E: m.displayRefresh9020E, RCUEndpoints9020: m.CSS.rcuEndpoints9020}
+	for i := range s.RCUEndpoints9020 {
+		rkm := &s.RCUEndpoints9020[i].RKM
+		rkm.Input = slices.Clone(rkm.Input)
+		if rkm.Memory != nil {
+			memory := *rkm.Memory
+			rkm.Memory = &memory
+		}
+	}
 	sc := m.sclp
 	s.SCLP = sclpSnap{CPReceive: sc.cpReceive, CPSend: sc.cpSend, Lines: append([]string(nil), sc.Lines...),
 		Partial: append([]byte(nil), sc.Partial...), Dropped: sc.dropped, Version: sc.version}
@@ -289,15 +344,22 @@ func (m *Machine) capture() (*machineSnap, error) {
 			DXC: c.dxc, ExcAddr: c.excAddr, ExcSpace: c.excSpace, IODelay: c.ioDelay,
 			DAR9020: c.maintenance9020.dar, DARMask9020: c.maintenance9020.darMask,
 			Checks9020: c.maintenance9020.checks, PIR9020: c.maintenance9020.pir,
-			ATR9020: c.maintenance9020.atr, ATRSet9020: c.maintenance9020.atrSet, PSB9020: c.maintenance9020.psb,
-			Local9020: c.maintenance9020.local, Delay9020: c.maintenance9020.delayUntil, DiagnosticSE1: c.maintenance9020.diagnosticSE1})
+			MachineCheck9020: c.maintenance9020.machineCheck,
+			ATR9020:          c.maintenance9020.atr, ATRSet9020: c.maintenance9020.atrSet, PSB9020: c.maintenance9020.psb, PSBAlternate9020: c.maintenance9020.psbAlternate,
+			Local9020: c.maintenance9020.local, Delay9020: c.maintenance9020.delayUntil, DiagnosticSE1: c.maintenance9020.diagnosticSE1,
+			Interleave9020: c.maintenance9020.interleave, InterleavePanel9020: c.interleavePanel9020,
+			TimerInhibitSince9020: c.maintenance9020.timerInhibitSince,
+			ReverseSumParity9020:  c.maintenance9020.reverseSumParity,
+			CountLogoutAt9020:     c.maintenance9020.countLogoutAt, ReverseMarkParity9020: c.maintenance9020.reverseMarkParity,
+			ReverseAddressParity9020: c.maintenance9020.reverseAddressParity, ScanPrefetch9020: c.maintenance9020.scanPrefetch,
+			DisplayWrap9020E: c.maintenance9020.displayWrap})
 	}
 	for _, x := range m.CSS.subs {
-		s.Subchannels = append(s.Subchannels, subSnap{Num: x.num, Devno: x.devno, Intparm: x.intparm, ISC: x.isc,
+		s.Subchannels = append(s.Subchannels, subSnap{Num: x.num, Devno: x.devno, CE9020: x.ce9020, Intparm: x.intparm, ISC: x.isc,
 			Enabled: x.enabled, LPM: x.lpm, MBI: x.mbi, MM: x.mm, Limit: x.limit, Multipath: x.multip, Timing: x.timing,
 			Key: x.key, CCWFmt: x.ccwfmt, Flags: x.flags, FC: x.fc, AC: x.ac, SC: x.sc, CCWAddr: x.ccwaddr,
 			DevStatus: x.devStatus, SchStatus: x.schStatus, Residual: x.residual, Pending: x.pending, IRQ: x.irq,
-			CCDeferred: x.ccDeferred, Sense: append([]byte(nil), x.sense...), AttnHold: x.attnHold,
+			CCDeferred: x.ccDeferred, Sense: append([]byte(nil), x.sense...), HeldStatus: x.heldStatus,
 			Blocked: x.blocked, BlockAddr: x.blockAddr, BlockFmt1: x.blockFmt1, PCIWait: x.pciWait,
 			PCIInterrupt: x.pciIRQ, PCIAt: x.pciAt, Timed: x.timed, DevPending: x.devPending, EndCE: x.endCE, EndDE: x.endDE,
 			CCWs: x.ccws, ResumeAt: x.resumeAt, FinishAt: x.finishAt, DEAt: x.deAt, DEStatus: x.deStatus,
@@ -310,7 +372,7 @@ func (m *Machine) capture() (*machineSnap, error) {
 		if err != nil {
 			return nil, fmt.Errorf("s390: device %04X: %w", x.devno, err)
 		}
-		s.Devices = append(s.Devices, devSnap{Devno: x.devno, Kind: sn.snapshotKind(), Data: data})
+		s.Devices = append(s.Devices, devSnap{Devno: x.devno, Kind: sn.snapshotKind(), Data: data, Controller9020: x.controller9020})
 	}
 	return s, nil
 }
@@ -360,7 +422,10 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 		return fmt.Errorf("s390: checkpoint: %w", err)
 	}
 	// Validate everything before changing anything.
-	if s.S370 != m.S370 || s.S360 != m.S360 || s.Model9020 != m.Model9020 || s.IOCE != m.cfg.IOCE || s.MemSize != len(m.S.Mem) || len(s.CPUs) != len(m.CPUs) {
+	if s.NoIntervalTimer != m.cfg.NoIntervalTimer || s.S370 != m.S370 || s.S360 != m.S360 || s.Model9020 != m.Model9020 ||
+		s.Model9020A != m.cfg.Model9020A || s.Model9020E != m.cfg.Model9020E || s.Model50 != m.cfg.Model50 || s.Model65 != m.cfg.Model65 ||
+		s.IOCE != m.cfg.IOCE || s.ByteMuxSubchannels != m.cfg.ByteMuxSubchannels || s.MemSize != len(m.S.Mem) ||
+		s.MainEnd9020E != m.S.mainEnd9020E || len(s.CPUs) != len(m.CPUs) {
 		return fmt.Errorf("s390: checkpoint is of a different machine (%d bytes, %d CPUs, S/370 %v)", s.MemSize, len(s.CPUs), s.S370)
 	}
 	if len(s.MACH) != 0 && len(s.MACH) != len(m.CSS.mach) {
@@ -395,7 +460,7 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 		}
 		d, ok := devs[x.devno]
 		sn, can := x.dev.(snapshotter)
-		if !ok || !can || sn.snapshotKind() != d.Kind {
+		if !ok || !can || sn.snapshotKind() != d.Kind || x.controller9020 != d.Controller9020 {
 			return fmt.Errorf("s390: device %04X differs from the checkpoint", x.devno)
 		}
 		if dasd, isDASD := x.dev.(*DASD3390); isDASD {
@@ -426,7 +491,25 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 	clear(m.CSS.mach)
 	copy(m.CSS.mach, s.MACH)
 	m.CSS.ioceATR = s.IOCEATR
+	m.CSS.ioceChecks9020 = s.IOCEChecks9020
+	m.storageLogout9020 = s.StorageLogout9020
+	m.storageLatches9020 = s.StorageLatches9020
+	m.storage9020A = s.Storage9020A
+	m.storageBadParity9020 = maps.Clone(s.StorageBadParity9020)
+	m.storageBadKey9020 = maps.Clone(s.StorageBadKey9020)
+	m.configuration9020 = s.Configuration9020
+	m.displayRefresh9020E = s.DisplayRefresh9020E
+	m.CSS.rcuEndpoints9020 = s.RCUEndpoints9020
 	m.tod, m.lastStck, m.todProgrammable = s.TOD, s.LastStck, s.TODProgrammable
+	for i := range m.cfg.DisplayElements9020E {
+		d := &m.displayRefresh9020E[i]
+		if d.DGMask != 0 && d.Tails == [4]byte{} {
+			// Older snapshots scheduled one event per full sweep.
+			d.NextScan = 0
+			m.configureDisplay9020E(i, d.DGMask)
+		}
+	}
+	m.updateDisplayDeadline9020E()
 	m.serviceSignal, m.serviceParam, m.inputWake = s.ServiceSignal, s.ServiceParam, s.InputWake
 	m.LoadParm, m.SCPConfig, m.Facilities, m.SCPCPUFacilities = s.LoadParm, s.SCPConfig, s.Facilities, s.SCPCPUFacilities
 	m.keyGen++
@@ -449,8 +532,13 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 		c.Instructions, c.SIEEntries, c.dxc, c.ioDelay = cs.Instructions, cs.SIEEntries, cs.DXC, cs.IODelay
 		c.excAddr, c.excSpace = cs.ExcAddr, cs.ExcSpace
 		c.maintenance9020 = maintenance9020{dar: cs.DAR9020, darMask: cs.DARMask9020, checks: cs.Checks9020, pir: cs.PIR9020,
-			atr: cs.ATR9020, atrSet: cs.ATRSet9020, psb: cs.PSB9020, local: cs.Local9020,
-			delayUntil: cs.Delay9020, diagnosticSE1: cs.DiagnosticSE1}
+			atr: cs.ATR9020, atrSet: cs.ATRSet9020, psb: cs.PSB9020, psbAlternate: cs.PSBAlternate9020, local: cs.Local9020,
+			delayUntil: cs.Delay9020, diagnosticSE1: cs.DiagnosticSE1, machineCheck: cs.MachineCheck9020,
+			interleave: cs.Interleave9020, timerInhibitSince: cs.TimerInhibitSince9020, countLogoutAt: cs.CountLogoutAt9020,
+			reverseSumParity:  cs.ReverseSumParity9020,
+			reverseMarkParity: cs.ReverseMarkParity9020, reverseAddressParity: cs.ReverseAddressParity9020,
+			scanPrefetch: cs.ScanPrefetch9020, displayWrap: cs.DisplayWrap9020E}
+		c.interleavePanel9020 = cs.InterleavePanel9020
 		c.next = c.PSW.IA
 		c.sie = nil
 		if cs.SIE != nil {
@@ -467,11 +555,15 @@ func (m *Machine) Restore(r io.Reader, disksOnly bool) error {
 	}
 	for _, x := range m.CSS.subs {
 		ss := byNum[x.devno]
+		x.ce9020 = ss.CE9020
 		x.intparm, x.isc, x.enabled, x.lpm, x.mbi = ss.Intparm, ss.ISC, ss.Enabled, ss.LPM, ss.MBI
 		x.mm, x.limit, x.multip, x.timing = ss.MM, ss.Limit, ss.Multipath, ss.Timing
 		x.key, x.ccwfmt, x.flags, x.fc, x.ac, x.sc = ss.Key, ss.CCWFmt, ss.Flags, ss.FC, ss.AC, ss.SC
 		x.ccwaddr, x.devStatus, x.schStatus, x.residual = ss.CCWAddr, ss.DevStatus, ss.SchStatus, ss.Residual
-		x.pending, x.irq, x.ccDeferred, x.sense, x.attnHold = ss.Pending, ss.IRQ, ss.CCDeferred, ss.Sense, ss.AttnHold
+		x.pending, x.irq, x.ccDeferred, x.sense, x.heldStatus = ss.Pending, ss.IRQ, ss.CCDeferred, ss.Sense, ss.HeldStatus
+		if ss.AttnHold {
+			x.heldStatus |= usAttention
+		}
 		x.blocked, x.blockAddr, x.blockFmt1 = ss.Blocked, ss.BlockAddr, ss.BlockFmt1
 		x.pciWait, x.pciIRQ, x.pciAt = ss.PCIWait, ss.PCIInterrupt, ss.PCIAt
 		x.timed, x.devPending, x.endCE, x.endDE, x.ccws = ss.Timed, ss.DevPending, ss.EndCE, ss.EndDE, ss.CCWs
@@ -491,11 +583,15 @@ type dasdSnap struct {
 	Overlay                       map[uint32][]ckd.Record
 	Home                          map[uint32][5]byte
 	Overflow                      map[uint32]map[int]bool
+	R0Checks                      map[uint32]int
 	Cyl, Head                     uint32
 	Rec                           int
 	AfterData, AfterKey           bool
 	SeekIncomplete                bool
 	PlugRemoved                   bool
+	MotorStopped                  bool
+	Physical2314                  uint16
+	SeekExtra2314                 time.Duration
 	IndexPass                     int
 	Extent                        bool
 	Mask                          byte
@@ -554,9 +650,12 @@ func (d *DASD3390) snapshot() ([]byte, error) {
 		}
 		overlay[t] = cp
 	}
-	return encodeGob(dasdSnap{Fingerprint: fp, Overlay: overlay, Home: d.home, Overflow: d.overflow, Cyl: d.cyl, Head: d.head, Rec: d.rec,
+	return encodeGob(dasdSnap{Fingerprint: fp, Overlay: overlay, Home: d.home, Overflow: d.overflow, R0Checks: d.r0Checks, Cyl: d.cyl, Head: d.head, Rec: d.rec,
 		AfterData: d.afterData, AfterKey: d.afterKey, SeekIncomplete: d.seekIncomplete, PlugRemoved: d.plugRemoved,
-		IndexPass: d.indexPass, Extent: d.extent, Mask: d.mask, MaskSet: d.maskSet,
+		MotorStopped:  d.motorStopped,
+		Physical2314:  d.physical2314,
+		SeekExtra2314: d.seekExtra2314,
+		IndexPass:     d.indexPass, Extent: d.extent, Mask: d.mask, MaskSet: d.maskSet,
 		ExtBeg: d.extBeg, ExtEnd: d.extEnd, Locate: d.locate, LROp: d.lrOp, LRCount: d.lrCount, LROrient: d.lrOrient,
 		LRSearch: d.lrSearch, LRSearched: d.lrSearched, LRFirst: d.lrFirst, Sense: d.sense, RSSD: d.rssd,
 		Reserved: d.reserved, PGID: d.pgid, Chained: d.chained, PrevCmd: d.prevCmd, SearchMatch: d.searchMatch, SpaceLengths: d.spaceLengths,
@@ -592,9 +691,16 @@ func (d *DASD3390) restore(data []byte, disksOnly bool) error {
 	if disksOnly {
 		return nil
 	}
+	d.r0Checks = s.R0Checks
 	d.cyl, d.head, d.rec, d.afterData, d.afterKey, d.indexPass = s.Cyl, s.Head, s.Rec, s.AfterData, s.AfterKey, s.IndexPass
 	d.seekIncomplete = s.SeekIncomplete
 	d.plugRemoved = s.PlugRemoved
+	d.motorStopped = s.MotorStopped
+	d.physical2314 = s.Physical2314
+	d.seekExtra2314 = s.SeekExtra2314
+	if d.physical2314 == 0 && d.devType == 0x2314 {
+		d.physical2314 = d.devno + 1
+	}
 	d.extent, d.mask, d.maskSet, d.extBeg, d.extEnd = s.Extent, s.Mask, s.MaskSet, s.ExtBeg, s.ExtEnd
 	d.locate, d.lrOp, d.lrCount, d.lrOrient, d.lrSearch, d.lrSearched, d.lrFirst = s.Locate, s.LROp, s.LRCount, s.LROrient, s.LRSearch, s.LRSearched, s.LRFirst
 	d.sense, d.rssd, d.reserved, d.pgid, d.chained, d.prevCmd = s.Sense, s.RSSD, s.Reserved, s.PGID, s.Chained, s.PrevCmd
@@ -665,7 +771,12 @@ type console3215Snap struct {
 	Dropped                        int
 	Version                        uint64
 	NotReady, ReadyEnd, CancelRead bool
+	ReadStatus                     byte
 	WriteLines                     int
+	CarrierColumn, WriteColumn     int
+	HasCarrierColumn               bool
+	RibbonShift                    bool
+	Ribbon, WriteRibbon            ribbon1052
 	WritePartial                   string
 	WriteData                      []byte
 	WriteReturn                    bool
@@ -698,7 +809,10 @@ func (t *Console3215) restoreConsoleState(s console3215Snap) {
 
 func (t *Console1052) snapshot() ([]byte, error) {
 	s := t.consoleState()
-	s.NotReady, s.ReadyEnd, s.CancelRead = t.notReady, t.readyEnd, t.cancelRead
+	s.NotReady, s.ReadyEnd, s.ReadStatus = t.notReady, t.readyEnd, t.readStatus
+	s.CancelRead = t.readStatus == usUnitExcept
+	s.RibbonShift, s.Ribbon, s.WriteRibbon = t.ribbonShift, t.ribbon, t.wRibbon
+	s.CarrierColumn, s.WriteColumn, s.HasCarrierColumn = t.column, t.wColumn, true
 	s.WriteLines, s.WritePartial, s.WriteData, s.WriteReturn = t.wLines, t.wPart, t.wData, t.wCR
 	return encodeGob(s)
 }
@@ -709,50 +823,70 @@ func (t *Console1052) restore(data []byte, _ bool) error {
 		return err
 	}
 	t.restoreConsoleState(s)
-	t.notReady, t.readyEnd, t.cancelRead = s.NotReady, s.ReadyEnd, s.CancelRead
+	t.notReady, t.readyEnd, t.readStatus = s.NotReady, s.ReadyEnd, s.ReadStatus
+	if t.readStatus == 0 && s.CancelRead {
+		t.readStatus = usUnitExcept
+	}
 	t.wLines, t.wPart, t.wData, t.wCR = s.WriteLines, s.WritePartial, s.WriteData, s.WriteReturn
+	t.ribbonShift, t.ribbon, t.wRibbon = s.RibbonShift, s.Ribbon, s.WriteRibbon
+	if s.HasCarrierColumn {
+		t.column, t.wColumn = s.CarrierColumn, s.WriteColumn
+	} else {
+		t.column, t.wColumn = len([]rune(s.Partial)), len([]rune(s.WritePartial))
+	}
 	return nil
 }
 
 type unitRecordSnap struct {
-	Type         uint16
-	Cards        [][]byte
-	Output       []string
-	Sense        byte
-	Dropped      int
-	Version      uint64
-	Buffer       []byte
-	Last         byte
-	Started      bool
-	EOF          bool
-	PunchStopped bool
-	Punched      [][]byte
-	DiagColumns  [160]byte
-	DiagReady    bool
-	Printer      printerSnap
-	SwitchPaths  [2]uint16
-	Control      switch2821State
-	Port         unit2821State
+	Type          uint16
+	Cards         [][]byte
+	Output        []string
+	Sense         byte
+	Dropped       int
+	Version       uint64
+	Buffer        []byte
+	Last          byte
+	Started       bool
+	EOF           bool
+	ReadStackers  [3]uint64
+	PunchStopped  bool
+	PunchPending  bool
+	PunchStacker  byte
+	PunchStackers [3]uint64
+	Punched       [][]byte
+	Card1442      []byte
+	Column1442    int
+	DiagColumns   [160]byte
+	DiagReady     bool
+	Wide1443      bool
+	Burst2821     bool
+	ReaderStopped bool
+	Printer       printerSnap
+	SwitchPaths   [2]uint16
+	Control       switch2821State
+	Port          unit2821State
 }
 
 type printerSnap struct {
-	Tape                                             []uint16
-	Line                                             int
-	SkipMoves, UCSLoaded, UCSGated, BlockCheck, Fold bool
-	UCS                                              [240]byte
-	Plane                                            [printBuffer]byte
-	ChainPos                                         int
-	PrevCmd                                          byte
+	Tape                                                                                    []uint16
+	LinesAdvanced                                                                           uint64
+	Line                                                                                    int
+	SkipMoves, NoUCS, UCSLoaded, UCSGated, BlockCheck, Fold, Dualing, NotReady, Unavailable bool
+	UCS                                                                                     [240]byte
+	Plane                                                                                   [printBuffer]byte
+	ChainPos                                                                                int
+	PrevCmd                                                                                 byte
 }
 
 func (u *UnitRecord) snapshotKind() string { return fmt.Sprintf("unit-%04X", u.Type) }
 
 func (u *UnitRecord) snapshot() ([]byte, error) {
 	s := unitRecordSnap{Type: u.Type, Cards: u.cards, Output: u.Output, Sense: u.sense, Dropped: u.dropped, Version: u.version,
-		Buffer: u.buffer, Last: u.last, Started: u.started, EOF: u.eof, PunchStopped: u.punchStopped, Punched: u.punched,
-		DiagColumns: u.diagColumns, DiagReady: u.diagReady,
-		Printer: printerSnap{Tape: u.pr.tape, Line: u.pr.line, SkipMoves: u.pr.skipMoves, UCSLoaded: u.pr.ucsLoaded,
-			UCSGated: u.pr.ucsGated, BlockCheck: u.pr.blockCheck, Fold: u.pr.fold, UCS: u.pr.ucs, Plane: u.pr.plane,
+		Buffer: u.buffer, Last: u.last, Started: u.started, EOF: u.eof, ReadStackers: u.readStackers, PunchStopped: u.punchStopped, PunchPending: u.punchPending, PunchStacker: u.punchStacker, PunchStackers: u.punchStackers, Punched: u.punched,
+		Card1442: u.card1442, Column1442: u.column1442,
+		DiagColumns: u.diagColumns, DiagReady: u.diagReady, Wide1443: u.wide1443, Burst2821: u.burst2821, ReaderStopped: u.readerStopped,
+		Printer: printerSnap{Tape: u.pr.tape, Line: u.pr.line, LinesAdvanced: u.pr.linesAdvanced, SkipMoves: u.pr.skipMoves, NoUCS: u.pr.noUCS, UCSLoaded: u.pr.ucsLoaded,
+			UCSGated: u.pr.ucsGated, BlockCheck: u.pr.blockCheck, Fold: u.pr.fold, Dualing: u.pr.dualing, NotReady: u.pr.notReady, Unavailable: u.pr.unavailable, UCS: u.pr.ucs, Plane: u.pr.plane,
 			ChainPos: u.chainPos, PrevCmd: u.prevCmd}}
 	if u.port != nil {
 		s.SwitchPaths = [2]uint16{u.port.paths[0].devno, u.port.paths[1].devno}
@@ -766,6 +900,9 @@ func (u *UnitRecord) restore(data []byte, _ bool) error {
 	if err := decodeGob(data, &s); err != nil {
 		return err
 	}
+	if s.Wide1443 != u.wide1443 {
+		return fmt.Errorf("unit record %04X: snapshot has different 1443 print width", u.devno)
+	}
 	var paths [2]uint16
 	if u.port != nil {
 		paths = [2]uint16{u.port.paths[0].devno, u.port.paths[1].devno}
@@ -773,34 +910,63 @@ func (u *UnitRecord) restore(data []byte, _ bool) error {
 	if paths != s.SwitchPaths {
 		return fmt.Errorf("unit record %04X: snapshot has different 2821 interfaces", u.devno)
 	}
+	u.burst2821 = s.Burst2821
+	u.readerStopped = s.ReaderStopped
 	if u.port != nil {
 		u.port.control.state, u.port.state = s.Control, s.Port
 	}
 	u.cards, u.Output, u.sense, u.dropped = s.Cards, s.Output, s.Sense, s.Dropped
 	u.buffer, u.last, u.started, u.eof = s.Buffer, s.Last, s.Started, s.EOF
+	u.readStackers = s.ReadStackers
 	u.punchStopped, u.punched = s.PunchStopped, s.Punched
+	u.card1442, u.column1442 = s.Card1442, s.Column1442
+	u.punchPending, u.punchStacker, u.punchStackers = s.PunchPending, s.PunchStacker, s.PunchStackers
 	u.diagColumns, u.diagReady = s.DiagColumns, s.DiagReady
 	p := s.Printer
-	u.pr = printer{tape: p.Tape, line: p.Line, skipMoves: p.SkipMoves, ucsLoaded: p.UCSLoaded, ucsGated: p.UCSGated,
-		blockCheck: p.BlockCheck, fold: p.Fold, ucs: p.UCS, plane: p.Plane}
+	u.pr = printer{tape: p.Tape, line: p.Line, linesAdvanced: p.LinesAdvanced, skipMoves: p.SkipMoves, noUCS: p.NoUCS, ucsLoaded: p.UCSLoaded, ucsGated: p.UCSGated,
+		blockCheck: p.BlockCheck, fold: p.Fold, dualing: p.Dualing, notReady: p.NotReady, unavailable: p.Unavailable, ucs: p.UCS, plane: p.Plane}
 	u.chainPos, u.prevCmd = p.ChainPos, p.PrevCmd
 	u.version = max(u.version, s.Version) + 1
 	return nil
 }
 
 type tapeSnap struct {
-	Blocks        int
-	Pos           int
-	Unloaded      bool
-	Sense         [24]byte
-	PastLoadPoint bool
-	LastCommand   byte
-	SevenTrack    bool
-	SevenMode     byte
-	NoConverter   bool
-	ReelEOT       int64
-	ReelPosition  int64
-	TapeIndicate  bool
+	Blocks               int
+	Pos                  int
+	Unloaded             bool
+	Sense                [24]byte
+	PastLoadPoint        bool
+	LastCommand          byte
+	SevenTrack           bool
+	SevenMode            byte
+	NoConverter          bool
+	DualDensity          bool
+	PEOnly2415           bool // legacy field name, also used by PE-only 2401s
+	TransportModel       uint8
+	ModeCompatible       bool
+	GoInhibitUntil       uint64
+	ReadMotionEnd        uint64
+	GoDelay              time.Duration
+	WritePE              bool
+	TransferPE           bool
+	EraseDensity         int
+	ReelEOT              int64
+	ReelPosition         int64
+	BlankTravel          int64
+	TapeIndicate         bool
+	FileProtected        bool
+	WriteCheckRecord     int
+	WriteChecks          int
+	Manual2415           bool
+	ReadyArmed2415       bool
+	WriteMode2415        bool
+	Backward2415         bool
+	Turnaround2415       time.Duration
+	LoadPoint2415        time.Duration
+	UnloadUntil2415      uint64
+	Reload2415           byte
+	ReadyEnd2415         bool
+	RewindDisconnect2415 uint64
 }
 
 func (t *Tape3420) snapshotKind() string { return "3420" }
@@ -808,7 +974,13 @@ func (t *Tape3420) snapshotKind() string { return "3420" }
 func (t *Tape3420) snapshot() ([]byte, error) {
 	return encodeGob(tapeSnap{Blocks: len(t.blocks), Pos: t.pos, Unloaded: t.unloaded, Sense: t.sense,
 		PastLoadPoint: t.pastLoadPoint, LastCommand: t.lastCommand, SevenTrack: t.sevenTrack, SevenMode: t.sevenMode,
-		NoConverter: t.noConverter, ReelEOT: t.reelEOT, ReelPosition: t.reelPosition, TapeIndicate: t.tapeIndicate})
+		NoConverter: t.noConverter, DualDensity: t.dualDensity, PEOnly2415: t.peOnly, TransportModel: t.transportModel, ModeCompatible: t.modeCompatible,
+		GoInhibitUntil: t.goInhibitUntil, ReadMotionEnd: t.readMotionEnd, GoDelay: t.goDelay,
+		WritePE: t.writePE, TransferPE: t.transferPE, EraseDensity: t.eraseDensity,
+		ReelEOT: t.reelEOT, ReelPosition: t.reelPosition, BlankTravel: t.blankTravel, TapeIndicate: t.tapeIndicate, FileProtected: t.fileProtected,
+		WriteCheckRecord: t.writeCheckRecord, WriteChecks: t.writeChecks, Manual2415: t.manual, ReadyArmed2415: t.readyArmed,
+		Backward2415: t.backward, WriteMode2415: t.writeMode, Turnaround2415: t.turnaround, LoadPoint2415: t.loadPointDelay,
+		UnloadUntil2415: t.unloadUntil, Reload2415: t.reload, ReadyEnd2415: t.readyEnd, RewindDisconnect2415: t.rewindDisconnect})
 }
 
 func (t *Tape3420) restore(data []byte, _ bool) error {
@@ -819,16 +991,29 @@ func (t *Tape3420) restore(data []byte, _ bool) error {
 	if s.Blocks != len(t.blocks) {
 		return fmt.Errorf("tape has %d blocks, checkpoint %d (tapes written in a session are not saved)", len(t.blocks), s.Blocks)
 	}
-	if s.SevenTrack != t.sevenTrack || s.NoConverter != t.noConverter {
+	if s.SevenTrack != t.sevenTrack || s.NoConverter != t.noConverter || s.DualDensity != t.dualDensity || s.PEOnly2415 != t.peOnly {
 		return fmt.Errorf("tape track configuration differs from checkpoint")
+	}
+	if s.TransportModel != t.transportModel || s.ModeCompatible != t.modeCompatible {
+		return fmt.Errorf("tape transport model differs from checkpoint")
 	}
 	if s.ReelEOT != t.reelEOT {
 		return fmt.Errorf("tape reel configuration differs from checkpoint")
 	}
 	t.pos, t.unloaded, t.sense = s.Pos, s.Unloaded, s.Sense
 	t.pastLoadPoint, t.lastCommand = s.PastLoadPoint, s.LastCommand
-	t.sevenMode = s.SevenMode
+	t.sevenMode, t.fileProtected = s.SevenMode, s.FileProtected
+	t.goInhibitUntil, t.readMotionEnd, t.goDelay = s.GoInhibitUntil, s.ReadMotionEnd, s.GoDelay
+	t.writePE, t.transferPE, t.eraseDensity = s.WritePE, s.TransferPE, s.EraseDensity
 	t.reelPosition, t.tapeIndicate = s.ReelPosition, s.TapeIndicate
+	t.blankTravel = s.BlankTravel
+	t.writeCheckRecord, t.writeChecks = s.WriteCheckRecord, s.WriteChecks
+	t.manual, t.readyArmed = s.Manual2415, s.ReadyArmed2415
+	t.backward, t.writeMode, t.turnaround = s.Backward2415, s.WriteMode2415, s.Turnaround2415
+	t.loadPointDelay = s.LoadPoint2415
+	t.unloadUntil, t.reload = s.UnloadUntil2415, s.Reload2415
+	t.readyEnd = s.ReadyEnd2415
+	t.rewindDisconnect = s.RewindDisconnect2415
 	return nil
 }
 

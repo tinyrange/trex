@@ -1,5 +1,7 @@
 package s390
 
+import "fmt"
+
 // System/370 architecture mode: basic-control and extended-control PSWs,
 // System/370 dynamic address translation with 2K or 4K pages and 64K or 1M
 // segments, channel I/O through START I/O and the CSW, the interval timer,
@@ -102,11 +104,26 @@ func (c *CPU) decodePSW(x uint64) (PSW, bool) {
 // 1/300 s, so bit 31 counts 1/76800 s; a TOD unit is 1/4096 microsecond.
 const itNum, itDen = 3, 160000
 
+func (c *CPU) intervalTicks() uint64 {
+	return (c.M.tod - c.itBase) * itNum / itDen
+}
+
+func (c *CPU) intervalPSAStopped9020() bool {
+	return !c.M.cfg.NoIntervalTimer && c.maintenance9020.timerInhibitSince == 0 && c.psaUnavailable9020()
+}
+
+func (c *CPU) psaUnavailable9020() bool {
+	return c.M.Model9020 && (!c.storageConfigured9020(c.Prefix) || c.M.storageStopped9020(c.Prefix))
+}
+
 // intervalTimer decrements the timer word at real location 80 for elapsed
 // time and reports whether its interruption is pending.
 func (c *CPU) intervalTimer() bool {
-	units := (c.M.tod - c.itBase) * itNum / itDen
-	if d := units - c.itDone; d > 0 {
+	if c.M.cfg.NoIntervalTimer || c.maintenance9020.timerInhibitSince != 0 {
+		return false
+	}
+	units := c.intervalTicks()
+	if d := units - c.itDone; d > 0 && !c.psaUnavailable9020() {
 		a := c.realToAbs(0x50)
 		old := int64(int32(be.Uint32(c.S.Mem[a:])))
 		v := old - int64(d)
@@ -122,14 +139,20 @@ func (c *CPU) intervalTimer() bool {
 // intervalDeadline returns the TOD value at which the timer next goes from
 // positive to negative.
 func (c *CPU) intervalDeadline() (uint64, bool) {
-	if c.intervalTimer() {
+	if c.M.cfg.NoIntervalTimer || c.maintenance9020.timerInhibitSince != 0 {
 		return 0, false
 	}
-	v := int32(be.Uint32(c.S.Mem[c.realToAbs(0x50):]))
-	if v < 0 {
-		return 0, false
+	target := c.itDone + 1
+	if !c.psaUnavailable9020() {
+		if c.intervalTimer() {
+			return 0, false
+		}
+		v := int32(be.Uint32(c.S.Mem[c.realToAbs(0x50):]))
+		if v < 0 {
+			return 0, false
+		}
+		target = c.itDone + uint64(v) + 1
 	}
-	target := c.itDone + uint64(v) + 1
 	return c.itBase + (target*itDen+itNum-1)/itNum, true
 }
 
@@ -250,7 +273,17 @@ func (c *CPU) ssk370(r1, r2 int) {
 	if c.M.cfg.IOCE {
 		mask = 0xf0 // The standalone IOCE preprocessor has four-bit keys (D10450).
 	}
-	*c.S.key(abs) = byte(c.GR[r1]) & mask
+	key := byte(c.GR[r1]) & mask
+	if c.interleaveMode9020() != 0 {
+		other := c.realAbs(a+oddBank9020, accFetch)
+		*c.S.key(other) = key
+		c.storeKeyParity9020(other)
+	}
+	*c.S.key(abs) = key
+	c.storeKeyParity9020(abs)
+	if c.maintenance9020.reverseSumParity {
+		c.storageKeyCheck9020(abs, seSetKey9020, true)
+	}
 }
 
 func (c *CPU) isk370(r1, r2 int) {
@@ -259,7 +292,15 @@ func (c *CPU) isk370(r1, r2 int) {
 	if c.GR[r2]&0xf != 0 {
 		c.program(pgmSpecification)
 	}
-	k := *c.S.key(c.realAbs(a, accFetch))
+	abs := c.realAbs(a, accFetch)
+	c.storageKeyCheck9020(abs, seInsertKey9020, false)
+	k := *c.S.key(abs)
+	if c.interleaveMode9020() != 0 {
+		// The 7201-02 inserts the OR of the two key-out cycles.
+		other := c.realAbs(a+oddBank9020, accFetch)
+		c.storageKeyCheck9020(other, seInsertKey9020, false)
+		k |= *c.S.key(other)
+	}
 	mask := byte(0xfe)
 	if c.PSW.BC {
 		mask = 0xf8
@@ -293,7 +334,50 @@ func (x *Subchannel) csw() uint64 {
 }
 
 func (c *CPU) storeCSW(x *Subchannel) {
-	c.setLowDouble(0x40, x.csw())
+	c.storeChannelStatus370(x.devno, x.csw())
+}
+
+func (c *CPU) fetchCAW370(devno uint16) uint32 {
+	c.checkIOPSA9020(devno)
+	addr := c.iocePSAAddress9020(0x48, accFetch)
+	c.M.CSS.latchIOCEStorage9020(devno, addr, 4, accFetch, 0)
+	return be.Uint32(c.S.Mem[addr:])
+}
+
+func (c *CPU) storeChannelStatus370(devno uint16, status uint64) {
+	c.checkIOPSA9020(devno)
+	addr := c.iocePSAAddress9020(0x40, accStore)
+	be.PutUint64(c.S.Mem[addr:], status)
+	*c.S.key(addr) |= keyRef | keyChg
+	c.M.CSS.latchIOCEStorage9020(devno, addr, 8, accStore, 0)
+}
+
+func (c *CPU) iocePSAAddress9020(offset uint32, acc access) uint32 {
+	if !c.M.Model9020 {
+		return c.lowAbs(offset, acc)
+	}
+	addr := c.Prefix + offset
+	return c.M.CSS.ioceInterleave9020(addr).physical(addr)
+}
+
+func ioceLockoutCode9020(devno uint16) uint16 {
+	ioce := devno >> 10
+	if ioce >= 3 {
+		return pgmSEStopped9020
+	}
+	return 0x40 >> ioce
+}
+
+// The IOCE reports PSA lockout if an I/O instruction needs the stopped PSA.
+func (c *CPU) checkIOPSA9020(devno uint16) {
+	if !c.ioceCanAccessPSA9020(devno) {
+		c.PSW.CC = 3
+		panic(programCheck{code: ioceLockoutCode9020(devno)})
+	}
+}
+
+func (c *CPU) ioceCanAccessPSA9020(devno uint16) bool {
+	return !c.M.storageStopped9020(c.Prefix) && c.M.CSS.ioceStorageConfigured9020(devno, c.Prefix)
 }
 
 // channelEnabled reports whether I/O interruptions from a channel are
@@ -315,13 +399,29 @@ func (c *CPU) takeIO370() bool {
 		return false
 	}
 	for _, x := range c.M.CSS.subs {
-		if x.pciIRQ && c.channelEnabled(x.devno>>8) {
+		if !c.channelEnabled(x.devno>>8) || !c.ioceConfigured9020(x.devno>>10) || c.M.CSS.ioceMachineCheckPending9020(x.devno) ||
+			(!x.pciIRQ && (!x.pending || !x.irq)) {
+			continue
+		}
+		if !c.ioceCanAccessPSA9020(x.devno) {
+			// The failed IOCE status store loses this I/O interruption.
+			// The CE reports lockout through the alternate program PSW.
+			if x.pciIRQ {
+				x.pciIRQ, x.pciAt = false, c.Instructions
+			} else {
+				c.M.CSS.accept370(x)
+			}
+			c.ia, c.next = c.PSW.IA, c.PSW.IA
+			c.takeProgram(ioceLockoutCode9020(x.devno), false)
+			return true
+		}
+		if x.pciIRQ {
 			// Program-controlled interruption: the channel program is
 			// still working; the CSW identifies the next CCW.
 			c.PSW.Wait = false
 			x.pciIRQ = false
 			x.pciAt = c.Instructions
-			c.setLowDouble(0x40, uint64(x.key&0xf)<<60|uint64(x.blockAddr&0x00ffffff)<<32|uint64(scsPCI)<<16)
+			c.storeChannelStatus370(x.devno, uint64(x.key&0xf)<<60|uint64(x.blockAddr&0x00ffffff)<<32|uint64(scsPCI)<<16)
 			if c.PSW.BC {
 				c.PSW.IntCode = x.devno
 			} else {
@@ -331,11 +431,11 @@ func (c *CPU) takeIO370() bool {
 			c.swap(pswIOOld, pswIONew)
 			return true
 		}
-		if !x.pending || !x.irq || !c.channelEnabled(x.devno>>8) {
-			continue
-		}
 		c.PSW.Wait = false
 		c.storeCSW(x)
+		if c.M.TraceIO && !c.M.TraceIOSkip[x.devno] {
+			c.M.event("io", c, fmt.Sprintf("interrupt %04X csw %016X", x.devno, be.Uint64(c.S.Mem[c.realToAbs(0x40):])))
+		}
 		c.M.CSS.accept370(x)
 		if c.PSW.BC {
 			c.PSW.IntCode = x.devno
