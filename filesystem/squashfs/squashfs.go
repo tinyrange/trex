@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/tinyrange/trex/archive/xz"
@@ -29,10 +30,14 @@ type image struct {
 	codec, idCount                                         uint16
 	cache                                                  *bytecache.Cache
 	options                                                auto.Options
+	xattrIndex                                             uint64
+	xattrStart                                             uint64
+	xattrCount                                             uint32
+	xattrs                                                 sync.Map
 }
 
 // Open supports SquashFS 4.0 with zlib, XZ and Zstandard compression.
-// Symlinks/devices remain metadata; xattr identifiers are retained, not decoded.
+// Symlinks, devices and extended attributes are returned in entry metadata.
 func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, error) {
 	if !bytes.HasPrefix(prefix, []byte("hsqs")) {
 		return nil, auto.ErrNoMatch
@@ -65,6 +70,9 @@ func Open(prefix []byte, source storage.Reader, o auto.Options) (auto.View, erro
 	}
 	if s.fragmentCount > 0 && (s.fragmentsTable < 96 || s.fragmentsTable >= s.used) {
 		return nil, fmt.Errorf("squashfs: invalid fragment table")
+	}
+	if err := s.initXattrs(le.Uint64(h[56:])); err != nil {
+		return nil, err
 	}
 	root, _, err := s.inode(le.Uint64(h[32:]), nil)
 	if err != nil {
@@ -360,6 +368,13 @@ func (s *image) inode(ref uint64, parents []uint64) (auto.Entry, uint16, error) 
 			e.Attributes["xattr_id"] = le.Uint32(b[len(b)-4:])
 		}
 	}
+	if id, ok := e.Attributes["xattr_id"].(uint32); ok && id != 0xffffffff {
+		attrs, err := s.readXattrs(id)
+		if err != nil {
+			return e, 0, err
+		}
+		e.Attributes["xattrs"] = attrs
+	}
 	return e, baseKind, nil
 }
 
@@ -449,7 +464,11 @@ func (s *image) data(b dataBlock) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		return s.decode(data, b.word&(1<<24) != 0, int(s.blockSize))
+		decoded, err := s.decode(data, b.word&(1<<24) != 0, int(s.blockSize))
+		if err != nil {
+			return nil, fmt.Errorf("squashfs: data block at %d: %w", b.off, err)
+		}
+		return decoded, nil
 	})
 }
 func (f *file) ReadAt(p []byte, off int64) (int, error) {

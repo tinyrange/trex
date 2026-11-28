@@ -24,6 +24,43 @@ func imageBytes(t *testing.T, entries []unixfs.Entry, size int64) []byte {
 	}
 	return b
 }
+
+func TestSymlinkBoundaryAndExtendedAttributes(t *testing.T) {
+	target59 := strings.Repeat("a", 59)
+	target60 := strings.Repeat("b", 60)
+	image, err := Build([]unixfs.Entry{
+		{Path: "fast", Mode: unixfs.Symlink | 0777, Target: target59, Xattrs: map[string][]byte{"security.selinux": []byte("label\x00")}},
+		{Path: "slow", Mode: unixfs.Symlink | 0777, Target: target60},
+	}, BuildOptions{Size: 8 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := Read(image, auto.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []struct {
+		target  string
+		sectors uint32
+		label   string
+	}{{target59, 8, "label\x00"}, {target60, 8, ""}} {
+		node, err := fs.readInode(uint32(11 + i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry, err := fs.entry(node, "link")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry.Attributes["target"] != want.target || u32(node.raw, 28) != want.sectors {
+			t.Fatalf("invalid symlink storage for target length %d", len(want.target))
+		}
+		attrs, _ := entry.Attributes["xattrs"].(map[string][]byte)
+		if string(attrs["security.selinux"]) != want.label {
+			t.Fatalf("invalid stored security label: %q", attrs["security.selinux"])
+		}
+	}
+}
 func TestBuildUnixMetadataAndAllocationInvariants(t *testing.T) {
 	input := []unixfs.Entry{{Path: "bin/tool", Mode: 0104755, UID: 123456, GID: 789012, Mtime: 12345, Data: bytes.NewReader([]byte("hello"))}, {Path: "alias", Mode: 0104755, UID: 123456, GID: 789012, Mtime: 12345, Target: "bin/tool", Hardlink: true}, {Path: "short", Mode: 0120777, Target: "/bin/tool"}, {Path: "long", Mode: 0120777, Target: "/" + strings.Repeat("long/", 30)}, {Path: "dev/node", Mode: 0020660, Major: 511, Minor: 65537}, {Path: "pipe", Mode: 0010600}}
 	b := imageBytes(t, input, 256<<20)

@@ -72,6 +72,20 @@ func ParseEntries(value starlark.Value) ([]Entry, error) {
 				dst = &e.Major
 			case "minor":
 				dst = &e.Minor
+			case "xattrs":
+				attrs, ok := val.(*starlark.Dict)
+				if !ok {
+					return nil, fmt.Errorf("entry: xattrs must be a dict")
+				}
+				e.Xattrs = make(map[string][]byte, attrs.Len())
+				for _, attr := range attrs.Items() {
+					name, ok := starlark.AsString(attr[0])
+					data, bytesOK := attr[1].(starlark.Bytes)
+					if !ok || !bytesOK {
+						return nil, fmt.Errorf("entry: xattr names must be strings and values must be bytes")
+					}
+					e.Xattrs[name] = []byte(data)
+				}
 			default:
 				return nil, fmt.Errorf("entry: unknown field %q", key)
 			}

@@ -174,6 +174,7 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 			parent.links++
 		}
 	}
+	hasXattrs := false
 	for _, n := range unique {
 		if n.links > 65535 {
 			return nil, fmt.Errorf("ext4: too many links for %q", n.entry.Path)
@@ -189,6 +190,23 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 		put16(inode, 128, 32)
 		for _, off := range []int{8, 12, 16, 144} {
 			put32(inode, off, e.Mtime)
+		}
+		var xattrBlocks uint32
+		if len(e.Xattrs) != 0 {
+			payload, err := buildXattrBlock(e.Xattrs)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", e.Path, err)
+			}
+			blocks, err := b.allocate(1)
+			if err != nil {
+				return nil, err
+			}
+			xattrBlock := blocks[0].physical
+			b.addBytes(int64(xattrBlock)*int64(blockSize), payload)
+			put32(inode, 104, uint32(xattrBlock))
+			put32(inode, 28, blockSize/512)
+			xattrBlocks = 1
+			hasXattrs = true
 		}
 		var data storage.Reader
 		switch e.Mode & 0170000 {
@@ -206,7 +224,7 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 			data = e.Data
 		case unixfs.Symlink:
 			data = bytes.NewReader([]byte(e.Target))
-			if len(e.Target) <= 60 {
+			if len(e.Target) < 60 {
 				copy(inode[40:100], e.Target)
 				put32(inode, 4, uint32(len(e.Target)))
 				continue
@@ -248,7 +266,7 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 		if err != nil {
 			return nil, err
 		}
-		sectors := (uint64((size+4095)/4096) + uint64(treeBlocks)) * 8
+		sectors := (uint64((size+4095)/4096) + uint64(treeBlocks) + uint64(xattrBlocks)) * 8
 		put32(inode, 28, uint32(sectors))
 		put16(inode, 116, uint16(sectors>>32))
 	}
@@ -287,6 +305,9 @@ func Build(input []unixfs.Entry, options BuildOptions) (storage.Reader, error) {
 	put32(sb, 76, 1)
 	put32(sb, 84, 11)
 	put16(sb, 88, 256)
+	if hasXattrs {
+		put32(sb, 92, 0x8) // ext_attr
+	}
 	if options.Ext2 {
 		put32(sb, 96, 0x2)  // filetype
 		put32(sb, 100, 0x2) // large_file

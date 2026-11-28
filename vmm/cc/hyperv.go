@@ -27,6 +27,14 @@ func hyperVClockCPUID(cpu hypervisor.X86) ([]x86state.CPUIDEntry, error) {
 		return nil, nil
 	}
 	eax, edx := uint32(clock), uint32(0)
+	// Linux uses the accelerator's TSC and APIC frequencies when both the
+	// partition privilege and MSR availability flags are present.
+	const accessFrequencyMSRs = 1 << 11
+	const frequencyMSRsAvailable = 1 << 8
+	if features.Eax&accessFrequencyMSRs != 0 && features.Edx&frequencyMSRsAvailable != 0 {
+		eax |= accessFrequencyMSRs
+		edx |= frequencyMSRsAvailable
+	}
 	const timers = 1<<2 | 1<<3 | 1<<6 // SynIC, synthetic timers, VP index
 	if features.Eax&timers == timers {
 		if synic, ok := cpu.(hypervisor.X86HyperVSynIC); ok {
@@ -36,7 +44,7 @@ func hyperVClockCPUID(cpu hypervisor.X86) ([]x86state.CPUIDEntry, error) {
 			}
 			if enabled {
 				eax |= timers
-				edx = features.Edx & (1 << 19)
+				edx |= features.Edx & (1 << 19)
 			} // optional direct mode
 		}
 	}

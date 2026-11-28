@@ -404,7 +404,7 @@ var nativeStarlarkSignatures = map[string]string{
 	"cc.prepare_ram":                    "cc.prepare_ram(ram, shared_workers=False) -> cc.prepared_ram",
 	"cc.kernel_symbol":                  "cc.kernel_symbol(kernel, address) -> symbol or None",
 	"cc.boot_bsd":                       "cc.boot_bsd(os, kernel, marker, root=None, memory_mb=1024, timeout=60, console=None, overlay_limit=64MiB) -> result",
-	"cc.backend":                        "cc.backend(acpi=False, pci_ide=False, pci_display=False, hpet=False, uefi=False, usb=False, sb16=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend",
+	"cc.backend":                        "cc.backend(acpi=False, pci_ide=False, pci_display=False, virtio_gpu=False, hpet=False, uefi=False, usb=False, sb16=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend",
 	"qemu.backend":                      "qemu.backend(binary='', machine='pc', machine_properties={}, accelerator='auto', firmware='bios', display_frontend='auto', display_zoom_to_fit=False, block_transport='auto', overlay_limit=256MiB, stderr_limit=1MiB, devices=[], netdevs=[], chardevs=[], options=[], acpi_tables=[], incoming=False)",
 	"qemu.chardev":                      "qemu.chardev(name, **properties)",
 	"qemu.device":                       "qemu.device(name, **properties)",

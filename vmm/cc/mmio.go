@@ -6,6 +6,12 @@ import (
 	"j5.nz/cc/hypervisor"
 )
 
+const (
+	virtioGPUAddress = 0xfeb10000
+	virtioGPUSize    = 0x1000
+	virtioGPUIRQ     = 23
+)
+
 // Debugger stepping and ordinary execution must use the same device bus.
 func (p *pc) handleMMIO(ex hypervisor.X86Exit) error {
 	if ex.Size == 0 || ex.Size > 8 || uint64(ex.Size) > ^uint64(0)-ex.Address {
@@ -31,6 +37,20 @@ func (p *pc) handleMMIO(ex hypervisor.X86Exit) error {
 	}
 	if p.nvme != nil && p.nvme.contains(ex.Address, ex.Size) {
 		return p.nvme.mmio(ex, p.cpu)
+	}
+	if p.virtioGPU != nil && p.virtioGPU.Contains(ex.Address, int(ex.Size)) {
+		if ex.Write {
+			var value uint64
+			for i := uint8(0); i < ex.Size; i++ {
+				value |= uint64(ex.Data[i]) << (8 * i)
+			}
+			return p.virtioGPU.Write(ex.Address, int(ex.Size), value)
+		}
+		value, err := p.virtioGPU.Read(ex.Address, int(ex.Size))
+		if err == nil {
+			p.cpu.CompleteMMIORead(value, uint32(ex.Size))
+		}
+		return err
 	}
 	if p.hpet != nil && ex.Address >= hpetAddress && ex.Address < hpetAddress+0x400 {
 		return p.hpet.mmio(ex, p.cpu, p.now())

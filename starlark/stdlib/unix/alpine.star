@@ -90,7 +90,7 @@ def _verify(source, sha256):
     if binary.hex(digest(source)) != sha256.lower():
         fail("alpine: SHA-256 mismatch")
 
-def read_package(source, sha256, expected = None, maximum_bytes = 512 << 20, maximum_entries = 100000):
+def read_package(source, sha256, expected = None, maximum_bytes = 512 << 20, maximum_entries = 100000, cache_payload = False):
     """Validate pinned APK v2 and return metadata, entries and install effects."""
     _verify(source, sha256)
     members = archive.gzip_members(source, maximum_bytes = maximum_bytes, maximum_members = 3)
@@ -130,7 +130,7 @@ def read_package(source, sha256, expected = None, maximum_bytes = 512 << 20, max
         checksum = "Q1" + binary.base64(crypto.hash("sha1", control_member))
         if checksum != expected["checksum"]:
             fail("alpine: control checksum differs from index")
-    tar = archive.tar(archive.gzip(data_member), maximum_entries = maximum_entries)
+    tar = archive.tar(archive.gzip(data_member, maximum_bytes = maximum_bytes, cache = cache_payload), maximum_entries = maximum_entries)
     entries = []
     seen = {}
     for item in tar.entries:

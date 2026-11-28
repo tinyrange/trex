@@ -27,6 +27,7 @@ type Backend struct {
 	ACPI, PCIIDE, HPET, UEFI bool
 	// PCIDisplay exposes the TRF1 aperture as the 1234:cc02 PCI display device.
 	PCIDisplay bool
+	VirtioGPU  bool
 	// USB enables the UHCI keyboard and absolute pointer.
 	USB bool
 	// SB16 opts into ISA DSP 4.05 PCM with DMA1/5 and bounded capture.
@@ -78,6 +79,9 @@ func (b *Backend) Capabilities() []string {
 }
 func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	if m.Architecture == "arm64" {
+		if b.VirtioGPU {
+			return []vmm.ValidationIssue{{Code: "cc.unsupported", Field: "virtio_gpu", Message: "ACPI virtio graphics requires the x86_64 UEFI platform", Backend: b.ID()}}
+		}
 		if b.SB16 {
 			return []vmm.ValidationIssue{{Code: "cc.unsupported", Field: "sb16", Message: "ISA sound requires x86", Backend: b.ID()}}
 		}
@@ -92,6 +96,9 @@ func (b *Backend) Validate(m vmm.Machine) []vmm.ValidationIssue {
 	}
 	if b.PrivateAppleISA {
 		add("private_apple_isa", "private Apple ISA requires the native ARM64 backend")
+	}
+	if b.VirtioGPU && (!b.UEFI || m.Architecture != "x86_64") {
+		add("virtio_gpu", "ACPI virtio graphics requires the x86_64 UEFI platform")
 	}
 	if b.CPUFactory == nil && ((runtime.GOOS != "linux" && runtime.GOOS != "windows") || runtime.GOARCH != "amd64") {
 		add("backend", "PC execution requires Linux/amd64 KVM or Windows/amd64 WHP")
@@ -355,6 +362,13 @@ func (b *Backend) newPlatform(ctx context.Context, m vmm.Machine, disk vmm.Disk)
 		platform.sound = newSB16(platform.ram, cpu.SetIRQ)
 	}
 	platform.framebuffer = ram[m.Memory : uint64(m.Memory)+ramfb.Size]
+	if b.VirtioGPU {
+		platform.virtioGPU, err = hypervisor.NewVirtioGPU(virtioGPUAddress, virtioGPUSize, virtioGPUIRQ, 1280, 720, nvmeMemory{platform}, cpu)
+		if err != nil {
+			cpu.Close()
+			return nil, err
+		}
+	}
 	if disk.Bus == "nvme" {
 		platform.nvme = newPCINVMe(platform)
 		platform.nvme.controller.EnableAsyncIO(func() { _ = cpu.Cancel() })

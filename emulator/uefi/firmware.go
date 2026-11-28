@@ -27,12 +27,16 @@ type FirmwareOptions struct {
 }
 
 type Firmware struct {
-	physical   cpu.Memory
-	virtualMap runtimeMap
-	stall      func(time.Duration) error
-	graphics   *graphicsOutput
-	machine    *Machine
-	entry      FirmwareEntry
+	physical          cpu.Memory
+	virtualMap        runtimeMap
+	stall             func(time.Duration) error
+	graphics          *graphicsOutput
+	machine           *Machine
+	entry             FirmwareEntry
+	architecture      string
+	applications      map[uint64]loadedApplication
+	applicationReturn uint64
+	protocolHandles   map[uint64]bool
 }
 type FirmwareEntry struct{ PC, Stack, ImageHandle, SystemTable, ReturnAddress, DeviceHandle uint64 }
 
@@ -82,7 +86,13 @@ func NewFirmware(image storage.Reader, opts FirmwareOptions) (*Firmware, error) 
 		return nil, err
 	}
 	m.put(m.returnAddress, m.firmwareGate(m.returnAddress))
-	return &Firmware{machine: m, physical: opts.PhysicalMemory, stall: opts.Stall, entry: FirmwareEntry{base + uint64(pe.EntryRVA), stack + o.StackSize, m.imageHandle, m.systemTable, m.returnAddress, m.ramBase + 0xb00}}, m.err
+	applicationReturn := m.gate(imageReturnGate)
+	return &Firmware{
+		machine: m, physical: opts.PhysicalMemory, stall: opts.Stall,
+		entry:        FirmwareEntry{base + uint64(pe.EntryRVA), stack + o.StackSize, m.imageHandle, m.systemTable, m.returnAddress, m.ramBase + 0xb00},
+		architecture: opts.Architecture, applications: make(map[uint64]loadedApplication), applicationReturn: applicationReturn,
+		protocolHandles: make(map[uint64]bool),
+	}, m.err
 }
 func (f *Firmware) Entry() FirmwareEntry { return f.entry }
 func (f *Firmware) Service(address uint64) (string, bool) {
@@ -132,7 +142,26 @@ func (f *Firmware) Call(address uint64, args [10]uint64) (uint64, error) {
 	if name == "GOP.QueryMode" || name == "GOP.SetMode" || name == "GOP.Blt" {
 		return f.graphicsCall(name, args)
 	}
-	status, supported := m.dispatch(name, [8]uint64(args[:8]))
+	var status uint64
+	supported := true
+	switch name {
+	case "LoadImage":
+		status = f.loadApplication(args)
+	case "UnloadImage":
+		status = f.unloadApplication(args[0])
+	case "StartImage":
+		for _, result := range args[1:3] {
+			if result != 0 {
+				m.u64(result, 0)
+			}
+		}
+	case "InstallMultipleProtocolInterfaces":
+		status = f.updateProtocols(args, true)
+	case "UninstallMultipleProtocolInterfaces":
+		status = f.updateProtocols(args, false)
+	default:
+		status, supported = m.dispatch(name, [8]uint64(args[:8]))
+	}
 	if m.err != nil {
 		return 0, fmt.Errorf("uefi %s: %w", name, m.err)
 	}

@@ -7,10 +7,12 @@ import (
 	"hash/crc32"
 	"io"
 	"math"
+	"sort"
 	"sync"
 
 	rootxz "github.com/therootcompany/xz"
 	"github.com/tinyrange/trex/storage"
+	bytecache "github.com/tinyrange/trex/storage/cache"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
@@ -39,6 +41,8 @@ type File struct {
 	base       storage.Reader
 	size       int64
 	dictionary uint32
+	blocks     []indexedBlock
+	cache      *bytecache.Cache
 
 	mu      sync.Mutex
 	reader  io.Reader
@@ -50,15 +54,21 @@ func Open(file storage.Reader, dictionary uint32) (*File, error) {
 	if dictionary == 0 {
 		dictionary = defaultXZDictionaryLimit
 	}
-	size, streams, blocks, err := xzUncompressedSize(file)
+	var index []indexedBlock
+	size, streams, _, err := indexXZ(file, &index)
 	if err != nil {
 		return nil, err
 	}
 	if streams == 0 {
 		return nil, fmt.Errorf("xz: no streams")
 	}
-	_ = blocks // Parsing the count validates every Index record and block boundary.
-	return &File{base: file, size: size, dictionary: dictionary, offset: -1}, nil
+	sort.Slice(index, func(i, j int) bool { return index[i].physical < index[j].physical })
+	var logical int64
+	for i := range index {
+		index[i].logical = logical
+		logical += index[i].decoded
+	}
+	return &File{base: file, size: size, dictionary: dictionary, offset: -1, blocks: index, cache: bytecache.New(indexCacheBytes)}, nil
 }
 func (f *File) reset() error {
 	reader, err := rootxz.NewReader(io.NewSectionReader(f.base, 0, f.base.Size()), f.dictionary)
@@ -84,7 +94,13 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	if off >= f.size {
 		return 0, io.EOF
 	}
+	if len(f.blocks) > 1 || len(f.blocks) == 1 && f.blocks[0].decoded <= indexCacheBytes {
+		return f.readIndexed(p, off)
+	}
+	return f.readSequential(p, off)
+}
 
+func (f *File) readSequential(p []byte, off int64) (int, error) {
 	requested := len(p)
 	if remaining := f.size - off; int64(len(p)) > remaining {
 		p = p[:remaining]
@@ -142,6 +158,18 @@ func verifyXZEnd(reader io.Reader) error {
 }
 
 func (f *File) WriteTo(w io.Writer) (int64, error) {
+	if f.size > 0 {
+		allBounded := true
+		for _, block := range f.blocks {
+			if block.decoded > indexCacheBytes {
+				allBounded = false
+				break
+			}
+		}
+		if allBounded {
+			return io.Copy(w, io.NewSectionReader(f, 0, f.size))
+		}
+	}
 	reader, err := rootxz.NewReader(io.NewSectionReader(f.base, 0, f.base.Size()), f.dictionary)
 	if err != nil {
 		return 0, fmt.Errorf("xz: initialize decoder: %w", err)
@@ -170,7 +198,7 @@ func (f *File) Attr(name string) (starlark.Value, error) {
 }
 func (f *File) AttrNames() []string { return starfile.AttrNames() }
 
-func xzUncompressedSize(file storage.Reader) (size int64, streamCount int, blockCount uint64, err error) {
+func indexXZ(file storage.Reader, blocks *[]indexedBlock) (size int64, streamCount int, blockCount uint64, err error) {
 	end := file.Size()
 	if end < 24 {
 		return 0, 0, 0, fmt.Errorf("xz: file is too small")
@@ -208,7 +236,8 @@ func xzUncompressedSize(file storage.Reader) (size int64, streamCount int, block
 			return 0, 0, 0, fmt.Errorf("xz: invalid index size %d", indexSize)
 		}
 		indexOffset := footerOffset - int64(indexSize)
-		uncompressed, paddedBlocks, records, err := parseXZIndex(file, indexOffset, int64(indexSize))
+		first := len(*blocks)
+		uncompressed, paddedBlocks, records, err := parseXZIndex(file, indexOffset, int64(indexSize), blocks)
 		if err != nil {
 			return 0, 0, 0, err
 		}
@@ -232,10 +261,17 @@ func xzUncompressedSize(file storage.Reader) (size int64, streamCount int, block
 		if string(header[6:8]) != string(footer[8:10]) {
 			return 0, 0, 0, fmt.Errorf("xz: stream header and footer flags differ")
 		}
-		if total > math.MaxInt64-uncompressed {
+		if uncompressed > math.MaxInt64 || total > math.MaxInt64-uncompressed {
 			return 0, 0, 0, fmt.Errorf("xz: uncompressed size overflows 64-bit file size")
 		}
 		total += uncompressed
+		physical := headerOffset + 12
+		for i := first; i < len(*blocks); i++ {
+			block := &(*blocks)[i]
+			block.physical = physical
+			copy(block.header[:], header)
+			physical += (block.unpadded + 3) &^ 3
+		}
 		if blockCount > math.MaxUint64-records {
 			return 0, 0, 0, fmt.Errorf("xz: block count overflow")
 		}
@@ -270,7 +306,7 @@ func trimXZStreamPadding(file storage.Reader, end int64) (int64, int64, error) {
 	return end, original - end, nil
 }
 
-func parseXZIndex(file storage.Reader, offset, size int64) (uncompressed uint64, paddedBlocks uint64, records uint64, err error) {
+func parseXZIndex(file storage.Reader, offset, size int64, blocks *[]indexedBlock) (uncompressed uint64, paddedBlocks uint64, records uint64, err error) {
 	if size < 8 {
 		return 0, 0, 0, fmt.Errorf("xz: index at offset %d is too small", offset)
 	}
@@ -286,7 +322,7 @@ func parseXZIndex(file storage.Reader, offset, size int64) (uncompressed uint64,
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("xz: read index record count: %w", err)
 	}
-	if records > uint64(bodySize/2) {
+	if records > uint64(bodySize/2) || records > uint64(1_000_000-len(*blocks)) {
 		return 0, 0, 0, fmt.Errorf("xz: impossible index record count %d", records)
 	}
 	for i := uint64(0); i < records; i++ {
@@ -298,7 +334,7 @@ func parseXZIndex(file storage.Reader, offset, size int64) (uncompressed uint64,
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf("xz: read block %d uncompressed size: %w", i, err)
 		}
-		if unpadded == 0 || unpadded > math.MaxUint64-3 {
+		if unpadded == 0 || unpadded > math.MaxInt64-3 || blockSize > math.MaxInt64 {
 			return 0, 0, 0, fmt.Errorf("xz: invalid block %d unpadded size %d", i, unpadded)
 		}
 		padded := (unpadded + 3) &^ 3
@@ -307,6 +343,7 @@ func parseXZIndex(file storage.Reader, offset, size int64) (uncompressed uint64,
 		}
 		paddedBlocks += padded
 		uncompressed += blockSize
+		*blocks = append(*blocks, indexedBlock{unpadded: int64(unpadded), decoded: int64(blockSize)})
 	}
 	for {
 		value, err := reader.ReadByte()

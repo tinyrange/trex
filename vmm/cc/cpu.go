@@ -56,6 +56,9 @@ func configureCPUTopology(cpu hypervisor.X86, longMode bool, id, count int) erro
 	filtered := entries[:0]
 	hasLongMode := false
 	for _, entry := range entries {
+		if longMode && count == 1 && entry.Function == 2 {
+			continue
+		}
 		if entry.Function > 3 && !(count > 1 && entry.Function == 4) && !(longMode && entry.Function >= 0x80000000 && entry.Function <= 0x80000008) {
 			continue
 		}
@@ -113,6 +116,13 @@ func configureCPUTopology(cpu hypervisor.X86, longMode bool, id, count int) erro
 	}
 	if longMode && !hasLongMode {
 		return fmt.Errorf("cc x86_64 requires accelerator long-mode support")
+	}
+	if longMode && count == 1 {
+		// The synthetic Intel identity stops at leaf 3. A host leaf 2 can
+		// refer to deterministic cache leaf 4, which this profile omits.
+		// Describe 32 KiB L1 data/instruction caches and a 256 KiB L2
+		// using legacy Intel descriptors so guests see a consistent CPU.
+		filtered = append(filtered, x86state.CPUIDEntry{Function: 2, Eax: 0x3c302c01})
 	}
 	if count > 1 {
 		filtered = append(filtered,

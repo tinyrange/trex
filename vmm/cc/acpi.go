@@ -184,6 +184,13 @@ func (p *pc) installACPI() error {
 		}
 		aml = append(aml, data...)
 	}
+	if p.virtioGPU != nil {
+		data, err := (acpi.ISADevice{Name: "VGPU", ID: "LNRO0005", StringID: true, LevelIRQs: []uint32{virtioGPUIRQ}, Memory: [][2]uint32{{virtioGPUAddress, virtioGPUSize}}}).AML()
+		if err != nil {
+			return err
+		}
+		aml = append(aml, data...)
+	}
 	if p.hpet != nil {
 		data, err := (acpi.ISADevice{Name: "HPET", ID: "PNP0103", Parent: `\_SB.PCI0`, Memory: [][2]uint32{{hpetAddress, 0x400}}}).AML()
 		if err != nil {

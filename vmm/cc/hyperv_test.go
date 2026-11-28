@@ -48,7 +48,7 @@ func TestHyperVClockPolicy(t *testing.T) {
 				}
 				if e.Function == 0x40000003 {
 					leaf = true
-					if e.Eax != 1<<1|1<<5|1<<9 || e.Ebx != 0 || e.Ecx != 0 || e.Edx != 0 {
+					if e.Eax != 1<<1|1<<5|1<<9|1<<11 || e.Ebx != 0 || e.Ecx != 0 || e.Edx != 1<<8 {
 						t.Fatalf("unconfigured features leaked: %+v", e)
 					}
 				}
@@ -57,6 +57,25 @@ func TestHyperVClockPolicy(t *testing.T) {
 				t.Fatalf("hypervisor=%v leaf=%v want=%v", present, leaf, tc.want)
 			}
 		})
+	}
+}
+
+func TestHyperVFrequencyRequiresBothFlags(t *testing.T) {
+	const clocks = 1<<1 | 1<<5 | 1<<9
+	for _, feature := range []x86state.CPUIDEntry{
+		{Function: 0x40000003, Eax: clocks | 1<<11},
+		{Function: 0x40000003, Eax: clocks, Edx: 1 << 8},
+	} {
+		c := &hyperVTestCPU{hv: []x86state.CPUIDEntry{feature}}
+		entries, err := hyperVClockCPUID(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if entry.Function == 0x40000003 && (entry.Eax != clocks || entry.Edx != 0) {
+				t.Fatalf("incomplete frequency feature advertised: %+v", entry)
+			}
+		}
 	}
 }
 

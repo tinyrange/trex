@@ -3,11 +3,14 @@
 package unixfs
 
 import (
+	"bytes"
 	"fmt"
-	"github.com/tinyrange/trex/storage"
+	"maps"
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/tinyrange/trex/storage"
 )
 
 const (
@@ -27,10 +30,11 @@ type Entry struct {
 	Target                string // symlink target, or root-relative regular-file hardlink target
 	Hardlink              bool
 	Major, Minor          uint32
+	Xattrs                map[string][]byte
 }
 
 func Clean(name string) (string, error) {
-	if name == "" || strings.HasPrefix(name, "/") || strings.ContainsAny(name, "\x00\\") {
+	if name == "" || strings.HasPrefix(name, "/") || strings.ContainsRune(name, 0) {
 		return "", fmt.Errorf("unix entry: invalid path %q", name)
 	}
 	for _, p := range strings.Split(name, "/") {
@@ -132,7 +136,7 @@ func Normalize(input []Entry) ([]Entry, error) {
 			seen[target] = true
 			if !t.Hardlink {
 				// Unix hardlinks share inode metadata, not just file contents.
-				if e.Mode != t.Mode || e.UID != t.UID || e.GID != t.GID || e.Mtime != t.Mtime {
+				if e.Mode != t.Mode || e.UID != t.UID || e.GID != t.GID || e.Mtime != t.Mtime || (e.Xattrs != nil && !maps.EqualFunc(e.Xattrs, t.Xattrs, bytes.Equal)) {
 					return nil, fmt.Errorf("unix entry: conflicting hardlink metadata %q", p)
 				}
 				e.Target = target

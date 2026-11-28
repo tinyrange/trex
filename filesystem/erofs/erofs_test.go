@@ -54,7 +54,6 @@ func baseFixture(extended bool) []byte {
 	copy(root[32:], d)
 	p := b[3072:]
 	le.PutUint16(p[4:], 0100644)
-	le.PutUint16(p[2:], 2)
 	if extended {
 		le.PutUint16(p, 1)
 		le.PutUint32(p[24:], 42)
@@ -87,16 +86,19 @@ func flatFixture(extended, inline bool) ([]byte, []byte) {
 	b := baseFixture(extended)
 	p := b[3072:]
 	le.PutUint32(p[16:], 8)
+	le.PutUint16(p[2:], 3)
+	xattrStart := 32
+	if extended {
+		xattrStart = 64
+	}
+	copy(p[xattrStart+12:], []byte{1, 1, 1, 0, 'x', 'y', 0, 0})
 	want := make([]byte, 4096+9)
 	for i := range want {
 		want[i] = byte(i*17 + i/91)
 	}
 	if inline {
 		le.PutUint16(p, le.Uint16(p)|4)
-		tail := 3072 + 32 + 16
-		if extended {
-			tail += 32
-		}
+		tail := 3072 + xattrStart + 20
 		copy(b[8*4096:], want[:4096])
 		copy(b[tail:], want[4096:])
 	} else {
@@ -336,6 +338,32 @@ func TestCompressedIndexesAndBigClusters(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestPackedFragmentWithEndOfFileIndex(t *testing.T) {
+	b := baseFixture(false)
+	le.PutUint32(b[1104:], 0x23)
+	le.PutUint64(b[1120:], 120) // packed inode
+	packed := b[120*32:]
+	le.PutUint16(packed[4:], 0100600)
+	le.PutUint16(packed[6:], 1)
+	le.PutUint32(packed[8:], 8192)
+	le.PutUint32(packed[16:], 8)
+	want := make([]byte, 4096+71)
+	for i := range want {
+		want[i] = byte(i / 7)
+	}
+	copy(b[8*4096+16:], want)
+
+	le.PutUint16(b[3072:], 2) // full compression index
+	le.PutUint16(b[3074:], 0)
+	fileSize(b, len(want))
+	le.PutUint32(b[3104:], 16)   // packed offset
+	le.PutUint16(b[3108:], 0x22) // fragment and big HEAD1
+	le.PutUint16(b[3120:], 1)    // fragment head
+	le.PutUint16(b[3130:], 71)   // next head is an EOF marker
+	checksum(b)
+	checkReads(t, payload(t, b), want)
 }
 func TestMalformedFilesystemAndDirectories(t *testing.T) {
 	for _, tc := range []struct {

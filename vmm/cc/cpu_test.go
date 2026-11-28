@@ -23,6 +23,7 @@ func TestPortableCPUIdentity(t *testing.T) {
 		c := &cpuidTestCPU{input: []x86state.CPUIDEntry{
 			{Function: 0, Eax: 32, Ebx: 1, Ecx: 2, Edx: 3},
 			{Function: 1, Eax: 0x00abcdef, Ebx: 0xffffffff, Ecx: 0xffffffff, Edx: 0xffffffff},
+			{Function: 2, Eax: 0x00ff0001},
 			{Function: 7, Eax: 1234},
 			{Function: 0x80000000, Eax: 0x80000020},
 			{Function: 0x80000001, Ecx: 0xffffffff, Edx: 0xffffffff},
@@ -50,6 +51,14 @@ func TestPortableCPUIdentity(t *testing.T) {
 				}
 			case 7:
 				t.Fatal("unconfigured feature leaf exposed")
+			case 2:
+				expected := uint32(0x00ff0001)
+				if longMode {
+					expected = 0x3c302c01
+				}
+				if e.Eax != expected {
+					t.Fatalf("unexpected legacy cache descriptors: %#x", e.Eax)
+				}
 			case 0x80000002, 0x80000003, 0x80000004:
 				for _, v := range []uint32{e.Eax, e.Ebx, e.Ecx, e.Edx} {
 					brand = binary.LittleEndian.AppendUint32(brand, v)
