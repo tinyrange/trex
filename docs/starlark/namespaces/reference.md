@@ -422,9 +422,9 @@ ARM64 UEFI machine with inbox NVMe storage and USB input policy.
 
 Basic Alpine APK v2 handling. Policy stays in Starlark, formats in Go.
 
-Inputs are caller-pinned: read_package requires an independently trusted full
-APK SHA-256. Embedded signatures are retained for inspection, not interpreted
-as authentication. This is image construction, not an apk-tools replacement:
+Callers can verify full-file SHA-256 digests or supply trusted repository
+media. Embedded signatures are retained for inspection. Repository-backed APKs
+are checked against their index and data hash. The image recipe owns policy:
 install scripts/triggers are returned and never silently executed or discarded.
 
 ### `install_plan`
@@ -447,11 +447,11 @@ Parse APKINDEX text, retaining dependency/provides/checksum fields.
 
 ### `read_index`
 
-Read a trusted pinned APKINDEX.tar.gz; package signatures are not trust.
+Read APKINDEX.tar.gz, verifying its digest unless the caller supplies None.
 
 ### `read_package`
 
-Validate pinned APK v2 and return metadata, entries and install effects.
+Read APK v2, checking a trusted SHA-256 or the expected index record.
 
 ### `select`
 
@@ -5175,6 +5175,12 @@ Creates a bounded mutable byte builder. Append encoded values, reserve or patch 
 `binary.bzimage_payload(file) -> file`
 
 Returns the embedded kernel payload of a Linux/x86-64 bzImage as a bounded file view. The caller can pass the view to the decompressor matching its magic. Uses Linux boot protocol 2.12 or later.
+
+### `binary.bzimage_release`
+
+`binary.bzimage_release(file) -> string`
+
+Returns the kernel release from an x86-64 bzImage setup header, used to match the boot image with its installed modules.
 
 ### `binary.concat`
 

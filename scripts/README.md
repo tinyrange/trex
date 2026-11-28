@@ -77,6 +77,69 @@ media and commands for `smoke/reactos.star` and
 `smoke/reactos_custom_account.star`, including screenshot and report outputs.
 These are QEMU integration tests, separate from in-process PE emulation.
 
+## Boot installed Linux desktops on CrumbleCracker
+
+Run the desktop matrix on a Linux x86-64 host with KVM. The same manifest can
+also run the installed-system smokes, which exercise boot, package ownership
+and a representative command through the serial console.
+
+```console
+trex scripts/smoke/linux_desktops_cc.star media.json
+trex scripts/smoke/linux_desktops_cc.star media.json alpine nixos
+trex scripts/smoke/linux_installed_cc.star media.json arch ubuntu
+```
+
+Use paths to your original media in the manifest. Relative paths are relative
+to the manifest. A NAS can serve the original media while Trex assembles the
+disks, VM overlays, and desktop captures in memory.
+
+```json
+{
+  "shared": {
+    "loader_iso": "media/alpine-virt.iso",
+    "minirootfs": "media/alpine-minirootfs.tar.gz"
+  },
+  "alpine": {
+    "main_index": "media/alpine/main/APKINDEX.tar.gz",
+    "community_index": "media/alpine/community/APKINDEX.tar.gz",
+    "packages": "media/alpine/packages"
+  },
+  "nixos": {
+    "iso": "media/nixos-minimal.iso",
+    "desktop_iso": "media/nixos-graphical.iso"
+  }
+}
+```
+
+This example supplies enough media for the Alpine and NixOS selections. Fill
+in the remaining sections to run all ten.
+
+| Section | Installed smoke inputs | Desktop smoke inputs |
+| --- | --- | --- |
+| `alpine` | `main_index`, `packages` | Also `community_index` for Xfce |
+| `arch` | `iso` | `iso`, `packages` for Xfce |
+| `fedora` | Workstation `iso` | Xfce spin `desktop_iso` |
+| `gentoo` | OpenRC amd64 `stage3`, minimal installer `iso` | Plasma LiveGUI `desktop_iso` |
+| `nixos` | Minimal `iso` with an LTS entry | Graphical `desktop_iso` with a Plasma LTS entry |
+| `opensuse` | Tumbleweed live `iso` | Tumbleweed Xfce `desktop_iso` |
+| `slackware` | Slackware64 install DVD `iso` | Same `iso` for Xfce |
+| `solus` | Budgie `iso` | Xfce `desktop_iso` |
+| `ubuntu` | Ubuntu 24.04 LTS Desktop `iso` | Same `iso` for GNOME, plus amd64 GNU Hello `hello_deb` |
+| `void` | glibc base `iso` | glibc Xfce `desktop_iso` |
+
+Use an x86-64 Alpine virt ISO as the shared GRUB source and an Alpine
+minirootfs from the same stable series. Bring trusted APKINDEX and Pacman
+repository databases from the release or snapshot matching their base media.
+Place the selected APK files in Alpine's package directory. Place `core.db`,
+`extra.db`, and the selected package archives in Arch's package directory.
+The Alpine and Arch standalone desktop smokes accept `--media-plan` to list
+their required package filenames before constructing a disk.
+
+The recipes read boot and package metadata from the supplied media. A rolling
+snapshot can still change its installer layout or package hooks. Trex checks
+that the media satisfies each recipe's expected layout and rejects package
+effects it has no policy for.
+
 ## Windows 1.01 native computer use
 
 `examples/windows_101_computer.star` builds the installed DOS/Windows image and

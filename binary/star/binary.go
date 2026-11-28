@@ -86,6 +86,7 @@ func Builtins() starlark.StringDict {
 		"android_boot":                 starlark.NewBuiltin("android_boot", androidboot.Builtin),
 		"berkeley_db":                  starlark.NewBuiltin("berkeley_db", berkeleydb.Builtin),
 		"bzimage_payload":              starlark.NewBuiltin("bzimage_payload", bzimagePayloadBuiltin),
+		"bzimage_release":              starlark.NewBuiltin("bzimage_release", bzimageReleaseBuiltin),
 		"software_update_catalog":      starlark.NewBuiltin("software_update_catalog", softwareUpdateCatalogBuiltin),
 		"software_update_distribution": starlark.NewBuiltin("software_update_distribution", softwareUpdateDistributionBuiltin),
 
