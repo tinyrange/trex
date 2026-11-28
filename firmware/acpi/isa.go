@@ -9,11 +9,15 @@ import (
 // Ports are base/length pairs; IRQs use the ISA edge/high convention.
 type ISADevice struct {
 	Name, ID string
+	// StringID encodes a Plug and Play ID in AML string form.
+	StringID bool
 	// Parent is an absolute ACPI scope; the default is the system bus.
 	Parent string
 	UID    uint32
 	Ports  [][2]uint16
 	IRQs   []uint8
+	// LevelIRQs are dedicated, active-high global system interrupts.
+	LevelIRQs []uint32
 	// Memory contains fixed base/length pairs in the 32-bit physical address space.
 	Memory [][2]uint32
 }
@@ -25,12 +29,21 @@ func (d ISADevice) AML() ([]byte, error) {
 	if err := acpiNameString("ISA device name", d.Name, 4, 4); err != nil {
 		return nil, err
 	}
-	id, ok := acpiEISAID(d.ID)
-	if !ok {
-		return nil, fmt.Errorf("invalid ISA device ID %q", d.ID)
+	var hid []byte
+	if d.StringID {
+		if err := acpiNameString("ISA device ID", d.ID, 7, 8); err != nil {
+			return nil, err
+		}
+		hid = append(append([]byte{0x0d}, d.ID...), 0)
+	} else {
+		id, ok := acpiEISAID(d.ID)
+		if !ok {
+			return nil, fmt.Errorf("invalid ISA device ID %q", d.ID)
+		}
+		hid = amlInteger(uint64(id))
 	}
 	body := []byte(d.Name)
-	body = append(body, amlName("_HID", amlInteger(uint64(id)))...)
+	body = append(body, amlName("_HID", hid)...)
 	body = append(body, amlName("_UID", amlInteger(uint64(d.UID)))...)
 	var resources []byte
 	for _, port := range d.Ports {
@@ -56,6 +69,10 @@ func (d ISADevice) AML() ([]byte, error) {
 			return nil, fmt.Errorf("invalid ISA IRQ %d", irq)
 		}
 		resources = binary.LittleEndian.AppendUint16(append(resources, 0x22), 1<<irq)
+	}
+	for _, irq := range d.LevelIRQs {
+		// Extended IRQ: consumer, level-triggered, active-high, exclusive.
+		resources = binary.LittleEndian.AppendUint32(append(resources, 0x89, 6, 0, 1, 1), irq)
 	}
 	resources = append(resources, 0x79, 0)
 	buffer := append(amlInteger(uint64(len(resources))), resources...)

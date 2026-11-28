@@ -4,6 +4,7 @@ load("//tests:testing.star", "case", "equal", "raises", "suite", "true")
 load("@stdlib//unix:alpine.star", "install_plan", "merge", "parse_index", "read_package", "select", "validate_dependencies")
 load("@stdlib//unix:initramfs.star", initramfs = "build")
 load("@stdlib//unix:kernel.star", "modules", "x86_header")
+load("//starlark/private/linux:desktop.star", "desktop_reported")
 
 def _file(text):
     return binary.concat([text])
@@ -121,4 +122,17 @@ def test_kernel_header_and_module_closure():
     cycle = dict(kernel, entries = [_entry("modules.dep", "kernel/a.ko: kernel/b.ko\nkernel/b.ko: kernel/a.ko\n"), _entry("kernel/a.ko", "a"), _entry("kernel/b.ko", "b")])
     raises(modules, [cycle, ["a"]], message = "cycle")
 
-TEST_SUITE = suite("linux", [case("apk-framing-and-metadata", test_apk_framing_and_metadata), case("pinned-dependency-plans", test_pinned_dependency_plans), case("initramfs-and-ext4", test_initramfs_and_ext4), case("kernel-header-and-module-closure", test_kernel_header_and_module_closure)])
+def test_desktop_console_report():
+    marker = "OPENSUSE_DESKTOP_OK Xfce"
+    equal(desktop_reported([marker], marker), True)
+    equal(desktop_reported(["[   17.401643][ T599] " + marker], marker), True)
+    equal(desktop_reported(["opensuse login: [   17.401643][ T599] " + marker], marker), True)
+    equal(desktop_reported(["opensuse login: echo " + marker, "[ T599] " + marker + " extra"], marker), False)
+
+TEST_SUITE = suite("linux", [
+    case("apk-framing-and-metadata", test_apk_framing_and_metadata),
+    case("pinned-dependency-plans", test_pinned_dependency_plans),
+    case("initramfs-and-ext4", test_initramfs_and_ext4),
+    case("kernel-header-and-module-closure", test_kernel_header_and_module_closure),
+    case("desktop-console-report", test_desktop_console_report),
+])

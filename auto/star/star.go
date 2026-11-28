@@ -25,7 +25,7 @@ func Builtin(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.T
 	var maximum starlark.Value
 	name := ""
 	options := auto.Options{MaxEntries: 100000, MaxDepth: 32}
-	if err := starlark.UnpackArgs("auto", args, kwargs, "source", &source, "name?", &name, "maximum?", &maximum, "maximum_entries?", &options.MaxEntries, "maximum_depth?", &options.MaxDepth, "tree?", &tree, "path?", &sourcePath); err != nil {
+	if err := starlark.UnpackArgs("auto", args, kwargs, "source", &source, "name?", &name, "maximum?", &maximum, "maximum_entries?", &options.MaxEntries, "maximum_depth?", &options.MaxDepth, "tree?", &tree, "path?", &sourcePath, "literal_backslash?", &options.LiteralBackslash); err != nil {
 		return nil, err
 	}
 	if maximum != nil {

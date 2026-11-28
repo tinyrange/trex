@@ -158,6 +158,7 @@ func fixture(t *testing.T, codec uint16, fragment, sparse, extended bool) ([]byt
 	le.PutUint16(image[28:], 4)
 	le.PutUint64(image[40:], uint64(len(image)))
 	le.PutUint64(image[48:], idTable)
+	le.PutUint64(image[56:], ^uint64(0))
 	le.PutUint64(image[64:], inodeTable)
 	le.PutUint64(image[72:], directoryTable)
 	le.PutUint64(image[80:], fragmentTable)

@@ -1,8 +1,10 @@
 package uefi
 
 import (
-	"github.com/tinyrange/trex/windows/guid"
+	"bytes"
 	"sort"
+
+	"github.com/tinyrange/trex/windows/guid"
 )
 
 type protocolOpen struct {
@@ -113,4 +115,99 @@ func (m *Machine) locateHandles(a [8]uint64, allocate bool) (uint64, bool) {
 		m.u64(buffer+uint64(j)*8, handle)
 	}
 	return 0, true
+}
+
+func (m *Machine) locateDevicePath(protocol, pathPointer, handlePointer uint64) uint64 {
+	if protocol == 0 || pathPointer == 0 || handlePointer == 0 {
+		return invalidParameter
+	}
+	address := m.read64(pathPointer)
+	path, valid := m.copyDevicePath(address)
+	if !valid || len(path) < 4 {
+		return invalidParameter
+	}
+	identifier := guid.Format([16]byte(m.get(protocol, 16)))
+	var best uint64
+	bestLength := -1
+	for _, handle := range m.handles(identifier) {
+		candidateAddress := m.protocols[handle][devicePathGUID]
+		if candidateAddress == 0 {
+			continue
+		}
+		candidate, valid := m.copyDevicePath(candidateAddress)
+		if !valid || len(candidate) < 4 {
+			continue
+		}
+		prefix := candidate[:len(candidate)-4]
+		if len(prefix) > bestLength && bytes.HasPrefix(path, prefix) {
+			best, bestLength = handle, len(prefix)
+		}
+	}
+	if best == 0 {
+		return notFound
+	}
+	m.u64(pathPointer, address+uint64(bestLength))
+	m.u64(handlePointer, best)
+	return 0
+}
+
+// updateProtocols implements the bounded varargs form used by EFI
+// applications. Registration is atomic if any pair is invalid.
+func (f *Firmware) updateProtocols(a [10]uint64, install bool) uint64 {
+	m := f.machine
+	if a[0] == 0 || m.exited {
+		return invalidParameter
+	}
+	handle := a[0]
+	if install {
+		handle = m.read64(a[0])
+	}
+	existing := m.protocols[handle]
+	if handle != 0 && existing == nil {
+		return invalidParameter
+	}
+	pairs := make(map[string]uint64)
+	terminated := false
+	for i := 1; i < len(a); i += 2 {
+		if a[i] == 0 {
+			terminated = true
+			break
+		}
+		if i+1 >= len(a) || a[i+1] == 0 {
+			return invalidParameter
+		}
+		key := guid.Format([16]byte(m.get(a[i], 16)))
+		if pairs[key] != 0 || (install && existing[key] != 0) || (!install && existing[key] != a[i+1]) {
+			return invalidParameter
+		}
+		pairs[key] = a[i+1]
+	}
+	if !terminated || len(pairs) == 0 {
+		return invalidParameter
+	}
+	if install {
+		if handle == 0 {
+			handle = m.allocate(0, 4, 1, 0)
+			if handle == 0 {
+				return outOfResources
+			}
+			existing = make(map[string]uint64)
+			m.protocols[handle] = existing
+			f.protocolHandles[handle] = true
+			m.u64(a[0], handle)
+		}
+		for key, iface := range pairs {
+			existing[key] = iface
+		}
+		return 0
+	}
+	for key := range pairs {
+		delete(existing, key)
+	}
+	if len(existing) == 0 && f.protocolHandles[handle] {
+		delete(m.protocols, handle)
+		delete(f.protocolHandles, handle)
+		m.free(handle, 1)
+	}
+	return 0
 }

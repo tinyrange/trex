@@ -26,6 +26,12 @@ const efiPort = 0xf6
 type efiMemory struct {
 	p      *pc
 	system *x86state.SystemRegisters
+	images []efiImageFrame
+}
+
+type efiImageFrame struct {
+	handle uint64
+	caller x86state.Registers
 }
 
 func (m efiMemory) physical(a uint64) (uint64, error) {
@@ -244,6 +250,9 @@ func (p *pc) efiCall() error {
 		return fmt.Errorf("EFI trap outside firmware: %#x", r.Rip)
 	}
 	p.lastService = "EFI " + name
+	if name == "Image.Return" {
+		return p.returnEFIImage(r.Rax)
+	}
 	args := [10]uint64{r.Rcx, r.Rdx, r.R8, r.R9}
 	var extra [48]byte
 	if err = p.efiMemory.ReadMemory(r.Rsp+40, extra[:], cpu.Read); err != nil {
@@ -278,8 +287,48 @@ func (p *pc) efiCall() error {
 	if err != nil {
 		return err
 	}
+	if name == "StartImage" && status == 0 {
+		return p.startEFIImage(args[0], r)
+	}
 	r.Rax = status
 	return p.cpu.SetRegisters(r)
+}
+
+func (p *pc) startEFIImage(handle uint64, caller x86state.Registers) error {
+	entry, status := p.efi.StartImage(handle)
+	if status != 0 {
+		caller.Rax = status
+		return p.cpu.SetRegisters(caller)
+	}
+	// Preserve the caller's return slot and provide the Microsoft x64
+	// argument home area and alignment for the child application.
+	regs := caller
+	regs.Rsp -= 48
+	var target [8]byte
+	binary.LittleEndian.PutUint64(target[:], entry.ReturnAddress)
+	if err := p.efiMemory.WriteMemory(regs.Rsp, target[:]); err != nil {
+		return err
+	}
+	p.efiMemory.images = append(p.efiMemory.images, efiImageFrame{handle: handle, caller: caller})
+	regs.Rip, regs.Rcx, regs.Rdx = entry.PC, entry.ImageHandle, entry.SystemTable
+	return p.cpu.SetRegisters(regs)
+}
+
+func (p *pc) returnEFIImage(status uint64) error {
+	frames := p.efiMemory.images
+	if len(frames) == 0 {
+		return fmt.Errorf("EFI child image returned without a caller")
+	}
+	frame := frames[len(frames)-1]
+	frames = frames[:len(frames)-1]
+	parent := p.efi.Entry().ImageHandle
+	if len(frames) != 0 {
+		parent = frames[len(frames)-1].handle
+	}
+	p.efiMemory.images = frames
+	p.efi.FinishImage(frame.handle, parent)
+	frame.caller.Rax = status
+	return p.cpu.SetRegisters(frame.caller)
 }
 
 // The firmware arena uses guest physical addresses, not compact backing offsets.

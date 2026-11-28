@@ -14,12 +14,13 @@ import (
 )
 
 type Image struct {
-	Architecture  cpu.Architecture
-	PreferredBase uint64
-	Base          uint64
-	EntryRVA      uint32
-	Data          []byte
-	Directories   [16]pe.DataDirectory
+	Architecture    cpu.Architecture
+	Characteristics uint16
+	PreferredBase   uint64
+	Base            uint64
+	EntryRVA        uint32
+	Data            []byte
+	Directories     [16]pe.DataDirectory
 }
 
 // SectionData permits omitted raw-file alignment padding only when all bytes
@@ -51,7 +52,7 @@ func Parse(data []byte, memoryLimit uint64) (*Image, error) {
 		return nil, err
 	}
 	defer file.Close()
-	image := &Image{}
+	image := &Image{Characteristics: file.Characteristics}
 	var imageSize, headerSize uint32
 	switch optional := file.OptionalHeader.(type) {
 	case *pe.OptionalHeader32:

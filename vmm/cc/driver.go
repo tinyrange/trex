@@ -543,6 +543,11 @@ func (p *pc) capture() (*image.RGBA, error) {
 }
 
 func (p *pc) captureInto(dst *image.RGBA) (*image.RGBA, error) {
+	if p.virtioGPU != nil {
+		if frame := p.virtioGPU.Capture(); frame != nil {
+			return frame, nil
+		}
+	}
 	frame, err := ramfb.CaptureInto(p.displayMemory(), dst)
 	if frame != nil || err != nil {
 		return frame, err

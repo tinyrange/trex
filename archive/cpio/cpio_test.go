@@ -100,6 +100,24 @@ func TestHardlinksAndConcatenation(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestTrailingPayloadAfterPaddedArchive(t *testing.T) {
+	archive := append(record("070701", "early.bin", "microcode", 1, 0100644, 1), trailer("070701")...)
+	archive = append(archive, make([]byte, 512)...)
+	tail, err := Trailing(&starfile.Bytes{Data: archive}, 10)
+	if err != nil || tail != nil {
+		t.Fatalf("plain archive returned %v, %v", tail, err)
+	}
+	want := []byte{0x28, 0xb5, 0x2f, 0xfd, 0, 1, 2} // Zstandard magic and payload
+	tail, err = Trailing(&starfile.Bytes{Data: append(archive, want...)}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := starfile.ReadAll(tail)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("tail %x, want %x, error %v", got, want, err)
+	}
+}
 func TestBoundsAndChecksums(t *testing.T) {
 	for _, name := range []string{"../escape", "safe/../../escape", "/absolute", ""} {
 		b := append(record("070701", name, "hello", 1, 0100644, 1), trailer("070701")...)

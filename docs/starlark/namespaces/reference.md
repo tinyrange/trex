@@ -422,9 +422,9 @@ ARM64 UEFI machine with inbox NVMe storage and USB input policy.
 
 Basic Alpine APK v2 handling. Policy stays in Starlark, formats in Go.
 
-Inputs are caller-pinned: read_package requires an independently trusted full
-APK SHA-256. Embedded signatures are retained for inspection, not interpreted
-as authentication. This is image construction, not an apk-tools replacement:
+Callers can verify full-file SHA-256 digests or supply trusted repository
+media. Embedded signatures are retained for inspection. Repository-backed APKs
+are checked against their index and data hash. The image recipe owns policy:
 install scripts/triggers are returned and never silently executed or discarded.
 
 ### `install_plan`
@@ -447,11 +447,11 @@ Parse APKINDEX text, retaining dependency/provides/checksum fields.
 
 ### `read_index`
 
-Read a trusted pinned APKINDEX.tar.gz; package signatures are not trust.
+Read APKINDEX.tar.gz, verifying its digest unless the caller supplies None.
 
 ### `read_package`
 
-Validate pinned APK v2 and return metadata, entries and install effects.
+Read APK v2, checking a trusted SHA-256 or the expected index record.
 
 ### `select`
 
@@ -4482,9 +4482,9 @@ Applies one KD load/unload event to resolver state.
 
 ### `auto`
 
-`auto(source, name='', maximum=<default>, maximum_entries=100000, maximum_depth=32, tree=None, path='') -> auto`
+`auto(source, name='', maximum=<default>, maximum_entries=100000, maximum_depth=32, tree=None, path='', literal_backslash=False) -> auto`
 
-Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Native EROFS supports compact/extended inodes, flat/inline data and LZ4 full/compact indexes including 2-byte packs and big physical clusters. EROFS views verify superblock CRC32C and reject unsupported incompatible features; source bytes must remain unchanged while views are used. summary returns current entry metadata without detecting or reading its payload; metadata additionally detects the payload format. Use summary for directory inventories. By default eager decoding is limited to 512 MiB while bounded gzip, bzip2 and XZ streams have no total-length ceiling; an explicit positive maximum bounds both kinds. Container paths resolve recursively while file preserves the original bytes. Detectors receive containing-tree context for companion files across directories. For an isolated file, tree and its tree-relative path attach that context explicitly. Companion lookup reads raw entries within the supplied tree without following links or recursively detecting files; dot segments and host paths are not accepted.
+Wraps a byte view, file, bytes value or existing filesystem in a lazy standardized Go node view. Registered format detectors inspect a bounded prefix and confirm the format through native parsers. Native EROFS supports compact/extended inodes, flat/inline data and LZ4 or MicroLZMA full and compact indexes with big physical clusters and packed fragments. EROFS views verify superblock CRC32C and reject unsupported incompatible features; source bytes must remain unchanged while views are used. summary returns current entry metadata without detecting or reading its payload; metadata additionally detects the payload format. Use summary for directory inventories. By default eager decoding is limited to 512 MiB while bounded gzip, bzip2 and XZ streams have no total-length ceiling; an explicit positive maximum bounds both kinds. Container paths resolve recursively while file preserves the original bytes. Set literal_backslash=True to preserve Unix filenames containing backslashes. Detectors receive containing-tree context for companion files across directories. For an isolated file, tree and its tree-relative path attach that context explicitly. Companion lookup reads raw entries within the supplied tree without following links or recursively detecting files; dot segments and host paths are not accepted.
 
 ### `auto_plan`
 
@@ -4630,6 +4630,24 @@ Opens a symmetric profile-1 AEA1 archive natively. key is 32 raw bytes; None sel
 
 Reads bounded AEA1 header metadata without decrypting or authenticating it. Returns profile, scrypt_strength, borrowed auth_data and values (key to binary bytes). Rejects malformed or duplicate records. Metadata may contain encryption keys; inspect names before printing values. Never contacts a key service.
 
+### `archive.apk_installed`
+
+`archive.apk_installed(packages) -> file`
+
+Encodes Alpine v2 installed records from pairs of APKINDEX fields and Unix payload entries. Records include paths, permission differences, and content checksums. Callers provide verified package entries and handle installation effects.
+
+### `archive.apk_resolve`
+
+`archive.apk_resolve(available, base, selected) -> list[string]`
+
+Resolves exact name=version selections and their dependencies using Alpine v2 package and provider semantics. Available and base records use APKINDEX field dictionaries. Returns the exact package identities to add.
+
+### `archive.apk_script_database`
+
+`archive.apk_script_database(scripts, triggers, packages) -> record`
+
+Registers APK v2 package hooks in the installed scripts.tar and trigger databases. Each package supplies its name, version, APKINDEX checksum, script files and trigger patterns. Returns the updated files for the image.
+
 ### `archive.apple_archive`
 
 `archive.apple_archive(file, maximum_entries=100000) -> entries`
@@ -4750,6 +4768,12 @@ Indexes ASCII CPIO directly into flat metadata dictionaries using bounded forwar
 
 Constructs a deterministic Linux-compatible newc archive from Unix entry dictionaries. Preserves modes, ownership, timestamps, symbolic links, hardlinks and device numbers. Synthesizes missing parent directories, rejects duplicate or unsafe paths, and borrows payload readers without extracting them.
 
+### `archive.cpio_trailing`
+
+`archive.cpio_trailing(file, maximum_entries=100000) -> file|None`
+
+Returns a borrowed view of the non-CPIO data after the trailer and padding of an ASCII CPIO archive, or None when no trailing payload exists. Useful for Linux initramfs files that prefix a compressed archive with an uncompressed microcode archive.
+
 ### `archive.crx`
 
 `archive.crx(file) -> record(id, version, files, entries)`
@@ -4761,6 +4785,12 @@ Verifies a CRX3 envelope and returns its developer ID, format version and ZIP en
 `archive.dcs(file, maximum_bytes=512MiB) -> file`
 
 Expands a DCS v1 CBS component-store container to an in-memory read-only file using native LZMS decoding. maximum_bytes (1..512MiB) bounds both stored and expanded sizes; framing, block counts, lengths and trailing data are checked before returning content. This is separate from WIM resource compression and does not verify manifest hashes or catalog trust.
+
+### `archive.debian_control`
+
+`archive.debian_control(file, maximum_bytes=64MiB) -> list[record]`
+
+Parses Debian control paragraphs and returns their case-normalized field dictionaries and original paragraph text. Validates continuation lines and duplicate fields within the byte limit.
 
 ### `archive.gzip`
 
@@ -4924,6 +4954,24 @@ Decodes an Omaha metainstaller LZMA/BCJ2 payload resource into a portable file, 
 
 Decodes a UNIX pack (1f1e) Huffman stream, checking its symbol tree, end marker, padding and declared output size. Enforces maximum_bytes and returns a file; useful for compressed IRIX manual pages nested inside inst images.
 
+### `archive.pacman_compare`
+
+`archive.pacman_compare(left, right) -> int`
+
+Compares Pacman package versions using epoch, version and release ordering.
+
+### `archive.pacman_installed`
+
+`archive.pacman_installed(metadata, paths, backups, explicit=False) -> record`
+
+Builds Pacman local desc and files records from verified repository metadata and an owned path list.
+
+### `archive.pacman_metadata`
+
+`archive.pacman_metadata(file, pkginfo=False) -> dict`
+
+Reads Pacman section records or package PKGINFO records as a dictionary of field names to lists of strings.
+
 ### `archive.pbze`
 
 `archive.pbze(file, maximum_bytes=<unlimited>) -> file`
@@ -5036,7 +5084,7 @@ Indexes XAR v1 without extraction. Returns entries, files, original decoded toc,
 
 `archive.xz(file, max_dictionary=64MiB) -> file`
 
-Decodes an XZ stream into a file, rejecting decoder dictionaries above max_dictionary. This unwraps compression; it does not interpret an archive contained in the decoded bytes.
+Decodes a bounded-dictionary XZ stream into a file. Uses the stream indexes for block-level reads and supports the ARM64 branch filter on bounded blocks.
 
 ### `archive.zip`
 
@@ -5127,6 +5175,12 @@ Creates a bounded mutable byte builder. Append encoded values, reserve or patch 
 `binary.bzimage_payload(file) -> file`
 
 Returns the embedded kernel payload of a Linux/x86-64 bzImage as a bounded file view. The caller can pass the view to the decompressor matching its magic. Uses Linux boot protocol 2.12 or later.
+
+### `binary.bzimage_release`
+
+`binary.bzimage_release(file) -> string`
+
+Returns the kernel release from an x86-64 bzImage setup header, used to match the boot image with its installed modules.
 
 ### `binary.concat`
 
@@ -5628,9 +5682,9 @@ Returns a read-only file view of a live block device. Later device changes remai
 
 ### `cc.backend`
 
-`cc.backend(acpi=False, pci_ide=False, pci_display=False, hpet=False, uefi=False, usb=False, sb16=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
+`cc.backend(acpi=False, pci_ide=False, pci_display=False, virtio_gpu=False, hpet=False, uefi=False, usb=False, sb16=False, ide_model='synthetic', ide_dma=True, overlay_limit=268435456, run_timeout=30.0, private_apple_isa=False) -> vmm_backend`
 
-Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. Native UEFI PCs accept cpus=1..4 as one package without SMT; other PC profiles remain single-CPU. All-core pause/stop/capture barriers precede inspection and teardown. cc.v1.cpus() returns per-core register summaries; state/read_virtual use CPU0, and breakpoint/step require one CPU. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 16 GiB with uefi=True. usb=True on x86_64 enables a UHCI keyboard and absolute pointer with wheel; PS/2 keyboard fallback remains until USB enumeration. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_display=True exposes the 1234:cc02 TRF1 PCI framebuffer at bus 0 device 2, with an 8 MiB BAR at 0xe0000000; it requires a compatible guest display driver. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
+Creates an in-process CrumbleCracker backend for Linux/amd64 KVM or native macOS ARM64 HVF. ARM64 uses explicit CPU/load state and an optional caller-composed vmm.arm64_platform. The native loop dispatches MMIO, optional polling/lifecycle hooks and platform HVC before PSCI; it has no board map or OEM service policy. Native protocol devices receive placement, backing and wiring from the platform factory. run_timeout bounds ARM64 execution in seconds (default 30). private_apple_isa=True selects HVF private ISA level 3 before VM creation and requires com.apple.private.hypervisor on a configured host; this host option is independent of board selection and nested EL2. ARM64 is headless and supports one CPU, named byte channels and snapshot-backed block resources. RAM must align to host pages; memory protection applies to both guest CPU access and emulated DMA. PC devices and Intel symbol/disassembly helpers below apply to x86 guests. The i386 and x86_64 platforms provide Go BIOS services, one ATA disk, VGA capture and PS/2 input. ACPI is automatic for x86_64 and optional for i386. uefi=True selects native Go UEFI for x86_64 GPT disks, enables PCI IDE, and provides a 1280x720 GOP framebuffer. Native UEFI PCs accept cpus=1..4 as one package without SMT; other PC profiles remain single-CPU. All-core pause/stop/capture barriers precede inspection and teardown. cc.v1.cpus() returns per-core register summaries; state/read_virtual use CPU0, and breakpoint/step require one CPU. RAM supports 16 MiB through 8 GiB for x86_64 BIOS/direct Darwin, 3 GiB for i386, or 16 GiB with uefi=True. usb=True on x86_64 enables a UHCI keyboard and absolute pointer with wheel; PS/2 keyboard fallback remains until USB enumeration. RAM beyond 3 GiB is mapped above 4 GiB, leaving the PCI MMIO window unmapped as RAM. hpet=True adds a 100 MHz HPET with three comparators and enables ACPI. pci_display=True exposes the 1234:cc02 TRF1 PCI framebuffer at bus 0 device 2, with an 8 MiB BAR at 0xe0000000; it requires a compatible guest display driver. virtio_gpu=True adds a native 2D virtio-MMIO display on x86_64 UEFI, with guest scanout available to capture. pci_ide enables ACPI and a generic PCI IDE controller with PIO and bus-master DMA; ide_dma=False selects a PIO-only disk. ide_model='synthetic' preserves the generic compatibility controller; 'ich7-pata' requires PCI IDE and selects the 8086:27df profile with one primary disk, compatibility IRQ14 and native INTA routed to GSI16. The secondary channel has no disk. Timing registers are recorded; electrical cable timing is not simulated. The cc.v1 extension provides bounded read_virtual, original kernel symbol lookup and read-only disassemble observations for direct Darwin boot. overlay_limit bounds dirty snapshot memory in bytes (default 256 MiB). vmm.start creates the guest from portable memory and disk intent.
 
 ### `cc.boot_bsd`
 
@@ -5835,6 +5889,24 @@ Builds an ESE database in memory from declarative tables. Supports Windows 2000 
 `database.msi(file) -> msi`
 
 Reads a Windows Installer database and its embedded streams. plan resolves static payloads and table effects for supplied target properties, retaining custom actions and runtime dependencies without execution.
+
+### `database.nix_store`
+
+`database.nix_store(registration) -> file`
+
+Builds the Nix schema-10 SQLite store database from an original Nix closure registration file. Resolves references across the complete manifest and preserves SHA-256 NAR hashes and sizes. Install the registered paths alongside the database.
+
+### `database.nix_store_closure`
+
+`database.nix_store_closure(registration, roots) -> record`
+
+Selects roots and their transitive references from an original Nix registration file. Returns the sorted store paths and matching schema-10 SQLite database for an installed closure.
+
+### `database.shared_mime_info`
+
+`database.shared_mime_info(xml) -> dict`
+
+Compiles a Shared MIME-info XML file into the lookup files used for content type detection and filename associations. Returns a dictionary of filenames and in-memory files.
 
 ### `database.sqlite`
 
@@ -6092,7 +6164,7 @@ Reads a clean ext2/3/4 image without mounting. Returns flat entry records with U
 
 `filesystem.ext4_build(entries, size, label='', uuid='', inode_count=0, ext2=False) -> file`
 
-Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. inode_count optionally sets minimum total inode capacity, including reserved inodes, rounded up to block-group geometry; zero sizes from input entries. Larger values reserve free inodes for later guest writes, subject to the metadata and disk-size bounds. Preserves ownership, permissions, links and devices. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes. ext2=True builds a revision-1 ext2 image instead (block maps, filetype and large_file features only) for kernels without ext4.
+Builds a sparse ext4 image from Unix entry dictionaries using native 4096-byte blocks, extents and linear directories. Size is explicit and block-aligned; metadata is bounded at 256 MiB. inode_count optionally sets minimum total inode capacity, including reserved inodes, rounded up to block-group geometry; zero sizes from input entries. Larger values reserve free inodes for later guest writes, subject to the metadata and disk-size bounds. Preserves ownership, permissions, links, devices and extended attributes. Images have no journal; file payloads are borrowed immutable readers. UUID is 32 hexadecimal digits; label is at most 16 bytes. ext2=True builds a revision-1 ext2 image instead (block maps, filetype and large_file features only) for kernels without ext4.
 
 ### `filesystem.fat`
 

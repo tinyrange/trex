@@ -22,6 +22,8 @@ func TestOpenBZImage(t *testing.T) {
 	le.PutUint32(data[0x24c:], 6)
 	le.PutUint64(data[0x258:], 16<<20)
 	le.PutUint32(data[0x260:], 32<<20)
+	le.PutUint16(data[0x20e:], 0x100)
+	copy(data[0x300:], "7.2.11-arch1-1 (builder)\x00")
 	data[0x26c] = 0xf4 // Instruction after the setup header.
 	copy(data[payloadAt:], "payload")
 	image, err := OpenBZImage(bytes.NewReader(data))
@@ -31,6 +33,30 @@ func TestOpenBZImage(t *testing.T) {
 	if image.Payload.Size() != 16 || image.InitSize != 32<<20 || image.PreferredAddress != 16<<20 || image.KernelAlignment != 2<<20 || !image.Relocatable {
 		t.Fatalf("wrong bzImage layout: %+v", image)
 	}
+	if release, err := image.KernelRelease(); err != nil || release != "7.2.11-arch1-1" {
+		t.Fatalf("kernel release = %q, %v", release, err)
+	}
+	for _, tc := range []struct {
+		pointer uint16
+		value   string
+	}{
+		{0, ""},
+		{payloadAt - 0x200, ""},
+		{payloadAt - 0x200 - 1, "1"},
+		{0x100, "../outside"},
+	} {
+		malformed := bytes.Clone(data)
+		le.PutUint16(malformed[0x20e:], tc.pointer)
+		copy(malformed[0x200+int(tc.pointer):], tc.value)
+		image, err := OpenBZImage(bytes.NewReader(malformed))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := image.KernelRelease(); err == nil {
+			t.Fatalf("accepted invalid version at %#x", tc.pointer)
+		}
+	}
+
 	var payload [7]byte
 	if _, err := image.Payload.ReadAt(payload[:], 0); err != nil || string(payload[:]) != "payload" {
 		t.Fatalf("payload = %q, %v", payload, err)

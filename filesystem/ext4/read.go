@@ -448,6 +448,13 @@ func (r *fileReader) ReadAt(p []byte, off int64) (int, error) {
 }
 func (v *Volume) entry(n *inode, name string) (auto.Entry, error) {
 	e := auto.Entry{Name: name, Attributes: map[string]any{"inode": n.id, "mode": n.mode, "uid": n.uid, "gid": n.gid, "mtime": n.mtime, "nlink": n.nlink}}
+	xattrs, err := v.readXattrs(n)
+	if err != nil {
+		return e, err
+	}
+	if len(xattrs) != 0 {
+		e.Attributes["xattrs"] = xattrs
+	}
 	switch n.mode & 0170000 {
 	case unixfs.Regular:
 		e.Kind = "file"
@@ -473,7 +480,7 @@ func (v *Volume) entry(n *inode, name string) (auto.Entry, error) {
 			sectors -= v.block / 512
 		}
 		if sectors == 0 {
-			if n.size > 60 {
+			if n.size >= 60 {
 				return e, fmt.Errorf("ext4: invalid fast symlink")
 			}
 			data = n.raw[40 : 40+n.size]
@@ -558,7 +565,7 @@ func (d *dirView) load() ([]auto.Entry, error) {
 		}
 		if v.ro&0x400 != 0 {
 			if err := v.directoryChecksum(node, block, off == 0); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("ext4 directory inode %d block %d: %w", node.id, uint64(off)/v.block, err)
 			}
 		}
 		for at := 0; at < len(block); {
@@ -626,15 +633,16 @@ func (d *dirView) load() ([]auto.Entry, error) {
 }
 func (v *Volume) directoryChecksum(n *inode, b []byte, first bool) error {
 	// Linear/htree leaf blocks end with ext4_dir_entry_tail.
+	indexed := n.flags&0x1000 != 0
 	tail := len(b) - 12
-	if u32(b, tail) == 0 && u16(b, tail+4) == 12 && b[tail+6] == 0 && b[tail+7] == 0xde {
+	if !(indexed && first) && u32(b, tail) == 0 && u16(b, tail+4) == 12 && b[tail+6] == 0 && b[tail+7] == 0xde {
 		if rawCRC(n.seed, b[:tail]) != u32(b, tail+8) {
 			return fmt.Errorf("ext4: directory checksum mismatch")
 		}
 		return nil
 	}
 	// Htree root and interior nodes carry a dx_tail after their entry capacity.
-	if n.flags&0x1000 == 0 {
+	if !indexed {
 		return fmt.Errorf("ext4: missing directory checksum tail")
 	}
 	countOff := 8

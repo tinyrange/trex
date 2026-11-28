@@ -72,6 +72,14 @@ func Builtin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwarg
 					attrs[k] = starlark.MakeUint(uint(val))
 				case string:
 					attrs[k] = starlark.String(val)
+				case map[string][]byte:
+					xattrs := starlark.NewDict(len(val))
+					for name, data := range val {
+						if err := xattrs.SetKey(starlark.String(name), starlark.Bytes(data)); err != nil {
+							return err
+						}
+					}
+					attrs[k] = xattrs
 				}
 			}
 			attrs["data"] = starlark.None

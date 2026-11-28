@@ -74,6 +74,7 @@ type pc struct {
 	pciAddress      uint32
 	pciIDE          *pciIDE
 	pciDisplay      *pciDisplay
+	virtioGPU       *hypervisor.VirtioGPU
 	uhci            *uhci
 
 	runSlots         chan struct{}

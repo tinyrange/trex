@@ -36,6 +36,23 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 // metadata. Later duplicate paths replace earlier ones; archive identifies the
 // trailer-delimited hardlink namespace. No directory adapter is constructed.
 func Read(source storage.Reader, limit int) ([]auto.Entry, error) {
+	return readArchive(source, limit, nil)
+}
+
+// Trailing returns a borrowed view following a trailer-delimited CPIO
+// sequence, allowing compressed members in Linux initramfs to be identified.
+func Trailing(source storage.Reader, limit int) (storage.Reader, error) {
+	var offset int64
+	if _, err := readArchive(source, limit, &offset); err != nil {
+		return nil, err
+	}
+	if offset == source.Size() {
+		return nil, nil
+	}
+	return io.NewSectionReader(source, offset, source.Size()-offset), nil
+}
+
+func readArchive(source storage.Reader, limit int, trailing *int64) ([]auto.Entry, error) {
 	if source == nil || source.Size() < 0 {
 		return nil, fmt.Errorf("cpio: invalid source")
 	}
@@ -92,6 +109,7 @@ func Read(source storage.Reader, limit int) ([]auto.Entry, error) {
 				}
 				// Keep seven bytes: a Cray signature begins with six zeros.
 				if n == len(padding) && pos+int64(n) == size {
+					pos = size
 					break
 				}
 				pos += int64(max(1, n-7))
@@ -269,6 +287,12 @@ func Read(source storage.Reader, limit int) ([]auto.Entry, error) {
 		entries = append(entries, entry)
 	}
 	finish()
+	if trailing != nil {
+		if !afterTrailer {
+			return nil, fmt.Errorf("cpio: missing archive trailer")
+		}
+		*trailing = pos
+	}
 	selected := entries[:0]
 	for i, e := range entries {
 		if latest[e.Name] == i {

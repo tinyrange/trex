@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"github.com/tinyrange/trex/block"
 	blockstar "github.com/tinyrange/trex/block/star"
@@ -37,6 +38,36 @@ func TestATCMOSCenturySelection(t *testing.T) {
 }
 func ioByte(port uint16, write bool, value byte) hypervisor.X86Exit {
 	return hypervisor.X86Exit{Reason: hypervisor.X86ExitIO, Port: port, Size: 1, Count: 1, Write: write, Data: []byte{value}}
+}
+
+func TestCMOSUpdateInProgressFollowsClock(t *testing.T) {
+	now := time.Unix(100, 0)
+	p := &pc{now: func() time.Time { return now }, cmosIndex: 0xa}
+	p.cmos[0xa] = 0x26
+	status := func() byte {
+		t.Helper()
+		ex := ioByte(0x71, false, 0)
+		if err := p.handleIO(ex); err != nil {
+			t.Fatal(err)
+		}
+		return ex.Data[0]
+	}
+	if status() != 0x26 {
+		t.Fatal("update outside the end-of-second window")
+	}
+	now = now.Add(time.Second - 100*time.Microsecond)
+	if status() != 0xa6 {
+		t.Fatal("missing update indicator")
+	}
+	p.cmos[0xb] = 0x80
+	if status() != 0x26 {
+		t.Fatal("SET did not inhibit the update indicator")
+	}
+	p.cmos[0xb] = 0
+	now = now.Add(100 * time.Microsecond)
+	if status() != 0x26 {
+		t.Fatal("update indicator persisted past the calendar boundary")
+	}
 }
 
 func TestIDEMultiSectorAndOverlay(t *testing.T) {

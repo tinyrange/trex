@@ -1,15 +1,21 @@
 package erofs
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 
 	bytecache "github.com/tinyrange/trex/storage/cache"
+	"github.com/ulikunitz/xz/lzma"
 )
 
 type compression struct {
 	base, count, logical uint64
 	advise               uint16
 	bits                 uint8
+	algorithms           uint8
+	fragment             uint64
+	entireFragment       bool
 }
 type cluster struct {
 	kind                                     uint8
@@ -22,9 +28,21 @@ func (n *inode) compression() (compression, error) {
 	if err != nil {
 		return compression{}, err
 	}
-	c := compression{base: pos + 8, advise: le.Uint16(h[4:]), bits: n.fs.bits + (h[7] & 15)}
-	if h[6] != 0 || h[7]&^byte(15) != 0 || c.advise & ^uint16(23) != 0 || n.fs.algorithms&1 == 0 || n.layout == 1 && c.advise&1 != 0 {
+	if h[7]&0x80 != 0 {
+		if n.fs.incompat&0x20 == 0 {
+			return compression{}, fmt.Errorf("packed inode without fragments feature")
+		}
+		return compression{entireFragment: true, fragment: le.Uint64(h) &^ (uint64(1) << 63)}, nil
+	}
+	c := compression{base: pos + 8, advise: le.Uint16(h[4:]), bits: n.fs.bits + (h[7] & 15), algorithms: h[6]}
+	if h[6]&15 > 1 || h[6]>>4 > 1 || h[7]&^byte(15) != 0 || c.advise & ^uint16(0x37) != 0 || n.layout == 1 && c.advise&1 != 0 {
 		return c, fmt.Errorf("unsupported compression map or algorithm")
+	}
+	if c.advise&0x20 != 0 {
+		if n.fs.incompat&0x20 == 0 {
+			return c, fmt.Errorf("packed fragment without fragments feature")
+		}
+		c.fragment = uint64(le.Uint32(h))
 	}
 	if c.advise&6 != 0 && n.fs.incompat&2 == 0 {
 		return c, fmt.Errorf("big cluster lacks superblock feature")
@@ -166,14 +184,11 @@ func (n *inode) index(c compression, index uint64) (cluster, error) {
 	return n.validateCluster(c, r)
 }
 func (n *inode) validateCluster(c compression, r cluster) (cluster, error) {
-	if r.kind == 3 {
-		return r, fmt.Errorf("unsupported HEAD2 cluster")
-	}
 	if r.kind == 2 {
 		if r.back == 0 || r.blocks > 0 && (c.advise&6 == 0 || r.blocks*n.fs.block > 1<<20) {
 			return r, fmt.Errorf("invalid cluster back reference or block count")
 		}
-	} else if r.offset >= c.logical || r.physical >= n.fs.used/n.fs.block {
+	} else if r.offset >= c.logical || (c.advise&0x20 == 0 && r.physical >= n.fs.used/n.fs.block) {
 		return r, fmt.Errorf("invalid cluster offset or physical address")
 	}
 	return r, nil
@@ -183,6 +198,9 @@ func (n *inode) compressed(at uint64) ([]byte, error) {
 	c, err := n.compression()
 	if err != nil {
 		return nil, err
+	}
+	if c.entireFragment {
+		return n.packedBytes(c.fragment, at, n.size-at)
 	}
 	head := at / c.logical
 	r, err := n.index(c, head)
@@ -227,15 +245,28 @@ func (n *inode) compressed(at uint64) ([]byte, error) {
 	if start > at || end <= at || end-start > 12<<20 {
 		return nil, fmt.Errorf("invalid compressed extent range")
 	}
-	physical := c.logical
-	if r.kind != 0 && c.advise&2 != 0 && head+1 < c.count {
+	// Full indexes can carry a following head marker at EOF. It ends the
+	// previous extent without displacing its packed-fragment mapping.
+	if end == n.size && c.advise&0x20 != 0 {
+		offset := c.fragment
+		if n.layout == 1 {
+			offset |= r.physical << 32
+		}
+		return n.packedBytes(offset, at-start, end-at)
+	}
+	physical := n.fs.block
+	bigFlag := uint16(4)
+	if r.kind == 1 {
+		bigFlag = 2
+	}
+	if c.advise&bigFlag != 0 && head+1 < c.count {
 		following, err := n.index(c, head+1)
 		if err != nil {
 			return nil, err
 		}
 		if following.kind == 2 {
 			if following.blocks == 0 || following.back != 1 {
-				return nil, fmt.Errorf("missing physical block count")
+				return nil, fmt.Errorf("missing physical block count after cluster %d (type %d, flags %#x, next delta %d)", head, r.kind, c.advise, following.back)
 			}
 			physical = following.blocks * n.fs.block
 		}
@@ -270,12 +301,61 @@ func (n *inode) compressed(at uint64) ([]byte, error) {
 			}
 			encoded = encoded[padding:]
 		}
+		algorithm := c.algorithms & 15
+		if r.kind == 3 {
+			algorithm = c.algorithms >> 4
+		}
+		if n.fs.algorithms&(uint16(1)<<algorithm) == 0 {
+			return nil, fmt.Errorf("compression algorithm not advertised")
+		}
+		if algorithm == 1 {
+			return microLZMA(encoded, n.fs.lzmaDictionary, length)
+		}
 		return lz4Prefix(encoded, length)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return b[at-start:], nil
+}
+
+func (n *inode) packedBytes(offset, at, remaining uint64) ([]byte, error) {
+	if n.fs.packed == 0 || n.nid == n.fs.packed {
+		return nil, fmt.Errorf("missing or recursive packed inode")
+	}
+	source, err := n.fs.inode(n.fs.packed)
+	if err != nil {
+		return nil, err
+	}
+	if offset > source.size || at > source.size-offset || remaining > source.size-offset-at {
+		return nil, fmt.Errorf("packed fragment outside packed inode")
+	}
+	out := make([]byte, min(remaining, 1<<20))
+	if _, err := io.ReadFull(io.NewSectionReader(source, int64(offset+at), int64(len(out))), out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func microLZMA(encoded []byte, dictionary uint32, length int) ([]byte, error) {
+	if len(encoded) < 5 || dictionary < 4096 || dictionary > 8<<20 || length <= 0 || length > 12<<20 {
+		return nil, fmt.Errorf("invalid MicroLZMA cluster parameters")
+	}
+	// MicroLZMA replaces the first range-coder byte with complemented LZMA1
+	// properties. Restore that byte and provide the classic LZMA1 sizes.
+	var header [14]byte
+	header[0] = ^encoded[0]
+	le.PutUint32(header[1:], dictionary)
+	le.PutUint64(header[5:], uint64(length))
+	r, err := (lzma.ReaderConfig{DictCap: int(dictionary)}).NewReader(io.MultiReader(bytes.NewReader(header[:]), bytes.NewReader(encoded[1:])))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, length)
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // lz4Prefix decodes a bounded prefix of a raw LZ4 block. EROFS may request a

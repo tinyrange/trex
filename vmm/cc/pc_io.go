@@ -199,6 +199,11 @@ func (p *pc) handleIO(ex hypervisor.X86Exit) error {
 				value = bcd(t.Year() % 100)
 			case 0xa:
 				value = p.cmos[0xa] & 0x7f
+				// UIP rises eight ticks of the 32,768 Hz oscillator
+				// before the next calendar update, unless SET inhibits it.
+				if p.cmos[0xb]&0x80 == 0 && time.Second-time.Duration(t.Nanosecond()) <= 8*time.Second/32768 {
+					value |= 0x80
+				}
 			case 0xb:
 				value = p.cmos[0xb]
 			case 0xc:

@@ -1,8 +1,8 @@
 """Basic Alpine APK v2 handling. Policy stays in Starlark, formats in Go.
 
-Inputs are caller-pinned: read_package requires an independently trusted full
-APK SHA-256. Embedded signatures are retained for inspection, not interpreted
-as authentication. This is image construction, not an apk-tools replacement:
+Callers can verify full-file SHA-256 digests or supply trusted repository
+media. Embedded signatures are retained for inspection. Repository-backed APKs
+are checked against their index and data hash. The image recipe owns policy:
 install scripts/triggers are returned and never silently executed or discarded.
 """
 
@@ -55,8 +55,9 @@ def parse_index(text, maximum_entries = 100000):
     return records
 
 def read_index(source, sha256, maximum_bytes = 32 << 20):
-    """Read a trusted pinned APKINDEX.tar.gz; package signatures are not trust."""
-    _verify(source, sha256)
+    """Read APKINDEX.tar.gz, verifying its digest unless the caller supplies None."""
+    if sha256 != None:
+        _verify(source, sha256)
     members = archive.gzip_members(source, maximum_bytes = maximum_bytes, maximum_members = 4)
     found = None
     for member in members:
@@ -90,9 +91,12 @@ def _verify(source, sha256):
     if binary.hex(digest(source)) != sha256.lower():
         fail("alpine: SHA-256 mismatch")
 
-def read_package(source, sha256, expected = None, maximum_bytes = 512 << 20, maximum_entries = 100000):
-    """Validate pinned APK v2 and return metadata, entries and install effects."""
-    _verify(source, sha256)
+def read_package(source, sha256, expected = None, maximum_bytes = 512 << 20, maximum_entries = 100000, cache_payload = False):
+    """Read APK v2, checking a trusted SHA-256 or the expected index record."""
+    if sha256 != None:
+        _verify(source, sha256)
+    elif expected == None:
+        fail("alpine: trusted full-file SHA-256 or an expected index record required")
     members = archive.gzip_members(source, maximum_bytes = maximum_bytes, maximum_members = 3)
     if len(members) not in [2, 3]:
         fail("alpine: APK v2 requires control/data and optional signature members")
@@ -122,15 +126,15 @@ def read_package(source, sha256, expected = None, maximum_bytes = 512 << 20, max
         fail("alpine: datahash mismatch")
     if expected != None:
         if [name, version] != [expected["name"], expected["version"]] or source.size != expected["size"]:
-            fail("alpine: package identity differs from pinned index: expected {}={} ({} bytes), got {}={} ({} bytes)".format(expected["name"], expected["version"], expected["size"], name, version, source.size))
+            fail("alpine: package identity differs from index: expected {}={} ({} bytes), got {}={} ({} bytes)".format(expected["name"], expected["version"], expected["size"], name, version, source.size))
         # An architecture-specific APKINDEX can list a noarch payload under the
         # repository architecture. An architecture-specific payload must match.
         if arch != "noarch" and arch != expected["arch"]:
-            fail("alpine: package architecture differs from pinned index: {}={} expected {}, got {}".format(name, version, expected["arch"], arch))
+            fail("alpine: package architecture differs from index: {}={} expected {}, got {}".format(name, version, expected["arch"], arch))
         checksum = "Q1" + binary.base64(crypto.hash("sha1", control_member))
         if checksum != expected["checksum"]:
             fail("alpine: control checksum differs from index")
-    tar = archive.tar(archive.gzip(data_member), maximum_entries = maximum_entries)
+    tar = archive.tar(archive.gzip(data_member, maximum_bytes = maximum_bytes, cache = cache_payload), maximum_entries = maximum_entries)
     entries = []
     seen = {}
     for item in tar.entries:
@@ -151,7 +155,7 @@ def read_package(source, sha256, expected = None, maximum_bytes = 512 << 20, max
         elif item.entry_type in ["character_device", "block_device"]:
             e["major"], e["minor"] = item.major, item.minor
         entries.append(e)
-    return {"name": name, "version": version, "arch": arch, "metadata": metadata, "depends": metadata.get("depend", []), "provides": metadata.get("provides", []), "entries": entries, "effects": effects, "signatures": signature, "sha256": sha256.lower()}
+    return {"name": name, "version": version, "arch": arch, "metadata": metadata, "depends": metadata.get("depend", []), "provides": metadata.get("provides", []), "entries": entries, "effects": effects, "signatures": signature, "sha256": sha256.lower() if sha256 != None else None}
 
 def merge(packages, modifications = [], allow_effects = False):
     """Merge package payloads; conflicting files/effects require explicit policy."""

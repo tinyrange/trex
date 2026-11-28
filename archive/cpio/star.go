@@ -2,11 +2,32 @@ package cpio
 
 import (
 	"fmt"
+
 	"github.com/tinyrange/trex/filesystem/unixfs"
 	"github.com/tinyrange/trex/storage"
 	starfile "github.com/tinyrange/trex/storage/star"
 	"go.starlark.net/starlark"
 )
+
+func TrailingBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var value starlark.Value
+	limit := 100000
+	if err := starlark.UnpackArgs("cpio_trailing", args, kwargs, "file", &value, "maximum_entries?", &limit); err != nil {
+		return nil, err
+	}
+	source, ok := value.(storage.Reader)
+	if !ok || limit <= 0 {
+		return nil, fmt.Errorf("cpio_trailing: expected file and positive maximum_entries")
+	}
+	trailing, err := Trailing(source, limit)
+	if err != nil {
+		return nil, err
+	}
+	if trailing == nil {
+		return starlark.None, nil
+	}
+	return starfile.NewReader("CPIO trailing data", trailing), nil
+}
 
 func BuildBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var value starlark.Value

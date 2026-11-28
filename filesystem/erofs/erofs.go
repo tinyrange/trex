@@ -11,6 +11,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/tinyrange/trex/auto"
 	"github.com/tinyrange/trex/storage"
@@ -30,6 +31,11 @@ type image struct {
 	algorithms                    uint16
 	buildNsec                     uint32
 	root                          uint64
+	packed                        uint64
+	sharedXattr                   uint64
+	lzmaDictionary                uint32
+	xattrs                        sync.Map
+	rootXattrs                    map[string][]byte
 	uuid, label                   string
 	raw, decoded                  *bytecache.Cache
 	options                       auto.Options
@@ -48,7 +54,7 @@ type directory struct {
 }
 
 // Open supports compact/extended inodes, flat and inline data, and full/compact
-// LZ4 compression indexes including 2-byte packs and big physical clusters.
+// LZ4 and MicroLZMA indexes, large clusters, and packed file fragments.
 // Unsupported incompatible filesystem features are rejected explicitly.
 func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View, error) {
 	if len(prefix) < 1028 || le.Uint32(prefix[1024:]) != 0xe0f5e1e2 {
@@ -75,16 +81,18 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 	s.block = uint64(1) << s.bits
 	s.used = uint64(le.Uint32(h[36:])) * s.block
 	s.meta = uint64(le.Uint32(h[40:])) * s.block
+	s.sharedXattr = uint64(le.Uint32(h[44:])) * s.block
+	s.packed = le.Uint64(h[96:])
 	if s.used < 1152 || s.used > uint64(source.Size()) || s.meta >= s.used || uint64(128)+uint64(h[13])*16 > s.used-1024 {
 		return nil, fmt.Errorf("erofs: invalid filesystem size or metadata address")
 	}
-	if s.incompat & ^uint32(3) != 0 || le.Uint16(h[86:]) != 0 || h[90] != 0 {
+	if s.incompat & ^uint32(0x23) != 0 || le.Uint16(h[86:]) != 0 || h[90] != 0 || h[91] != 0 {
 		return nil, fmt.Errorf("erofs: unsupported incompatible features %#x, device table or directory block size", s.incompat)
 	}
 	s.algorithms = 1
 	if s.incompat&2 != 0 {
 		s.algorithms = le.Uint16(h[84:])
-		if s.algorithms & ^uint16(1) != 0 {
+		if s.algorithms & ^uint16(3) != 0 {
 			return nil, fmt.Errorf("erofs: unsupported compression algorithms %#x", s.algorithms)
 		}
 		pos := uint64(1152) + uint64(h[13])*16
@@ -107,6 +115,25 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 			maxBlocks := le.Uint16(cfg[2:])
 			if maxBlocks == 0 || uint64(maxBlocks)*s.block > 1<<20 {
 				return nil, fmt.Errorf("erofs: invalid LZ4 physical cluster limit")
+			}
+			pos = (pos + 2 + n + 3) &^ uint64(3)
+		}
+		if s.algorithms&2 != 0 {
+			length, err := s.read(pos, 2)
+			if err != nil {
+				return nil, err
+			}
+			n := uint64(le.Uint16(length))
+			if n < 14 {
+				return nil, fmt.Errorf("erofs: truncated MicroLZMA configuration")
+			}
+			cfg, err := s.read(pos+2, n)
+			if err != nil {
+				return nil, err
+			}
+			s.lzmaDictionary = le.Uint32(cfg)
+			if s.lzmaDictionary < 4096 || s.lzmaDictionary > 8<<20 || le.Uint16(cfg[4:]) != 0 {
+				return nil, fmt.Errorf("erofs: invalid MicroLZMA dictionary or format")
 			}
 		}
 	}
@@ -131,6 +158,10 @@ func Open(prefix []byte, source storage.Reader, options auto.Options) (auto.View
 	}
 	if root.mode&0170000 != 0040000 {
 		return nil, fmt.Errorf("erofs: root is not a directory")
+	}
+	s.rootXattrs, err = root.readXattrs()
+	if err != nil {
+		return nil, fmt.Errorf("erofs: root attributes: %w", err)
 	}
 	return &directory{node: root}, nil
 }
@@ -230,7 +261,7 @@ func (s *image) inode(nid uint64) (*inode, error) {
 
 func (d *directory) Description() (string, map[string]any) {
 	s := d.node.fs
-	return "erofs", map[string]any{"block_size": s.block, "filesystem_bytes": s.used, "inode_count": s.inodes, "root_nid": s.root, "uuid": s.uuid, "volume_name": s.label, "feature_compat": s.compat, "feature_incompat": s.incompat, "compression_algorithms": s.algorithms}
+	return "erofs", map[string]any{"block_size": s.block, "filesystem_bytes": s.used, "inode_count": s.inodes, "root_nid": s.root, "uuid": s.uuid, "volume_name": s.label, "feature_compat": s.compat, "feature_incompat": s.incompat, "compression_algorithms": s.algorithms, "root_xattrs": s.rootXattrs}
 }
 func (n *inode) attributes() map[string]any {
 	return map[string]any{"nid": n.nid, "inode_offset": n.pos, "mode": n.mode, "uid": n.uid, "gid": n.gid, "links": n.links, "mtime": n.mtime, "mtime_nsec": n.nsec, "data_layout": n.layout, "xattr_icount": n.xattrs}
@@ -332,6 +363,13 @@ func (d *directory) Entries() ([]auto.Entry, error) {
 	for _, r := range records {
 		child := inodes[r.id]
 		e := auto.Entry{Name: r.name, Attributes: child.attributes()}
+		xattrs, err := child.readXattrs()
+		if err != nil {
+			return nil, fmt.Errorf("erofs: %q: %w", r.name, err)
+		}
+		if len(xattrs) != 0 {
+			e.Attributes["xattrs"] = xattrs
+		}
 		typeCode := byte(0)
 		switch child.mode & 0170000 {
 		case 0040000:

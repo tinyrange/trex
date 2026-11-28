@@ -28,6 +28,10 @@ type Options struct {
 	Source               *SourceContext
 	MaxExpandedBytes     int64
 	MaxEntries, MaxDepth int
+	// LiteralBackslash preserves valid Unix filename bytes while paths still
+	// use only slash separators. Callers exporting to a host must use their
+	// host backend's path validation separately.
+	LiteralBackslash bool
 }
 
 func (o Options) defaults() Options {
@@ -199,7 +203,7 @@ func (n *Node) Children() ([]*Node, error) {
 		seen := map[string]bool{}
 		n.children = append([]*Node(nil), n.children...)
 		for _, child := range n.children {
-			if child.name == "" || child.name == "." || child.name == ".." || strings.ContainsAny(child.name, "/\\\x00") || seen[child.name] {
+			if child.name == "" || child.name == "." || child.name == ".." || strings.ContainsAny(child.name, "/\x00") || (!n.options.LiteralBackslash && strings.ContainsRune(child.name, '\\')) || seen[child.name] {
 				n.childrenErr = fmt.Errorf("invalid or duplicate child name %q", child.name)
 				return
 			}
@@ -217,9 +221,10 @@ func (n *Node) Children() ([]*Node, error) {
 }
 
 // Resolve crosses container boundaries using ordinary slash-separated paths.
-// Dot segments, NULs and backslashes are rejected, never normalized away.
+// Dot segments and NULs are rejected. Backslashes are accepted as literal
+// filename bytes only for an explicitly configured Unix path view.
 func (n *Node) Resolve(name string) (*Node, error) {
-	if strings.ContainsAny(name, "\\\x00") {
+	if strings.ContainsRune(name, 0) || (!n.options.LiteralBackslash && strings.ContainsRune(name, '\\')) {
 		return nil, fs.ErrInvalid
 	}
 	parts := strings.Split(strings.Trim(name, "/"), "/")

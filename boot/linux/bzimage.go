@@ -2,6 +2,7 @@
 package linux
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ type BZImage struct {
 	CommandLineMax   uint32
 	Relocatable      bool
 	setup            []byte
+	setupArea        storage.Reader
 }
 
 // OpenBZImage reads the bounded setup header without touching the payload.
@@ -64,6 +66,7 @@ func OpenBZImage(source storage.Reader) (*BZImage, error) {
 		CommandLineMax:   u32(header[0x238:]),
 		Relocatable:      header[0x234] != 0,
 		setup:            header[setupStart:end],
+		setupArea:        io.NewSectionReader(source, 0, offset),
 	}
 	if image.InitSize == 0 || image.CommandLineMax == 0 || (image.Relocatable && (image.KernelAlignment == 0 || image.KernelAlignment&(image.KernelAlignment-1) != 0)) {
 		return nil, fmt.Errorf("invalid bzImage initialization size, command line size, or kernel alignment")
@@ -86,4 +89,36 @@ func (i *BZImage) KernelPayload() (storage.Reader, error) {
 		return nil, fmt.Errorf("bzImage embedded kernel payload is empty or outside protected-mode data")
 	}
 	return io.NewSectionReader(i.Payload, offset, size), nil
+}
+
+// KernelRelease returns the kernel release from the NUL-terminated setup string.
+func (i *BZImage) KernelRelease() (string, error) {
+	const versionField = 0x20e - 0x1f1
+	pointer := int64(binary.LittleEndian.Uint16(i.setup[versionField:]))
+	if pointer == 0 || 0x200+pointer >= i.setupArea.Size() {
+		return "", fmt.Errorf("bzImage kernel version is missing or outside setup data")
+	}
+	offset := 0x200 + pointer
+	data := make([]byte, min(i.setupArea.Size()-offset, 512))
+	if _, err := i.setupArea.ReadAt(data, offset); err != nil {
+		return "", fmt.Errorf("read bzImage kernel version: %w", err)
+	}
+	end := bytes.IndexByte(data, 0)
+	if end < 0 {
+		return "", fmt.Errorf("unterminated bzImage kernel version")
+	}
+	release, _, _ := bytes.Cut(data[:end], []byte(" "))
+	if len(release) == 0 {
+		return "", fmt.Errorf("empty bzImage kernel release")
+	}
+	for _, c := range release {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+			c == '.' || c == '_' || c == '-' || c == '+') {
+			return "", fmt.Errorf("invalid bzImage kernel release %q", release)
+		}
+	}
+	if string(release) == "." || string(release) == ".." {
+		return "", fmt.Errorf("invalid bzImage kernel release %q", release)
+	}
+	return string(release), nil
 }

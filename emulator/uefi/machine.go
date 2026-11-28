@@ -113,6 +113,7 @@ type Machine struct {
 	nextService                                        uint64
 	firstService                                       uint64
 	systemTable, bootTable, imageHandle, returnAddress uint64
+	activeImage                                        uint64
 	err                                                error
 	exited                                             bool
 	steps                                              uint64
@@ -230,6 +231,7 @@ func (m *Machine) loadImage(pe *peimage.Image) (uint64, uint64, error) {
 	m.systemTable = m.ramBase + 0x100
 	m.bootTable = m.ramBase + 0x200
 	m.imageHandle = m.ramBase + 0x800
+	m.activeImage = m.imageHandle
 	m.returnAddress = m.ramBase + 0x900
 	m.tables()
 	kind := uint64(0)
@@ -701,6 +703,8 @@ func (m *Machine) dispatch(name string, a [8]uint64) (uint64, bool) {
 		return m.locateHandles(a, false)
 	case "LocateHandleBuffer":
 		return m.locateHandles(a, true)
+	case "LocateDevicePath":
+		return m.locateDevicePath(a[0], a[1], a[2]), true
 	case "GetTime":
 		if a[0] == 0 {
 			return invalidParameter, true
@@ -791,7 +795,7 @@ func (m *Machine) dispatch(name string, a [8]uint64) (uint64, bool) {
 		m.u64(a[2], m.mapKey)
 		return 0, true
 	case "ExitBootServices":
-		if a[0] != m.imageHandle || a[1] != m.mapKey {
+		if a[0] != m.activeImage || a[1] != m.mapKey {
 			return invalidParameter, true
 		}
 		m.exited = true
