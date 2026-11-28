@@ -317,8 +317,16 @@ def _desktop_failure_logs(vm):
             result.append(path + "\n" + node.file.slice(max(0, size - 4000)).read().rstrip())
     return "\n" + "\n".join(result) if result else ""
 
-def _reported(lines, marker):
-    return marker in lines or any([line.startswith("[") and line.rsplit("]", 1)[-1].strip() == marker for line in lines])
+def desktop_reported(lines, marker):
+    if marker in lines:
+        return True
+    for line in lines:
+        # The serial getty prompt has no trailing newline. A kernel console
+        # report can follow on the same line.
+        message = line.rsplit(" login: ", 1)[-1]
+        if message.startswith("[") and message.rsplit("]", 1)[-1].strip() == marker:
+            return True
+    return False
 
 def _watch_desktop(vm, marker, timeout, console_check, serial):
     channel = vm.channel("console") if serial else None
@@ -338,9 +346,9 @@ def _watch_desktop(vm, marker, timeout, console_check, serial):
                 channel.write(bytes(console_check[1] + "\n"))
                 console_check = None
         lines = last.splitlines()
-        if any([_reported(lines, error) for error in ["DESKTOP_START_FAILED", "DESKTOP_FAILED_SESSION", "DESKTOP_X11_AUTH_FAILED", "DESKTOP_PACKAGE_CHECK_FAILED"]]):
+        if any([desktop_reported(lines, error) for error in ["DESKTOP_START_FAILED", "DESKTOP_FAILED_SESSION", "DESKTOP_X11_AUTH_FAILED", "DESKTOP_PACKAGE_CHECK_FAILED"]]):
             break
-        session_ready = session_ready or _reported(lines, marker)
+        session_ready = session_ready or desktop_reported(lines, marker)
         if session_ready:
             frame = image.decode(vm.screenshot())
             if frame.width < 800 or frame.height < 600:
